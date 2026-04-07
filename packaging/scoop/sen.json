@@ -1,0 +1,30 @@
+{
+    "version": "0.1.0",
+    "description": "Autonomous AI agent runtime and CLI code editor built in Rust",
+    "homepage": "https://github.com/senweaver/SenWeaverCoding",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/senweaver/SenWeaverCoding/releases/download/v0.1.0/sen-x86_64-pc-windows-msvc.zip",
+            "hash": "PLACEHOLDER_SHA256"
+        },
+        "arm64": {
+            "url": "https://github.com/senweaver/SenWeaverCoding/releases/download/v0.1.0/sen-aarch64-pc-windows-msvc.zip",
+            "hash": "PLACEHOLDER_SHA256"
+        }
+    },
+    "bin": "sen.exe",
+    "checkver": {
+        "github": "https://github.com/senweaver/SenWeaverCoding"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/senweaver/SenWeaverCoding/releases/download/v$version/sen-x86_64-pc-windows-msvc.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/senweaver/SenWeaverCoding/releases/download/v$version/sen-aarch64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

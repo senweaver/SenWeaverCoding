@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+//
+// Bridge status utilities — mirrors claude-code-typescript-src`bridge/bridgeStatusUtil.ts`.
+
+use super::types::BridgeStatus;
+
+/// Human-readable status description.
+pub fn status_label(status: BridgeStatus) -> &'static str {
+    match status {
+        BridgeStatus::Disconnected => "Disconnected",
+        BridgeStatus::Connecting => "Connecting…",
+        BridgeStatus::Connected => "Connected",
+        BridgeStatus::Paired => "Paired",
+        BridgeStatus::Error => "Error",
+    }
+}
+
+/// Emoji indicator for terminal UI.
+pub fn status_indicator(status: BridgeStatus) -> &'static str {
+    match status {
+        BridgeStatus::Disconnected => "○",
+        BridgeStatus::Connecting => "◌",
+        BridgeStatus::Connected => "●",
+        BridgeStatus::Paired => "◉",
+        BridgeStatus::Error => "✗",
+    }
+}
+
+/// Whether the bridge is in a usable state.
+pub fn is_usable(status: BridgeStatus) -> bool {
+    matches!(status, BridgeStatus::Connected | BridgeStatus::Paired)
+}

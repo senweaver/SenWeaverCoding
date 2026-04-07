@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+//
+// Magic docs service — mirrors claude-code-typescript-src`services/MagicDocs/`.
+// Smart documentation generation from code, project structure,
+// and conversation context.
+
+use serde::{Deserialize, Serialize};
+
+/// A generated documentation section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocSection {
+    pub title: String,
+    pub content: String,
+    pub source_files: Vec<String>,
+    pub doc_type: DocType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocType {
+    Readme,
+    ApiReference,
+    SetupGuide,
+    Architecture,
+    Changelog,
+    Contributing,
+}
+
+/// Configuration for documentation generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicDocsConfig {
+    pub include_examples: bool,
+    pub max_depth: u32,
+    pub include_private: bool,
+    pub output_format: DocFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocFormat {
+    Markdown,
+    Html,
+    PlainText,
+}
+
+impl Default for MagicDocsConfig {
+    fn default() -> Self {
+        Self {
+            include_examples: true,
+            max_depth: 3,
+            include_private: false,
+            output_format: DocFormat::Markdown,
+        }
+    }
+}
+
+/// Generate a project structure summary for documentation.
+pub fn generate_structure_doc(
+    project_name: &str,
+    directories: &[DirectoryInfo],
+    _config: &MagicDocsConfig,
+) -> DocSection {
+    let mut content = format!("# {project_name}\n\n## Project Structure\n\n");
+    for dir in directories {
+        content.push_str(&format!(
+            "- **`{}/`** — {} ({} files)\n",
+            dir.path, dir.description, dir.file_count
+        ));
+    }
+    DocSection {
+        title: format!("{project_name} — Project Structure"),
+        content,
+        source_files: directories.iter().map(|d| d.path.clone()).collect(),
+        doc_type: DocType::Architecture,
+    }
+}
+
+/// Information about a project directory for documentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryInfo {
+    pub path: String,
+    pub description: String,
+    pub file_count: u32,
+}

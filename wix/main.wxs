@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SenWeaverCoding Windows Installer (WiX v6)
+  Build: wix build -ext WixToolset.UI.wixext wix\main.wxs -o dist\SenWeaverCoding-0.1.0.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+    Name="SenWeaverCoding"
+    Version="0.1.0"
+    Manufacturer="senweaver"
+    UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+    Language="2052"
+    Codepage="936"
+    InstallerVersion="500">
+
+    <SummaryInformation
+      Description="SenWeaverCoding CLI 代码编辑器 — 新一代自主智能体运行时"
+      Manufacturer="senweaver" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="已安装了更新版本的 SenWeaverCoding，无法降级安装。" />
+
+    <Media Id="1" Cabinet="sen.cab" EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ── UI: Install wizard with directory selection ───── -->
+    <WixVariable Id="WixUILicenseRtf" Value="wix\License.rtf" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <ui:WixUI Id="WixUI_InstallDir" />
+
+    <!-- ── Directories & Components ─────────────────────── -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="SenWeaverCoding">
+        <Component Id="SenBinary" Guid="B2C3D4E5-F6A7-8901-BCDE-F23456789012">
+          <File Id="SenExe"
+                Source="target\release\sen.exe"
+                KeyPath="yes" />
+          <Environment Id="PATH"
+                       Name="PATH"
+                       Value="[INSTALLFOLDER]"
+                       Permanent="no"
+                       Part="last"
+                       Action="set"
+                       System="yes" />
+        </Component>
+
+        <Component Id="ReadmeDoc" Guid="C3D4E5F6-A7B8-9012-CDEF-345678901234">
+          <File Id="ReadmeFile"
+                Source="README.md"
+                KeyPath="yes" />
+        </Component>
+
+        <Component Id="LicenseDoc" Guid="D4E5F6A7-B8C9-0123-DEFA-456789012345">
+          <File Id="LicenseFile"
+                Source="LICENSE"
+                KeyPath="yes" />
+        </Component>
+
+        <Component Id="EnvExample" Guid="E5F6A7B8-C9D0-1234-EFAB-567890123456">
+          <File Id="EnvExampleFile"
+                Source=".env.example"
+                KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ── Feature ──────────────────────────────────────── -->
+    <Feature Id="MainFeature" Title="SenWeaverCoding CLI" Description="SenWeaverCoding CLI 代码编辑器核心组件" Level="1">
+      <ComponentRef Id="SenBinary" />
+      <ComponentRef Id="ReadmeDoc" />
+      <ComponentRef Id="LicenseDoc" />
+      <ComponentRef Id="EnvExample" />
+    </Feature>
+
+  </Package>
+</Wix>

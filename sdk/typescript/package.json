@@ -1,0 +1,21 @@
+{
+  "name": "@senweaver/sen",
+  "version": "0.1.0",
+  "description": "SenWeaverCoding TypeScript SDK — call AI agents as OS-level services",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "eslint src/"
+  },
+  "files": [
+    "dist/"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^5.4",
+    "vitest": "^2.0"
+  }
+}

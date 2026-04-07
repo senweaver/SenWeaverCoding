@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+//
+// Policy limits service — mirrors claude-code-typescript-src`services/policyLimits/`.
+// Enforces organization-level policies on tool usage, model selection,
+// spending limits, and allowed operations.
+
+use serde::{Deserialize, Serialize};
+
+/// A policy rule that restricts agent behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRule {
+    pub id: String,
+    pub description: String,
+    pub kind: PolicyKind,
+    pub enforcement: PolicyEnforcement,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PolicyKind {
+    /// Block specific tools from being used.
+    BlockTools { tool_names: Vec<String> },
+    /// Restrict to specific models only.
+    AllowModels { model_ids: Vec<String> },
+    /// Set a spending cap per session (USD cents).
+    SpendingCap { max_cents: u64 },
+    /// Restrict file write paths to a glob pattern.
+    RestrictPaths { allowed_globs: Vec<String> },
+    /// Limit maximum number of tool calls per turn.
+    MaxToolCallsPerTurn { limit: u32 },
+    /// Restrict network access to specific domains.
+    AllowDomains { domains: Vec<String> },
+    /// Custom policy evaluated via hook.
+    Custom { hook_event: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyEnforcement {
+    Block,
+    Warn,
+    Log,
+}
+
+/// Evaluates policy rules against agent actions.
+pub struct PolicyLimitsService {
+    rules: Vec<PolicyRule>,
+}
+
+impl PolicyLimitsService {
+    pub fn new(rules: Vec<PolicyRule>) -> Self {
+        Self { rules }
+    }
+
+    /// Check if a tool is allowed by policy.
+    pub fn check_tool(&self, tool_name: &str) -> PolicyCheckResult {
+        for rule in &self.rules {
+            if let PolicyKind::BlockTools { tool_names } = &rule.kind {
+                if tool_names.iter().any(|t| t == tool_name) {
+                    return PolicyCheckResult {
+                        allowed: rule.enforcement != PolicyEnforcement::Block,
+                        violations: vec![PolicyViolation {
+                            rule_id: rule.id.clone(),
+                            message: format!(
+                                "Tool '{tool_name}' is blocked by policy: {}",
+                                rule.description
+                            ),
+                            enforcement: rule.enforcement,
+                        }],
+                    };
+                }
+            }
+        }
+        PolicyCheckResult::ok()
+    }
+
+    /// Check if a model is allowed by policy.
+    pub fn check_model(&self, model_id: &str) -> PolicyCheckResult {
+        for rule in &self.rules {
+            if let PolicyKind::AllowModels { model_ids } = &rule.kind {
+                if !model_ids.iter().any(|m| m == model_id) {
+                    return PolicyCheckResult {
+                        allowed: rule.enforcement != PolicyEnforcement::Block,
+                        violations: vec![PolicyViolation {
+                            rule_id: rule.id.clone(),
+                            message: format!("Model '{model_id}' is not in the allowed list"),
+                            enforcement: rule.enforcement,
+                        }],
+                    };
+                }
+            }
+        }
+        PolicyCheckResult::ok()
+    }
+
+    /// Check if spending is within limits.
+    pub fn check_spending(&self, current_cents: u64) -> PolicyCheckResult {
+        for rule in &self.rules {
+            if let PolicyKind::SpendingCap { max_cents } = &rule.kind {
+                if current_cents > *max_cents {
+                    return PolicyCheckResult {
+                        allowed: rule.enforcement != PolicyEnforcement::Block,
+                        violations: vec![PolicyViolation {
+                            rule_id: rule.id.clone(),
+                            message: format!(
+                                "Spending limit exceeded: {current_cents} cents > {max_cents} cents cap"
+                            ),
+                            enforcement: rule.enforcement,
+                        }],
+                    };
+                }
+            }
+        }
+        PolicyCheckResult::ok()
+    }
+
+    /// Check if a file path is allowed for writing.
+    pub fn check_write_path(&self, path: &str) -> PolicyCheckResult {
+        for rule in &self.rules {
+            if let PolicyKind::RestrictPaths { allowed_globs } = &rule.kind {
+                let allowed = allowed_globs.iter().any(|g| glob_matches(g, path));
+                if !allowed {
+                    return PolicyCheckResult {
+                        allowed: rule.enforcement != PolicyEnforcement::Block,
+                        violations: vec![PolicyViolation {
+                            rule_id: rule.id.clone(),
+                            message: format!("Path '{path}' is not in allowed write paths"),
+                            enforcement: rule.enforcement,
+                        }],
+                    };
+                }
+            }
+        }
+        PolicyCheckResult::ok()
+    }
+}
+
+/// Result of a policy check.
+#[derive(Debug, Clone)]
+pub struct PolicyCheckResult {
+    pub allowed: bool,
+    pub violations: Vec<PolicyViolation>,
+}
+
+impl PolicyCheckResult {
+    pub fn ok() -> Self {
+        Self {
+            allowed: true,
+            violations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyViolation {
+    pub rule_id: String,
+    pub message: String,
+    pub enforcement: PolicyEnforcement,
+}
+
+/// Simple glob matching (supports * and ** only).
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    if pattern == "**" {
+        return true;
+    }
+    if pattern.contains("**") {
+        let prefix = pattern.split("**").next().unwrap_or("");
+        return path.starts_with(prefix);
+    }
+    if pattern.contains('*') {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            return path.starts_with(parts[0]) && path.ends_with(parts[1]);
+        }
+    }
+    path == pattern
+}
