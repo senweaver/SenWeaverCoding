@@ -2,25 +2,13 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-<p align="center">
-  <!-- logo placeholder -->
-  <img src="docs/images/logo.svg" width="200" alt="SenWeaverCoding Logo" />
-</p>
+
 
 <p align="center">
   <strong>Autonomous AI Agent Runtime & CLI Code Editor · Built in Rust</strong>
 </p>
 
-<p align="center">
-  <a href="https://github.com/senweaver/SenWeaverCoding/actions/workflows/ci.yml">
-    <img src="https://github.com/senweaver/SenWeaverCoding/actions/workflows/ci.yml/badge.svg" alt="CI Status" />
-  </a>
-  <a href="https://crates.io/crates/senweavercoding">
-    <img src="https://img.shields.io/crates/v/senweavercoding" alt="Crate Version" />
-  </a>
-  <a href="https://crates.io/crates/senweavercoding">
-    <img src="https://img.shields.io/crates/d/senweavercoding" alt="Crate Downloads" />
-  </a>
+<p align="center">  
   <a href="https://github.com/senweaver/SenWeaverCoding/blob/master/LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" />
   </a>
