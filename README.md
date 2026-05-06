@@ -38,8 +38,7 @@ single install gives you the GUI and a terminal-callable `sen` command.
 | --- | --- | --- |
 | **Windows x64** | `SenWeaverCoding_<ver>_x64-setup.exe` (NSIS) | Lets you pick install scope (per-user / per-machine) **and the install directory**. Adds the install dir to `HKCU\Environment\Path` so `sen.exe` is callable from any cmd / PowerShell / Windows Terminal session immediately after install. Removed cleanly on uninstall. |
 | **Windows x64** | `SenWeaverCoding_<ver>_x64_en-US.msi` | For silent / group-policy deployment. |
-| **macOS Apple Silicon** | `SenWeaverCoding_<ver>_aarch64.dmg` | Drag-to-Applications. CLI lives at `SenWeaverCoding.app/Contents/Resources/sen`; symlink it once with `ln -sf "/Applications/SenWeaverCoding.app/Contents/Resources/sen" /usr/local/bin/sen` to call it from any shell. |
-| **macOS Intel** | `SenWeaverCoding_<ver>_x64.dmg` | Same as above, x86_64 build. |
+| **macOS (universal)** | `SenWeaverCoding_<ver>_universal.dmg` | One drag-to-Applications package that runs natively on both Apple Silicon and Intel Macs (the bundled `sen` is a `lipo`-merged fat binary). CLI lives at `SenWeaverCoding.app/Contents/Resources/sen`; symlink it once with `ln -sf "/Applications/SenWeaverCoding.app/Contents/Resources/sen" /usr/local/bin/sen` to call it from any shell. |
 | **Linux x64** | `SenWeaverCoding_<ver>_amd64.deb` | `sudo dpkg -i` on Debian/Ubuntu — installs the desktop launcher **and** `/usr/bin/sen` automatically. |
 | **Linux x64** | `SenWeaverCoding_<ver>_amd64.AppImage` | Portable single-file desktop app. The CLI is **not** carried by the AppImage — install the `.deb` instead if you want a system-wide `sen` command. |
 
@@ -111,7 +110,7 @@ git push origin v0.1.0
 ```
 
 After a few minutes the Release page lists installers for Windows /
-macOS (Apple Silicon + Intel) / Linux (deb + AppImage).
+macOS (one universal `.dmg`) / Linux (deb + AppImage).
 
 ### Quality gates
 

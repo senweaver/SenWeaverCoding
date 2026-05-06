@@ -37,8 +37,7 @@ IDE。
 | --- | --- | --- |
 | **Windows x64** | `SenWeaverCoding_<ver>_x64-setup.exe`（NSIS） | 安装时**可选择安装范围（当前用户 / 本机所有用户）并自定义安装目录**；安装目录会被自动写入 `HKCU\Environment\Path`，cmd / PowerShell / Windows Terminal 立即可用 `sen.exe`，卸载时自动移除。 |
 | **Windows x64** | `SenWeaverCoding_<ver>_x64_en-US.msi` | 适合域内静默部署 / 组策略推送。 |
-| **macOS Apple Silicon** | `SenWeaverCoding_<ver>_aarch64.dmg` | 拖入 Applications 即可。CLI 位于 `SenWeaverCoding.app/Contents/Resources/sen`，可执行一次 `ln -sf "/Applications/SenWeaverCoding.app/Contents/Resources/sen" /usr/local/bin/sen` 让 `sen` 全局可用。 |
-| **macOS Intel** | `SenWeaverCoding_<ver>_x64.dmg` | 同上，x86_64 版本。 |
+| **macOS（通用）** | `SenWeaverCoding_<ver>_universal.dmg` | 一个拖入 Applications 的安装包，即可在 Apple Silicon 与 Intel Mac 上原生运行（内置 `sen` 是 `lipo` 合并后的胖二进制）。CLI 位于 `SenWeaverCoding.app/Contents/Resources/sen`，可执行一次 `ln -sf "/Applications/SenWeaverCoding.app/Contents/Resources/sen" /usr/local/bin/sen` 让 `sen` 全局可用。 |
 | **Linux x64** | `SenWeaverCoding_<ver>_amd64.deb` | Debian/Ubuntu 系：`sudo dpkg -i` —— 同时安装桌面快捷方式与 `/usr/bin/sen`。 |
 | **Linux x64** | `SenWeaverCoding_<ver>_amd64.AppImage` | 单文件便携桌面版。AppImage 内**不含独立 CLI**，如需系统级 `sen` 命令请改用 `.deb`。 |
 
@@ -105,7 +104,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-几分钟后 Releases 页面就会出现 Windows / macOS（Apple Silicon + Intel）
+几分钟后 Releases 页面就会出现 Windows / macOS（universal `.dmg`）
 / Linux（deb + AppImage）的安装包。
 
 ### 质量门禁
