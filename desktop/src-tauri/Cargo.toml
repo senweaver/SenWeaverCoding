@@ -1,0 +1,92 @@
+[package]
+name = "sen-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sen_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "sen-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Core agent runtime — the desktop binary embeds the gateway router
+# and the AgentSession so we don't need a sidecar subprocess.
+senweavercoding = { path = "../..", package = "SenWeaverCoding", default-features = false, features = [
+    "fs-watch",
+    "sandbox",
+    "tool-cron",
+    "tool-sop",
+    "tool-team",
+    "tool-cloud-ops",
+    "tool-reports",
+    "tool-linkedin",
+    "tool-pushover",
+    "tool-search-social",
+    "tool-productivity",
+    "tool-utility-misc",
+    "tool-image",
+    "skill-creation",
+    "code-intel",
+] }
+
+# Tauri 2 framework.  The `unstable` feature unlocks multi-webview APIs
+# (`Webview::add_child`, `Webview::set_position` / `set_size`,
+# per-webview navigation interception) used by the embedded browser
+# dock for parenting a wry/WebView2/WebKitGTK child to a placeholder
+# div directly above the chat composer.
+tauri = { version = "2", features = ["unstable"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
+
+# Async + HTTP server stack (mirrors the workspace root).
+tokio = { version = "1.50", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"] }
+
+# PTY for the in-app terminal panel (xterm.js on the React side).
+portable-pty = "0.8"
+
+# Misc.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+parking_lot = "0.12"
+tracing = "0.1"
+async-trait = "0.1"
+base64 = "0.22"
+
+# Cross-platform OS-level window screenshot used by the embedded
+# browser dock to power the agent-driven `screenshot` action.  Falls
+# back to an in-page DOM render through the bridge when the platform
+# capture isn't available (e.g. Wayland).
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Windows-only: APIs to disable the 1px DWM focus border that gets
+# painted around `decorations: false` windows when they're active.
+# Both modern (Win11 22H2+: DWMWA_BORDER_COLOR) and legacy (Win10:
+# subclass + WM_NCPAINT / WM_NCACTIVATE interception) paths are needed.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    # `Win32_Graphics_Gdi` is needed for `InvalidateRect`, which we
+    # call from the focus-change subclass to overwrite any chrome
+    # pixels DefWindowProc may have leaked into the redirected
+    # bitmap on activation events.
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints.rust]
+# The desktop crate is allowed to keep `unused_imports` etc. as warnings
+# — every cargo run goes through the workspace root so the upstream
+# clippy/rustc lint floor still applies.
+unused_must_use = "warn"

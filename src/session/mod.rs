@@ -1,0 +1,394 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+//! Shared agent session kernel consumed by CLI, TUI, and GUI.
+//!
+//! `AgentSession` is the UI-agnostic façade: callers `submit()` user input
+//! and receive a stream of `SessionEvent`s that the presentation layer
+//! renders.  All business logic (provider calls, tool dispatch, context
+//! management) lives behind this interface ??UI code never touches the
+//! agent loop directly.
+//!
+//! Two modes are supported:
+//!
+//! 1. **Standalone** (`AgentSession::new`): events are emitted by the caller
+//!    (e.g. test code, `/session demo`).  Useful for wiring the shell
+//!    renderers without a real LLM provider.
+//! 2. **Agent-backed** (`AgentSession::with_agent`): `submit()` actually
+//!    calls `Agent::turn_streamed` on a shared `Agent` handle and bridges
+//!    the internal `TurnEvent` stream into `SessionEvent`.  This is the
+//!    production path used by CLI/TUI/GUI shells.
+
+#![allow(unused_imports)]
+pub mod bridge;
+pub mod chat_view;
+pub mod event;
+
+pub mod persistence;
+pub mod shell;
+
+pub mod state;
+
+pub mod sync;
+pub mod translators;
+
+pub mod rpc;
+
+pub use bridge::SessionEventSink;
+pub use chat_view::{
+    ChatEntry, ChatEntryKind, ChatViewSink, ChatViewSurface, SessionChatState,
+    apply_session_event, apply_session_event_cli, apply_session_event_gui,
+    apply_session_event_tui, replay_state_into_sink, spawn_hub_subscriber,
+};
+pub use event::{SessionEvent, SessionEventKind};
+pub use persistence::{SNAPSHOT_EVERY, SessionEventLog};
+pub use shell::{CliFormat, GuiEvent, TuiLine, TuiStyle, render_cli, render_gui, render_tui};
+pub use state::{
+    AgentId, EditBatchRef, RemoteDelta, SessionActor, SessionDelta, SessionId, SessionMetrics,
+    SessionState, Turn,
+};
+pub use sync::SessionSyncHub;
+pub use translators::{is_forwardable, session_to_agent_events};
+
+use std::sync::Arc;
+
+use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
+
+use crate::agent::agent::{Agent, TurnEvent};
+
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    pub model: String,
+    pub temperature: f64,
+    pub max_turns: Option<u32>,
+    pub system_prompt_append: Option<String>,
+
+    pub agent_id: Option<String>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-4-20250514".into(),
+            temperature: 0.7,
+            max_turns: None,
+            system_prompt_append: None,
+            agent_id: None,
+        }
+    }
+}
+
+pub struct AgentSession {
+    config: SessionConfig,
+    event_tx: broadcast::Sender<SessionEvent>,
+    cancel: CancellationToken,
+    _input_tx: mpsc::Sender<String>,
+
+    agent: Option<Arc<Mutex<Agent>>>,
+
+    state: Option<Arc<SessionActor>>,
+}
+
+impl AgentSession {
+
+    pub fn new(config: SessionConfig) -> (Self, broadcast::Receiver<SessionEvent>) {
+        let (event_tx, event_rx) = broadcast::channel(256);
+        let cancel = CancellationToken::new();
+        let (_input_tx, _input_rx) = mpsc::channel::<String>(16);
+
+        let session = Self {
+            config,
+            event_tx,
+            cancel,
+            _input_tx,
+            agent: None,
+            state: None,
+        };
+        (session, event_rx)
+    }
+
+    pub fn with_agent(
+        config: SessionConfig,
+        agent: Arc<Mutex<Agent>>,
+    ) -> (Self, broadcast::Receiver<SessionEvent>) {
+        let (event_tx, event_rx) = broadcast::channel(256);
+        let cancel = CancellationToken::new();
+        let (_input_tx, _input_rx) = mpsc::channel::<String>(16);
+
+        let session = Self {
+            config,
+            event_tx,
+            cancel,
+            _input_tx,
+            agent: Some(agent),
+            state: None,
+        };
+        (session, event_rx)
+    }
+
+    pub fn with_agent_and_state(
+        config: SessionConfig,
+        agent: Arc<Mutex<Agent>>,
+        state: Arc<SessionActor>,
+    ) -> (Self, broadcast::Receiver<SessionEvent>) {
+        let (session, rx) = Self::with_agent(config, agent);
+        let session = session.attach_state(state);
+        (session, rx)
+    }
+
+    #[must_use]
+    pub fn attach_state(mut self, state: Arc<SessionActor>) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    pub fn state(&self) -> Option<Arc<SessionActor>> {
+        self.state.clone()
+    }
+
+    pub fn has_agent(&self) -> bool {
+        self.agent.is_some()
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub fn sink(&self) -> SessionEventSink {
+        SessionEventSink::new(self.event_tx.clone())
+    }
+
+    pub async fn submit(&self, input: &str) {
+        let turn_start = std::time::Instant::now();
+        let agent_id = self
+            .config
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        self.publish_event(SessionEvent::new(SessionEventKind::TurnStarted {
+            input: input.to_string(),
+        }));
+
+        let Some(ref agent) = self.agent else {
+
+            self.publish_event(SessionEvent::new(SessionEventKind::TurnFinished {
+                output: format!("[session] received: {}", input),
+                tokens_used: 0,
+            }));
+            return;
+        };
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(128);
+
+        let event_tx = self.event_tx.clone();
+        let state_for_bridge = self.state.clone();
+        let agent_id_owned = agent_id.clone();
+        let bridge_task =
+            crate::runtime::spawn_supervised("agent_session.event_bridge", async move {
+                let mut saw_first_token = false;
+                while let Some(turn_event) = rx.recv().await {
+                    if !saw_first_token && is_first_token_trigger(&turn_event) {
+                        saw_first_token = true;
+                        let elapsed = turn_start.elapsed();
+                        let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+                        let first_tok = SessionEvent::new(SessionEventKind::FirstToken {
+                            agent_id: agent_id_owned.clone(),
+                            elapsed_ms,
+                        });
+                        if let Some(state) = &state_for_bridge {
+                            state.apply(&first_tok);
+                        }
+                        let _ = event_tx.send(first_tok);
+                        if let Some(observer) = crate::observability::global_observer() {
+                            observer.record_metric(
+                                &crate::observability::traits::ObserverMetric::FirstTokenLatency {
+                                    agent_id: agent_id_owned.clone(),
+                                    elapsed,
+                                },
+                            );
+                        }
+                    }
+                    if let Some(sess_event) = turn_event_to_session_event(turn_event) {
+                        if let Some(state) = &state_for_bridge {
+                            state.apply(&sess_event);
+                        }
+                        let _ = event_tx.send(sess_event);
+                    }
+                }
+            })
+            .into_inner();
+
+        let turn_result = {
+            let mut guard = agent.lock().await;
+            guard
+                .turn_streamed(input, tx)
+                .await
+                .map_err(|e| e.to_string())
+        };
+
+        let _ = bridge_task.await;
+
+        let final_output = match turn_result {
+            Ok(text) => text,
+            Err(msg) => {
+                self.publish_event(SessionEvent::new(SessionEventKind::Error {
+                    message: msg.clone(),
+                }));
+                msg
+            }
+        };
+
+        self.publish_event(SessionEvent::new(SessionEventKind::TurnFinished {
+            output: final_output,
+            tokens_used: 0,
+        }));
+    }
+
+    pub async fn submit_cancellable(&self, input: &str, cancel: CancellationToken) -> bool {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => false,
+            _ = self.submit(input) => true,
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+
+    pub fn publish_event(&self, evt: SessionEvent) {
+        if let Some(state) = &self.state {
+            state.apply(&evt);
+        }
+        let _ = self.event_tx.send(evt);
+    }
+
+    pub fn approve(&self, approval_id: impl Into<String>, decision: impl Into<String>) {
+        self.publish_event(SessionEvent::new(SessionEventKind::ApprovalResponded {
+            id: approval_id.into(),
+            decision: decision.into(),
+            responder: self.config.agent_id.clone(),
+            updated_input: None,
+        }));
+        crate::observability::session_write_mode_metrics::incr_approval_responded_via_session();
+    }
+
+    pub fn approve_with_input(
+        &self,
+        approval_id: impl Into<String>,
+        decision: impl Into<String>,
+        updated_input: Option<serde_json::Value>,
+    ) {
+        self.publish_event(SessionEvent::new(SessionEventKind::ApprovalResponded {
+            id: approval_id.into(),
+            decision: decision.into(),
+            responder: self.config.agent_id.clone(),
+            updated_input,
+        }));
+        crate::observability::session_write_mode_metrics::incr_approval_responded_via_session();
+    }
+}
+
+fn is_first_token_trigger(event: &TurnEvent) -> bool {
+    match event {
+        TurnEvent::Chunk { delta } | TurnEvent::Thinking { delta } => !delta.is_empty(),
+        _ => false,
+    }
+}
+
+fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
+    let kind = match event {
+        TurnEvent::Chunk { delta } => SessionEventKind::Delta { text: delta },
+        TurnEvent::Thinking { delta } => SessionEventKind::Delta {
+            text: format!("[thinking] {}", delta),
+        },
+        TurnEvent::ToolCall { name, args } => SessionEventKind::ToolCall {
+            tool_name: name.clone(),
+            tool_call_id: format!("{}_call", name),
+            arguments: args,
+        },
+        TurnEvent::ToolResult { name, output } => SessionEventKind::ToolResult {
+            tool_call_id: format!("{}_call", name),
+            output,
+            is_error: false,
+        },
+        TurnEvent::Error { message } => SessionEventKind::Error { message },
+
+        TurnEvent::FileEdit {
+            path,
+            additions,
+            deletions,
+            ..
+        } => {
+
+            SessionEventKind::ToolResult {
+                tool_call_id: format!("file_edit:{path}"),
+                output: format!("edited {path} (+{additions}/-{deletions})"),
+                is_error: false,
+            }
+        }
+        TurnEvent::StatusUpdate { action, detail: _ } => {
+
+            if action == "compressed" {
+                SessionEventKind::ContextCompressed {
+                    tokens_before: 0,
+                    tokens_after: 0,
+                }
+            } else {
+                return None;
+            }
+        }
+        TurnEvent::ProgressTick { .. }
+        | TurnEvent::CommandPreview { .. }
+        | TurnEvent::Cancelling { .. }
+        | TurnEvent::PermissionRequest { .. } => {
+
+            return None;
+        }
+        TurnEvent::ContextCompressed {
+            tokens_before,
+            tokens_after,
+        } => SessionEventKind::ContextCompressed {
+            tokens_before,
+            tokens_after,
+        },
+        TurnEvent::SubagentChunk {
+            task_id,
+            agent_id,
+            kind: subkind,
+            delta,
+        } => {
+
+            let label = format!("[{agent_id}::{task_id}]");
+            SessionEventKind::Delta {
+                text: match subkind {
+                    crate::agent::SubagentChunkKind::Chunk => {
+                        format!("{label} {delta}")
+                    }
+                    crate::agent::SubagentChunkKind::Thinking => {
+                        format!("{label} [thinking] {delta}")
+                    }
+                    crate::agent::SubagentChunkKind::ToolCall => {
+                        format!("{label} -> tool {delta}")
+                    }
+                    crate::agent::SubagentChunkKind::ToolResult => {
+                        format!("{label} <- {delta}")
+                    }
+                    crate::agent::SubagentChunkKind::Status => {
+                        format!("{label} {delta}")
+                    }
+                },
+            }
+        }
+    };
+    Some(SessionEvent::new(kind))
+}

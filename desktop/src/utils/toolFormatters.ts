@@ -1,0 +1,295 @@
+// SPDX-License-Identifier: MIT
+//
+// Lightweight, side-effect-free formatters used by ToolCard and the
+// per-category views. Kept in one place so the rendering stays consistent
+// and the Explored summary can use the same conventions.
+
+function firstKey(input: unknown, keys: readonly string[]): unknown {
+  if (!input || typeof input !== 'object') return undefined
+  const obj = input as Record<string, unknown>
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k]
+  }
+  return undefined
+}
+
+function readString(input: unknown, keys: readonly string[]): string | undefined {
+  const value = firstKey(input, keys)
+  return typeof value === 'string' ? value : undefined
+}
+
+function readNumber(input: unknown, keys: readonly string[]): number | undefined {
+  const value = firstKey(input, keys)
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+export function basename(path: string | undefined): string {
+  if (!path) return ''
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+}
+
+export function splitPathForDisplay(
+  path: string | undefined,
+): { dir: string; tail: string; separator: string } {
+  if (!path) return { dir: '', tail: '', separator: '/' }
+  let p = path
+  const extendedMatch = /^\\\\\?\\(.+)$/.exec(p)
+  if (extendedMatch && extendedMatch[1]) {
+    p = extendedMatch[1]
+  }
+  const trimmed = p.replace(/[\\/]+$/, '')
+  const separator = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/'
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  if (idx < 0) return { dir: '', tail: trimmed, separator }
+  return {
+    dir: trimmed.slice(0, idx),
+    tail: trimmed.slice(idx + 1),
+    separator,
+  }
+}
+
+export function isWorkspaceRootPath(raw: string | undefined): boolean {
+  const t = raw?.trim() ?? ''
+  return t === '' || t === '.' || t === './' || t === '.\\'
+}
+
+export function meaningfulListPath(raw: string | undefined): string {
+  const t = raw?.trim() ?? ''
+  if (!t || t === '.' || t === './' || t === '.\\') return ''
+  return t
+}
+
+export function isGlobPattern(s: string | undefined): boolean {
+  if (!s) return false
+  return /[*?[\]{}]/.test(s)
+}
+
+export function extractPath(input: unknown): string {
+  return (
+    readString(input, [
+      'path',
+      'file_path',
+      'filepath',
+      'filename',
+      'notebook_path',
+      'target',
+      'target_path',
+      'glob_pattern',
+      'directory',
+    ]) ?? ''
+  )
+}
+
+export type EditTarget =
+  | { kind: 'path'; full: string; dir: string; tail: string; separator: string; isWorkspaceRoot: boolean }
+  | { kind: 'glob'; pattern: string }
+  | { kind: 'multi'; first: string; count: number; paths: string[] }
+  | { kind: 'unknown' }
+
+function collectMultiEditPaths(input: unknown): string[] {
+  if (!input || typeof input !== 'object') return []
+  const edits = (input as Record<string, unknown>).edits
+  if (!Array.isArray(edits)) return []
+  const paths: string[] = []
+  for (const entry of edits) {
+    if (entry && typeof entry === 'object') {
+      const p = (entry as Record<string, unknown>).path
+      if (typeof p === 'string' && p.trim()) paths.push(p)
+    }
+  }
+  return paths
+}
+
+export function resolveEditTarget(
+  input: unknown,
+  toolName: string,
+): EditTarget {
+  const multi = collectMultiEditPaths(input)
+  if (multi.length > 0) {
+    return {
+      kind: 'multi',
+      first: multi[0] ?? '',
+      count: multi.length,
+      paths: multi,
+    }
+  }
+
+  const rawPattern =
+    (input && typeof input === 'object'
+      ? (input as Record<string, unknown>).pattern
+      : undefined)
+  if (typeof rawPattern === 'string' && rawPattern.trim()) {
+    if (toolName === 'glob_edit' || isGlobPattern(rawPattern)) {
+      return { kind: 'glob', pattern: rawPattern }
+    }
+  }
+
+  const globKey =
+    (input && typeof input === 'object'
+      ? (input as Record<string, unknown>).glob_pattern
+      : undefined)
+  if (typeof globKey === 'string' && globKey.trim()) {
+    return { kind: 'glob', pattern: globKey }
+  }
+
+  const direct = extractPath(input)
+  if (direct) {
+    if (isGlobPattern(direct)) {
+      return { kind: 'glob', pattern: direct }
+    }
+    const { dir, tail, separator } = splitPathForDisplay(direct)
+    return {
+      kind: 'path',
+      full: direct,
+      dir,
+      tail,
+      separator,
+      isWorkspaceRoot: isWorkspaceRootPath(direct),
+    }
+  }
+
+  return { kind: 'unknown' }
+}
+
+export function extractQuery(input: unknown): string {
+  return (
+    readString(input, ['query', 'q', 'pattern', 'search', 'keyword', 'prompt']) ?? ''
+  )
+}
+
+export function extractUrl(input: unknown): string {
+  return readString(input, ['url', 'href', 'link']) ?? ''
+}
+
+export function extractCommand(input: unknown): string {
+  return readString(input, ['command', 'cmd', 'script']) ?? ''
+}
+
+export function firstWord(command: string): string {
+  const trimmed = command.trim()
+  if (!trimmed) return ''
+
+  const afterAnd = trimmed.split(/&&|\|\|/).pop()?.trim() ?? trimmed
+  const tokens = afterAnd.split(/\s+/)
+  return tokens[0] ?? ''
+}
+
+export type FileRange = { offset?: number; limit?: number }
+
+export function extractRange(input: unknown): FileRange {
+  return {
+    offset: readNumber(input, ['offset', 'start', 'startLine', 'start_line']),
+    limit: readNumber(input, ['limit', 'count', 'lines', 'maxLines']),
+  }
+}
+
+export function urlHost(url: string): string {
+  if (!url) return ''
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
+export function firstLine(text: string): string {
+  if (!text) return ''
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line) return line
+  }
+  return ''
+}
+
+export function extractTextContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((chunk) => {
+        if (typeof chunk === 'string') return chunk
+        if (chunk && typeof chunk === 'object' && 'text' in chunk) {
+          const t = (chunk as { text?: unknown }).text
+          return typeof t === 'string' ? t : ''
+        }
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (content && typeof content === 'object') {
+    try {
+      return JSON.stringify(content, null, 2)
+    } catch {
+      return String(content)
+    }
+  }
+  if (content === null || content === undefined) return ''
+  return String(content)
+}
+
+export function truncate(s: string, max: number): string {
+  if (!s) return ''
+  if (s.length <= max) return s
+  return `${s.slice(0, Math.max(0, max - 1))}…`
+}
+
+export type SearchHit = {
+
+  file: string
+
+  line?: number
+
+  preview: string
+}
+
+export function parseSearchHits(text: string, max = 50): SearchHit[] {
+  if (!text) return []
+  const hits: SearchHit[] = []
+  for (const raw of text.split(/\r?\n/)) {
+    if (hits.length >= max) break
+    const line = raw.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+    if (!line) continue
+    if (/^---+$|^==+$/.test(line)) continue
+
+    const m1 = line.match(/^([^:\r\n]+?):(\d+):(.*)$/)
+    if (m1) {
+      hits.push({
+        file: m1[1] ?? '',
+        line: Number(m1[2]),
+        preview: (m1[3] ?? '').trim(),
+      })
+      continue
+    }
+
+    const m2 = line.match(/^([^\s:][^\r\n]*?)-(\d+)-(.*)$/)
+    if (m2) {
+      hits.push({
+        file: m2[1] ?? '',
+        line: Number(m2[2]),
+        preview: (m2[3] ?? '').trim(),
+      })
+      continue
+    }
+
+    const m3 = line.match(/^([^:\s][^:\r\n]*\.[A-Za-z0-9_.+-]{1,8}):(.*)$/)
+    if (m3) {
+      hits.push({ file: m3[1] ?? '', preview: (m3[2] ?? '').trim() })
+      continue
+    }
+
+    hits.push({ file: '', preview: line.trim() })
+  }
+  return hits
+}
+
+export function lineCountLabel(count: number | undefined): string {
+  if (!count || count <= 0) return ''
+  return `${count.toLocaleString()} ${count === 1 ? 'line' : 'lines'}`
+}

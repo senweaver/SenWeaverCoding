@@ -1,0 +1,7 @@
+name = "jq"
+match_command = "^jq\\b"
+max_lines = 500
+
+strip_lines = [
+  "^jq: error \\(at <stdin>:0\\):",
+]

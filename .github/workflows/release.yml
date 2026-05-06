@@ -1,0 +1,191 @@
+name: Release
+
+# Triggered by pushing a `v*` tag (e.g. `v0.1.0`).  Each platform job:
+#   1. Performs a clean checkout (no local dev state can leak in).
+#   2. Builds the `sen` CLI binary from the back-end at `src/`.
+#   3. Drops it under `desktop/src-tauri/binaries/sen[.exe]` so the Tauri
+#      bundler can include it in the installer (per-platform override
+#      configs at desktop/src-tauri/tauri.<os>.conf.json).
+#   4. Lets `tauri-action` build the front-end + desktop application and
+#      attach every produced installer to a single GitHub Release.
+#
+# Resulting Release assets per tag:
+#   * Windows:  *_x64-setup.exe (NSIS, picks install dir, adds to PATH),
+#               *_x64_en-US.msi
+#   * macOS:    *_aarch64.dmg, *_x64.dmg (`sen` lives at .app/Contents/Resources/sen)
+#   * Linux:    *_amd64.deb (installs both the desktop launcher and /usr/bin/sen),
+#               *_amd64.AppImage (desktop app only — install the deb if you want CLI)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Lift Node's old-space heap from the default ~2 GB so Vite/tsc can
+  # finish bundling the desktop front-end on macOS arm64 runners
+  # (which OOM on the default limit).
+  NODE_OPTIONS: "--max-old-space-size=8192"
+
+jobs:
+  # ── Stage 1: create the GitHub Release shell first so every
+  # platform job can attach its installers to the same release.
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.id }}
+      tag_name: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve tag
+        id: resolve
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create draft release
+        id: create
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.tag }}
+          name: SenWeaverCoding ${{ steps.resolve.outputs.tag }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+
+  # ── Stage 2: build the desktop installer (and embed `sen` CLI)
+  # on every supported platform.
+  build:
+    name: Build (${{ matrix.label }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cli_src: target/x86_64-pc-windows-msvc/release/sen.exe
+            cli_dst: desktop/src-tauri/binaries/sen.exe
+            tauri_args: ""
+          - label: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            cli_src: target/aarch64-apple-darwin/release/sen
+            cli_dst: desktop/src-tauri/binaries/sen
+            tauri_args: "--target aarch64-apple-darwin"
+          - label: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            cli_src: target/x86_64-apple-darwin/release/sen
+            cli_dst: desktop/src-tauri/binaries/sen
+            tauri_args: "--target x86_64-apple-darwin"
+          - label: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            cli_src: target/x86_64-unknown-linux-gnu/release/sen
+            cli_dst: desktop/src-tauri/binaries/sen
+            tauri_args: ""
+
+    steps:
+      # Hard guarantee: clean checkout, no leftover state from cache layers.
+      - name: Checkout (clean)
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          submodules: false
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ matrix.label }}-cargoreg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.label }}-cargoreg-
+
+      - name: Install Linux desktop runtime deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            patchelf \
+            file \
+            wget
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+
+      # Build the `sen` CLI from the Rust workspace and inject it under
+      # desktop/src-tauri/binaries/ where the per-platform tauri config
+      # picks it up as a bundle resource (Windows / macOS) or a deb file
+      # mapped to /usr/bin/sen (Linux).
+      - name: Build sen CLI
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin sen
+          mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
+          cp "${{ matrix.cli_src }}" "${{ matrix.cli_dst }}"
+          ls -la "${{ matrix.cli_dst }}"
+
+      - name: Build & bundle desktop application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          projectPath: desktop
+          tagName: ${{ needs.create-release.outputs.tag_name }}
+          releaseName: SenWeaverCoding ${{ needs.create-release.outputs.tag_name }}
+          args: ${{ matrix.tauri_args }}
+
+  # ── Stage 3: publish the release once every platform succeeded.
+  publish-release:
+    name: Publish release
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark release as published
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag_name }}
+          draft: false
+          prerelease: false

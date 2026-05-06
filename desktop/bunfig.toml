@@ -1,0 +1,2 @@
+# Override parent bunfig (if any) so the desktop install does not
+# inherit unrelated preload scripts from the workspace root.

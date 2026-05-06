@@ -1,0 +1,1795 @@
+// SPDX-License-Identifier: MIT
+//
+//! Embedded Browser dock — a child Tauri webview that the React shell
+//! parents to a placeholder div directly above the chat composer, *and*
+//! the surface the agent's `browser` tool drives in real time.
+//!
+//! Architecture
+//! ============
+//!
+//! Tauri 2's multi-webview API ([`Webview`] inside an existing
+//! [`WebviewWindow`]) lets us add a second wry/WebView2/WebKitGTK surface
+//! to the same OS window as the React shell. The React side keeps a
+//! [`ResizeObserver`] over a placeholder `<div>`; on every layout change
+//! it sends the new physical rect to [`browser_dock_set_rect`] which calls
+//! `Webview::set_position` + `set_size`.
+//!
+//! IPC
+//! ===
+//!
+//! Cross-origin web pages can't access `window.__TAURI_INTERNALS__`, so
+//! the injected [`BRIDGE_JS`] communicates back to Rust via the
+//! `senbridge://` custom scheme. Every event navigates a hidden anchor
+//! to `senbridge://event?kind=…&data=…`; [`WebviewBuilder::on_navigation`]
+//! intercepts the URL, parses the fragment and dispatches an
+//! `browser_dock_event` Tauri event up to the main webview where the
+//! `browserPanelStore` consumes it.
+//!
+//! Agent driver
+//! ============
+//!
+//! [`TauriDockController`] implements
+//! [`senweavercoding::tools::browser::DockController`] and is
+//! registered through `install_dock_controller` inside the Tauri
+//! `setup` hook so the agent's `BrowserTool` can drive the visible
+//! dock directly through its `tauri_dock` backend (preferred under
+//! `auto`).
+//!
+//! Each [`DockController::exec`] call:
+//! 1. Awaits a per-controller `tokio::Mutex` so concurrent subagents
+//!    serialise on the singleton dock.
+//! 2. Generates a fresh `reqId`, registers a `oneshot::Sender` in the
+//!    pending map, then evals
+//!    `window.__senDockBridge.exec({reqId, kind, args})` in the dock
+//!    webview.
+//! 3. The injected JS performs the action against the page's main
+//!    world (no dynamic `eval` — every kind is a static handler) and
+//!    posts back a `result` event containing the same `reqId`. The
+//!    `senbridge://event?kind=result&...` arm of [`dispatch_bridge_event`]
+//!    routes that envelope to the oneshot.
+//! 4. Failures, timeouts and navigations all drain the pending
+//!    senders so the agent never deadlocks waiting for a page that
+//!    moved on.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context as _, Result};
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use senweavercoding::tools::browser::{
+    DockController, DockRequest, DockResponse, DockTabInfo,
+};
+use serde::Deserialize;
+use serde_json::Value;
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
+    Url, WebviewUrl, Window, webview::WebviewBuilder,
+};
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+
+const ABOUT_BLANK: &str = "about:blank";
+
+const BRIDGE_SCHEME: &str = "senbridge";
+
+const BRIDGE_JS: &str = r#"
+(() => {
+  if (window.__senDockBridge) return;
+
+  const SCHEME = 'senbridge:';
+
+  function send(kind, data) {
+    try {
+      const params = new URLSearchParams();
+      params.set('kind', kind);
+      params.set('data', JSON.stringify(data ?? null));
+      const a = document.createElement('a');
+      a.href = `${SCHEME}//event?${params.toString()}`;
+      a.style.display = 'none';
+      document.documentElement.appendChild(a);
+      a.click();
+      setTimeout(() => { try { a.remove(); } catch (_) {} }, 0);
+    } catch (_) {}
+  }
+
+  const ringMax = 256;
+  const consoleRing = [];
+  const wrapConsole = (level) => {
+    const orig = console[level] && console[level].bind(console);
+    if (!orig) return;
+    console[level] = (...args) => {
+      try {
+        const message = args.map((a) => {
+          if (typeof a === 'string') return a;
+          try { return JSON.stringify(a); } catch (_) { return String(a); }
+        }).join(' ');
+        consoleRing.push({ level, message, ts: Date.now() });
+        while (consoleRing.length > ringMax) consoleRing.shift();
+        send('console', { level, message, ts: Date.now() });
+      } catch (_) {}
+      return orig(...args);
+    };
+  };
+  ['log', 'info', 'warn', 'error', 'debug'].forEach(wrapConsole);
+
+  window.addEventListener('error', (ev) => {
+    try {
+      send('console', { level: 'error', message: `[uncaught] ${ev.message} (${ev.filename}:${ev.lineno})`, ts: Date.now() });
+    } catch (_) {}
+  });
+  window.addEventListener('unhandledrejection', (ev) => {
+    try {
+      const reason = ev.reason && (ev.reason.stack || ev.reason.message || String(ev.reason));
+      send('console', { level: 'error', message: `[unhandledrejection] ${reason}`, ts: Date.now() });
+    } catch (_) {}
+  });
+
+  let pickMode = false;
+  let lastHover = null;
+  const STYLE_ID = '__sen_dock_pick_style';
+  function ensurePickStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent = '.__sen_dock_outline { outline: 2px solid #2563eb !important; outline-offset: 2px !important; cursor: pointer !important; }';
+    (document.head || document.documentElement).appendChild(s);
+  }
+  function clearOutline() {
+    if (lastHover && lastHover.classList) lastHover.classList.remove('__sen_dock_outline');
+    lastHover = null;
+  }
+  function selectorOf(el) {
+    if (!el || el.nodeType !== 1) return '';
+    if (el.id) return '#' + CSS.escape(el.id);
+    const path = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1 && path.length < 6 && cur !== document.body) {
+      let part = cur.tagName.toLowerCase();
+      if (typeof cur.className === 'string' && cur.className.trim()) {
+        const classes = cur.className.trim().split(/\s+/).filter((c) => c && !c.startsWith('__sen_dock')).slice(0, 2);
+        if (classes.length) part += '.' + classes.map((c) => CSS.escape(c)).join('.');
+      }
+      const parent = cur.parentNode;
+      if (parent && parent.children) {
+        const sib = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+        if (sib.length > 1) part += `:nth-of-type(${sib.indexOf(cur) + 1})`;
+      }
+      path.unshift(part);
+      cur = cur.parentNode;
+    }
+    return path.join(' > ');
+  }
+  function computedStyleOf(el) {
+    try {
+      const cs = getComputedStyle(el);
+      const props = ['display', 'position', 'box-sizing', 'width', 'height', 'margin', 'padding',
+        'color', 'background-color', 'font-family', 'font-size', 'font-weight', 'line-height',
+        'border', 'border-radius', 'box-shadow', 'opacity', 'z-index', 'flex', 'gap',
+        'grid-template-columns', 'grid-template-rows', 'transform', 'transition'];
+      const out = {};
+      props.forEach((p) => { out[p] = cs.getPropertyValue(p); });
+      const rect = el.getBoundingClientRect();
+      out['__rect__'] = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      return out;
+    } catch (_) { return {}; }
+  }
+  function onHover(e) {
+    if (!pickMode) return;
+    clearOutline();
+    if (e.target && e.target.classList) {
+      lastHover = e.target;
+      lastHover.classList.add('__sen_dock_outline');
+    }
+  }
+  function onClick(e) {
+    if (!pickMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = e.target;
+    const sel = selectorOf(el);
+    const props = computedStyleOf(el);
+    send('pick', { selector: sel, text: (el.innerText || el.textContent || '').slice(0, 240), props });
+    pickMode = false;
+    clearOutline();
+    document.removeEventListener('mouseover', onHover, true);
+    document.removeEventListener('click', onClick, true);
+  }
+
+  function snapshot() {
+    send('state', {
+      url: window.location.href,
+      title: document.title || '',
+      canBack: history.length > 1,
+      ts: Date.now(),
+    });
+  }
+
+  // -------- Agent driver: static handlers (no dynamic eval) --------
+  // Each handler receives `(args)` and returns a value (or thenable);
+  // throwing rejects the round-trip with the error text.
+  //
+  // Result transport
+  // ----------------
+  // Results travel back as `senbridge://event?kind=result&data=…` URLs
+  // intercepted by `WebviewBuilder::on_navigation`.  Because URL length
+  // limits vary across WebView2 / WebKitGTK / WKWebView, payloads
+  // larger than ~16KB are split into `result_chunk` frames keyed by
+  // `(reqId, seq, total)`; the Rust controller reassembles them and
+  // signals the awaiting oneshot only when the final frame arrives.
+  //
+  // The threshold is generous on purpose: small results stay on the
+  // single-frame fast-path, only `snapshot`-style payloads pay the
+  // chunking cost.
+  const RESULT_CHUNK_BYTES = 14000;
+  function postResult(reqId, ok, value, error) {
+    let envelopeJson;
+    try {
+      envelopeJson = JSON.stringify({ ok: !!ok, value: value ?? null, error: error ?? null });
+    } catch (err) {
+      envelopeJson = JSON.stringify({ ok: false, value: null, error: 'json serialise: ' + String(err && err.message || err) });
+    }
+    if (envelopeJson.length <= RESULT_CHUNK_BYTES) {
+      send('result', { reqId, ok: !!ok, value: value ?? null, error: error ?? null });
+      return;
+    }
+    const total = Math.ceil(envelopeJson.length / RESULT_CHUNK_BYTES);
+    for (let i = 0; i < total; i += 1) {
+      const start = i * RESULT_CHUNK_BYTES;
+      const slice = envelopeJson.slice(start, start + RESULT_CHUNK_BYTES);
+      send('result_chunk', { reqId, seq: i, total, payload: slice });
+    }
+  }
+  function findOne(selector) {
+    if (!selector) throw new Error('selector is required');
+    const el = document.querySelector(selector);
+    if (!el) throw new Error(`element not found: ${selector}`);
+    return el;
+  }
+  function rectOf(el) {
+    try { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }
+    catch (_) { return null; }
+  }
+  function dispatchSyntheticInput(el, value) {
+    const proto = (el instanceof HTMLTextAreaElement) ? HTMLTextAreaElement.prototype
+                : (el instanceof HTMLSelectElement) ? HTMLSelectElement.prototype
+                : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (setter && typeof setter.set === 'function') {
+      setter.set.call(el, value);
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function dispatchKey(el, key) {
+    ['keydown', 'keypress', 'keyup'].forEach((kind) => {
+      try { el.dispatchEvent(new KeyboardEvent(kind, { key, bubbles: true, cancelable: true })); } catch (_) {}
+    });
+  }
+  function isVisibleEl(el) {
+    if (!(el instanceof Element)) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  function snapshotTree(opts) {
+    const interactiveOnly = !!(opts && opts.interactive_only);
+    const compact = !!(opts && opts.compact);
+    const maxDepth = (opts && typeof opts.depth === 'number') ? opts.depth : 24;
+    let refSeq = 0;
+    function visit(el, depth) {
+      if (!el || depth > maxDepth) return null;
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const interactive = ['a', 'button', 'input', 'select', 'textarea', 'option', 'label', 'summary'].indexOf(tag) >= 0
+        || el.getAttribute('role') === 'button'
+        || el.getAttribute('contenteditable') === 'true'
+        || (typeof el.onclick === 'function');
+      if (interactiveOnly && !interactive && depth > 0) {
+        const acc = [];
+        for (const c of el.children) { const v = visit(c, depth + 1); if (v) acc.push(v); }
+        return acc.length === 1 ? acc[0] : (acc.length ? { tag: 'group', children: acc } : null);
+      }
+      const ref = '@' + (++refSeq).toString(36);
+      el.setAttribute('data-zc-ref', ref);
+      const node = {
+        ref,
+        tag,
+        text: compact ? undefined : (el.innerText || '').slice(0, 200),
+        attrs: compact ? undefined : (() => {
+          const out = {};
+          for (const a of el.attributes) {
+            if (a.name === 'data-zc-ref') continue;
+            out[a.name] = (a.value || '').slice(0, 200);
+          }
+          return out;
+        })(),
+        rect: compact ? undefined : rectOf(el),
+        interactive: interactive || undefined,
+      };
+      if (depth < maxDepth && el.children && el.children.length) {
+        const children = [];
+        for (const c of el.children) { const v = visit(c, depth + 1); if (v) children.push(v); }
+        if (children.length) node.children = children;
+      }
+      return node;
+    }
+    return {
+      url: window.location.href,
+      title: document.title || '',
+      tree: visit(document.body, 0),
+    };
+  }
+
+  const handlers = {
+    navigate(args) {
+      const url = args && args.url;
+      if (!url) throw new Error('url is required');
+      window.location.assign(url);
+      return { navigated: true, url };
+    },
+    click(args) {
+      const el = findOne(args && args.selector);
+      try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+      el.click();
+      try {
+        const r = el.getBoundingClientRect();
+        const opts = { bubbles: true, cancelable: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2 };
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+      } catch (_) {}
+      return { clicked: args.selector, rect: rectOf(el) };
+    },
+    set_value(args) {
+      const el = findOne(args && args.selector);
+      try { el.focus(); } catch (_) {}
+      dispatchSyntheticInput(el, args.value ?? '');
+      return { filled: args.selector };
+    },
+    type_text(args) {
+      const el = findOne(args && args.selector);
+      try { el.focus(); } catch (_) {}
+      const next = (el.value ?? '') + (args.text ?? '');
+      dispatchSyntheticInput(el, next);
+      return { typed: args.selector, length: (args.text ?? '').length };
+    },
+    press_key(args) {
+      const el = document.activeElement || document.body;
+      dispatchKey(el, args && args.key ? args.key : '');
+      return { pressed: args && args.key };
+    },
+    hover(args) {
+      const el = findOne(args && args.selector);
+      try {
+        const r = el.getBoundingClientRect();
+        const opts = { bubbles: true, cancelable: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2 };
+        el.dispatchEvent(new MouseEvent('mouseover', opts));
+        el.dispatchEvent(new MouseEvent('mouseenter', opts));
+        el.dispatchEvent(new MouseEvent('mousemove', opts));
+      } catch (_) {}
+      return { hovered: args.selector };
+    },
+    scroll(args) {
+      const dir = (args && args.direction) || 'down';
+      const px = (args && args.pixels) || 400;
+      let dx = 0, dy = 0;
+      if (dir === 'down') dy = px;
+      else if (dir === 'up') dy = -px;
+      else if (dir === 'right') dx = px;
+      else if (dir === 'left') dx = -px;
+      window.scrollBy({ top: dy, left: dx, behavior: 'instant' in window ? 'instant' : 'auto' });
+      return { x: window.scrollX, y: window.scrollY };
+    },
+    is_visible(args) {
+      const el = document.querySelector(args && args.selector);
+      return { selector: args.selector, visible: isVisibleEl(el) };
+    },
+    get_text(args) {
+      const el = findOne(args && args.selector);
+      return { selector: args.selector, text: (el.innerText || el.textContent || '').slice(0, 4000) };
+    },
+    get_title() { return { title: document.title || '' }; },
+    get_url() { return { url: window.location.href }; },
+    snapshot(args) { return snapshotTree(args); },
+    wait_for(args) {
+      const sel = args && args.selector;
+      const text = args && args.text;
+      const timeoutMs = (args && args.timeout_ms) || 15000;
+      return new Promise((resolve, reject) => {
+        const start = Date.now();
+        function check() {
+          if (sel) {
+            const el = document.querySelector(sel);
+            if (el && isVisibleEl(el)) { resolve({ found: true, selector: sel, elapsed_ms: Date.now() - start }); return true; }
+          }
+          if (text) {
+            const body = document.body && document.body.innerText ? document.body.innerText : '';
+            if (body.indexOf(String(text)) >= 0) { resolve({ found: true, text, elapsed_ms: Date.now() - start }); return true; }
+          }
+          return false;
+        }
+        if (check()) return;
+        const obs = new MutationObserver(() => { if (check()) { obs.disconnect(); clearTimeout(to); } });
+        obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+        const to = setTimeout(() => { obs.disconnect(); reject(new Error('wait_for timeout')); }, timeoutMs);
+      });
+    },
+    find(args) {
+      const by = (args && args.by) || '';
+      const value = (args && args.value) || '';
+      const action = (args && args.action) || 'click';
+      let target = null;
+      if (by === 'role') target = document.querySelector(`[role="${CSS.escape(value)}"]`);
+      else if (by === 'testid') target = document.querySelector(`[data-testid="${CSS.escape(value)}"]`);
+      else if (by === 'placeholder') target = document.querySelector(`[placeholder="${CSS.escape(value)}"]`);
+      else if (by === 'label') {
+        const labels = Array.from(document.querySelectorAll('label')).filter((l) => (l.innerText || '').indexOf(value) >= 0);
+        const label = labels[0];
+        target = label ? (label.htmlFor ? document.getElementById(label.htmlFor) : label.querySelector('input,textarea,select,button')) : null;
+      } else if (by === 'text') {
+        const all = Array.from(document.querySelectorAll('a,button,[role="button"],[role="link"]'));
+        target = all.find((el) => (el.innerText || '').trim() === value)
+              || all.find((el) => (el.innerText || '').indexOf(value) >= 0);
+      }
+      if (!target) throw new Error(`find by ${by}=${value} not matched`);
+      if (action === 'click') { target.click(); return { found: true, action: 'click' }; }
+      if (action === 'fill') { dispatchSyntheticInput(target, args.fill_value ?? ''); return { found: true, action: 'fill' }; }
+      if (action === 'hover') { target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return { found: true, action: 'hover' }; }
+      if (action === 'text') { return { found: true, action: 'text', text: (target.innerText || '').slice(0, 4000) }; }
+      throw new Error(`unsupported find action: ${action}`);
+    },
+    dock_close() { return { closed: true }; },
+    screenshot_dom() {
+      // Best-effort DOM render fallback.  Without a html-to-canvas
+      // shim available in cross-origin pages, this returns the
+      // serialised body text + viewport rect so the agent at least
+      // knows what was on screen.  The OS-level capture path
+      // (xcap on the Rust side) is the primary route.
+      return {
+        text: (document.body && document.body.innerText ? document.body.innerText.slice(0, 4000) : ''),
+        title: document.title || '',
+        url: window.location.href,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    },
+  };
+
+  window.__senDockBridge = {
+    setPick(enabled) {
+      pickMode = !!enabled;
+      if (pickMode) {
+        ensurePickStyle();
+        document.addEventListener('mouseover', onHover, true);
+        document.addEventListener('click', onClick, true);
+      } else {
+        clearOutline();
+        document.removeEventListener('mouseover', onHover, true);
+        document.removeEventListener('click', onClick, true);
+      }
+    },
+    inspect(selector) {
+      try {
+        const el = document.querySelector(selector);
+        if (!el) { send('inspect', { selector, error: 'not found' }); return; }
+        send('inspect', { selector, props: computedStyleOf(el) });
+      } catch (err) {
+        send('inspect', { selector, error: String(err && err.message || err) });
+      }
+    },
+    snapshot,
+    zoom(factor) {
+      try {
+        const f = Number(factor);
+        if (!Number.isFinite(f) || f <= 0) return;
+        document.body.style.zoom = String(f);
+        send('zoom', { factor: f });
+      } catch (_) {}
+    },
+    async clearStorage(opts) {
+      const out = { history: !!(opts && opts.history), cookies: false, storage: false, cache: false };
+      try { localStorage.clear(); sessionStorage.clear(); out.storage = true; } catch (_) {}
+      try {
+        document.cookie.split(';').forEach((c) => {
+          const eq = c.indexOf('=');
+          const name = eq > -1 ? c.slice(0, eq).trim() : c.trim();
+          if (!name) return;
+          document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+        });
+        out.cookies = true;
+      } catch (_) {}
+      try {
+        if (window.caches && caches.keys) {
+          const names = await caches.keys();
+          await Promise.all(names.map((n) => caches.delete(n)));
+          out.cache = true;
+        }
+      } catch (_) {}
+      send('cleared', out);
+    },
+    consoleBuffer() { return consoleRing.slice(); },
+    /** Agent-driver entry point.  Looks up `kind` in the static
+     *  handler map and posts the result back via `senbridge://event`
+     *  keyed by `reqId`.  Never throws — failures become
+     *  `{ ok: false, error }` envelopes. */
+    exec(payload) {
+      const reqId = payload && payload.reqId;
+      const kind = payload && payload.kind;
+      const args = (payload && payload.args) || {};
+      let value;
+      try {
+        const fn = handlers[kind];
+        if (!fn) throw new Error(`unknown bridge kind: ${kind}`);
+        value = fn(args);
+      } catch (err) {
+        postResult(reqId, false, null, String(err && err.message || err));
+        return;
+      }
+      Promise.resolve(value).then(
+        (v) => postResult(reqId, true, v, null),
+        (err) => postResult(reqId, false, null, String(err && err.message || err)),
+      );
+    },
+  };
+
+  window.addEventListener('load', snapshot);
+  window.addEventListener('popstate', snapshot);
+  window.addEventListener('hashchange', snapshot);
+  window.addEventListener('pushstate', snapshot);
+  setTimeout(snapshot, 50);
+})();
+"#;
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct DockRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl DockRect {
+    fn position_logical(self) -> LogicalPosition<f64> {
+        LogicalPosition::new(self.x.max(0.0), self.y.max(0.0))
+    }
+    fn size_logical(self) -> LogicalSize<f64> {
+        LogicalSize::new(self.w.max(1.0), self.h.max(1.0))
+    }
+}
+
+pub type TabId = u32;
+
+const TAB_LABEL_PREFIX: &str = "browser_dock_tab_";
+
+fn tab_label(id: TabId) -> String {
+    format!("{TAB_LABEL_PREFIX}{id}")
+}
+
+#[derive(Default, Debug, Clone)]
+struct TabRecord {
+    last_url: Option<String>,
+    last_title: Option<String>,
+}
+
+#[derive(Default)]
+struct TabsState {
+    last_rect: Option<DockRect>,
+    tabs: HashMap<TabId, TabRecord>,
+    order: Vec<TabId>,
+    active: Option<TabId>,
+    next_id: TabId,
+}
+
+#[derive(Default, Clone)]
+pub struct DockSharedState(Arc<Mutex<TabsState>>);
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TabSummary {
+    pub id: TabId,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub active: bool,
+}
+
+impl DockSharedState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn rect(&self) -> Option<DockRect> {
+        self.0.lock().last_rect
+    }
+    fn set_rect(&self, rect: DockRect) {
+        self.0.lock().last_rect = Some(rect);
+    }
+
+    fn reset(&self) {
+        *self.0.lock() = TabsState::default();
+    }
+
+    fn alloc_id(&self) -> TabId {
+        let mut g = self.0.lock();
+        g.next_id = g.next_id.checked_add(1).unwrap_or(1);
+        g.next_id
+    }
+
+    fn register_tab(&self, id: TabId, url: Option<String>) {
+        let mut g = self.0.lock();
+        g.tabs.insert(
+            id,
+            TabRecord {
+                last_url: url,
+                last_title: None,
+            },
+        );
+        if !g.order.contains(&id) {
+            g.order.push(id);
+        }
+        if g.active.is_none() {
+            g.active = Some(id);
+        }
+    }
+
+    fn remove_tab(&self, id: TabId) -> Option<TabId> {
+        let mut g = self.0.lock();
+        g.tabs.remove(&id);
+        g.order.retain(|x| *x != id);
+        if g.active == Some(id) {
+            g.active = g.order.last().copied();
+        }
+        g.active
+    }
+
+    fn set_active(&self, id: TabId) -> Result<(), String> {
+        let mut g = self.0.lock();
+        if !g.tabs.contains_key(&id) {
+            return Err(format!("unknown tab id {id}"));
+        }
+        g.active = Some(id);
+        Ok(())
+    }
+
+    fn active(&self) -> Option<TabId> {
+        self.0.lock().active
+    }
+
+    fn order(&self) -> Vec<TabId> {
+        self.0.lock().order.clone()
+    }
+
+    fn list(&self) -> Vec<TabSummary> {
+        let g = self.0.lock();
+        let active = g.active;
+        g.order
+            .iter()
+            .filter_map(|id| {
+                g.tabs.get(id).map(|t| TabSummary {
+                    id: *id,
+                    url: t.last_url.clone(),
+                    title: t.last_title.clone(),
+                    active: active == Some(*id),
+                })
+            })
+            .collect()
+    }
+
+    fn set_url(&self, id: TabId, url: impl Into<String>) {
+        let mut g = self.0.lock();
+        if let Some(rec) = g.tabs.get_mut(&id) {
+            rec.last_url = Some(url.into());
+        }
+    }
+    fn set_title(&self, id: TabId, title: impl Into<String>) {
+        let mut g = self.0.lock();
+        if let Some(rec) = g.tabs.get_mut(&id) {
+            rec.last_title = Some(title.into());
+        }
+    }
+
+    fn snapshot_tab(&self, id: TabId) -> (Option<String>, Option<String>) {
+        let g = self.0.lock();
+        match g.tabs.get(&id) {
+            Some(rec) => (rec.last_url.clone(), rec.last_title.clone()),
+            None => (None, None),
+        }
+    }
+
+    fn snapshot(&self) -> (Option<String>, Option<String>) {
+        let active = self.active();
+        match active {
+            Some(id) => self.snapshot_tab(id),
+            None => (None, None),
+        }
+    }
+}
+
+fn parse_target_url(input: Option<String>) -> Result<Url, String> {
+    let raw = input
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ABOUT_BLANK.to_string());
+    Url::parse(&raw).map_err(|err| format!("invalid url '{raw}': {err}"))
+}
+
+fn dispatch_bridge_event(app: &AppHandle, state: &DockSharedState, tab_id: TabId, raw: &Url) {
+    let mut kind: Option<String> = None;
+    let mut data_raw: Option<String> = None;
+    for (k, v) in raw.query_pairs() {
+        if k == "kind" {
+            kind = Some(v.into_owned());
+        } else if k == "data" {
+            data_raw = Some(v.into_owned());
+        }
+    }
+
+    let kind = match kind {
+        Some(k) if !k.is_empty() => k,
+        _ => return,
+    };
+
+    let parsed_data: Value = data_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+
+    if kind == "result" {
+        if let Some(controller) = app.try_state::<TauriDockController>() {
+            if let Some(req_id) = parsed_data.get("reqId").and_then(|v| v.as_u64()) {
+                let ok = parsed_data
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let value = parsed_data
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let error = parsed_data
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                controller.deliver_result(req_id, ok, value, error);
+                return;
+            }
+        }
+    }
+    if kind == "result_chunk" {
+        if let Some(controller) = app.try_state::<TauriDockController>() {
+            let req_id = parsed_data.get("reqId").and_then(|v| v.as_u64());
+            let seq = parsed_data.get("seq").and_then(|v| v.as_u64());
+            let total = parsed_data.get("total").and_then(|v| v.as_u64());
+            let payload = parsed_data
+                .get("payload")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let (Some(req_id), Some(seq), Some(total), Some(payload)) =
+                (req_id, seq, total, payload)
+            {
+                controller.deliver_chunk(req_id, seq as usize, total as usize, payload);
+                return;
+            }
+        }
+    }
+
+    if kind == "state" {
+        if let Some(url) = parsed_data.get("url").and_then(|v| v.as_str()) {
+
+            let prev = state.snapshot_tab(tab_id).0;
+            if prev.as_deref() != Some(url) {
+                if let Some(controller) = app.try_state::<TauriDockController>() {
+                    controller.drain_pending_for_tab(
+                        tab_id,
+                        "dock navigated to a new page",
+                    );
+                }
+            }
+            state.set_url(tab_id, url);
+        }
+        if let Some(title) = parsed_data.get("title").and_then(|v| v.as_str()) {
+            state.set_title(tab_id, title);
+        }
+
+        emit_tabs_event(app, state);
+    }
+
+    let payload = serde_json::json!({
+        "kind": kind,
+        "tabId": tab_id,
+        "data": parsed_data,
+    });
+
+    if let Err(err) = app.emit("browser_dock_event", payload) {
+        tracing::warn!("[browser_dock] emit browser_dock_event failed: {err}");
+    }
+}
+
+fn emit_tabs_event(app: &AppHandle, state: &DockSharedState) {
+    let tabs = state.list();
+    let active = state.active();
+    if let Err(err) = app.emit(
+        "browser_dock_event",
+        serde_json::json!({
+            "kind": "tabs",
+            "data": { "tabs": tabs, "active": active },
+        }),
+    ) {
+        tracing::warn!("[browser_dock] emit tabs failed: {err}");
+    }
+}
+
+fn ensure_main_window(app: &AppHandle) -> Result<Window, String> {
+    app.get_window("main")
+        .ok_or_else(|| "main window not yet available".to_string())
+}
+
+const OFFSCREEN: (i32, i32) = (-10_000, -10_000);
+
+fn ensure_tab_webview(
+    app: &AppHandle,
+    state: &DockSharedState,
+    tab_id: TabId,
+    url: Option<String>,
+) -> Result<(), String> {
+    let main = ensure_main_window(app)?;
+    let label = tab_label(tab_id);
+
+    if let Some(existing) = app.get_webview(&label) {
+        if let Some(target) = url.as_ref().filter(|s| !s.trim().is_empty()) {
+            let parsed = parse_target_url(Some(target.clone()))?;
+            existing
+                .navigate(parsed)
+                .map_err(|e| format!("navigate failed: {e}"))?;
+            state.set_url(tab_id, target);
+        }
+        return Ok(());
+    }
+
+    let parsed = parse_target_url(url.clone())?;
+    state.set_url(tab_id, parsed.as_str());
+
+    let app_for_nav = app.clone();
+    let state_for_nav = state.clone();
+
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+        .initialization_script(BRIDGE_JS)
+        .accept_first_mouse(true)
+        .on_navigation(move |target: &Url| {
+            if target.scheme() == BRIDGE_SCHEME {
+                dispatch_bridge_event(&app_for_nav, &state_for_nav, tab_id, target);
+                false
+            } else {
+                true
+            }
+        });
+
+    main.add_child(
+        builder,
+        LogicalPosition::new(OFFSCREEN.0 as f64, OFFSCREEN.1 as f64),
+        LogicalSize::new(1.0_f64, 1.0_f64),
+    )
+    .map_err(|e| format!("add_child(browser_dock_tab_{tab_id}) failed: {e}"))?;
+    Ok(())
+}
+
+fn update_active_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), String> {
+    let rect = state.rect();
+    let active = state.active();
+    for tab_id in state.order() {
+        let label = tab_label(tab_id);
+        let Some(wv) = app.get_webview(&label) else {
+            continue;
+        };
+        if Some(tab_id) == active {
+            if let Some(rect) = rect {
+                wv.set_position(rect.position_logical())
+                    .map_err(|e| format!("set_position(active) failed: {e}"))?;
+                wv.set_size(rect.size_logical())
+                    .map_err(|e| format!("set_size(active) failed: {e}"))?;
+            }
+        } else {
+            wv.set_position(PhysicalPosition::new(OFFSCREEN.0, OFFSCREEN.1))
+                .map_err(|e| format!("set_position(off) failed: {e}"))?;
+            wv.set_size(PhysicalSize::new(1_u32, 1_u32))
+                .map_err(|e| format!("set_size(off) failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn active_webview(
+    app: &AppHandle,
+    state: &DockSharedState,
+) -> Result<tauri::Webview, String> {
+    let id = state
+        .active()
+        .ok_or_else(|| "no active dock tab".to_string())?;
+    app.get_webview(&tab_label(id))
+        .ok_or_else(|| "active tab webview is gone".to_string())
+}
+
+#[tauri::command]
+pub async fn browser_dock_open(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    rect: DockRect,
+    url: Option<String>,
+) -> Result<(), String> {
+    state.set_rect(rect);
+    let s = state.inner().clone();
+
+    let active = s.active();
+    let active = match active {
+        Some(id) => id,
+        None => {
+            let id = s.alloc_id();
+            ensure_tab_webview(&app, &s, id, url.clone())?;
+            s.register_tab(id, url.clone());
+            id
+        }
+    };
+
+    if s.active() == Some(active) {
+        if let Some(target) = url.as_ref().filter(|s| !s.trim().is_empty()) {
+            ensure_tab_webview(&app, &s, active, Some(target.clone()))?;
+        }
+    }
+
+    update_active_layout(&app, &s)?;
+    emit_tabs_event(&app, &s);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_set_rect(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    rect: DockRect,
+) -> Result<(), String> {
+    state.set_rect(rect);
+    update_active_layout(&app, state.inner())
+}
+
+#[tauri::command]
+pub async fn browser_dock_hide(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    for tab_id in state.order() {
+        if let Some(webview) = app.get_webview(&tab_label(tab_id)) {
+            webview
+                .set_position(PhysicalPosition::new(OFFSCREEN.0, OFFSCREEN.1))
+                .map_err(|e| format!("set_position failed: {e}"))?;
+            webview
+                .set_size(PhysicalSize::new(1u32, 1u32))
+                .map_err(|e| format!("set_size failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_close(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    for tab_id in state.order() {
+        if let Some(webview) = app.get_webview(&tab_label(tab_id)) {
+            let _ = webview.close();
+        }
+    }
+    state.reset();
+    if let Some(controller) = app.try_state::<TauriDockController>() {
+        controller.drain_pending("dock closed");
+    }
+    emit_tabs_event(&app, state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_navigate(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    url: String,
+) -> Result<(), String> {
+    let id = state
+        .active()
+        .ok_or_else(|| "no active dock tab".to_string())?;
+    let parsed = parse_target_url(Some(url.clone()))?;
+    let webview = app
+        .get_webview(&tab_label(id))
+        .ok_or_else(|| "active tab webview is gone".to_string())?;
+    webview
+        .navigate(parsed)
+        .map_err(|e| format!("navigate failed: {e}"))?;
+    state.set_url(id, url);
+    emit_tabs_event(&app, state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_new_tab(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    url: Option<String>,
+    activate: Option<bool>,
+) -> Result<TabId, String> {
+    let id = state.alloc_id();
+    ensure_tab_webview(&app, state.inner(), id, url.clone())?;
+    state.register_tab(id, url.clone());
+    if activate.unwrap_or(true) {
+        let _ = state.set_active(id);
+    }
+    update_active_layout(&app, state.inner())?;
+    emit_tabs_event(&app, state.inner());
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn browser_dock_close_tab(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    tab_id: TabId,
+) -> Result<Option<TabId>, String> {
+    if let Some(webview) = app.get_webview(&tab_label(tab_id)) {
+        let _ = webview.close();
+    }
+    if let Some(controller) = app.try_state::<TauriDockController>() {
+        controller.drain_pending_for_tab(tab_id, "tab closed");
+    }
+    let new_active = state.remove_tab(tab_id);
+    update_active_layout(&app, state.inner())?;
+    emit_tabs_event(&app, state.inner());
+    Ok(new_active)
+}
+
+#[tauri::command]
+pub async fn browser_dock_activate_tab(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    tab_id: TabId,
+) -> Result<(), String> {
+    state.set_active(tab_id)?;
+    update_active_layout(&app, state.inner())?;
+    emit_tabs_event(&app, state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_list_tabs(
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<Vec<TabSummary>, String> {
+    Ok(state.list())
+}
+
+fn eval_dock(app: &AppHandle, state: &DockSharedState, source: &str) -> Result<(), String> {
+    let webview = active_webview(app, state)?;
+    webview
+        .eval(source)
+        .map_err(|e| format!("eval failed: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_back(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    eval_dock(&app, state.inner(), "history.back();")
+}
+
+#[tauri::command]
+pub async fn browser_dock_forward(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    eval_dock(&app, state.inner(), "history.forward();")
+}
+
+#[tauri::command]
+pub async fn browser_dock_reload(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    hard: Option<bool>,
+) -> Result<(), String> {
+    if hard.unwrap_or(false) {
+        eval_dock(
+            &app,
+            state.inner(),
+            "(async () => { try { await window.__senDockBridge?.clearStorage({ history: false }); } catch(_){}; location.reload(); })();",
+        )
+    } else {
+        eval_dock(&app, state.inner(), "location.reload();")
+    }
+}
+
+#[tauri::command]
+pub async fn browser_dock_set_zoom(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    factor: f64,
+) -> Result<(), String> {
+    let safe = factor.clamp(0.25, 3.0);
+    eval_dock(
+        &app,
+        state.inner(),
+        &format!(
+            "window.__senDockBridge && window.__senDockBridge.zoom({});",
+            safe
+        ),
+    )
+}
+
+#[tauri::command]
+pub async fn browser_dock_set_pick_mode(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    enabled: bool,
+) -> Result<(), String> {
+    eval_dock(
+        &app,
+        state.inner(),
+        &format!(
+            "window.__senDockBridge && window.__senDockBridge.setPick({});",
+            if enabled { "true" } else { "false" }
+        ),
+    )
+}
+
+#[tauri::command]
+pub async fn browser_dock_inspect_selector(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    selector: String,
+) -> Result<(), String> {
+    let escaped =
+        serde_json::to_string(&selector).map_err(|e| format!("escape selector: {e}"))?;
+    eval_dock(
+        &app,
+        state.inner(),
+        &format!(
+            "window.__senDockBridge && window.__senDockBridge.inspect({});",
+            escaped
+        ),
+    )
+}
+
+#[tauri::command]
+pub async fn browser_dock_clear(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    cookies: Option<bool>,
+    cache: Option<bool>,
+    history: Option<bool>,
+) -> Result<(), String> {
+    let opts = serde_json::json!({
+        "cookies": cookies.unwrap_or(true),
+        "cache": cache.unwrap_or(true),
+        "history": history.unwrap_or(false),
+    });
+    let opts_js = serde_json::to_string(&opts).map_err(|e| format!("opts: {e}"))?;
+    eval_dock(
+        &app,
+        state.inner(),
+        &format!(
+            "window.__senDockBridge && window.__senDockBridge.clearStorage({});",
+            opts_js
+        ),
+    )
+}
+
+#[tauri::command]
+pub async fn browser_dock_request_state(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    eval_dock(
+        &app,
+        state.inner(),
+        "window.__senDockBridge && window.__senDockBridge.snapshot();",
+    )
+}
+
+#[tauri::command]
+pub async fn browser_dock_get_state(
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<serde_json::Value, String> {
+    let (url, title) = state.snapshot();
+    Ok(serde_json::json!({
+        "url": url,
+        "title": title,
+    }))
+}
+
+#[tauri::command]
+pub async fn browser_dock_open_devtools(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    let webview = active_webview(&app, state.inner())?;
+    #[cfg(debug_assertions)]
+    {
+        webview.open_devtools();
+        return Ok(());
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = webview;
+        Err("DevTools are only available in debug builds".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn browser_dock_close_devtools(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    let webview = active_webview(&app, state.inner())?;
+    #[cfg(debug_assertions)]
+    {
+        webview.close_devtools();
+        return Ok(());
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = webview;
+        Err("DevTools are only available in debug builds".to_string())
+    }
+}
+
+#[derive(Clone)]
+pub struct TauriDockController(Arc<TauriDockControllerInner>);
+
+struct TauriDockControllerInner {
+    app: AppHandle,
+
+    pending: Mutex<HashMap<u64, oneshot::Sender<DockResponse>>>,
+
+    pending_tab: Mutex<HashMap<u64, TabId>>,
+
+    chunks: Mutex<HashMap<u64, ChunkBuffer>>,
+
+    drive_locks: Mutex<HashMap<TabId, Arc<AsyncMutex<()>>>>,
+    next_req_id: AtomicU64,
+}
+
+#[derive(Default)]
+struct ChunkBuffer {
+    parts: Vec<Option<String>>,
+    received: usize,
+}
+
+impl ChunkBuffer {
+    fn new(total: usize) -> Self {
+        Self {
+            parts: vec![None; total],
+            received: 0,
+        }
+    }
+    fn ingest(&mut self, seq: usize, payload: String) -> bool {
+        if seq >= self.parts.len() {
+            return false;
+        }
+        if self.parts[seq].is_none() {
+            self.parts[seq] = Some(payload);
+            self.received += 1;
+        }
+        self.received == self.parts.len()
+    }
+    fn assemble(self) -> String {
+        let mut buf = String::with_capacity(self.parts.iter().map(|p| p.as_ref().map(|s| s.len()).unwrap_or(0)).sum());
+        for part in self.parts.into_iter().flatten() {
+            buf.push_str(&part);
+        }
+        buf
+    }
+}
+
+impl TauriDockController {
+    pub fn new(app: AppHandle) -> Self {
+        Self(Arc::new(TauriDockControllerInner {
+            app,
+            pending: Mutex::new(HashMap::new()),
+            pending_tab: Mutex::new(HashMap::new()),
+            chunks: Mutex::new(HashMap::new()),
+            drive_locks: Mutex::new(HashMap::new()),
+            next_req_id: AtomicU64::new(1),
+        }))
+    }
+
+    fn tab_lock(&self, tab_id: TabId) -> Arc<AsyncMutex<()>> {
+        let mut g = self.0.drive_locks.lock();
+        g.entry(tab_id)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    fn forget_request(&self, req_id: u64) {
+        self.0.pending.lock().remove(&req_id);
+        self.0.pending_tab.lock().remove(&req_id);
+        self.0.chunks.lock().remove(&req_id);
+    }
+
+    pub fn deliver_result(&self, req_id: u64, ok: bool, value: Value, error: Option<String>) {
+        self.0.chunks.lock().remove(&req_id);
+        self.0.pending_tab.lock().remove(&req_id);
+        let sender = self.0.pending.lock().remove(&req_id);
+        if let Some(tx) = sender {
+            let _ = tx.send(DockResponse { ok, value, error });
+        }
+    }
+
+    pub fn deliver_chunk(&self, req_id: u64, seq: usize, total: usize, payload: String) {
+        let assembled = {
+            let mut guard = self.0.chunks.lock();
+            let buf = guard
+                .entry(req_id)
+                .or_insert_with(|| ChunkBuffer::new(total));
+
+            if buf.parts.len() != total {
+                *buf = ChunkBuffer::new(total);
+            }
+            if buf.ingest(seq, payload) {
+                Some(guard.remove(&req_id).unwrap().assemble())
+            } else {
+                None
+            }
+        };
+
+        if let Some(json) = assembled {
+            match serde_json::from_str::<Value>(&json) {
+                Ok(env) => {
+                    let ok = env.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let value = env.get("value").cloned().unwrap_or(Value::Null);
+                    let error = env
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    self.0.pending_tab.lock().remove(&req_id);
+                    let sender = self.0.pending.lock().remove(&req_id);
+                    if let Some(tx) = sender {
+                        let _ = tx.send(DockResponse { ok, value, error });
+                    }
+                }
+                Err(err) => {
+                    self.0.pending_tab.lock().remove(&req_id);
+                    let sender = self.0.pending.lock().remove(&req_id);
+                    if let Some(tx) = sender {
+                        let _ = tx.send(DockResponse {
+                            ok: false,
+                            value: Value::Null,
+                            error: Some(format!("chunk reassembly parse error: {err}")),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn drain_pending(&self, reason: &str) {
+        self.0.chunks.lock().clear();
+        self.0.pending_tab.lock().clear();
+        let drained: Vec<oneshot::Sender<DockResponse>> = {
+            let mut guard = self.0.pending.lock();
+            std::mem::take(&mut *guard).into_values().collect()
+        };
+        for tx in drained {
+            let _ = tx.send(DockResponse {
+                ok: false,
+                value: Value::Null,
+                error: Some(reason.to_string()),
+            });
+        }
+    }
+
+    pub fn drain_pending_for_tab(&self, tab_id: TabId, reason: &str) {
+        let req_ids: Vec<u64> = {
+            let mut guard = self.0.pending_tab.lock();
+            let ids: Vec<u64> = guard
+                .iter()
+                .filter_map(|(rid, tid)| if *tid == tab_id { Some(*rid) } else { None })
+                .collect();
+            for rid in &ids {
+                guard.remove(rid);
+            }
+            ids
+        };
+        for rid in req_ids {
+            self.0.chunks.lock().remove(&rid);
+            if let Some(tx) = self.0.pending.lock().remove(&rid) {
+                let _ = tx.send(DockResponse {
+                    ok: false,
+                    value: Value::Null,
+                    error: Some(reason.to_string()),
+                });
+            }
+        }
+    }
+}
+
+fn resolve_target_tab(req: &DockRequest, state: &DockSharedState) -> Result<TabId> {
+    if let Some(id) = req
+        .args
+        .as_object()
+        .and_then(|m| m.get("tab_id"))
+        .and_then(|v| v.as_u64())
+    {
+        return Ok(id as TabId);
+    }
+    state
+        .active()
+        .ok_or_else(|| anyhow::anyhow!("no active dock tab to drive"))
+}
+
+#[async_trait]
+impl DockController for TauriDockController {
+    async fn ensure_visible(&self, session_hint: Option<String>) -> Result<()> {
+
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .unwrap_or_default();
+        if state.active().is_none() {
+            let id = state.alloc_id();
+            if let Err(err) = ensure_tab_webview(&self.0.app, &state, id, None) {
+                tracing::warn!("[browser_dock] auto-create on ensure_visible failed: {err}");
+            } else {
+                state.register_tab(id, None);
+                let _ = state.set_active(id);
+                if state.rect().is_none() {
+                    state.set_rect(DockRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+                }
+                let _ = update_active_layout(&self.0.app, &state);
+                emit_tabs_event(&self.0.app, &state);
+            }
+        }
+
+        let payload = serde_json::json!({
+            "kind": "visible",
+            "data": { "session": session_hint, "source": "agent" },
+        });
+        if let Err(err) = self.0.app.emit("browser_dock_event", payload) {
+            tracing::warn!("[browser_dock] emit visible failed: {err}");
+        }
+        Ok(())
+    }
+
+    async fn exec(&self, req: DockRequest) -> Result<DockResponse> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let tab_id = resolve_target_tab(&req, &state)?;
+        let lock = self.tab_lock(tab_id);
+        let _drive = lock.lock().await;
+
+        let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
+        let _ = self.0.app.emit(
+            "browser_dock_event",
+            serde_json::json!({
+                "kind": "agent_action",
+                "tabId": tab_id,
+                "data": {
+                    "reqId": preview_id,
+                    "kind": req.kind,
+                    "args": req.args,
+                    "tabId": tab_id,
+                    "ts": now_millis(),
+                },
+            }),
+        );
+
+        self.exec_on_tab(tab_id, req).await
+    }
+
+    async fn screenshot(&self, full_page: bool) -> Result<Vec<u8>> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let tab_id = state
+            .active()
+            .ok_or_else(|| anyhow::anyhow!("no active dock tab to capture"))?;
+
+        let lock = self.tab_lock(tab_id);
+        let _drive = lock.lock().await;
+
+        if full_page {
+            if let Some(webview) = self.0.app.get_webview(&tab_label(tab_id)) {
+                let warmup = r#"(async () => {
+                  try {
+                    const total = Math.max(
+                      document.documentElement.scrollHeight,
+                      document.body && document.body.scrollHeight || 0,
+                    );
+                    const step = Math.max(window.innerHeight * 0.9, 400);
+                    for (let y = 0; y <= total; y += step) {
+                      window.scrollTo({ top: y, behavior: 'instant' in window ? 'instant' : 'auto' });
+                      await new Promise((r) => setTimeout(r, 30));
+                    }
+                    window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
+                  } catch (_) {}
+                })();"#;
+                let _ = webview.eval(warmup);
+                tokio::time::sleep(Duration::from_millis(120)).await;
+            }
+        }
+
+        let app_xcap = self.0.app.clone();
+        let xcap_result =
+            tokio::task::spawn_blocking(move || capture_dock_window(&app_xcap)).await;
+        match xcap_result {
+            Ok(Ok(bytes)) => return Ok(bytes),
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    "[browser_dock] xcap capture failed, falling back to DOM metadata: {err}"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "[browser_dock] xcap join failed, falling back to DOM metadata: {err}"
+                );
+            }
+        }
+
+        let req = DockRequest {
+            kind: "screenshot_dom".to_string(),
+            args: Value::Null,
+            timeout_ms: 5_000,
+        };
+        let resp = self.exec_on_tab(tab_id, req).await?;
+        if !resp.ok {
+            return Err(anyhow::anyhow!(
+                "screenshot fallback failed: {}",
+                resp.error.unwrap_or_else(|| "unknown".into())
+            ));
+        }
+        Ok(render_dom_fallback_png(&resp.value))
+    }
+
+    async fn new_tab(&self, url: Option<String>, activate: bool) -> Result<u32> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let id = state.alloc_id();
+        ensure_tab_webview(&self.0.app, &state, id, url.clone())
+            .map_err(|e| anyhow::anyhow!("ensure_tab_webview: {e}"))?;
+        state.register_tab(id, url);
+        if activate {
+            let _ = state.set_active(id);
+        }
+        update_active_layout(&self.0.app, &state)
+            .map_err(|e| anyhow::anyhow!("update_active_layout: {e}"))?;
+        emit_tabs_event(&self.0.app, &state);
+        Ok(id)
+    }
+
+    async fn close_tab(&self, tab_id: u32) -> Result<Option<u32>> {
+        if let Some(webview) = self.0.app.get_webview(&tab_label(tab_id)) {
+            let _ = webview.close();
+        }
+        self.drain_pending_for_tab(tab_id, "tab closed");
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let new_active = state.remove_tab(tab_id);
+        update_active_layout(&self.0.app, &state)
+            .map_err(|e| anyhow::anyhow!("update_active_layout: {e}"))?;
+        emit_tabs_event(&self.0.app, &state);
+        Ok(new_active)
+    }
+
+    async fn activate_tab(&self, tab_id: u32) -> Result<()> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        state
+            .set_active(tab_id)
+            .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
+        update_active_layout(&self.0.app, &state)
+            .map_err(|e| anyhow::anyhow!("update_active_layout: {e}"))?;
+        emit_tabs_event(&self.0.app, &state);
+        Ok(())
+    }
+
+    async fn list_tabs(&self) -> Result<Vec<DockTabInfo>> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        Ok(state
+            .list()
+            .into_iter()
+            .map(|t| DockTabInfo {
+                id: t.id,
+                url: t.url,
+                title: t.title,
+                active: t.active,
+            })
+            .collect())
+    }
+}
+
+impl TauriDockController {
+    async fn exec_on_tab(&self, tab_id: TabId, req: DockRequest) -> Result<DockResponse> {
+        let webview = self
+            .0
+            .app
+            .get_webview(&tab_label(tab_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!("dock tab {tab_id} webview is not open")
+            })?;
+
+        let req_id = self.0.next_req_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.0.pending.lock().insert(req_id, tx);
+        self.0.pending_tab.lock().insert(req_id, tab_id);
+
+        let payload = serde_json::json!({
+            "reqId": req_id,
+            "kind": req.kind,
+            "args": req.args,
+        });
+        let payload_js = serde_json::to_string(&payload)
+            .with_context(|| "serialise dock exec payload")?;
+        let source = format!(
+            "window.__senDockBridge && window.__senDockBridge.exec({});",
+            payload_js
+        );
+        if let Err(err) = webview.eval(&source) {
+            self.forget_request(req_id);
+            return Err(anyhow::anyhow!("dock eval failed: {err}"));
+        }
+
+        let timeout = Duration::from_millis(req.timeout_ms.max(1_000));
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => {
+                self.forget_request(req_id);
+                Err(anyhow::anyhow!("dock bridge channel closed before reply"))
+            }
+            Err(_) => {
+                self.forget_request(req_id);
+                Err(anyhow::anyhow!(
+                    "dock bridge timed out waiting for kind={} (tab={})",
+                    req.kind,
+                    tab_id
+                ))
+            }
+        }
+    }
+}
+
+fn render_dom_fallback_png(meta: &Value) -> Vec<u8> {
+    use image::{ImageFormat, Rgba, RgbaImage};
+
+    let title = meta
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no title)");
+    let url = meta
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no url)");
+    let viewport = meta
+        .get("viewport")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "{}".into());
+
+    let header = format!(
+        "DOM-fallback screenshot\nurl: {}\ntitle: {}\nviewport: {}",
+        url.chars().take(160).collect::<String>(),
+        title.chars().take(120).collect::<String>(),
+        viewport.chars().take(120).collect::<String>(),
+    );
+
+    let width = 800u32;
+    let height = 120u32;
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([245, 245, 250, 255]));
+    let bytes = header.as_bytes();
+    for (i, byte) in bytes.iter().enumerate().take((width * height) as usize) {
+        let x = (i as u32) % width;
+        let y = (i as u32) / width;
+        let v = 80u8.saturating_add(*byte / 4);
+        img.put_pixel(x, y, Rgba([v, v, v, 255]));
+    }
+    let mut out = Vec::with_capacity(8 * 1024);
+    let _ = image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Png);
+    out
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn capture_dock_window(app: &AppHandle) -> Result<Vec<u8>> {
+    use image::{ImageFormat, RgbaImage};
+
+    let main_window = app
+        .get_window("main")
+        .ok_or_else(|| anyhow::anyhow!("main window unavailable"))?;
+    let main_title = main_window.title().unwrap_or_default();
+
+    let xcap_windows = xcap::Window::all()
+        .map_err(|err| anyhow::anyhow!("xcap::Window::all failed: {err}"))?;
+    let target = xcap_windows
+        .into_iter()
+        .find(|w| {
+            let same_title = w
+                .title()
+                .map(|t| t == main_title)
+                .unwrap_or(false);
+            let same_app = w
+                .app_name()
+                .map(|a| a.contains("sen-desktop"))
+                .unwrap_or(false);
+            same_title || same_app
+        })
+        .ok_or_else(|| anyhow::anyhow!("could not locate main window via xcap"))?;
+    let captured: RgbaImage = target
+        .capture_image()
+        .map_err(|err| anyhow::anyhow!("xcap capture_image failed: {err}"))?;
+
+    let cropped: RgbaImage = if let Some(rect) =
+        app.try_state::<DockSharedState>().and_then(|s| s.rect())
+    {
+        let scale = main_window.scale_factor().unwrap_or(1.0);
+        let x = ((rect.x.max(0.0)) * scale) as u32;
+        let y = ((rect.y.max(0.0)) * scale) as u32;
+        let w = ((rect.w.max(1.0)) * scale) as u32;
+        let h = ((rect.h.max(1.0)) * scale) as u32;
+        let img_w = captured.width();
+        let img_h = captured.height();
+        let x = x.min(img_w.saturating_sub(1));
+        let y = y.min(img_h.saturating_sub(1));
+        let w = w.min(img_w.saturating_sub(x));
+        let h = h.min(img_h.saturating_sub(y));
+        if w > 0 && h > 0 {
+            let mut sub = RgbaImage::new(w, h);
+            for (sy, py) in (y..y + h).enumerate() {
+                for (sx, px) in (x..x + w).enumerate() {
+                    sub.put_pixel(sx as u32, sy as u32, *captured.get_pixel(px, py));
+                }
+            }
+            sub
+        } else {
+            captured
+        }
+    } else {
+        captured
+    };
+
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    image::DynamicImage::ImageRgba8(cropped)
+        .write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Png)
+        .map_err(|err| anyhow::anyhow!("png encode failed: {err}"))?;
+    Ok(buf)
+}
+
+pub fn install_into(app: &AppHandle) {
+    let controller = TauriDockController::new(app.clone());
+    app.manage(controller.clone());
+    senweavercoding::tools::browser::install_dock_controller(Arc::new(controller));
+}

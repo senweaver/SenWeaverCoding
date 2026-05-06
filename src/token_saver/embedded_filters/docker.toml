@@ -1,0 +1,15 @@
+name = "docker"
+match_command = "^docker\\b"
+max_lines = 400
+dedup = true
+
+strip_lines = [
+  "^Sending build context",
+  "^Step \\d+/\\d+ : ",
+  "^ ---> Running in [0-9a-f]+",
+  "^ ---> [0-9a-f]+",
+  "^Removing intermediate container",
+  "^\\d+: Pulling from",
+  "^Pull complete$",
+  "^Already exists$",
+]

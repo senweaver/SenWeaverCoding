@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 SenWeaverCoding
+#
+# Project-wide clippy configuration.  Loaded automatically by
+# `cargo clippy` when this file sits alongside `Cargo.toml`.
+#
+# Refer to https://rust-lang.github.io/rust-clippy/master/#configuration
+# for the exhaustive list of recognised keys.
+
+# ── Secret-handling guardrails ──────────────────────────────────────
+#
+# Discourage direct `Display`/`Debug` formatting of types likely to
+# contain secrets.  Callers should use `SecretString::redacted()` or
+# go through `tracing` with the process-wide `RedactLayer` installed
+# (see `src/observability/redact_layer.rs`).
+#
+# `disallowed-methods` entries cause clippy to emit a warning at the
+# call site; the project-level `-D warnings` flag escalates them to
+# hard errors in CI.
+disallowed-methods = [
+    # NOTE: Don't disable `String::as_str` or `format!` outright —
+    # that would break 90% of the codebase.  Instead we add the
+    # narrow `dev/lint_secrets.sh` grep-based check that catches
+    # the specific leak-prone patterns (interpolating raw api_key
+    # fields into format strings).
+]
+
+# Increase the complexity threshold slightly — the agent loop is
+# unavoidably state-heavy; spreading it across six files hurts more
+# than it helps.
+cognitive-complexity-threshold = 30
+
+# Allow moderately long function signatures — the AgentLoopCore
+# builder pattern needs many parameters by design.
+too-many-arguments-threshold = 12
+
+# Keep the enum-variant naming style lenient; we use
+# `VectorBackend::{Linear,Sharded,Ivf}` and similar "short" variants
+# deliberately.
+enum-variant-name-threshold = 3

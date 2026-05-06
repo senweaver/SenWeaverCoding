@@ -1,0 +1,8 @@
+name = "ssh"
+match_command = "^ssh\\b"
+
+strip_lines = [
+  "^Warning: Permanently added .* to the list of known hosts",
+  "^Pseudo-terminal will not be allocated",
+  "^Connection to .* closed",
+]

@@ -1,0 +1,13 @@
+name = "gradle"
+match_command = "^gradle\\b"
+max_lines = 400
+dedup = true
+
+strip_lines = [
+  "^Download ",
+  "^> Task ",
+  "^<-+>",
+  "^Welcome to Gradle",
+  "^Daemon will be ",
+  "^Starting a Gradle Daemon",
+]

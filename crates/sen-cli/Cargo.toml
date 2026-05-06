@@ -1,0 +1,16 @@
+[package]
+name = "sen-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "sen-tool"
+path = "src/main.rs"
+
+[dependencies]
+senweavercoding = { path = "../..", package = "SenWeaverCoding", default-features = true }
+sen-core = { path = "../sen-core" }
+
+[features]
+default = []
+tui = ["senweavercoding/tui", "sen-core/code-intel"]

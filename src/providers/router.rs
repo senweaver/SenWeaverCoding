@@ -1,0 +1,296 @@
+﻿// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+use super::Provider;
+use super::traits::{
+    ChatMessage, ChatRequest, ChatResponse, StreamChunk, StreamEvent, StreamOptions, StreamResult,
+};
+use crate::config::schema::ModelPricing;
+use async_trait::async_trait;
+use futures_util::stream::BoxStream;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub struct Route {
+    pub provider_name: String,
+    pub model: String,
+}
+
+pub struct RouterProvider {
+    routes: HashMap<String, (usize, String)>,
+    providers: Vec<(String, Box<dyn Provider>)>,
+    default_index: usize,
+    default_model: String,
+    prices: HashMap<String, ModelPricing>,
+}
+
+impl RouterProvider {
+
+    pub fn new(
+        providers: Vec<(String, Box<dyn Provider>)>,
+        routes: Vec<(String, Route)>,
+        default_model: String,
+    ) -> Self {
+
+        let name_to_index: HashMap<&str, usize> = providers
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.as_str(), i))
+            .collect();
+
+        let resolved_routes: HashMap<String, (usize, String)> = routes
+            .into_iter()
+            .filter_map(|(hint, route)| {
+                let index = name_to_index.get(route.provider_name.as_str()).copied();
+                match index {
+                    Some(i) => Some((hint, (i, route.model))),
+                    None => {
+                        tracing::warn!(
+                            hint = hint,
+                            provider = route.provider_name,
+                            "Route references unknown provider, skipping"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        Self {
+            routes: resolved_routes,
+            providers,
+            default_index: 0,
+            default_model,
+            prices: HashMap::new(),
+        }
+    }
+
+    pub fn with_prices(mut self, prices: HashMap<String, ModelPricing>) -> Self {
+        self.prices = prices;
+        self
+    }
+
+    pub fn resolve_cost_optimized(
+        &self,
+        model: &str,
+        prices: &HashMap<String, ModelPricing>,
+        required_vision: bool,
+        required_tools: bool,
+    ) -> (usize, String) {
+        let hint = model.strip_prefix("hint:");
+        let is_cost_hint = matches!(hint, Some("cost-optimized" | "cheapest"));
+
+        if !is_cost_hint {
+            return self.resolve(model);
+        }
+
+        let mut candidates: Vec<(usize, String, f64)> = Vec::new();
+
+        for (idx, route_model) in self.routes.values() {
+
+            if let Some((_, provider)) = self.providers.get(*idx) {
+                if required_vision && !provider.supports_vision() {
+                    continue;
+                }
+                if required_tools && !provider.supports_native_tools() {
+                    continue;
+                }
+            }
+
+            if let Some(pricing) = prices.get(route_model) {
+                let total_cost = pricing.input + pricing.output;
+                candidates.push((*idx, route_model.clone(), total_cost));
+            }
+        }
+
+        candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((idx, route_model, _)) = candidates.into_iter().next() {
+            return (idx, route_model);
+        }
+
+        tracing::warn!(
+            "No cost-optimized route found with matching pricing data, \
+             falling back to default"
+        );
+        (self.default_index, self.default_model.clone())
+    }
+
+    fn resolve_auto(&self, model: &str) -> (usize, String) {
+        if (model.starts_with("hint:cost") || model.starts_with("hint:cheap"))
+            && !self.prices.is_empty()
+        {
+            return self.resolve_cost_optimized(model, &self.prices, false, false);
+        }
+        self.resolve(model)
+    }
+
+    fn resolve(&self, model: &str) -> (usize, String) {
+        if let Some(hint) = model.strip_prefix("hint:") {
+            if let Some((idx, resolved_model)) = self.routes.get(hint) {
+                return (*idx, resolved_model.clone());
+            }
+            tracing::warn!(
+                hint = hint,
+                "Unknown route hint, falling back to default provider"
+            );
+        }
+
+        (self.default_index, model.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CostOptimizedStrategy {
+
+    pub prices: HashMap<String, ModelPricing>,
+
+    pub required_vision: bool,
+
+    pub required_tools: bool,
+}
+
+impl CostOptimizedStrategy {
+
+    pub fn new(prices: HashMap<String, ModelPricing>) -> Self {
+        Self {
+            prices,
+            required_vision: false,
+            required_tools: false,
+        }
+    }
+
+    pub fn with_vision(mut self, required: bool) -> Self {
+        self.required_vision = required;
+        self
+    }
+
+    pub fn with_tools(mut self, required: bool) -> Self {
+        self.required_tools = required;
+        self
+    }
+
+    pub fn score(&self, model: &str) -> Option<f64> {
+        self.prices.get(model).map(|p| p.input + p.output)
+    }
+}
+
+#[async_trait]
+impl Provider for RouterProvider {
+    async fn chat_with_system(
+        &self,
+        system_prompt: Option<&str>,
+        message: &str,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<String> {
+        let (provider_idx, resolved_model) = self.resolve_auto(model);
+
+        let (provider_name, provider) = &self.providers[provider_idx];
+        tracing::info!(
+            provider = provider_name.as_str(),
+            model = resolved_model.as_str(),
+            "Router dispatching request"
+        );
+
+        provider
+            .chat_with_system(system_prompt, message, &resolved_model, temperature)
+            .await
+    }
+
+    async fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<String> {
+        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider
+            .chat_with_history(messages, &resolved_model, temperature)
+            .await
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<ChatResponse> {
+        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider.chat(request, &resolved_model, temperature).await
+    }
+
+    async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<ChatResponse> {
+        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider
+            .chat_with_tools(messages, tools, &resolved_model, temperature)
+            .await
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|(_, provider)| provider.supports_native_tools())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|(_, provider)| provider.supports_streaming())
+    }
+
+    fn supports_streaming_tool_events(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|(_, provider)| provider.supports_streaming_tool_events())
+    }
+
+    fn stream_chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> BoxStream<'static, StreamResult<StreamChunk>> {
+        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider.stream_chat_with_history(messages, &resolved_model, temperature, options)
+    }
+
+    fn stream_chat(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> BoxStream<'static, StreamResult<StreamEvent>> {
+        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider.stream_chat(request, &resolved_model, temperature, options)
+    }
+
+    fn supports_vision(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|(_, provider)| provider.supports_vision())
+    }
+
+    async fn warmup(&self) -> anyhow::Result<()> {
+        for (name, provider) in &self.providers {
+            tracing::info!(provider = name, "Warming up routed provider");
+            if let Err(e) = provider.warmup().await {
+                tracing::warn!(provider = name, "Warmup failed (non-fatal): {e}");
+            }
+        }
+        Ok(())
+    }
+}

@@ -1,0 +1,11 @@
+name = "make"
+match_command = "^make\\b"
+dedup = true
+max_lines = 400
+
+strip_lines = [
+  "^make\\[\\d+\\]:",
+  "^Entering directory",
+  "^Leaving directory",
+  "^make: Nothing to be done",
+]

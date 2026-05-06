@@ -1,0 +1,11 @@
+name = "ping"
+match_command = "^ping\\b"
+max_lines = 30
+
+strip_lines = [
+  "^Request timeout for icmp_seq \\d+$",
+]
+
+[[replace]]
+pattern = "Request timeout for icmp_seq \\d+"
+to = "Request timeout"

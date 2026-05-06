@@ -1,0 +1,36 @@
+# Phase 5 M11 — cargo-mutants configuration.
+#
+# Excludes auto-generated / schema / gateway-route surfaces where
+# mutation testing produces false positives without meaningful
+# signal, and narrows the default mutation set to the Phase 5 core
+# modules exercised by `.github/workflows/mutants.yml`.
+
+exclude_globs = [
+    "src/config/schema.rs",
+    "src/channels/**/*.rs",
+    "src/gateway/api.rs",
+    "src/tui/**/*.rs",
+    "src/gui/**/*.rs",
+    "src/providers/**/*.rs",
+    "src/main.rs",
+    "src/lib.rs",
+    "dev/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs",
+]
+
+examine_globs = [
+    "src/apply_model/**/*.rs",
+    "src/inline_completion/**/*.rs",
+    "src/context_resolver/**/*.rs",
+    "src/evals/**/*.rs",
+    "src/services/lsp_rename.rs",
+    "src/agent/turn_engine/**/*.rs",
+    "src/code_intel/symbol_graph_incremental.rs",
+]
+
+# 180s timeout per mutant matches the CI job's `--timeout 180`.
+timeout_multiplier = 3.0
+
+# Do not bother testing unviable mutations (compile failures).
+error_values = ["Default::default()"]

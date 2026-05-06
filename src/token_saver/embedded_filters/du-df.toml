@@ -1,0 +1,9 @@
+name = "du-df"
+match_command = "^(?:du|df)\\b"
+dedup = true
+max_lines = 200
+
+strip_lines = [
+  "^du: cannot access",
+  "^du: cannot read directory",
+]

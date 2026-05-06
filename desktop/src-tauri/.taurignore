@@ -1,0 +1,27 @@
+# Tauri dev/build watcher ignore (gitignore-style). Keep this in sync with
+# any path the running app writes back into one of Tauri's watch roots,
+# otherwise saving that file triggers a full app rebuild + restart and
+# the user sees the desktop window flash / "crash".
+#
+# Why these entries:
+# - .senweavercoding/**
+#     `exit_plan_mode` and `update_plan` write `<workspace>/.senweavercoding/plans/*.plan.md`
+#     and `update_plan` may also write progress JSON. When the user opens
+#     this very repo as their working directory, those writes land under
+#     the workspace watcher root and re-trigger `cargo run`.
+# - **/*.plan.md
+#     Defensive: the saved-plan filename is also inside `.senweavercoding/`,
+#     but if a future tool path changes, ignoring the file extension as
+#     well prevents accidental rebuild churn.
+# - **/.senweavercoding-state/**, **/.senweavercoding-cache/**
+#     Reserved for any future runtime artefacts written by the agent
+#     (cached embeddings, tool transcripts, etc.) that must never count
+#     as source-code changes.
+
+.senweavercoding/**
+**/.senweavercoding/**
+**/*.plan.md
+.senweavercoding-state/**
+**/.senweavercoding-state/**
+.senweavercoding-cache/**
+**/.senweavercoding-cache/**

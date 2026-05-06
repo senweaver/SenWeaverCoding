@@ -1,0 +1,14 @@
+name = "terraform-plan"
+match_command = "^(?:terraform|tofu)\\b"
+max_lines = 600
+dedup = true
+
+strip_lines = [
+  "^\\s*$",
+  "^Refreshing state\\.\\.\\.",
+  "^Acquiring state lock\\.",
+  "^Releasing state lock\\.",
+  "^This plan was saved to:",
+  "^To perform exactly these actions, run the following command",
+  "^    terraform apply ",
+]
