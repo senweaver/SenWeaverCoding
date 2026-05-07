@@ -93,7 +93,10 @@ mod session;
 mod apply_model;
 
 mod code_intel;
+mod constants;
 mod context;
+#[cfg(feature = "crdt-coordination")]
+mod coordination;
 
 mod context_resolver;
 mod coordinator;
