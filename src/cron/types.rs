@@ -129,6 +129,50 @@ fn default_source() -> String {
     "imperative".to_string()
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentJobOptions {
+
+    pub session_target: SessionTarget,
+
+    pub model: Option<String>,
+
+    pub delivery: Option<DeliveryConfig>,
+
+    pub delete_after_run: bool,
+
+    pub allowed_tools: Option<Vec<String>>,
+
+    pub permission_mode: Option<String>,
+
+    pub coding_mode: Option<String>,
+
+    pub folder_path: Option<String>,
+
+    pub use_worktree: Option<bool>,
+
+    pub notification: Option<serde_json::Value>,
+
+    pub task_description: Option<String>,
+}
+
+impl Default for AgentJobOptions {
+    fn default() -> Self {
+        Self {
+            session_target: SessionTarget::default(),
+            model: None,
+            delivery: None,
+            delete_after_run: false,
+            allowed_tools: None,
+            permission_mode: None,
+            coding_mode: None,
+            folder_path: None,
+            use_worktree: None,
+            notification: None,
+            task_description: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
     pub id: String,
@@ -154,6 +198,24 @@ pub struct CronJob {
     pub last_run: Option<DateTime<Utc>>,
     pub last_status: Option<String>,
     pub last_output: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coding_mode: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_path: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_worktree: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,4 +241,10 @@ pub struct CronJobPatch {
     pub session_target: Option<SessionTarget>,
     pub delete_after_run: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
+    pub permission_mode: Option<String>,
+    pub coding_mode: Option<String>,
+    pub folder_path: Option<String>,
+    pub use_worktree: Option<bool>,
+    pub notification: Option<serde_json::Value>,
+    pub task_description: Option<String>,
 }

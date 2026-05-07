@@ -181,6 +181,7 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
             false,
             None,
             allowed_tools.clone(),
+            None,
         )
         .await
         {

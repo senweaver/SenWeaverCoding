@@ -379,7 +379,7 @@ impl TtsProvider for EdgeTtsProvider {
 
         let output = tokio::time::timeout(
             TTS_HTTP_TIMEOUT,
-            tokio::process::Command::new(&self.binary_path)
+            crate::util::hidden_async_command(&self.binary_path)
                 .arg("--text")
                 .arg(text)
                 .arg("--voice")

@@ -98,7 +98,7 @@ impl ScreenshotTool {
         let program = cmd_args.remove(0);
         let result = tokio::time::timeout(
             Duration::from_secs(SCREENSHOT_TIMEOUT_SECS),
-            tokio::process::Command::new(&program)
+            crate::util::hidden_async_command(&program)
                 .args(&cmd_args)
                 .output(),
         )

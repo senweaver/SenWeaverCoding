@@ -40,7 +40,7 @@ fn deploy_remote(host: &str, bridge_dir: &std::path::Path) -> Result<()> {
     };
 
     println!("Copying Bridge app to {}...", host);
-    let status = Command::new("ssh")
+    let status = crate::util::hidden_sync_command("ssh")
         .args([&ssh_target, "mkdir", "-p", "~/ArduinoApps"])
         .status()
         .context("ssh mkdir failed")?;
@@ -48,7 +48,7 @@ fn deploy_remote(host: &str, bridge_dir: &std::path::Path) -> Result<()> {
         anyhow::bail!("Failed to create ArduinoApps dir on Uno Q");
     }
 
-    let status = Command::new("scp")
+    let status = crate::util::hidden_sync_command("scp")
         .args([
             "-r",
             &bridge_dir.to_string_lossy(),
@@ -61,7 +61,7 @@ fn deploy_remote(host: &str, bridge_dir: &std::path::Path) -> Result<()> {
     }
 
     println!("Starting Bridge app on Uno Q...");
-    let status = Command::new("ssh")
+    let status = crate::util::hidden_sync_command("ssh")
         .args([
             &ssh_target,
             "arduino-app-cli",
@@ -98,7 +98,7 @@ fn deploy_local(bridge_dir: Option<&std::path::Path>) -> Result<()> {
     }
 
     println!("Starting Bridge app...");
-    let status = Command::new("arduino-app-cli")
+    let status = crate::util::hidden_sync_command("arduino-app-cli")
         .args(["app", "start", &dest_dir.to_string_lossy()])
         .status()
         .context("arduino-app-cli start failed")?;

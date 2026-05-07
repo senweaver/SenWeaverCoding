@@ -41,7 +41,6 @@ use crate::providers::traits::{ChatRequest, ChatResponse, Provider, TokenUsage};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 pub const GEMINI_CLI_PATH_ENV: &str = "GEMINI_CLI_PATH";
@@ -112,7 +111,7 @@ impl GeminiCliProvider {
     }
 
     async fn invoke_cli(&self, message: &str, model: &str) -> anyhow::Result<String> {
-        let mut cmd = Command::new(&self.binary_path);
+        let mut cmd = crate::util::hidden_async_command(&self.binary_path);
         cmd.arg("--print");
 
         if Self::should_forward_model(model) {

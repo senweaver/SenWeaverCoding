@@ -9,8 +9,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-
 const SAFE_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
 ];
@@ -132,7 +130,7 @@ impl Tool for OpenCodeCliTool {
             });
         }
 
-        let mut cmd = Command::new("opencode");
+        let mut cmd = crate::util::hidden_async_command("opencode");
         cmd.arg("run").arg(prompt);
 
         cmd.env_clear();

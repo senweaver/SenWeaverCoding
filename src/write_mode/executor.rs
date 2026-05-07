@@ -22,8 +22,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
-
 use super::types::{PlanContext, VerifyOutcome, WritePlan, WriteStep};
 use crate::agent::verification::{
     Artifact as VerifyArtifact, ArtifactKind, Language, SyntacticVerifier, VerificationPipeline,
@@ -621,7 +619,7 @@ async fn run_shell(command: &str, cwd: &Path) -> Result<(i32, String), ExecuteEr
     #[cfg(not(windows))]
     let (program, flag) = ("sh", "-c");
 
-    let output = Command::new(program)
+    let output = crate::util::hidden_async_command(program)
         .arg(flag)
         .arg(command)
         .current_dir(cwd)

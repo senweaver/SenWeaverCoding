@@ -15,8 +15,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
-
 use serde::{Deserialize, Serialize};
 
 use super::symbol_graph::{SymbolGraph, SymbolId};
@@ -72,7 +70,7 @@ pub fn build_timeline(root: &Path, graph: &SymbolGraph) -> HashMap<SymbolId, Tim
 }
 
 fn is_git_repo(root: &Path) -> bool {
-    let out = Command::new("git")
+    let out = crate::util::hidden_sync_command("git")
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -88,7 +86,7 @@ fn run_blame(root: &Path, file: &Path, lines: &[u32]) -> Option<HashMap<u32, Tim
         return Some(HashMap::new());
     }
     let file_str = file.to_string_lossy().to_string();
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::util::hidden_sync_command("git");
     cmd.arg("-C").arg(root).arg("blame").arg("--porcelain");
     for line in lines {
         cmd.arg("-L").arg(format!("{line},{line}"));

@@ -60,7 +60,7 @@ impl Tool for ArduinoUploadTool {
             });
         }
 
-        if Command::new("arduino-cli").arg("version").output().is_err() {
+        if crate::util::hidden_sync_command("arduino-cli").arg("version").output().is_err() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -96,7 +96,7 @@ impl Tool for ArduinoUploadTool {
         let sketch_path = sketch_dir.to_string_lossy();
         let fqbn = "arduino:avr:uno";
 
-        let compile = Command::new("arduino-cli")
+        let compile = crate::util::hidden_sync_command("arduino-cli")
             .args(["compile", "--fqbn", fqbn, &sketch_path])
             .output();
 
@@ -122,7 +122,7 @@ impl Tool for ArduinoUploadTool {
             });
         }
 
-        let upload = Command::new("arduino-cli")
+        let upload = crate::util::hidden_sync_command("arduino-cli")
             .args(["upload", "-p", &self.port, "--fqbn", fqbn, &sketch_path])
             .output();
 

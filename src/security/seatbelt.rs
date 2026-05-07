@@ -53,7 +53,7 @@ impl SeatbeltSandbox {
     fn is_installed() -> bool {
 
         Path::new("/usr/bin/sandbox-exec").exists()
-            || Command::new("sandbox-exec")
+            || crate::util::hidden_sync_command("sandbox-exec")
                 .arg("-n")
                 .arg("no-network")
                 .arg("true")
@@ -86,7 +86,7 @@ impl Sandbox for SeatbeltSandbox {
             .map(|s| s.to_string_lossy().to_string())
             .collect();
 
-        let mut sandbox_cmd = Command::new("sandbox-exec");
+        let mut sandbox_cmd = crate::util::hidden_sync_command("sandbox-exec");
         sandbox_cmd.arg("-f");
         sandbox_cmd.arg(&self.policy_path);
         sandbox_cmd.arg(&program);

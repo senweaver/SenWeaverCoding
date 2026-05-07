@@ -25,14 +25,14 @@ pub async fn handle_review(ctx: CommandContext) -> CommandResult {
         ctx.args.join(" ")
     };
 
-    let diff = match std::process::Command::new("git")
+    let diff = match crate::util::hidden_sync_command("git")
         .args(["diff", "--stat", "HEAD~1"])
         .output()
     {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             if stdout.is_empty() {
-                match std::process::Command::new("git")
+                match crate::util::hidden_sync_command("git")
                     .args(["diff", "--stat"])
                     .output()
                 {

@@ -4,8 +4,6 @@
 use super::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
 use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::Command;
-
 pub struct NgrokTunnel {
     auth_token: String,
     domain: Option<String>,
@@ -30,7 +28,7 @@ impl Tunnel for NgrokTunnel {
 
     async fn start(&self, _local_host: &str, local_port: u16) -> Result<String> {
 
-        Command::new("ngrok")
+        crate::util::hidden_async_command("ngrok")
             .args(["config", "add-authtoken", &self.auth_token])
             .output()
             .await?;
@@ -46,7 +44,7 @@ impl Tunnel for NgrokTunnel {
         args.push("--log-format".into());
         args.push("logfmt".into());
 
-        let mut child = Command::new("ngrok")
+        let mut child = crate::util::hidden_async_command("ngrok")
             .args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

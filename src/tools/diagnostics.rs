@@ -95,7 +95,7 @@ impl DiagnosticsTool {
             );
         };
 
-        let mut command = tokio::process::Command::new(cmd);
+        let mut command = crate::util::hidden_async_command(cmd);
         command.args(&args).current_dir(&workspace);
 
         if let Some(file_path) = path {

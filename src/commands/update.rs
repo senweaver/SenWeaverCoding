@@ -256,7 +256,7 @@ async fn validate_binary(path: &Path) -> Result<()> {
 
     check_binary_arch(path).await?;
 
-    let output = tokio::process::Command::new(path)
+    let output = crate::util::hidden_async_command(path)
         .arg("--version")
         .output()
         .await
@@ -361,7 +361,7 @@ async fn rollback_binary(backup: &Path, target: &Path) -> Result<()> {
 }
 
 async fn smoke_test(binary: &Path) -> Result<()> {
-    let output = tokio::process::Command::new(binary)
+    let output = crate::util::hidden_async_command(binary)
         .arg("--version")
         .output()
         .await

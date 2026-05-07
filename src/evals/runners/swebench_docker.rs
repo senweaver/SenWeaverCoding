@@ -372,7 +372,7 @@ impl SweBenchDockerExecutor {
         let image = self.resolve_image(inst);
         let args = self.build_docker_args(&image, &patch_dir);
 
-        let mut cmd = tokio::process::Command::new(&self.config.docker_bin);
+        let mut cmd = crate::util::hidden_async_command(&self.config.docker_bin);
         cmd.args(&args);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());

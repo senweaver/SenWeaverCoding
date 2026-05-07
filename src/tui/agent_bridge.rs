@@ -203,6 +203,7 @@ pub fn spawn_agent_task(config: Config) -> AgentBridge {
                             false,
                             None,
                             None,
+                            None,
                         ))
                         .await;
                         match result {

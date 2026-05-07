@@ -9,8 +9,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-
 const SAFE_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
 ];
@@ -137,7 +135,7 @@ impl Tool for CodexCliTool {
         } else {
             "codex"
         };
-        let mut cmd = Command::new(codex_bin);
+        let mut cmd = crate::util::hidden_async_command(codex_bin);
         cmd.arg("-q").arg(prompt);
 
         cmd.env_clear();

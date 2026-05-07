@@ -25,7 +25,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 const SUBPROCESS_TIMEOUT_SECS: u64 = 10;
@@ -101,7 +100,7 @@ impl Tool for SubprocessTool {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| anyhow::anyhow!("failed to serialise args: {}", e))?;
 
-        let mut child = Command::new(&self.binary_path)
+        let mut child = crate::util::hidden_async_command(&self.binary_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

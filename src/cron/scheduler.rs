@@ -9,17 +9,19 @@ use crate::channels::{
     Channel, DiscordChannel, MattermostChannel, QQChannel, SendMessage, SignalChannel,
     SlackChannel, TelegramChannel,
 };
+use crate::agent::coding_mode::CodingMode;
 use crate::config::Config;
-use crate::config::schema::{CronJobDecl, CronScheduleDecl};
+use crate::config::schema::{AutonomyConfig, CronJobDecl, CronScheduleDecl};
 use crate::cron::{
     CronJob, CronJobPatch, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs,
     due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job, reschedule_after_run,
     sync_declarative_jobs, update_job,
 };
-use crate::security::SecurityPolicy;
+use crate::security::{AutonomyLevel, SecurityPolicy};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -28,6 +30,51 @@ use tokio::time::{self, Duration};
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
 const SCHEDULER_COMPONENT: &str = "scheduler";
+
+fn apply_cron_permission_mode(autonomy: &mut AutonomyConfig, permission_mode: Option<&str>) {
+    let Some(raw) = permission_mode.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    match raw {
+        "bypassPermissions" => autonomy.level = AutonomyLevel::Full,
+        "acceptEdits" => {
+            autonomy.level = AutonomyLevel::Supervised;
+            for t in ["file_write", "file_edit", "multi_edit", "glob_edit", "notebook_edit"] {
+                let s = (*t).to_string();
+                if !autonomy.auto_approve.iter().any(|x| x == &s) {
+                    autonomy.auto_approve.push(s);
+                }
+            }
+        }
+        "default" | "askEveryTime" => autonomy.level = AutonomyLevel::Supervised,
+        _ => {}
+    }
+}
+
+fn resolved_cron_workspace_dir(config: &Config, job: &CronJob) -> PathBuf {
+    let fp = match job.folder_path.as_deref() {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return config.workspace_dir.clone(),
+    };
+    let path = PathBuf::from(fp);
+    if path.is_absolute() {
+        path
+    } else {
+        config.workspace_dir.join(path)
+    }
+}
+
+fn prepend_cron_run_meta(job: &CronJob, output: &str) -> String {
+    let perm = job.permission_mode.as_deref().unwrap_or("-");
+    let mode = job.coding_mode.as_deref().unwrap_or("-");
+    let folder = job.folder_path.as_deref().unwrap_or("-");
+    let uw = match job.use_worktree {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "-",
+    };
+    format!("--- run meta: mode={mode} permission={perm} folder={folder} useWorktree={uw} ---\n{output}")
+}
 
 pub async fn run(config: Config) -> Result<()> {
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
@@ -131,6 +178,34 @@ pub async fn execute_job_now(config: &Config, job: &CronJob) -> (bool, String) {
     Box::pin(execute_job_with_retry(config, &security, job)).await
 }
 
+pub async fn execute_job_now_and_record(config: &Config, job: &CronJob) -> (bool, String) {
+    let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
+
+    let started_at = Utc::now();
+    let run_id = match crate::cron::start_run(config, &job.id, started_at) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!("Failed to insert running cron record for {}: {e}", job.id);
+            None
+        }
+    };
+
+    let (success, output) = Box::pin(execute_job_with_retry(config, &security, job)).await;
+    let finished_at = Utc::now();
+    let success = Box::pin(persist_job_result(
+        config,
+        job,
+        success,
+        &output,
+        started_at,
+        finished_at,
+        run_id,
+    ))
+    .await;
+
+    (success, output)
+}
+
 async fn execute_job_with_retry(
     config: &Config,
     security: &SecurityPolicy,
@@ -209,6 +284,14 @@ async fn execute_and_persist_job(
     warn_if_high_frequency_agent_job(job);
 
     let started_at = Utc::now();
+    let run_id = match crate::cron::start_run(config, &job.id, started_at) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!("Failed to insert running cron record for {}: {e}", job.id);
+            None
+        }
+    };
+
     let (success, output) = Box::pin(execute_job_with_retry(config, security, job)).await;
     let finished_at = Utc::now();
     let success = Box::pin(persist_job_result(
@@ -218,6 +301,7 @@ async fn execute_and_persist_job(
         &output,
         started_at,
         finished_at,
+        run_id,
     ))
     .await;
 
@@ -254,10 +338,19 @@ async fn run_agent_job(
     let prefixed_prompt = format!("[cron:{} {name}] {prompt}", job.id);
     let model_override = job.model.clone();
 
+    let mut effective_config = config.clone();
+    apply_cron_permission_mode(&mut effective_config.autonomy, job.permission_mode.as_deref());
+    effective_config.workspace_dir = resolved_cron_workspace_dir(config, job);
+
+    let coding_override = job
+        .coding_mode
+        .as_deref()
+        .and_then(CodingMode::from_str_loose);
+
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
             Box::pin(crate::agent::run(
-                config.clone(),
+                effective_config,
                 Some(prefixed_prompt),
                 None,
                 model_override,
@@ -266,6 +359,7 @@ async fn run_agent_job(
                 false,
                 None,
                 job.allowed_tools.clone(),
+                coding_override,
             ))
             .await
         }
@@ -291,6 +385,7 @@ async fn persist_job_result(
     output: &str,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
+    run_id: Option<i64>,
 ) -> bool {
     let duration_ms = (finished_at - started_at).num_milliseconds();
 
@@ -303,15 +398,29 @@ async fn persist_job_result(
         }
     }
 
-    let _ = record_run(
-        config,
-        &job.id,
-        started_at,
-        finished_at,
-        if success { "ok" } else { "error" },
-        Some(output),
-        duration_ms,
-    );
+    let stored_output = prepend_cron_run_meta(job, output);
+    let status = if success { "ok" } else { "error" };
+
+    if let Some(rid) = run_id {
+        let _ = crate::cron::finalize_run(
+            config,
+            rid,
+            finished_at,
+            status,
+            Some(&stored_output),
+            duration_ms,
+        );
+    } else {
+        let _ = record_run(
+            config,
+            &job.id,
+            started_at,
+            finished_at,
+            status,
+            Some(&stored_output),
+            duration_ms,
+        );
+    }
 
     if is_one_shot_auto_delete(job) {
         if success {
@@ -698,7 +807,7 @@ fn build_cron_shell_command(
     command: &str,
     workspace_dir: &std::path::Path,
 ) -> anyhow::Result<Command> {
-    let mut cmd = Command::new("sh");
+    let mut cmd = crate::util::hidden_async_command("sh");
     cmd.arg("-c")
         .arg(command)
         .current_dir(workspace_dir)

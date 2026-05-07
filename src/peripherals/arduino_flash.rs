@@ -15,7 +15,7 @@ const FQBN: &str = "arduino:avr:uno";
 const SKETCH_NAME: &str = "arduino";
 
 pub fn arduino_cli_available() -> bool {
-    Command::new("arduino-cli")
+    crate::util::hidden_sync_command("arduino-cli")
         .arg("version")
         .output()
         .map(|o| o.status.success())
@@ -30,7 +30,7 @@ pub fn ensure_arduino_cli() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         println!("arduino-cli not found. Installing via Homebrew...");
-        let status = Command::new("brew")
+        let status = crate::util::hidden_sync_command("brew")
             .args(["install", "arduino-cli"])
             .status()
             .context("Failed to run brew install")?;
@@ -67,7 +67,7 @@ pub fn ensure_arduino_cli() -> Result<()> {
 }
 
 fn ensure_avr_core() -> Result<()> {
-    let out = Command::new("arduino-cli")
+    let out = crate::util::hidden_sync_command("arduino-cli")
         .args(["core", "list"])
         .output()
         .context("arduino-cli core list failed")?;
@@ -77,7 +77,7 @@ fn ensure_avr_core() -> Result<()> {
     }
 
     println!("Installing Arduino AVR core...");
-    let status = Command::new("arduino-cli")
+    let status = crate::util::hidden_sync_command("arduino-cli")
         .args(["core", "install", "arduino:avr"])
         .status()
         .context("arduino-cli core install failed")?;
@@ -102,7 +102,7 @@ pub fn flash_arduino_firmware(port: &str) -> Result<()> {
     let sketch_path = sketch_dir.to_string_lossy();
 
     println!("Compiling SenWeaverCoding Arduino firmware...");
-    let compile = Command::new("arduino-cli")
+    let compile = crate::util::hidden_sync_command("arduino-cli")
         .args(["compile", "--fqbn", FQBN, &*sketch_path])
         .output()
         .context("arduino-cli compile failed")?;
@@ -114,7 +114,7 @@ pub fn flash_arduino_firmware(port: &str) -> Result<()> {
     }
 
     println!("Uploading to {}...", port);
-    let upload = Command::new("arduino-cli")
+    let upload = crate::util::hidden_sync_command("arduino-cli")
         .args(["upload", "-p", port, "--fqbn", FQBN, &*sketch_path])
         .output()
         .context("arduino-cli upload failed")?;

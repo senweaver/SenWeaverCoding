@@ -360,7 +360,7 @@ impl Tool for GoogleWorkspaceTool {
             });
         }
 
-        let mut cmd = tokio::process::Command::new("gws");
+        let mut cmd = crate::util::hidden_async_command("gws");
         cmd.args(&cmd_args);
         cmd.env_clear();
 

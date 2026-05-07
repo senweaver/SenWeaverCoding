@@ -1,5 +1,8 @@
 
 
+import type { CodingModeId } from './codingMode'
+import type { PermissionMode } from './settings'
+
 export type TaskNotificationConfig = {
   enabled: boolean
   channels: ('telegram' | 'feishu')[]
@@ -18,7 +21,8 @@ export type CronTask = {
   lastRunAt?: number
   lastFiredAt?: string
   nextRunAt?: number
-  permissionMode?: string
+  permissionMode?: PermissionMode | string
+  codingMode?: CodingModeId | string
   model?: string
   folderPath?: string
   useWorktree?: boolean
@@ -33,7 +37,8 @@ export type CreateTaskInput = {
   enabled?: boolean
   recurring?: boolean
   permanent?: boolean
-  permissionMode?: string
+  permissionMode?: PermissionMode | string
+  codingMode?: CodingModeId | string
   model?: string
   folderPath?: string
   useWorktree?: boolean

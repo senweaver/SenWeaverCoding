@@ -93,7 +93,7 @@ impl Tool for WorktreeEnterTool {
             git_args.push(base.to_string());
         }
 
-        let output = tokio::process::Command::new("git")
+        let output = crate::util::hidden_async_command("git")
             .args(&git_args)
             .current_dir(workspace)
             .output()

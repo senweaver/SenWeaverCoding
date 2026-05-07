@@ -80,13 +80,13 @@ fn windows_task_name() -> &'static str {
 
 pub fn is_running() -> bool {
     if cfg!(target_os = "macos") {
-        run_capture(Command::new("launchctl").arg("list"))
+        run_capture(crate::util::hidden_sync_command("launchctl").arg("list"))
             .map(|out| out.lines().any(|l| l.contains(SERVICE_LABEL)))
             .unwrap_or(false)
     } else if cfg!(target_os = "linux") {
         is_running_linux()
     } else if cfg!(target_os = "windows") {
-        run_capture(Command::new("schtasks").args([
+        run_capture(crate::util::hidden_sync_command("schtasks").args([
             "/Query",
             "/TN",
             WINDOWS_TASK_NAME,
@@ -101,13 +101,13 @@ pub fn is_running() -> bool {
 }
 
 fn is_running_linux() -> bool {
-    if run_capture(Command::new("systemctl").args(["--user", "is-active", "sen.service"]))
+    if run_capture(crate::util::hidden_sync_command("systemctl").args(["--user", "is-active", "sen.service"]))
         .map(|out| out.trim() == "active")
         .unwrap_or(false)
     {
         return true;
     }
-    run_capture(Command::new("rc-service").args(["sen", "status"]))
+    run_capture(crate::util::hidden_sync_command("rc-service").args(["sen", "status"]))
         .map(|out| out.contains("started"))
         .unwrap_or(false)
 }
@@ -152,8 +152,8 @@ fn start(config: &Config, init_system: InitSystem) -> Result<()> {
             }
         }
         let plist = macos_service_file()?;
-        run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
-        run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
+        run_checked(crate::util::hidden_sync_command("launchctl").arg("load").arg("-w").arg(&plist))?;
+        run_checked(crate::util::hidden_sync_command("launchctl").arg("start").arg(SERVICE_LABEL))?;
         println!("Service started");
         Ok(())
     } else if cfg!(target_os = "linux") {
@@ -161,7 +161,7 @@ fn start(config: &Config, init_system: InitSystem) -> Result<()> {
         start_linux(resolved)
     } else if cfg!(target_os = "windows") {
         let _ = config;
-        run_checked(Command::new("schtasks").args(["/Run", "/TN", windows_task_name()]))?;
+        run_checked(crate::util::hidden_sync_command("schtasks").args(["/Run", "/TN", windows_task_name()]))?;
         println!("Service started");
         Ok(())
     } else {
@@ -173,11 +173,11 @@ fn start(config: &Config, init_system: InitSystem) -> Result<()> {
 fn start_linux(init_system: InitSystem) -> Result<()> {
     match init_system {
         InitSystem::Systemd => {
-            run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-            run_checked(Command::new("systemctl").args(["--user", "start", "sen.service"]))?;
+            run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "daemon-reload"]))?;
+            run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "start", "sen.service"]))?;
         }
         InitSystem::Openrc => {
-            run_checked(Command::new("rc-service").args(["sen", "start"]))?;
+            run_checked(crate::util::hidden_sync_command("rc-service").args(["sen", "start"]))?;
         }
         InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
     }
@@ -188,9 +188,9 @@ fn start_linux(init_system: InitSystem) -> Result<()> {
 fn stop(config: &Config, init_system: InitSystem) -> Result<()> {
     if cfg!(target_os = "macos") {
         let plist = macos_service_file()?;
-        let _ = run_checked(Command::new("launchctl").arg("stop").arg(SERVICE_LABEL));
+        let _ = run_checked(crate::util::hidden_sync_command("launchctl").arg("stop").arg(SERVICE_LABEL));
         let _ = run_checked(
-            Command::new("launchctl")
+            crate::util::hidden_sync_command("launchctl")
                 .arg("unload")
                 .arg("-w")
                 .arg(&plist),
@@ -203,7 +203,7 @@ fn stop(config: &Config, init_system: InitSystem) -> Result<()> {
     } else if cfg!(target_os = "windows") {
         let _ = config;
         let task_name = windows_task_name();
-        let _ = run_checked(Command::new("schtasks").args(["/End", "/TN", task_name]));
+        let _ = run_checked(crate::util::hidden_sync_command("schtasks").args(["/End", "/TN", task_name]));
         println!("Service stopped");
         Ok(())
     } else {
@@ -215,10 +215,10 @@ fn stop(config: &Config, init_system: InitSystem) -> Result<()> {
 fn stop_linux(init_system: InitSystem) -> Result<()> {
     match init_system {
         InitSystem::Systemd => {
-            let _ = run_checked(Command::new("systemctl").args(["--user", "stop", "sen.service"]));
+            let _ = run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "stop", "sen.service"]));
         }
         InitSystem::Openrc => {
-            let _ = run_checked(Command::new("rc-service").args(["sen", "stop"]));
+            let _ = run_checked(crate::util::hidden_sync_command("rc-service").args(["sen", "stop"]));
         }
         InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
     }
@@ -249,11 +249,11 @@ fn restart(config: &Config, init_system: InitSystem) -> Result<()> {
 fn restart_linux(init_system: InitSystem) -> Result<()> {
     match init_system {
         InitSystem::Systemd => {
-            run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-            run_checked(Command::new("systemctl").args(["--user", "restart", "sen.service"]))?;
+            run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "daemon-reload"]))?;
+            run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "restart", "sen.service"]))?;
         }
         InitSystem::Openrc => {
-            run_checked(Command::new("rc-service").args(["sen", "restart"]))?;
+            run_checked(crate::util::hidden_sync_command("rc-service").args(["sen", "restart"]))?;
         }
         InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
     }
@@ -263,7 +263,7 @@ fn restart_linux(init_system: InitSystem) -> Result<()> {
 
 fn status(config: &Config, init_system: InitSystem) -> Result<()> {
     if cfg!(target_os = "macos") {
-        let out = run_capture(Command::new("launchctl").arg("list"))?;
+        let out = run_capture(crate::util::hidden_sync_command("launchctl").arg("list"))?;
         let running = out.lines().any(|line| line.contains(SERVICE_LABEL));
         println!(
             "Service: {}",
@@ -284,7 +284,7 @@ fn status(config: &Config, init_system: InitSystem) -> Result<()> {
         let _ = config;
         let task_name = windows_task_name();
         let out =
-            run_capture(Command::new("schtasks").args(["/Query", "/TN", task_name, "/FO", "LIST"]));
+            run_capture(crate::util::hidden_sync_command("schtasks").args(["/Query", "/TN", task_name, "/FO", "LIST"]));
         match out {
             Ok(text) => {
                 let running = text.contains("Running");
@@ -307,13 +307,13 @@ fn status_linux(config: &Config, init_system: InitSystem) -> Result<()> {
     match init_system {
         InitSystem::Systemd => {
             let out =
-                run_capture(Command::new("systemctl").args(["--user", "is-active", "sen.service"]))
+                run_capture(crate::util::hidden_sync_command("systemctl").args(["--user", "is-active", "sen.service"]))
                     .unwrap_or_else(|_| "unknown".into());
             println!("Service state: {}", out.trim());
             println!("Unit: {}", linux_service_file(config)?.display());
         }
         InitSystem::Openrc => {
-            let out = run_capture(Command::new("rc-service").args(["sen", "status"]))
+            let out = run_capture(crate::util::hidden_sync_command("rc-service").args(["sen", "status"]))
                 .unwrap_or_else(|_| "unknown".into());
             println!("Service state: {}", out.trim());
             println!("Unit: /etc/init.d/sen");
@@ -365,7 +365,7 @@ fn logs_macos(config: &Config, lines: usize, follow: bool) -> Result<()> {
     };
 
     if follow {
-        let status = Command::new("tail")
+        let status = crate::util::hidden_sync_command("tail")
             .args(["-n", &lines.to_string(), "-f"])
             .arg(&log_file)
             .status()
@@ -374,7 +374,7 @@ fn logs_macos(config: &Config, lines: usize, follow: bool) -> Result<()> {
             bail!("tail exited with non-zero status");
         }
     } else {
-        let status = Command::new("tail")
+        let status = crate::util::hidden_sync_command("tail")
             .args(["-n", &lines.to_string()])
             .arg(&log_file)
             .status()
@@ -400,7 +400,7 @@ fn logs_linux(config: &Config, init_system: InitSystem, lines: usize, follow: bo
             if follow {
                 args.push("-f".to_string());
             }
-            let status = Command::new("journalctl")
+            let status = crate::util::hidden_sync_command("journalctl")
                 .args(&args)
                 .status()
                 .context("Failed to run journalctl")?;
@@ -447,7 +447,7 @@ fn logs_windows(config: &Config, lines: usize, follow: bool) -> Result<()> {
     };
 
     if follow {
-        let status = Command::new("powershell")
+        let status = crate::util::hidden_sync_command("powershell")
             .args([
                 "-Command",
                 &format!(
@@ -462,7 +462,7 @@ fn logs_windows(config: &Config, lines: usize, follow: bool) -> Result<()> {
             bail!("PowerShell Get-Content exited with non-zero status");
         }
     } else {
-        let status = Command::new("powershell")
+        let status = crate::util::hidden_sync_command("powershell")
             .args([
                 "-Command",
                 &format!("Get-Content -Path '{}' -Tail {}", log_file.display(), lines),
@@ -481,7 +481,7 @@ fn tail_file(path: &Path, lines: usize, follow: bool) -> Result<()> {
     if follow {
         args.push("-f".to_string());
     }
-    let status = Command::new("tail")
+    let status = crate::util::hidden_sync_command("tail")
         .args(&args)
         .arg(path)
         .status()
@@ -510,7 +510,7 @@ fn uninstall(config: &Config, init_system: InitSystem) -> Result<()> {
     }
     if cfg!(target_os = "windows") {
         let task_name = windows_task_name();
-        let _ = run_checked(Command::new("schtasks").args(["/Delete", "/TN", task_name, "/F"]));
+        let _ = run_checked(crate::util::hidden_sync_command("schtasks").args(["/Delete", "/TN", task_name, "/F"]));
         let wrapper = config
             .config_path
             .parent()
@@ -534,14 +534,14 @@ fn uninstall_linux(config: &Config, init_system: InitSystem) -> Result<()> {
                 fs::remove_file(&file)
                     .with_context(|| format!("Failed to remove {}", file.display()))?;
             }
-            let _ = run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]));
+            let _ = run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "daemon-reload"]));
             println!("Service uninstalled ({})", file.display());
         }
         InitSystem::Openrc => {
             let init_script = Path::new("/etc/init.d/sen");
             if init_script.exists() {
                 if let Err(err) =
-                    run_checked(Command::new("rc-update").args(["del", "sen", "default"]))
+                    run_checked(crate::util::hidden_sync_command("rc-update").args(["del", "sen", "default"]))
                 {
                     eprintln!("Warning: Could not remove sen from OpenRC default runlevel: {err}");
                 }
@@ -704,8 +704,8 @@ fn install_linux_systemd(config: &Config) -> Result<()> {
     );
 
     fs::write(&file, unit)?;
-    let _ = run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]));
-    let _ = run_checked(Command::new("systemctl").args(["--user", "enable", "sen.service"]));
+    let _ = run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "daemon-reload"]));
+    let _ = run_checked(crate::util::hidden_sync_command("systemctl").args(["--user", "enable", "sen.service"]));
     println!("Installed systemd user service: {}", file.display());
     println!("   Start with: sen service start");
     Ok(())
@@ -726,7 +726,7 @@ fn is_root() -> bool {
 }
 
 fn check_sen_user() -> Result<()> {
-    let output = Command::new("getent").args(["passwd", "sen"]).output();
+    let output = crate::util::hidden_sync_command("getent").args(["passwd", "sen"]).output();
     let is_alpine = Path::new("/etc/alpine-release").exists();
 
     let (del_cmd, add_cmd) = if is_alpine {
@@ -773,7 +773,7 @@ fn check_sen_user() -> Result<()> {
 }
 
 fn ensure_sen_user() -> Result<()> {
-    let output = Command::new("getent").args(["passwd", "sen"]).output();
+    let output = crate::util::hidden_sync_command("getent").args(["passwd", "sen"]).output();
     if let Ok(output) = output {
         if output.status.success() {
             return check_sen_user();
@@ -783,11 +783,11 @@ fn ensure_sen_user() -> Result<()> {
     let is_alpine = Path::new("/etc/alpine-release").exists();
 
     if is_alpine {
-        let group_output = Command::new("getent").args(["group", "sen"]).output();
+        let group_output = crate::util::hidden_sync_command("getent").args(["group", "sen"]).output();
         let group_exists = group_output.map(|o| o.status.success()).unwrap_or(false);
 
         if !group_exists {
-            let output = Command::new("addgroup")
+            let output = crate::util::hidden_sync_command("addgroup")
                 .args(["-S", "sen"])
                 .output()
                 .context("Failed to create sen group")?;
@@ -799,7 +799,7 @@ fn ensure_sen_user() -> Result<()> {
             println!("Created system group: sen");
         }
 
-        let output = Command::new("adduser")
+        let output = crate::util::hidden_sync_command("adduser")
             .args(["-S", "-s", "/sbin/nologin", "-H", "-D", "-G", "sen", "sen"])
             .output()
             .context("Failed to create sen user")?;
@@ -809,7 +809,7 @@ fn ensure_sen_user() -> Result<()> {
             bail!("Failed to create sen user: {}", stderr.trim());
         }
     } else {
-        let output = Command::new("useradd")
+        let output = crate::util::hidden_sync_command("useradd")
             .args(["-r", "-s", "/sbin/nologin", "sen"])
             .output()
             .context("Failed to create sen user")?;
@@ -826,7 +826,7 @@ fn ensure_sen_user() -> Result<()> {
 
 #[cfg(unix)]
 fn chown_to_sen(path: &Path) -> Result<()> {
-    let output = Command::new("chown")
+    let output = crate::util::hidden_sync_command("chown")
         .args(["sen:sen", &path.to_string_lossy()])
         .output()
         .context("Failed to run chown")?;
@@ -849,7 +849,7 @@ fn chown_to_sen(_path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn chown_recursive_to_sen(path: &Path) -> Result<()> {
-    let output = Command::new("chown")
+    let output = crate::util::hidden_sync_command("chown")
         .args(["-R", "sen:sen", &path.to_string_lossy()])
         .output()
         .context("Failed to run recursive chown")?;
@@ -909,7 +909,7 @@ fn resolve_invoking_user_config_dir() -> Option<PathBuf> {
         .filter(|value| !value.is_empty() && value != "root");
 
     if let Some(user) = sudo_user {
-        if let Ok(output) = Command::new("getent").args(["passwd", &user]).output() {
+        if let Ok(output) = crate::util::hidden_sync_command("getent").args(["passwd", &user]).output() {
             if output.status.success() {
                 let entry = String::from_utf8_lossy(&output.stdout);
                 let fields: Vec<&str> = entry.trim().split(':').collect();
@@ -992,7 +992,7 @@ fn build_openrc_writability_probe_command(path: &Path, has_runuser: bool) -> (St
 fn ensure_openrc_runtime_path_writable(path: &Path) -> Result<()> {
     let has_runuser = which::which("runuser").is_ok();
     let (program, args) = build_openrc_writability_probe_command(path, has_runuser);
-    let output = Command::new(&program)
+    let output = crate::util::hidden_sync_command(&program)
         .args(args.iter().map(String::as_str))
         .output()
         .with_context(|| {
@@ -1205,7 +1205,7 @@ fn install_linux_openrc(config: &Config) -> Result<()> {
             .with_context(|| format!("Failed to set permissions on {}", init_path.display()))?;
     }
 
-    run_checked(Command::new("rc-update").args(["add", "sen", "default"]))?;
+    run_checked(crate::util::hidden_sync_command("rc-update").args(["add", "sen", "default"]))?;
     println!("Installed OpenRC service: /etc/init.d/sen");
     println!("   Config path: /etc/sen/config.toml");
     println!("   Start with: sudo sen service start");
@@ -1236,11 +1236,11 @@ fn install_windows(config: &Config) -> Result<()> {
 
     let task_name = windows_task_name();
 
-    let _ = Command::new("schtasks")
+    let _ = crate::util::hidden_sync_command("schtasks")
         .args(["/Delete", "/TN", task_name, "/F"])
         .output();
 
-    run_checked(Command::new("schtasks").args([
+    run_checked(crate::util::hidden_sync_command("schtasks").args([
         "/Create",
         "/TN",
         task_name,

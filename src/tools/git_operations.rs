@@ -88,7 +88,7 @@ impl GitOperationsTool {
         args: &[&str],
         working_dir: &std::path::Path,
     ) -> anyhow::Result<String> {
-        let output = tokio::process::Command::new("git")
+        let output = crate::util::hidden_async_command("git")
             .args(args)
             .current_dir(working_dir)
             .output()

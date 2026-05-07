@@ -236,7 +236,7 @@ async fn install_npm_server(
         bytes_total: None,
     });
 
-    let mut cmd = tokio::process::Command::new(&npm);
+    let mut cmd = crate::util::hidden_async_command(&npm);
     cmd.arg("install")
         .arg("--prefix")
         .arg(&prefix)
@@ -490,7 +490,7 @@ async fn set_executable(_path: &Path) -> Result<()> {
 }
 
 async fn run_version_query(bin: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = crate::util::hidden_async_command(bin);
     for a in args {
         cmd.arg(*a);
     }

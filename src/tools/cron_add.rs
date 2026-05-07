@@ -342,11 +342,14 @@ impl Tool for CronAddTool {
                     name,
                     schedule,
                     prompt,
-                    session_target,
-                    model,
-                    delivery,
-                    delete_after_run,
-                    allowed_tools,
+                    cron::AgentJobOptions {
+                        session_target,
+                        model,
+                        delivery,
+                        delete_after_run,
+                        allowed_tools,
+                        ..Default::default()
+                    },
                 )
             }
         };

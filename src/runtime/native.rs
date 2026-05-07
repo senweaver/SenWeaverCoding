@@ -43,14 +43,14 @@ impl RuntimeAdapter for NativeRuntime {
     ) -> anyhow::Result<tokio::process::Command> {
         #[cfg(not(target_os = "windows"))]
         {
-            let mut process = tokio::process::Command::new("sh");
+            let mut process = crate::util::hidden_async_command("sh");
             process.arg("-c").arg(command).current_dir(workspace_dir);
             Ok(process)
         }
 
         #[cfg(target_os = "windows")]
         {
-            let mut process = tokio::process::Command::new("cmd.exe");
+            let mut process = crate::util::hidden_async_command("cmd.exe");
             process.arg("/C").arg(command).current_dir(workspace_dir);
             Ok(process)
         }

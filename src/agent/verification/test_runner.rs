@@ -26,7 +26,6 @@ use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::traits::{
@@ -304,7 +303,7 @@ impl Verifier for TestRunnerVerifier {
             )
         };
 
-        let mut cmd = Command::new(&program);
+        let mut cmd = crate::util::hidden_async_command(&program);
         cmd.args(&args)
             .current_dir(&cwd)
             .stdin(Stdio::null())

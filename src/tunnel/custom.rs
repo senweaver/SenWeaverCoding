@@ -4,8 +4,6 @@
 use super::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
 use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::Command;
-
 pub struct CustomTunnel {
     start_command: String,
     health_url: Option<String>,
@@ -45,7 +43,7 @@ impl Tunnel for CustomTunnel {
             bail!("Custom tunnel start_command is empty");
         }
 
-        let mut child = Command::new(parts[0])
+        let mut child = crate::util::hidden_async_command(parts[0])
             .args(&parts[1..])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

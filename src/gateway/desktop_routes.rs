@@ -2655,7 +2655,7 @@ fn detect_python() -> Option<(String, String)> {
         &[&["python3"], &["python"]]
     };
     for cmd in candidates {
-        let mut command = std::process::Command::new(cmd[0]);
+        let mut command = crate::util::hidden_sync_command(cmd[0]);
         for arg in &cmd[1..] {
             command.arg(arg);
         }
@@ -2773,7 +2773,7 @@ pub async fn handle_computer_use_setup(
         let py_path = py.1.clone();
         let venv_path = venv_dir.clone();
         let result = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(py_path)
+            crate::util::hidden_sync_command(py_path)
                 .args(["-m", "venv"])
                 .arg(&venv_path)
                 .output()
@@ -2820,7 +2820,7 @@ pub async fn handle_computer_use_setup(
             let pip_path = pip.clone();
             let pkgs = vec!["pyautogui", "pillow", "pynput"];
             let result = tokio::task::spawn_blocking(move || {
-                let mut cmd = std::process::Command::new(pip_path);
+                let mut cmd = crate::util::hidden_sync_command(pip_path);
                 cmd.arg("install").arg("--upgrade");
                 for pkg in pkgs {
                     cmd.arg(pkg);
@@ -2923,12 +2923,12 @@ pub async fn handle_computer_use_open_settings(
             }
             _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         };
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        let _ = crate::util::hidden_sync_command("open").arg(url).spawn();
     }
     #[cfg(target_os = "windows")]
     {
         let _ = pane;
-        let _ = std::process::Command::new("cmd")
+        let _ = crate::util::hidden_sync_command("cmd")
             .args(["/C", "start", "ms-settings:privacy"])
             .spawn();
     }
@@ -3539,6 +3539,7 @@ fn cron_job_to_payload(j: crate::cron::CronJob) -> serde_json::Value {
     serde_json::json!({
         "id": j.id,
         "name": j.name.clone().unwrap_or_else(|| j.id.clone()),
+        "description": j.task_description.clone().unwrap_or_default(),
         "cron": cron_schedule_string(&j.schedule),
         "schedule": cron_schedule_string(&j.schedule),
         "type": if j.prompt.is_some() { "agent" } else { "shell" },
@@ -3555,6 +3556,11 @@ fn cron_job_to_payload(j: crate::cron::CronJob) -> serde_json::Value {
         "nextRun": j.next_run.to_rfc3339(),
         "model": j.model,
         "deleteAfterRun": j.delete_after_run,
+        "permissionMode": j.permission_mode.clone(),
+        "codingMode": j.coding_mode.clone(),
+        "folderPath": j.folder_path.clone(),
+        "useWorktree": j.use_worktree.unwrap_or(false),
+        "notification": j.notification.clone(),
     })
 }
 
@@ -3564,6 +3570,38 @@ fn cron_schedule_string(schedule: &crate::cron::Schedule) -> String {
         crate::cron::Schedule::At { at } => at.to_rfc3339(),
         other => format!("{other:?}"),
     }
+}
+
+fn map_cron_run_status(raw: &str) -> &'static str {
+    match raw {
+        "ok" | "success" | "completed" => "completed",
+        "running" => "running",
+        "timeout" => "timeout",
+        _ => "failed",
+    }
+}
+
+fn cron_run_to_payload(r: crate::cron::CronRun) -> serde_json::Value {
+    let status = map_cron_run_status(&r.status);
+    let is_running = status == "running";
+    let completed_at = if is_running {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(r.finished_at.to_rfc3339())
+    };
+    let ended_at = completed_at.clone();
+    serde_json::json!({
+        "id": r.id,
+        "taskId": r.job_id,
+        "startedAt": r.started_at.to_rfc3339(),
+        "endedAt": ended_at,
+        "completedAt": completed_at,
+        "status": status,
+        "ok": status == "completed",
+        "summary": r.output.clone(),
+        "output": r.output,
+        "durationMs": if is_running { None } else { r.duration_ms },
+    })
 }
 
 pub async fn handle_scheduled_tasks_create(
@@ -3611,17 +3649,49 @@ pub async fn handle_scheduled_tasks_create(
         .or_else(|| body.get("deleteAfterRun").and_then(|v| v.as_bool()))
         .unwrap_or(false);
 
+    let task_description = body
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let permission_mode = body
+        .get("permissionMode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let coding_mode = body
+        .get("codingMode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let folder_path = body
+        .get("folderPath")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let use_worktree = body.get("useWorktree").and_then(|v| v.as_bool());
+
+    let notification = body.get("notification").cloned();
+
     let job = if let Some(prompt) = prompt {
         crate::cron::add_agent_job(
             &config,
             name,
             schedule,
             &prompt,
-            crate::cron::SessionTarget::default(),
-            model,
-            None,
-            delete_after_run,
-            None,
+            crate::cron::AgentJobOptions {
+                session_target: crate::cron::SessionTarget::default(),
+                model,
+                delivery: None,
+                delete_after_run,
+                allowed_tools: None,
+                permission_mode,
+                coding_mode,
+                folder_path,
+                use_worktree,
+                notification,
+                task_description,
+            },
         )
     } else if let Some(command) = command {
         crate::cron::add_shell_job_with_approval(
@@ -3695,6 +3765,25 @@ pub async fn handle_scheduled_tasks_update(
         patch.delete_after_run = Some(delete_after);
     }
 
+    if let Some(description) = body.get("description").and_then(|v| v.as_str()) {
+        patch.task_description = Some(description.to_string());
+    }
+    if let Some(v) = body.get("permissionMode").and_then(|x| x.as_str()) {
+        patch.permission_mode = Some(v.to_string());
+    }
+    if let Some(v) = body.get("codingMode").and_then(|x| x.as_str()) {
+        patch.coding_mode = Some(v.to_string());
+    }
+    if let Some(v) = body.get("folderPath").and_then(|x| x.as_str()) {
+        patch.folder_path = Some(v.to_string());
+    }
+    if let Some(v) = body.get("useWorktree").and_then(|x| x.as_bool()) {
+        patch.use_worktree = Some(v);
+    }
+    if let Some(v) = body.get("notification") {
+        patch.notification = Some(v.clone());
+    }
+
     match crate::cron::update_job(&config, &id, patch) {
         Ok(j) => Json(serde_json::json!({ "task": cron_job_to_payload(j) })).into_response(),
         Err(e) => {
@@ -3758,15 +3847,19 @@ pub async fn handle_scheduled_tasks_run(
     };
 
     let cfg_clone = config.clone();
-    tokio::spawn(async move {
-        let (success, output) = crate::cron::scheduler::execute_job_now(&cfg_clone, &job).await;
-        tracing::info!(
-            "scheduled task {} run completed: success={} bytes={}",
-            job.id,
-            success,
-            output.len()
-        );
-    });
+    crate::runtime::task_manager::spawn_supervised(
+        "scheduled_tasks.manual_run",
+        async move {
+            let (success, output) =
+                crate::cron::scheduler::execute_job_now_and_record(&cfg_clone, &job).await;
+            tracing::info!(
+                "scheduled task {} run completed: success={} bytes={}",
+                job.id,
+                success,
+                output.len()
+            );
+        },
+    );
     Json(serde_json::json!({ "ok": true, "started": true })).into_response()
 }
 
@@ -3797,18 +3890,7 @@ pub async fn handle_scheduled_tasks_runs(
     all_runs.truncate(limit);
     let runs_json: Vec<serde_json::Value> = all_runs
         .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id,
-                "taskId": r.job_id,
-                "startedAt": r.started_at.to_rfc3339(),
-                "endedAt": r.finished_at.to_rfc3339(),
-                "status": r.status,
-                "ok": r.status == "success",
-                "summary": r.output,
-                "durationMs": r.duration_ms,
-            })
-        })
+        .map(cron_run_to_payload)
         .collect();
     Json(serde_json::json!({ "runs": runs_json })).into_response()
 }
@@ -3825,18 +3907,7 @@ pub async fn handle_scheduled_tasks_task_runs(
     let runs = crate::cron::list_runs(&config, &id, 50).unwrap_or_default();
     let runs_json: Vec<serde_json::Value> = runs
         .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id,
-                "taskId": r.job_id,
-                "startedAt": r.started_at.to_rfc3339(),
-                "endedAt": r.finished_at.to_rfc3339(),
-                "status": r.status,
-                "ok": r.status == "success",
-                "summary": r.output,
-                "durationMs": r.duration_ms,
-            })
-        })
+        .map(cron_run_to_payload)
         .collect();
     Json(serde_json::json!({ "runs": runs_json })).into_response()
 }

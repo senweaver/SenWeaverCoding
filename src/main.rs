@@ -1486,6 +1486,7 @@ async fn main() -> Result<()> {
                     false,
                     Some(session_file),
                     None,
+                    None,
                 ))
                 .await
                 .map(|_| ())?;
@@ -1513,6 +1514,7 @@ async fn main() -> Result<()> {
                     peripheral,
                     is_interactive,
                     session_state_file,
+                    None,
                     None,
                 ))
                 .await
@@ -1585,7 +1587,7 @@ async fn main() -> Result<()> {
                     }
 
                     log_gateway_start(&host, port);
-                    Box::pin(gateway::run_gateway(&host, port, config, None)).await
+                    Box::pin(gateway::run_gateway_with_supervisors(&host, port, config, None)).await
                 }
                 Some(senweavercoding::GatewayCommands::GetPaircode { new }) => {
                     let port = config.gateway.port;
@@ -1636,13 +1638,13 @@ async fn main() -> Result<()> {
                 Some(senweavercoding::GatewayCommands::Start { port, host }) => {
                     let (port, host) = resolve_gateway_addr(&config, port, host);
                     log_gateway_start(&host, port);
-                    Box::pin(gateway::run_gateway(&host, port, config, None)).await
+                    Box::pin(gateway::run_gateway_with_supervisors(&host, port, config, None)).await
                 }
                 None => {
                     let port = config.gateway.port;
                     let host = config.gateway.host.clone();
                     log_gateway_start(&host, port);
-                    Box::pin(gateway::run_gateway(&host, port, config, None)).await
+                    Box::pin(gateway::run_gateway_with_supervisors(&host, port, config, None)).await
                 }
             }
         }
@@ -2076,11 +2078,11 @@ async fn main() -> Result<()> {
 
                 #[cfg(target_os = "macos")]
                 {
-                    let _ = std::process::Command::new("open").arg(download_url).spawn();
+                    let _ = senweavercoding::util::hidden_sync_command("open").arg(download_url).spawn();
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let _ = std::process::Command::new("xdg-open")
+                    let _ = senweavercoding::util::hidden_sync_command("xdg-open")
                         .arg(download_url)
                         .spawn();
                 }
@@ -2142,7 +2144,7 @@ async fn main() -> Result<()> {
             match desktop_bin {
                 Some(bin) => {
                     println!("Launching SenWeaverCoding companion app...");
-                    let _child = std::process::Command::new(&bin)
+                    let _child = senweavercoding::util::hidden_sync_command(&bin)
                         .spawn()
                         .with_context(|| format!("Failed to launch {}", bin.display()))?;
                     Ok(())
@@ -2315,6 +2317,7 @@ async fn main() -> Result<()> {
                     false,
                     None,
                     None,
+                    None,
                 )),
             )
             .await;
@@ -2472,9 +2475,7 @@ fn launch_desktop_gui() -> Result<()> {
         std::process::exit(1);
     };
 
-    let mut command = std::process::Command::new(&binary);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
+    let mut command = senweavercoding::util::hidden_sync_command(&binary);
     match command.spawn() {
         Ok(_child) => Ok(()),
         Err(e) => {

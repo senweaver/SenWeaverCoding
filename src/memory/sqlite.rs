@@ -357,6 +357,9 @@ impl SqliteMemory {
             if schema_sql.contains("superseded_by") {
                 v = 4;
             }
+            if schema_sql.contains("embedding_norm") {
+                v = v.max(6);
+            }
             v
         } else {
             current
@@ -391,7 +394,18 @@ impl SqliteMemory {
         let effective = baseline.max(current);
         for &(version, sql) in MIGRATIONS {
             if version > effective {
-                conn.execute_batch(sql)?;
+                if let Err(e) = conn.execute_batch(sql) {
+                    let msg = e.to_string();
+                    if msg.contains("duplicate column name")
+                        || msg.contains("already exists")
+                    {
+                        tracing::debug!(
+                            "memories migration v{version} idempotent skip: {msg}"
+                        );
+                        continue;
+                    }
+                    return Err(e.into());
+                }
             }
         }
 

@@ -70,6 +70,7 @@ impl LocalAgentTask {
                         false,
                         None,
                         allowed_tools,
+                        None,
                     ) => {
                         match result {
                             Ok(response) => {

@@ -129,7 +129,7 @@ impl Tool for BrowserOpenTool {
 async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let primary_error = match tokio::process::Command::new("open").arg(url).status().await {
+        let primary_error = match crate::util::hidden_async_command("open").arg(url).status().await {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => format!("open exited with status {status}"),
             Err(error) => format!("open not runnable: {error}"),
@@ -137,7 +137,7 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
 
         let mut brave_error = String::new();
         for app in ["Brave Browser", "Brave"] {
-            match tokio::process::Command::new("open")
+            match crate::util::hidden_async_command("open")
                 .arg("-a")
                 .arg(app)
                 .arg(url)
@@ -169,7 +169,7 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
             "brave-browser",
             "brave",
         ] {
-            let mut command = tokio::process::Command::new(cmd);
+            let mut command = crate::util::hidden_async_command(cmd);
             if cmd == "gio" {
                 command.arg("open");
             }
@@ -193,7 +193,7 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     {
 
-        let primary_error = match tokio::process::Command::new("rundll32")
+        let primary_error = match crate::util::hidden_async_command("rundll32")
             .arg("url.dll,FileProtocolHandler")
             .arg(url)
             .status()
@@ -206,7 +206,7 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
 
         let mut brave_error = String::new();
         for cmd in ["brave", "brave.exe"] {
-            match tokio::process::Command::new(cmd).arg(url).status().await {
+            match crate::util::hidden_async_command(cmd).arg(url).status().await {
                 Ok(status) if status.success() => return Ok(()),
                 Ok(status) => {
                     brave_error = format!("{cmd} exited with status {status}");

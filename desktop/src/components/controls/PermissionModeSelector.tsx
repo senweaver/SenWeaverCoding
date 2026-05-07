@@ -5,7 +5,7 @@ import { useTranslation } from '../../i18n'
 import type { PermissionMode } from '../../types/settings'
 
 const MODE_ICONS: Record<PermissionMode, string> = {
-  default: 'verified_user',
+  default: 'rule',
   acceptEdits: 'bolt',
   plan: 'architecture',
   bypassPermissions: 'gavel',
@@ -22,7 +22,7 @@ type Props = {
   workDir?: string
 }
 
-const PERMISSION_ROWS: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions']
+const PERMISSION_ROWS: PermissionMode[] = ['askEveryTime', 'acceptEdits', 'default', 'bypassPermissions']
 
 export function PermissionModeSelector({ value, onChange, workDir }: Props) {
   const t = useTranslation()
@@ -33,25 +33,24 @@ export function PermissionModeSelector({ value, onChange, workDir }: Props) {
   const rowMeta = useMemo(
     () =>
       ({
-        default: {
-          label: t('permMode.askPermissions'),
-          description: t('permMode.askPermDesc'),
-          icon: 'verified_user',
+        askEveryTime: {
+          label: t('settings.agents.autoRun.opt.askEveryTime'),
+          description: t('settings.agents.autoRun.opt.askEveryTimeHint'),
+          icon: 'help',
         },
         acceptEdits: {
-          label: t('permMode.autoAccept'),
-          description: t('permMode.autoAcceptDesc'),
+          label: t('settings.agents.autoRun.opt.acceptEdits'),
+          description: t('settings.agents.autoRun.opt.acceptEditsHint'),
           icon: 'bolt',
         },
-        plan: {
-          label: t('permMode.planMode'),
-          description: t('permMode.planModeDesc'),
-          icon: 'architecture',
-          color: 'text-[var(--color-text-tertiary)]',
+        default: {
+          label: t('settings.agents.autoRun.opt.useAllowlist'),
+          description: t('settings.agents.autoRun.opt.useAllowlistHint'),
+          icon: 'rule',
         },
         bypassPermissions: {
-          label: t('permMode.bypass'),
-          description: t('permMode.bypassDesc'),
+          label: t('settings.agents.autoRun.opt.runEverything'),
+          description: t('settings.agents.autoRun.opt.runEverythingHint'),
           icon: 'gavel',
           color: 'text-[var(--color-error)]',
         },
@@ -63,10 +62,10 @@ export function PermissionModeSelector({ value, onChange, workDir }: Props) {
   )
 
   const MODE_LABELS: Record<PermissionMode, string> = {
-    default: t('permMode.label.default'),
-    acceptEdits: t('permMode.label.acceptEdits'),
+    default: t('settings.agents.autoRun.opt.useAllowlist'),
+    acceptEdits: t('settings.agents.autoRun.opt.acceptEdits'),
     plan: t('permMode.label.plan'),
-    bypassPermissions: t('permMode.label.bypassPermissions'),
+    bypassPermissions: t('settings.agents.autoRun.opt.runEverything'),
     dontAsk: t('permMode.label.dontAsk'),
     askEveryTime: t('settings.agents.autoRun.opt.askEveryTime'),
   }

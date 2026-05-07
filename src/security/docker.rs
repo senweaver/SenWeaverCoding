@@ -57,7 +57,7 @@ impl DockerSandbox {
     }
 
     fn is_installed() -> bool {
-        Command::new("docker")
+        crate::util::hidden_sync_command("docker")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -73,7 +73,7 @@ impl Sandbox for DockerSandbox {
             .map(|s| s.to_string_lossy().to_string())
             .collect();
 
-        let mut docker_cmd = Command::new("docker");
+        let mut docker_cmd = crate::util::hidden_sync_command("docker");
         docker_cmd.args([
             "run",
             "--rm",

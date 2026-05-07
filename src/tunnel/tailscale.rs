@@ -3,8 +3,6 @@
 // Licensed under the MIT License.
 use super::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
 use anyhow::{Result, bail};
-use tokio::process::Command;
-
 pub struct TailscaleTunnel {
     funnel: bool,
     hostname: Option<String>,
@@ -34,7 +32,7 @@ impl Tunnel for TailscaleTunnel {
             h.clone()
         } else {
 
-            let output = Command::new("tailscale")
+            let output = crate::util::hidden_async_command("tailscale")
                 .args(["status", "--json"])
                 .output()
                 .await?;
@@ -55,7 +53,7 @@ impl Tunnel for TailscaleTunnel {
                 .to_string()
         };
 
-        let child = Command::new("tailscale")
+        let child = crate::util::hidden_async_command("tailscale")
             .args([subcommand, &local_port.to_string()])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -76,7 +74,7 @@ impl Tunnel for TailscaleTunnel {
     async fn stop(&self) -> Result<()> {
 
         let subcommand = if self.funnel { "funnel" } else { "serve" };
-        Command::new("tailscale")
+        crate::util::hidden_async_command("tailscale")
             .args([subcommand, "reset"])
             .output()
             .await

@@ -4,8 +4,6 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
 const TEST_FILE_NAME: &str = "TEST.sh";
 
 #[derive(Debug, Clone)]
@@ -86,7 +84,7 @@ fn run_test_case(case: &TestCase, skill_dir: &Path, verbose: bool) -> Option<Tes
         println!("    running: {}", case.command);
     }
 
-    let result = Command::new("sh")
+    let result = crate::util::hidden_sync_command("sh")
         .arg("-c")
         .arg(&case.command)
         .current_dir(skill_dir)

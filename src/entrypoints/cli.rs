@@ -325,6 +325,7 @@ impl CliEntrypoint {
             } else {
                 Some(options.allowed_tools)
             },
+            None,
         ))
         .await
         .map(|_| ())

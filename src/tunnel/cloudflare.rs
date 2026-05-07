@@ -4,8 +4,6 @@
 use super::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
 use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::Command;
-
 fn extract_tunnel_url(line: &str) -> Option<String> {
     let idx = line.find("https://")?;
     let url_part = &line[idx..];
@@ -51,7 +49,7 @@ impl Tunnel for CloudflareTunnel {
 
     async fn start(&self, _local_host: &str, local_port: u16) -> Result<String> {
 
-        let mut child = Command::new("cloudflared")
+        let mut child = crate::util::hidden_async_command("cloudflared")
             .args([
                 "tunnel",
                 "--no-autoupdate",

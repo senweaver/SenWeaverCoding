@@ -4,8 +4,6 @@
 use super::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
 use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::Command;
-
 pub struct PinggyTunnel {
     token: Option<String>,
     region: Option<String>,
@@ -46,7 +44,7 @@ impl Tunnel for PinggyTunnel {
 
         let forward_spec = format!("0:{local_host}:{local_port}");
 
-        let mut child = Command::new("ssh")
+        let mut child = crate::util::hidden_async_command("ssh")
             .args([
                 "-T",
                 "-p",

@@ -135,7 +135,7 @@ impl Channel for IMessageChannel {
 end tell"#
         );
 
-        let output = tokio::process::Command::new("osascript")
+        let output = crate::util::hidden_async_command("osascript")
             .arg("-e")
             .arg(&script)
             .output()

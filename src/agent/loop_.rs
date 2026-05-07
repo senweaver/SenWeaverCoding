@@ -4656,6 +4656,38 @@ pub(crate) fn build_tool_instructions(
     instructions
 }
 
+struct CodingModeRestoreGuard {
+    previous: Option<crate::agent::coding_mode::CodingMode>,
+}
+
+impl CodingModeRestoreGuard {
+    fn new(next: Option<crate::agent::coding_mode::CodingMode>) -> Self {
+        let previous = match next {
+            Some(ov) => match crate::services::try_get_services() {
+                Some(svc) => {
+                    let prev = *svc.coding_mode.read();
+                    *svc.coding_mode.write() = ov;
+                    Some(prev)
+                }
+                None => None,
+            },
+            None => None,
+        };
+        Self { previous }
+    }
+}
+
+impl Drop for CodingModeRestoreGuard {
+    fn drop(&mut self) {
+        let Some(prev) = self.previous else {
+            return;
+        };
+        if let Some(svc) = crate::services::try_get_services() {
+            *svc.coding_mode.write() = prev;
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn run(
     config: Config,
@@ -4667,6 +4699,7 @@ pub async fn run(
     interactive: bool,
     session_state_file: Option<PathBuf>,
     allowed_tools: Option<Vec<String>>,
+    coding_mode_override: Option<crate::agent::coding_mode::CodingMode>,
 ) -> Result<String> {
 
     let observer: Arc<dyn Observer> = crate::agent::cli_runtime::build_observer(&config);
@@ -4677,6 +4710,8 @@ pub async fn run(
     let _ = crate::services::init_services(
         crate::services::container::ServiceContainerConfig::default(),
     );
+
+    let _coding_mode_guard = CodingModeRestoreGuard::new(coding_mode_override);
 
     if let Some(svc) = crate::services::try_get_services() {
         svc.set_max_context_tokens(config.agent.max_context_tokens);

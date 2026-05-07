@@ -86,7 +86,7 @@ impl Tool for PowerShellTool {
             });
         }
 
-        let mut cmd = tokio::process::Command::new("powershell");
+        let mut cmd = crate::util::hidden_async_command("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", command]);
 
         if let Some(dir) = working_dir {

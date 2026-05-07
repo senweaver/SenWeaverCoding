@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
@@ -41,7 +41,7 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     pub fn new(config: &McpServerConfig) -> Result<Self> {
-        let mut child = Command::new(&config.command)
+        let mut child = crate::util::hidden_async_command(&config.command)
             .args(&config.args)
             .envs(&config.env)
             .stdin(std::process::Stdio::piped())

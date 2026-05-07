@@ -10,6 +10,8 @@ import { DayOfWeekPicker } from './DayOfWeekPicker'
 import { useTranslation } from '../../i18n'
 import { describeCron, isValidCron, parseCron, type FrequencyKey } from '../../lib/cronDescribe'
 import type { PermissionMode } from '../../types/settings'
+import type { CodingModeId } from '../../types/codingMode'
+import { DEFAULT_CODING_MODE } from '../../types/codingMode'
 import type { CronTask } from '../../types/task'
 
 type Props = {
@@ -92,7 +94,8 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
   const [frequency, setFrequency] = useState<FrequencyKey>(parsed?.frequency || 'daily')
   const [time, setTime] = useState(parsed?.time || '09:00')
   const [model, setModel] = useState(editTask?.model || '')
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>((editTask?.permissionMode as PermissionMode) || 'default')
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>((editTask?.permissionMode as PermissionMode) || 'askEveryTime')
+  const [codingMode, setCodingMode] = useState<CodingModeId>((editTask?.codingMode as CodingModeId) ?? DEFAULT_CODING_MODE)
   const [folderPath, setFolderPath] = useState(editTask?.folderPath || defaultWorkDir)
   const [useWorktree, setUseWorktree] = useState(editTask?.useWorktree || false)
   const [notifyEnabled, setNotifyEnabled] = useState(editTask?.notification?.enabled || false)
@@ -129,7 +132,8 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         cron: cronValue,
         prompt: prompt.trim(),
         model: model || undefined,
-        permissionMode: permissionMode !== 'default' ? permissionMode : undefined,
+        permissionMode,
+        codingMode,
         folderPath: folderPath.trim() || undefined,
         useWorktree: useWorktree || undefined,
         notification: notifyEnabled && notifyChannels.length > 0
@@ -195,6 +199,8 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
           value={prompt}
           onChange={setPrompt}
           placeholder={t('newTask.promptPlaceholder')}
+          codingMode={codingMode}
+          onCodingModeChange={setCodingMode}
           permissionMode={permissionMode}
           onPermissionModeChange={setPermissionMode}
           modelId={model}

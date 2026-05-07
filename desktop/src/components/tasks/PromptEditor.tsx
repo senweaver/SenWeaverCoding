@@ -1,13 +1,18 @@
 import { PermissionModeSelector } from '../controls/PermissionModeSelector'
+import { CodingModeSelector } from '../controls/CodingModeSelector'
 import { ModelSelector } from '../controls/ModelSelector'
 import { DirectoryPicker } from '../shared/DirectoryPicker'
 import { useTranslation } from '../../i18n'
 import type { PermissionMode } from '../../types/settings'
+import type { CodingModeId } from '../../types/codingMode'
 
 type Props = {
   value: string
   onChange: (value: string) => void
   placeholder?: string
+
+  codingMode: CodingModeId
+  onCodingModeChange: (mode: CodingModeId) => void
 
   permissionMode: PermissionMode
   onPermissionModeChange: (mode: PermissionMode) => void
@@ -26,6 +31,8 @@ export function PromptEditor({
   value,
   onChange,
   placeholder,
+  codingMode,
+  onCodingModeChange,
   permissionMode,
   onPermissionModeChange,
   modelId,
@@ -38,7 +45,6 @@ export function PromptEditor({
   const t = useTranslation()
   return (
     <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] focus-within:border-[var(--color-border-focus)] transition-colors overflow-visible">
-      {}
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -48,20 +54,19 @@ export function PromptEditor({
         style={{ minHeight: 120 }}
       />
 
-      {}
       <div className="border-t border-[var(--color-border)]/40 px-3 py-2 flex flex-col gap-2 bg-[var(--color-surface-container-low)] rounded-b-[var(--radius-lg)]">
-        {}
-        <div className="flex items-center justify-between">
-          <PermissionModeSelector value={permissionMode} onChange={onPermissionModeChange} workDir={folderPath || undefined} />
+        <div className="flex flex-wrap items-center gap-2 justify-between">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <CodingModeSelector value={codingMode} onChange={onCodingModeChange} />
+            <PermissionModeSelector value={permissionMode} onChange={onPermissionModeChange} workDir={folderPath || undefined} />
+          </div>
           <ModelSelector value={modelId} onChange={onModelChange} />
         </div>
 
-        {}
         <div className="flex items-center justify-between">
           <DirectoryPicker value={folderPath} onChange={onFolderPathChange} />
         </div>
 
-        {}
         {permissionMode === 'bypassPermissions' && (
           <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-[var(--color-error)]/8 text-[10px] text-[var(--color-error)]">
             <span className="material-symbols-outlined text-[12px]">warning</span>

@@ -322,7 +322,7 @@ impl BrowserTool {
         } else {
             "agent-browser"
         };
-        Command::new(cmd)
+        crate::util::hidden_async_command(cmd)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -536,7 +536,7 @@ impl BrowserTool {
         } else {
             "agent-browser"
         };
-        let mut cmd = Command::new(agent_browser_bin);
+        let mut cmd = crate::util::hidden_async_command(agent_browser_bin);
 
         if is_service_environment() {
             ensure_browser_env(&mut cmd);

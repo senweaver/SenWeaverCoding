@@ -213,7 +213,7 @@ pub fn verify_pid_is_sen_with_start(pid: u32, expected_start_time: Option<u64>) 
     #[cfg(target_os = "macos")]
     {
 
-        let output = std::process::Command::new("ps")
+        let output = crate::util::hidden_sync_command("ps")
             .args(["-p", &pid.to_string(), "-o", "comm=,lstart="])
             .output();
         let Ok(out) = output else { return false };
@@ -236,7 +236,7 @@ pub fn verify_pid_is_sen_with_start(pid: u32, expected_start_time: Option<u64>) 
     }
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("wmic")
+        let output = crate::util::hidden_sync_command("wmic")
             .args([
                 "process",
                 "where",
@@ -293,7 +293,7 @@ pub async fn safe_terminate_pid(pid: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = tokio::process::Command::new("taskkill")
+        let _ = crate::util::hidden_async_command("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
             .await;

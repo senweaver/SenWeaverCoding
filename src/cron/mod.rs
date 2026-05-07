@@ -17,11 +17,12 @@ pub use schedule::{
 };
 #[allow(unused_imports)]
 pub use store::{
-    add_agent_job, all_overdue_jobs, due_jobs, get_job, list_jobs, list_runs, record_last_run,
-    record_run, remove_job, reschedule_after_run, sync_declarative_jobs, update_job,
+    add_agent_job, all_overdue_jobs, due_jobs, finalize_run, get_job, list_jobs, list_runs,
+    record_last_run, record_run, remove_job, reschedule_after_run, start_run, sync_declarative_jobs,
+    update_job,
 };
 pub use types::{
-    CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
+    AgentJobOptions, CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
     deserialize_maybe_stringified,
 };
 
@@ -189,14 +190,14 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     None,
                     schedule,
                     &command,
-                    SessionTarget::Isolated,
-                    None,
-                    None,
-                    false,
-                    if allowed_tools.is_empty() {
-                        None
-                    } else {
-                        Some(allowed_tools)
+                    AgentJobOptions {
+                        session_target: SessionTarget::Isolated,
+                        allowed_tools: if allowed_tools.is_empty() {
+                            None
+                        } else {
+                            Some(allowed_tools)
+                        },
+                        ..Default::default()
                     },
                 )?;
                 println!("✅ Added agent cron job {}", job.id);
@@ -231,14 +232,15 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     None,
                     schedule,
                     &command,
-                    SessionTarget::Isolated,
-                    None,
-                    None,
-                    true,
-                    if allowed_tools.is_empty() {
-                        None
-                    } else {
-                        Some(allowed_tools)
+                    AgentJobOptions {
+                        session_target: SessionTarget::Isolated,
+                        delete_after_run: true,
+                        allowed_tools: if allowed_tools.is_empty() {
+                            None
+                        } else {
+                            Some(allowed_tools)
+                        },
+                        ..Default::default()
                     },
                 )?;
                 println!("✅ Added one-shot agent cron job {}", job.id);
@@ -268,14 +270,14 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     None,
                     schedule,
                     &command,
-                    SessionTarget::Isolated,
-                    None,
-                    None,
-                    false,
-                    if allowed_tools.is_empty() {
-                        None
-                    } else {
-                        Some(allowed_tools)
+                    AgentJobOptions {
+                        session_target: SessionTarget::Isolated,
+                        allowed_tools: if allowed_tools.is_empty() {
+                            None
+                        } else {
+                            Some(allowed_tools)
+                        },
+                        ..Default::default()
                     },
                 )?;
                 println!("✅ Added interval agent cron job {}", job.id);
@@ -309,14 +311,15 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                     None,
                     schedule,
                     &command,
-                    SessionTarget::Isolated,
-                    None,
-                    None,
-                    true,
-                    if allowed_tools.is_empty() {
-                        None
-                    } else {
-                        Some(allowed_tools)
+                    AgentJobOptions {
+                        session_target: SessionTarget::Isolated,
+                        delete_after_run: true,
+                        allowed_tools: if allowed_tools.is_empty() {
+                            None
+                        } else {
+                            Some(allowed_tools)
+                        },
+                        ..Default::default()
                     },
                 )?;
                 println!("✅ Added one-shot agent cron job {}", job.id);

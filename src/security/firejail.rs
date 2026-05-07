@@ -29,7 +29,7 @@ impl FirejailSandbox {
     }
 
     fn is_installed() -> bool {
-        Command::new("firejail")
+        crate::util::hidden_sync_command("firejail")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -46,7 +46,7 @@ impl Sandbox for FirejailSandbox {
             .map(|s| s.to_string_lossy().to_string())
             .collect();
 
-        let mut firejail_cmd = Command::new("firejail");
+        let mut firejail_cmd = crate::util::hidden_sync_command("firejail");
         firejail_cmd.args([
             "--private=home",
             "--private-dev",

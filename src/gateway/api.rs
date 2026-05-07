@@ -813,11 +813,14 @@ pub async fn handle_api_cron_add(
             name,
             schedule,
             prompt,
-            session_target,
-            model,
-            delivery,
-            delete_after_run,
-            allowed_tools,
+            crate::cron::AgentJobOptions {
+                session_target,
+                model,
+                delivery,
+                delete_after_run,
+                allowed_tools,
+                ..Default::default()
+            },
         )
     } else {
         let command = match command.as_deref() {
@@ -2777,7 +2780,7 @@ pub async fn handle_api_session_revert_batches(
 }
 
 fn run_git(workdir: &std::path::Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::util::hidden_sync_command("git")
         .current_dir(workdir)
         .args(args)
         .output()

@@ -34,7 +34,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
     ));
     checks.push("  Rust edition: 2024".to_string());
 
-    match std::process::Command::new("git").arg("--version").output() {
+    match crate::util::hidden_sync_command("git").arg("--version").output() {
         Ok(out) => {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
             checks.push(format!("  ✓ git: {ver}"));
@@ -44,7 +44,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
         }
     }
 
-    match std::process::Command::new("node").arg("--version").output() {
+    match crate::util::hidden_sync_command("node").arg("--version").output() {
         Ok(out) => {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
             checks.push(format!("  ✓ node: {ver}"));
@@ -54,7 +54,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
         }
     }
 
-    match std::process::Command::new("python3")
+    match crate::util::hidden_sync_command("python3")
         .arg("--version")
         .output()
     {
@@ -62,7 +62,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
             checks.push(format!("  ✓ python: {ver}"));
         }
-        Err(_) => match std::process::Command::new("python")
+        Err(_) => match crate::util::hidden_sync_command("python")
             .arg("--version")
             .output()
         {
@@ -74,7 +74,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
         },
     }
 
-    match std::process::Command::new("rg").arg("--version").output() {
+    match crate::util::hidden_sync_command("rg").arg("--version").output() {
         Ok(out) => {
             let ver = String::from_utf8_lossy(&out.stdout)
                 .lines()

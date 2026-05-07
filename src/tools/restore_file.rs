@@ -86,7 +86,7 @@ impl Tool for RestoreFileTool {
         let ws = self.security.workspace_dir();
         let workspace = full_path.parent().unwrap_or(ws.as_path());
 
-        let output = tokio::process::Command::new("git")
+        let output = crate::util::hidden_async_command("git")
             .args(["checkout", revision, "--", &full_path.to_string_lossy()])
             .current_dir(workspace)
             .output()

@@ -64,3 +64,51 @@ pub enum MaybeSet<T> {
     Unset,
     Null,
 }
+
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+pub trait HiddenWindowCommandExt {
+    fn hide_window(&mut self) -> &mut Self;
+}
+
+#[cfg(windows)]
+impl HiddenWindowCommandExt for std::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+}
+
+#[cfg(not(windows))]
+impl HiddenWindowCommandExt for std::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
+#[cfg(windows)]
+impl HiddenWindowCommandExt for tokio::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+}
+
+#[cfg(not(windows))]
+impl HiddenWindowCommandExt for tokio::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
+pub fn hidden_sync_command<S: AsRef<OsStr>>(program: S) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.hide_window();
+    cmd
+}
+
+pub fn hidden_async_command<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.hide_window();
+    cmd
+}

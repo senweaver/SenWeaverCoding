@@ -84,7 +84,7 @@ impl Tool for WorktreeExitTool {
             }
             cmd_args.push(worktree_path);
 
-            let output = tokio::process::Command::new("git")
+            let output = crate::util::hidden_async_command("git")
                 .args(&cmd_args)
                 .current_dir(self.security.workspace_dir())
                 .output()

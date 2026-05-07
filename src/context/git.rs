@@ -76,7 +76,7 @@ impl GitContext {
 }
 
 async fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = tokio::process::Command::new("git")
+    let output = crate::util::hidden_async_command("git")
         .args(args)
         .current_dir(cwd)
         .output()

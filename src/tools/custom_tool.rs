@@ -154,7 +154,7 @@ impl Tool for CustomTool {
             .map(|tpl| Self::substitute_arg(tpl, &args, &json_payload))
             .collect();
 
-        let mut command = tokio::process::Command::new(&self.command);
+        let mut command = crate::util::hidden_async_command(&self.command);
         command
             .args(&resolved_args)
             .current_dir(self.resolve_cwd())

@@ -614,7 +614,7 @@ fn build_rg_command(
     context_after: usize,
     multiline: bool,
 ) -> std::process::Command {
-    let mut cmd = std::process::Command::new("rg");
+    let mut cmd = crate::util::hidden_sync_command("rg");
 
     cmd.arg("--no-heading");
     cmd.arg("--line-number");
@@ -667,7 +667,7 @@ fn build_grep_command(
     context_before: usize,
     context_after: usize,
 ) -> std::process::Command {
-    let mut cmd = std::process::Command::new("grep");
+    let mut cmd = crate::util::hidden_sync_command("grep");
 
     cmd.arg("-r");
     cmd.arg("-n");

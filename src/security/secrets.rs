@@ -193,7 +193,7 @@ impl SecretStore {
             #[cfg(windows)]
             {
 
-                let username = std::process::Command::new("whoami")
+                let username = crate::util::hidden_sync_command("whoami")
                     .output()
                     .ok()
                     .filter(|o| o.status.success())
@@ -207,7 +207,7 @@ impl SecretStore {
                     return Ok(key);
                 };
 
-                match std::process::Command::new("takeown")
+                match crate::util::hidden_sync_command("takeown")
                     .arg("/F")
                     .arg(&self.key_path)
                     .output()
@@ -226,7 +226,7 @@ impl SecretStore {
                     }
                 }
 
-                match std::process::Command::new("icacls")
+                match crate::util::hidden_sync_command("icacls")
                     .arg(&self.key_path)
                     .args(["/inheritance:r", "/grant:r"])
                     .arg(grant_arg)

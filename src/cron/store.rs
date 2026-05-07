@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 use crate::config::Config;
 use crate::cron::{
-    CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
+    AgentJobOptions, CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
     next_run_for_schedule, schedule_cron_expression, validate_delivery_config, validate_schedule,
 };
 use anyhow::{Context, Result};
@@ -73,18 +73,27 @@ pub fn add_shell_job(
     get_job(config, &id)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn add_agent_job(
     config: &Config,
     name: Option<String>,
     schedule: Schedule,
     prompt: &str,
-    session_target: SessionTarget,
-    model: Option<String>,
-    delivery: Option<DeliveryConfig>,
-    delete_after_run: bool,
-    allowed_tools: Option<Vec<String>>,
+    opts: AgentJobOptions,
 ) -> Result<CronJob> {
+    let AgentJobOptions {
+        session_target,
+        model,
+        delivery,
+        delete_after_run,
+        allowed_tools,
+        permission_mode,
+        coding_mode,
+        folder_path,
+        use_worktree,
+        notification,
+        task_description,
+    } = opts;
+
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
     validate_delivery_config(delivery.as_ref())?;
@@ -93,13 +102,17 @@ pub fn add_agent_job(
     let expression = schedule_cron_expression(&schedule).unwrap_or_default();
     let schedule_json = serde_json::to_string(&schedule)?;
     let delivery = delivery.unwrap_or_default();
+    let notification_json =
+        encode_optional_json_value(notification.as_ref()).context("notification JSON")?;
 
     with_connection(config, |conn| {
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                enabled, delivery, delete_after_run, allowed_tools, created_at, next_run
-             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12)",
+                enabled, delivery, delete_after_run, allowed_tools,
+                permission_mode, coding_mode, folder_path, use_worktree, notification, task_description,
+                created_at, next_run
+             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 id,
                 expression,
@@ -111,6 +124,12 @@ pub fn add_agent_job(
                 serde_json::to_string(&delivery)?,
                 i32::from(delete_after_run),
                 encode_allowed_tools(allowed_tools.as_ref())?,
+                permission_mode,
+                coding_mode,
+                folder_path,
+                use_worktree.map(|b| i32::from(b)),
+                notification_json,
+                task_description,
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
             ],
@@ -127,7 +146,8 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, source
+                    allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
+                    task_description
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -146,7 +166,8 @@ pub fn get_job(config: &Config, job_id: &str) -> Result<CronJob> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, source
+                    allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
+                    task_description
              FROM cron_jobs WHERE id = ?1",
         )?;
 
@@ -180,7 +201,8 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, source
+                    allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
+                    task_description
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC
@@ -205,7 +227,8 @@ pub fn all_overdue_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJ
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                    allowed_tools, source
+                    allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
+                    task_description
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC",
@@ -267,17 +290,42 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
         }
     }
 
+    if let Some(pm) = patch.permission_mode.clone() {
+        job.permission_mode = (!pm.trim().is_empty()).then_some(pm);
+    }
+    if let Some(cm) = patch.coding_mode.clone() {
+        job.coding_mode = (!cm.trim().is_empty()).then_some(cm);
+    }
+    if let Some(fp) = patch.folder_path.clone() {
+        job.folder_path = (!fp.trim().is_empty()).then_some(fp);
+    }
+    if let Some(wt) = patch.use_worktree {
+        job.use_worktree = Some(wt);
+    }
+    if let Some(n) = patch.notification.clone() {
+        job.notification = if n.is_null() { None } else { Some(n) };
+    }
+    if let Some(td) = patch.task_description.clone() {
+        job.task_description = (!td.trim().is_empty()).then_some(td);
+    }
+
     if schedule_changed {
         job.next_run = next_run_for_schedule(&job.schedule, Utc::now())?;
     }
+
+    let notification_db =
+        encode_optional_json_value(job.notification.as_ref()).context("notification JSON")?;
 
     with_connection(config, |conn| {
         conn.execute(
             "UPDATE cron_jobs
              SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4, prompt = ?5, name = ?6,
                  session_target = ?7, model = ?8, enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                 allowed_tools = ?12, next_run = ?13
-             WHERE id = ?14",
+                 allowed_tools = ?12,
+                 permission_mode = ?13, coding_mode = ?14, folder_path = ?15, use_worktree = ?16,
+                 notification = ?17, task_description = ?18,
+                 next_run = ?19
+             WHERE id = ?20",
             params![
                 job.expression,
                 job.command,
@@ -291,6 +339,12 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                 serde_json::to_string(&job.delivery)?,
                 i32::from(job.delete_after_run),
                 encode_allowed_tools(job.allowed_tools.as_ref())?,
+                job.permission_mode,
+                job.coding_mode,
+                job.folder_path,
+                job.use_worktree.map(|b| i32::from(b)),
+                notification_db,
+                job.task_description,
                 job.next_run.to_rfc3339(),
                 job.id,
             ],
@@ -363,6 +417,64 @@ pub fn reschedule_after_run(
             Ok(())
         })
     }
+}
+
+pub fn start_run(config: &Config, job_id: &str, started_at: DateTime<Utc>) -> Result<i64> {
+    with_connection(config, |conn| {
+        conn.execute(
+            "INSERT INTO cron_runs (job_id, started_at, finished_at, status, output, duration_ms)
+             VALUES (?1, ?2, ?2, 'running', NULL, NULL)",
+            params![job_id, started_at.to_rfc3339()],
+        )
+        .context("Failed to insert cron running record")?;
+        Ok(conn.last_insert_rowid())
+    })
+}
+
+pub fn finalize_run(
+    config: &Config,
+    run_id: i64,
+    finished_at: DateTime<Utc>,
+    status: &str,
+    output: Option<&str>,
+    duration_ms: i64,
+) -> Result<()> {
+    let bounded_output = output.map(truncate_cron_output);
+    with_connection(config, |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
+            "UPDATE cron_runs
+             SET finished_at = ?1, status = ?2, output = ?3, duration_ms = ?4
+             WHERE id = ?5",
+            params![
+                finished_at.to_rfc3339(),
+                status,
+                bounded_output.as_deref(),
+                duration_ms,
+                run_id,
+            ],
+        )
+        .context("Failed to finalize cron run")?;
+
+        let keep = i64::from(config.cron.max_run_history.max(1));
+        tx.execute(
+            "DELETE FROM cron_runs
+             WHERE job_id = (SELECT job_id FROM cron_runs WHERE id = ?1)
+               AND id NOT IN (
+                 SELECT id FROM cron_runs
+                 WHERE job_id = (SELECT job_id FROM cron_runs WHERE id = ?1)
+                 ORDER BY started_at DESC, id DESC
+                 LIMIT ?2
+               )",
+            params![run_id, keep],
+        )
+        .context("Failed to prune cron run history")?;
+
+        tx.commit()
+            .context("Failed to commit cron run finalize transaction")?;
+        Ok(())
+    })
 }
 
 pub fn record_run(
@@ -489,6 +601,14 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
     let created_at_raw: String = row.get(12)?;
     let allowed_tools_raw: Option<String> = row.get(17)?;
     let source: Option<String> = row.get(18)?;
+    let permission_mode: Option<String> = row.get(19)?;
+    let coding_mode: Option<String> = row.get(20)?;
+    let folder_path: Option<String> = row.get(21)?;
+    let use_worktree_raw: Option<i64> = row.get(22)?;
+    let use_worktree = use_worktree_raw.map(|x| x != 0);
+    let notification_raw: Option<String> = row.get(23)?;
+    let notification = decode_optional_json(notification_raw.as_deref()).map_err(sql_conversion_error)?;
+    let task_description: Option<String> = row.get(24)?;
 
     Ok(CronJob {
         id: row.get(0)?,
@@ -514,7 +634,32 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         last_output: row.get(16)?,
         allowed_tools: decode_allowed_tools(allowed_tools_raw.as_deref())
             .map_err(sql_conversion_error)?,
+        permission_mode,
+        coding_mode,
+        folder_path,
+        use_worktree,
+        notification,
+        task_description,
     })
+}
+
+fn encode_optional_json_value(opt: Option<&serde_json::Value>) -> Result<Option<String>> {
+    Ok(match opt {
+        None => None,
+        Some(v) => Some(serde_json::to_string(v).context("Failed to serialize JSON column")?),
+    })
+}
+
+fn decode_optional_json(raw: Option<&str>) -> Result<Option<serde_json::Value>> {
+    let Some(trimmed) = raw.map(str::trim) else {
+        return Ok(None);
+    };
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(trimmed)
+        .map(Some)
+        .with_context(|| format!("Failed to parse JSON column value: {trimmed}"))
 }
 
 fn decode_schedule(schedule_raw: Option<&str>, expression: &str) -> Result<Schedule> {
@@ -909,6 +1054,12 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "delete_after_run", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(&conn, "allowed_tools", "TEXT")?;
     add_column_if_missing(&conn, "source", "TEXT DEFAULT 'imperative'")?;
+    add_column_if_missing(&conn, "permission_mode", "TEXT")?;
+    add_column_if_missing(&conn, "coding_mode", "TEXT")?;
+    add_column_if_missing(&conn, "folder_path", "TEXT")?;
+    add_column_if_missing(&conn, "use_worktree", "INTEGER")?;
+    add_column_if_missing(&conn, "notification", "TEXT")?;
+    add_column_if_missing(&conn, "task_description", "TEXT")?;
 
     f(&conn)
 }

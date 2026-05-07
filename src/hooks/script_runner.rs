@@ -543,11 +543,11 @@ fn truncate_for_payload(s: &str, max: usize) -> String {
 
 fn build_shell_command(line: &str) -> tokio::process::Command {
     if cfg!(target_os = "windows") {
-        let mut c = tokio::process::Command::new("cmd");
+        let mut c = crate::util::hidden_async_command("cmd");
         c.arg("/C").arg(line);
         c
     } else {
-        let mut c = tokio::process::Command::new("sh");
+        let mut c = crate::util::hidden_async_command("sh");
         c.arg("-c").arg(line);
         c
     }

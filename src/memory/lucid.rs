@@ -9,7 +9,6 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::process::Command;
 use tokio::time::timeout;
 
 pub struct LucidMemory {
@@ -217,7 +216,7 @@ impl LucidMemory {
         args: &[String],
         timeout_window: Duration,
     ) -> anyhow::Result<String> {
-        let mut cmd = Command::new(lucid_cmd);
+        let mut cmd = crate::util::hidden_async_command(lucid_cmd);
         cmd.args(args);
 
         let output = timeout(timeout_window, cmd.output()).await.map_err(|_| {

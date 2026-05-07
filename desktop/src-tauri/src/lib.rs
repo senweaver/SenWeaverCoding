@@ -408,7 +408,7 @@ fn start_embedded_gateway_once(_handle: AppHandle) -> Result<String, String> {
                     }
                 };
                 if let Err(err) =
-                    senweavercoding::gateway::run_gateway(host, port, config, Some(tokio_listener)).await
+                    senweavercoding::gateway::run_gateway_with_supervisors(host, port, config, Some(tokio_listener)).await
                 {
                     tracing::error!("[sen-desktop] run_gateway exited: {err:#}");
                 }

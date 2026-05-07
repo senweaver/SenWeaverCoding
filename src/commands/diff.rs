@@ -19,7 +19,7 @@ inventory::submit!(StaticSlashCommand {
 });
 
 pub async fn handle_diff(ctx: CommandContext) -> CommandResult {
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = crate::util::hidden_async_command("git");
     cmd.arg("diff");
     if !ctx.args.is_empty() {
         cmd.args(&ctx.args);

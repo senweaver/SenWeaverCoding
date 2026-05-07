@@ -26,7 +26,7 @@ impl BubblewrapSandbox {
     }
 
     fn is_installed() -> bool {
-        Command::new("bwrap")
+        crate::util::hidden_sync_command("bwrap")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -42,7 +42,7 @@ impl Sandbox for BubblewrapSandbox {
             .map(|s| s.to_string_lossy().to_string())
             .collect();
 
-        let mut bwrap_cmd = Command::new("bwrap");
+        let mut bwrap_cmd = crate::util::hidden_sync_command("bwrap");
         bwrap_cmd.args([
             "--ro-bind",
             "/usr",

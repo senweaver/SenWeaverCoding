@@ -178,7 +178,7 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     let which_cmd = "which";
 
-    let output = std::process::Command::new(which_cmd)
+    let output = crate::util::hidden_sync_command(which_cmd)
         .arg(name)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -198,7 +198,7 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 }
 
 fn get_version(name: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(name)
+    let output = crate::util::hidden_sync_command(name)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -570,7 +570,7 @@ impl LspServerHandle {
     async fn start(language: &str, workspace_root: &Path) -> Result<Self> {
         let (binary, args) = detect_server(language)?;
 
-        let mut cmd = tokio::process::Command::new(&binary);
+        let mut cmd = crate::util::hidden_async_command(&binary);
         cmd.args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -609,7 +609,7 @@ impl LspServerHandle {
     }
 
     async fn start_with_config(config: LspServerConfig) -> Result<Self> {
-        let mut cmd = tokio::process::Command::new(&config.server_command);
+        let mut cmd = crate::util::hidden_async_command(&config.server_command);
         cmd.args(&config.server_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

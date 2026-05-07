@@ -96,7 +96,7 @@ async fn run_mpremote(args: &[&str], timeout_secs: u64) -> Result<(String, Strin
 
     let result = timeout(
         std::time::Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("mpremote").args(args).output(),
+        crate::util::hidden_async_command("mpremote").args(args).output(),
     )
     .await;
 

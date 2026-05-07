@@ -90,7 +90,7 @@ impl RuntimeAdapter for DockerRuntime {
         command: &str,
         workspace_dir: &Path,
     ) -> anyhow::Result<tokio::process::Command> {
-        let mut process = tokio::process::Command::new("docker");
+        let mut process = crate::util::hidden_async_command("docker");
         process
             .arg("run")
             .arg("--rm")

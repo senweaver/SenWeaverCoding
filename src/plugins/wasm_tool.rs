@@ -77,7 +77,7 @@ impl Tool for WasmTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let input = serde_json::to_string(&args)?;
 
-        match std::process::Command::new("wasmtime")
+        match crate::util::hidden_sync_command("wasmtime")
             .args(["run", "--invoke", &self.function_name, &self.plugin_name])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

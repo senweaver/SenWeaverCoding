@@ -77,7 +77,7 @@ impl BrowserDelegateTool {
     }
 
     fn build_command(&self, task: &str, url: Option<&str>) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(&self.config.cli_binary);
+        let mut cmd = crate::util::hidden_async_command(&self.config.cli_binary);
 
         cmd.arg("--print");
 

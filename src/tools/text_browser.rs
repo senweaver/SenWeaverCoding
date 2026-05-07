@@ -64,7 +64,7 @@ impl TextBrowserTool {
 
     async fn detect_browser() -> Option<String> {
         for browser in SUPPORTED_BROWSERS {
-            if let Ok(output) = tokio::process::Command::new("which")
+            if let Ok(output) = crate::util::hidden_async_command("which")
                 .arg(browser)
                 .output()
                 .await
@@ -88,7 +88,7 @@ impl TextBrowserTool {
                 );
             }
 
-            let installed = tokio::process::Command::new("which")
+            let installed = crate::util::hidden_async_command("which")
                 .arg(&browser)
                 .output()
                 .await
@@ -103,7 +103,7 @@ impl TextBrowserTool {
         if let Some(ref preferred) = self.preferred_browser {
             let preferred = preferred.trim().to_lowercase();
             if SUPPORTED_BROWSERS.contains(&preferred.as_str()) {
-                let installed = tokio::process::Command::new("which")
+                let installed = crate::util::hidden_async_command("which")
                     .arg(&preferred)
                     .output()
                     .await
@@ -219,7 +219,7 @@ impl Tool for TextBrowserTool {
 
         let result = tokio::time::timeout(
             timeout,
-            tokio::process::Command::new(&browser)
+            crate::util::hidden_async_command(&browser)
                 .args(&dump_args)
                 .output(),
         )

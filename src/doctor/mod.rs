@@ -796,7 +796,7 @@ fn check_file_exists(
 }
 
 fn disk_available_mb(path: &Path) -> Option<u64> {
-    let output = std::process::Command::new("df")
+    let output = crate::util::hidden_sync_command("df")
         .arg("-m")
         .arg(path)
         .output()
@@ -1005,7 +1005,7 @@ fn check_cli_tools(items: &mut Vec<DiagItem>) {
 }
 
 fn check_command_available(cmd: &str, args: &[&str], cat: &'static str, items: &mut Vec<DiagItem>) {
-    match std::process::Command::new(cmd)
+    match crate::util::hidden_sync_command(cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -842,7 +842,7 @@ impl Channel for MatrixChannel {
                 .replace(['*', '`'], "")
                 .replace("# ", "");
 
-            let tts_ok = tokio::process::Command::new("edge-tts")
+            let tts_ok = crate::util::hidden_async_command("edge-tts")
                 .arg("--text")
                 .arg(&tts_text)
                 .arg("--write-media")

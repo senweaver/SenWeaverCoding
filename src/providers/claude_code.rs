@@ -38,7 +38,6 @@ use crate::providers::traits::{ChatMessage, ChatRequest, ChatResponse, Provider,
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 pub const CLAUDE_CODE_PATH_ENV: &str = "CLAUDE_CODE_PATH";
@@ -121,7 +120,7 @@ impl ClaudeCodeProvider {
     }
 
     async fn invoke_cli(&self, message: &str, model: &str) -> anyhow::Result<String> {
-        let mut cmd = Command::new(&self.binary_path);
+        let mut cmd = crate::util::hidden_async_command(&self.binary_path);
         cmd.arg("--print");
 
         if Self::should_forward_model(model) {

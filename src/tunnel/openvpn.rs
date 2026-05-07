@@ -4,8 +4,6 @@
 use super::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
 use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::Command;
-
 pub struct OpenVpnTunnel {
     config_file: String,
     auth_file: Option<String>,
@@ -61,7 +59,7 @@ impl Tunnel for OpenVpnTunnel {
 
         let args = self.build_args();
 
-        let mut child = Command::new("openvpn")
+        let mut child = crate::util::hidden_async_command("openvpn")
             .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())

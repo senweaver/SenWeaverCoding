@@ -645,7 +645,7 @@ impl Tool for IncrementalOptimizeTool {
 
                     let result = tokio::time::timeout(
                         std::time::Duration::from_secs(120),
-                        tokio::process::Command::new(shell)
+                        crate::util::hidden_async_command(shell)
                             .args([shell_arg, cmd])
                             .current_dir(&self.project_workspace())
                             .env_clear()

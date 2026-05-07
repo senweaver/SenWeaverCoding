@@ -14,7 +14,7 @@ const CHIP: &str = "STM32F401RETx";
 const TARGET: &str = "thumbv7em-none-eabihf";
 
 pub fn probe_rs_available() -> bool {
-    Command::new("probe-rs")
+    crate::util::hidden_sync_command("probe-rs")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -40,7 +40,7 @@ pub fn flash_nucleo_firmware() -> Result<()> {
     }
 
     println!("Building SenWeaverCoding Nucleo firmware...");
-    let build = Command::new("cargo")
+    let build = crate::util::hidden_sync_command("cargo")
         .args(["build", "--release", "--target", TARGET])
         .current_dir(&firmware_dir)
         .output()
@@ -62,7 +62,7 @@ pub fn flash_nucleo_firmware() -> Result<()> {
     }
 
     println!("Flashing to Nucleo-F401RE (connect via USB)...");
-    let flash = Command::new("probe-rs")
+    let flash = crate::util::hidden_sync_command("probe-rs")
         .args([
             "run",
             "--chip",

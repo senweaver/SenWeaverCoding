@@ -80,7 +80,7 @@ async fn run_shell_command(
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
     let shell_arg = if cfg!(windows) { "/C" } else { "-c" };
 
-    let mut child = Command::new(shell)
+    let mut child = crate::util::hidden_async_command(shell)
         .arg(shell_arg)
         .arg(command)
         .current_dir(cwd)

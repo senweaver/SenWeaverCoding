@@ -130,7 +130,7 @@ impl Tool for SkillShellTool {
             });
         }
 
-        let mut cmd = tokio::process::Command::new("sh");
+        let mut cmd = crate::util::hidden_async_command("sh");
         cmd.arg("-c").arg(&command);
         cmd.current_dir(self.security.workspace_dir());
         cmd.env_clear();

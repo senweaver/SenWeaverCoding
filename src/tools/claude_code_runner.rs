@@ -9,8 +9,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::process::Command;
-
 const SAFE_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
 ];
@@ -207,7 +205,7 @@ impl Tool for ClaudeCodeRunnerTool {
         }
         let _ = write!(env_exports, "CLAUDE_CODE_HOOK_URL={} ", &hook_url);
 
-        let create_result = Command::new("tmux")
+        let create_result = crate::util::hidden_async_command("tmux")
             .args(["new-session", "-d", "-s", &session_name])
             .arg("-c")
             .arg(work_dir.to_str().unwrap_or("."))
@@ -245,14 +243,14 @@ impl Tool for ClaudeCodeRunnerTool {
                 .join(" ")
         );
 
-        let send_result = Command::new("tmux")
+        let send_result = crate::util::hidden_async_command("tmux")
             .args(["send-keys", "-t", &session_name, &full_command, "Enter"])
             .output()
             .await;
 
         if let Err(e) = send_result {
 
-            let _ = Command::new("tmux")
+            let _ = crate::util::hidden_async_command("tmux")
                 .args(["kill-session", "-t", &session_name])
                 .output()
                 .await;
@@ -269,7 +267,7 @@ impl Tool for ClaudeCodeRunnerTool {
             format!("tools.claude_code_runner.ttl_cleanup.{}", session_name),
             async move {
                 tokio::time::sleep(std::time::Duration::from_secs(ttl)).await;
-                let _ = Command::new("tmux")
+                let _ = crate::util::hidden_async_command("tmux")
                     .args(["kill-session", "-t", &cleanup_session])
                     .output()
                     .await;

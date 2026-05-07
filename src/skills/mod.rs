@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use zip::ZipArchive;
@@ -526,7 +525,7 @@ fn clone_open_skills_repo(repo_dir: &Path) -> bool {
         }
     }
 
-    let output = Command::new("git")
+    let output = crate::util::hidden_sync_command("git")
         .args(["clone", "--depth", "1", OPEN_SKILLS_REPO_URL])
         .arg(repo_dir)
         .output();
@@ -554,7 +553,7 @@ fn pull_open_skills_repo(repo_dir: &Path) -> bool {
         return true;
     }
 
-    let output = Command::new("git")
+    let output = crate::util::hidden_sync_command("git")
         .arg("-C")
         .arg(repo_dir)
         .args(["pull", "--ff-only"])
@@ -1278,7 +1277,7 @@ fn install_git_skill_source(
     allow_scripts: bool,
 ) -> Result<(PathBuf, usize)> {
     let before = snapshot_skill_children(skills_path)?;
-    let output = std::process::Command::new("git")
+    let output = crate::util::hidden_sync_command("git")
         .args(["clone", "--depth", "1", source])
         .current_dir(skills_path)
         .output()?;

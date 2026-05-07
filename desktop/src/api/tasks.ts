@@ -5,6 +5,20 @@ type TasksResponse = { tasks: CronTask[] }
 type TaskResponse = { task: CronTask }
 type RunsResponse = { runs: TaskRun[] }
 
+type RunWire = Partial<TaskRun> & {
+  endedAt?: string
+  summary?: string
+}
+
+function normalizeRun(r: RunWire): TaskRun {
+  const base = r as TaskRun
+  return {
+    ...base,
+    completedAt: base.completedAt ?? r.endedAt,
+    output: base.output ?? r.summary,
+  }
+}
+
 export const tasksApi = {
   list() {
     return api.get<TasksResponse>('/api/scheduled-tasks')
@@ -26,11 +40,13 @@ export const tasksApi = {
     return api.post<{ ok: true }>(`/api/scheduled-tasks/${id}/run`, {})
   },
 
-  getRecentRuns(limit = 50) {
-    return api.get<RunsResponse>(`/api/scheduled-tasks/runs?limit=${limit}`)
+  async getRecentRuns(limit = 50) {
+    const res = await api.get<RunsResponse>(`/api/scheduled-tasks/runs?limit=${limit}`)
+    return { runs: res.runs.map((x) => normalizeRun(x as RunWire)) }
   },
 
-  getTaskRuns(taskId: string) {
-    return api.get<RunsResponse>(`/api/scheduled-tasks/${taskId}/runs`)
+  async getTaskRuns(taskId: string) {
+    const res = await api.get<RunsResponse>(`/api/scheduled-tasks/${taskId}/runs`)
+    return { runs: res.runs.map((x) => normalizeRun(x as RunWire)) }
   },
 }

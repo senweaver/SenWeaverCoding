@@ -414,9 +414,42 @@ impl AppState {
 pub async fn run_gateway(
     host: &str,
     port: u16,
-    mut config: Config,
+    config: Config,
     prebound: Option<tokio::net::TcpListener>,
 ) -> Result<()> {
+    run_gateway_inner(host, port, config, prebound, false).await
+}
+
+pub async fn run_gateway_with_supervisors(
+    host: &str,
+    port: u16,
+    config: Config,
+    prebound: Option<tokio::net::TcpListener>,
+) -> Result<()> {
+    run_gateway_inner(host, port, config, prebound, true).await
+}
+
+async fn run_gateway_inner(
+    host: &str,
+    port: u16,
+    mut config: Config,
+    prebound: Option<tokio::net::TcpListener>,
+    with_scheduler: bool,
+) -> Result<()> {
+    if with_scheduler && config.cron.enabled {
+        let scheduler_cfg = config.clone();
+        crate::runtime::task_manager::spawn_supervised(
+            "gateway.cron_scheduler",
+            async move {
+                if let Err(e) = crate::cron::scheduler::run(scheduler_cfg).await {
+                    tracing::warn!("cron scheduler exited with error: {e}");
+                }
+            },
+        );
+        tracing::info!("Embedded cron scheduler started alongside gateway");
+    } else if with_scheduler {
+        tracing::info!("Cron disabled; embedded scheduler not started");
+    }
 
     if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
     {

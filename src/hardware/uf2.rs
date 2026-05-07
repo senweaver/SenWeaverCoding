@@ -123,7 +123,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
 
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(CP_TIMEOUT_SECS),
-            tokio::process::Command::new("cp")
+            crate::util::hidden_async_command("cp")
                 .arg(&src_str)
                 .arg(&dst_str)
                 .output(),
@@ -151,7 +151,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
 
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(SUDO_CP_TIMEOUT_SECS),
-            tokio::process::Command::new("sudo")
+            crate::util::hidden_async_command("sudo")
                 .args(["-n", "cp", &src_str, &dst_str])
                 .output(),
         )
@@ -227,7 +227,7 @@ pub async fn deploy_main_py(port: &Path, firmware_dir: &Path) -> Result<()> {
         "deploying main.py via mpremote"
     );
 
-    let out = tokio::process::Command::new("mpremote")
+    let out = crate::util::hidden_async_command("mpremote")
         .args([
             "connect", &port_str, "cp", &src_str, ":main.py", "+", "reset",
         ])
