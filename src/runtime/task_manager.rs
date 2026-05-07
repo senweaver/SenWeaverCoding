@@ -159,3 +159,23 @@ pub fn snapshot() -> Vec<TaskInfo> {
 pub fn live_count() -> usize {
     REGISTRY.lock().len()
 }
+
+static PROCESS_START_AT: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> =
+    std::sync::OnceLock::new();
+static PROCESS_START_INSTANT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub fn ensure_process_start_recorded() {
+    PROCESS_START_AT.get_or_init(chrono::Utc::now);
+    PROCESS_START_INSTANT.get_or_init(Instant::now);
+}
+
+pub fn process_started_at() -> chrono::DateTime<chrono::Utc> {
+    *PROCESS_START_AT.get_or_init(chrono::Utc::now)
+}
+
+pub fn process_uptime_secs() -> u64 {
+    PROCESS_START_INSTANT
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs()
+}

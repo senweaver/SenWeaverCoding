@@ -1139,6 +1139,7 @@ enum TokensFiltersCommands {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
+    crate::runtime::task_manager::ensure_process_start_recorded();
 
     if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
         eprintln!("Warning: Failed to install default crypto provider: {e:?}");

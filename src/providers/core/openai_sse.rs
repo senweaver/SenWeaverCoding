@@ -115,11 +115,37 @@ pub struct StreamDelta {
     #[serde(default)]
     pub content: Option<String>,
 
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "reasoning",
+        deserialize_with = "deserialize_reasoning_content"
+    )]
     pub reasoning_content: Option<String>,
 
     #[serde(default)]
     pub tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+fn deserialize_reasoning_content<'de, D>(de: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = serde_json::Value::deserialize(de)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(text) => Ok(Some(text)),
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                return Ok(Some(text.to_string()));
+            }
+            if let Some(text) = map.get("content").and_then(|v| v.as_str()) {
+                return Ok(Some(text.to_string()));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
 }
 
 #[derive(Debug, Deserialize)]

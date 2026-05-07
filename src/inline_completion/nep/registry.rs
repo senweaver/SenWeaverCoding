@@ -108,6 +108,7 @@ pub fn default_registry(config: &crate::config::Config) -> Arc<NepRegistry> {
             extra_headers: config.extra_headers.clone(),
             api_path: config.api_path.clone(),
             provider_max_tokens: config.provider_max_tokens,
+            model_context_windows: config.model_context_windows.clone(),
         };
         if let Ok(boxed) = crate::providers::create_provider_with_options(
             &provider_name,

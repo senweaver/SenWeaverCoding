@@ -179,6 +179,8 @@ struct NativeContentIn {
     name: Option<String>,
     #[serde(default)]
     input: Option<serde_json::Value>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 impl AnthropicProvider {
@@ -519,6 +521,7 @@ impl AnthropicProvider {
     fn parse_native_response(response: NativeChatResponse) -> ProviderChatResponse {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut thinking_parts: Vec<String> = Vec::new();
 
         let usage = response.usage.map(|u| {
             let cached = u.cache_read_input_tokens;
@@ -541,6 +544,11 @@ impl AnthropicProvider {
                         }
                     }
                 }
+                "thinking" => {
+                    if let Some(t) = block.thinking.filter(|s| !s.is_empty()) {
+                        thinking_parts.push(t);
+                    }
+                }
                 "tool_use" => {
                     let name = block.name.unwrap_or_default();
                     if name.is_empty() {
@@ -559,6 +567,12 @@ impl AnthropicProvider {
             }
         }
 
+        let reasoning_content = if thinking_parts.is_empty() {
+            None
+        } else {
+            Some(thinking_parts.join("\n"))
+        };
+
         ProviderChatResponse {
             text: if text_parts.is_empty() {
                 None
@@ -567,7 +581,7 @@ impl AnthropicProvider {
             },
             tool_calls,
             usage,
-            reasoning_content: None,
+            reasoning_content,
         }
     }
 
@@ -664,6 +678,22 @@ impl AnthropicProvider {
                                             .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(
                                                 text.to_string(),
                                             ))))
+                                            .await
+                                            .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(text) =
+                                    delta.get("thinking").and_then(|t| t.as_str())
+                                {
+                                    if !text.is_empty()
+                                        && tx
+                                            .send(Ok(StreamEvent::TextDelta(
+                                                StreamChunk::reasoning(text.to_string()),
+                                            )))
                                             .await
                                             .is_err()
                                     {

@@ -20,6 +20,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     pub(crate) name: String,
     pub(crate) base_url: String,
@@ -43,6 +44,8 @@ pub struct OpenAiCompatibleProvider {
     api_path: Option<String>,
 
     max_tokens: Option<u32>,
+
+    model_context_windows: std::collections::HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +175,7 @@ impl OpenAiCompatibleProvider {
             reasoning_effort: None,
             api_path: None,
             max_tokens: None,
+            model_context_windows: std::collections::HashMap::new(),
         }
     }
 
@@ -206,6 +210,29 @@ impl OpenAiCompatibleProvider {
     pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
         self
+    }
+
+    pub fn with_model_context_windows(
+        mut self,
+        windows: std::collections::HashMap<String, u32>,
+    ) -> Self {
+        self.model_context_windows = windows;
+        self
+    }
+
+    fn context_window_for(&self, model: &str) -> usize {
+        if let Some(value) = self.model_context_windows.get(model).copied() {
+            return value as usize;
+        }
+        let id = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        if let Some(value) = self.model_context_windows.get(id.as_str()).copied() {
+            return value as usize;
+        }
+        crate::constants::api_limits::context_window_for_model(model) as usize
     }
 
     fn flatten_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -381,6 +408,132 @@ impl OpenAiCompatibleProvider {
             .then(|| self.reasoning_effort.clone())
             .flatten()
     }
+
+    fn thinking_param_for_model(&self, model: &str) -> Option<serde_json::Value> {
+        if self.is_thinking_blacklisted(model) {
+            return None;
+        }
+        Some(serde_json::json!({
+            "type": "enabled",
+        }))
+    }
+
+    fn thinking_blacklist_key(&self, model: &str) -> String {
+        format!(
+            "{}::{}",
+            self.name.to_ascii_lowercase(),
+            model.to_ascii_lowercase()
+        )
+    }
+
+    fn is_thinking_blacklisted(&self, model: &str) -> bool {
+        let key = self.thinking_blacklist_key(model);
+        let store = thinking_blacklist_store();
+        store
+            .read()
+            .map(|set| set.contains(&key))
+            .unwrap_or(false)
+    }
+
+    fn blacklist_thinking(&self, model: &str) {
+        let key = self.thinking_blacklist_key(model);
+        let store = thinking_blacklist_store();
+        if let Ok(mut set) = store.write() {
+            set.insert(key);
+        }
+    }
+
+    fn is_thinking_param_unsupported(status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let lower = error.to_lowercase();
+        let mentions_thinking = lower.contains("thinking") || lower.contains("reasoning");
+        if !mentions_thinking {
+            return false;
+        }
+        [
+            "unknown parameter",
+            "unsupported parameter",
+            "unrecognized field",
+            "unrecognized parameter",
+            "unknown field",
+            "invalid parameter",
+            "invalid field",
+            "not supported",
+            "does not support",
+            "extra field",
+            "extra fields not permitted",
+            "unexpected field",
+            "unexpected parameter",
+            "additional properties",
+            "no additional properties",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint))
+    }
+
+    fn reserved_output_tokens(&self, model: &str) -> usize {
+        let window = self.context_window_for(model);
+        let configured = self.max_tokens.map(|v| v as usize);
+        let default_reserve = (window / 8).clamp(512, 4096);
+        let raw = configured.unwrap_or(default_reserve);
+        let max_reserve = window.saturating_sub(512).max(512);
+        raw.clamp(256, max_reserve)
+    }
+
+    fn adjust_temperature_for_model(model: &str, requested: f64) -> f64 {
+        if Self::model_requires_unit_temperature(model) {
+            1.0
+        } else {
+            requested
+        }
+    }
+
+    fn model_requires_unit_temperature(model: &str) -> bool {
+        let id = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        id.starts_with("kimi-k2")
+            || id.starts_with("moonshotai/kimi-k2")
+            || id.starts_with("kimi-thinking")
+    }
+
+    fn model_supports_native_tools(model: &str) -> bool {
+        let id = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+
+        let denylist_prefixes: [&str; 6] = [
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k",
+            "moonshot-v1-auto",
+            "moonshotai/moonshot-v1",
+            "qwen-72b",
+        ];
+        if denylist_prefixes.iter().any(|p| id.starts_with(p)) {
+            return false;
+        }
+
+        let denylist_substrings: [&str; 3] = [
+            "-instruct-v0.1",
+            "-instruct-v0.2",
+            "-no-tools",
+        ];
+        if denylist_substrings.iter().any(|p| id.contains(p)) {
+            return false;
+        }
+
+        true
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -395,6 +548,8 @@ struct ApiChatRequest {
     stream_options: Option<StreamOptionsField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -456,7 +611,7 @@ struct Choice {
 }
 
 const REASONING_PLACEHOLDER: &str =
-    "(chain-of-thought unavailable for this turn — placeholder injected to satisfy thinking-mode round-trip requirements)";
+    "(chain-of-thought unavailable for this turn 鈥?placeholder injected to satisfy thinking-mode round-trip requirements)";
 
 fn strip_think_tags(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -483,7 +638,7 @@ struct ResponseMessage {
     #[serde(default)]
     content: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCall>>,
@@ -601,6 +756,8 @@ struct NativeChatRequest {
     stream_options: Option<StreamOptionsField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1290,6 +1447,29 @@ impl OpenAiCompatibleProvider {
             "tool_choice",
             "tool call validation failed",
             "was not in request",
+            "tokenization failed",
+            "invalid request: tokenization",
+            "tokenizer error",
+            "tokenizer failed",
+            "invalid tools",
+            "invalid tool schema",
+            "invalid function schema",
+            "invalid `tools`",
+            "invalid 'tools'",
+            "tool definition invalid",
+            "tools schema",
+            "function schema",
+            "json schema validation failed",
+            "schema validation failed",
+            "invalid messages",
+            "invalid `messages`",
+            "messages content type",
+            "content must be a string",
+            "image_url is not supported",
+            "vision is not supported",
+            "multimodal not supported",
+            "this model does not support multimodal",
+            "model does not support image",
         ]
         .iter()
         .any(|hint| lower.contains(hint))
@@ -1348,10 +1528,11 @@ impl Provider for OpenAiCompatibleProvider {
         let request = ApiChatRequest {
             model: model.to_string(),
             messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(false),
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_param_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -1399,6 +1580,26 @@ impl Provider for OpenAiCompatibleProvider {
             let status = response.status();
             let error = response.text().await?;
             let sanitized = super::sanitize_api_error(&error);
+
+            if !self.is_thinking_blacklisted(model)
+                && Self::is_thinking_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.compatible",
+                    provider = %self.name,
+                    model,
+                    status = %status,
+                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
+                );
+                self.blacklist_thinking(model);
+                return Box::pin(self.chat_with_system(
+                    system_prompt,
+                    message,
+                    model,
+                    temperature,
+                ))
+                .await;
+            }
 
             if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
                 return self
@@ -1453,10 +1654,17 @@ impl Provider for OpenAiCompatibleProvider {
             )
         })?;
 
+        let sanitized_input = super::traits::sanitize_messages_for_legacy(messages);
+        let budgeted_input = super::traits::enforce_context_budget_with_window(
+            sanitized_input,
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
         let effective_messages = if self.merge_system_into_user {
-            Self::flatten_system_messages(messages)
+            Self::flatten_system_messages(&budgeted_input)
         } else {
-            messages.to_vec()
+            budgeted_input
         };
         let api_messages: Vec<Message> = effective_messages
             .iter()
@@ -1473,10 +1681,11 @@ impl Provider for OpenAiCompatibleProvider {
         let request = ApiChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(false),
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_param_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -1510,6 +1719,22 @@ impl Provider for OpenAiCompatibleProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            let sanitized = super::sanitize_api_error(&error_body);
+
+            if !self.is_thinking_blacklisted(model)
+                && Self::is_thinking_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.compatible",
+                    provider = %self.name,
+                    model,
+                    status = %status,
+                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
+                );
+                self.blacklist_thinking(model);
+                return Box::pin(self.chat_with_history(messages, model, temperature)).await;
+            }
 
             if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
                 return self
@@ -1523,7 +1748,7 @@ impl Provider for OpenAiCompatibleProvider {
                     });
             }
 
-            return Err(super::api_error(&self.name, response).await);
+            anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
         }
 
         let body = response.text().await?;
@@ -1565,11 +1790,17 @@ impl Provider for OpenAiCompatibleProvider {
             )
         })?;
 
-        let effective_messages = if self.merge_system_into_user {
+        let pre_budget = if self.merge_system_into_user {
             Self::flatten_system_messages(messages)
         } else {
             messages.to_vec()
         };
+        let effective_messages = super::traits::enforce_context_budget_native_with_window(
+            pre_budget,
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
         let api_messages: Vec<Message> = effective_messages
             .iter()
             .map(|m| Message {
@@ -1582,23 +1813,45 @@ impl Provider for OpenAiCompatibleProvider {
             })
             .collect();
 
+        let model_supports_native = Self::model_supports_native_tools(model);
+        let has_tools = !tools.is_empty();
+        let allow_native_tools = has_tools && model_supports_native;
+
+        if !model_supports_native {
+            tracing::debug!(
+                target: "providers.compatible",
+                provider = %self.name,
+                model,
+                has_tools,
+                "model is on the legacy/no-tools allowlist; routing through chat_with_history without native tools"
+            );
+            let text = self.chat_with_history(messages, model, temperature).await?;
+            return Ok(ProviderChatResponse {
+                text: Some(text),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            });
+        }
+
         let request = ApiChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(false),
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
-            tool_stream: self.tool_stream_for_tools(!tools.is_empty()),
-            tools: if tools.is_empty() {
-                None
-            } else {
+            thinking: self.thinking_param_for_model(model),
+            tool_stream: self.tool_stream_for_tools(allow_native_tools),
+            tools: if allow_native_tools {
                 Some(tools.to_vec())
-            },
-            tool_choice: if tools.is_empty() {
-                None
             } else {
+                None
+            },
+            tool_choice: if allow_native_tools {
                 Some("auto".to_string())
+            } else {
+                None
             },
             max_tokens: self.max_tokens,
         };
@@ -1626,7 +1879,43 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         if !response.status().is_success() {
-            return Err(super::api_error(&self.name, response).await);
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            let sanitized = super::sanitize_api_error(&error_body);
+
+            if !self.is_thinking_blacklisted(model)
+                && Self::is_thinking_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.compatible",
+                    provider = %self.name,
+                    model,
+                    status = %status,
+                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
+                );
+                self.blacklist_thinking(model);
+                return Box::pin(self.chat_with_tools(messages, tools, model, temperature))
+                    .await;
+            }
+
+            if Self::is_native_tool_schema_unsupported(status, &sanitized) {
+                tracing::warn!(
+                    target: "providers.compatible",
+                    provider = %self.name,
+                    model,
+                    status = %status,
+                    "native tools rejected by upstream ({sanitized}); retrying via chat_with_history"
+                );
+                let text = self.chat_with_history(messages, model, temperature).await?;
+                return Ok(ProviderChatResponse {
+                    text: Some(text),
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning_content: None,
+                });
+            }
+
+            anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
         }
 
         let body = response.text().await?;
@@ -1683,28 +1972,72 @@ impl Provider for OpenAiCompatibleProvider {
             )
         })?;
 
-        let tools = Self::convert_tool_specs(request.tools);
-        let effective_messages = if self.merge_system_into_user {
+        let model_supports_native = Self::model_supports_native_tools(model);
+        let has_tools = request.tools.is_some_and(|t| !t.is_empty());
+        let allow_native_tools = has_tools && model_supports_native;
+
+        if !model_supports_native {
+            tracing::debug!(
+                target: "providers.compatible",
+                provider = %self.name,
+                model,
+                has_tools,
+                "model is on the legacy/no-tools allowlist; routing chat() through chat_with_history"
+            );
+            let guided = if has_tools {
+                Self::with_prompt_guided_tool_instructions(request.messages, request.tools)
+            } else {
+                request.messages.to_vec()
+            };
+            let text = self
+                .chat_with_history(&guided, model, temperature)
+                .await?;
+            return Ok(ProviderChatResponse {
+                text: Some(text),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            });
+        }
+
+        let tools = if allow_native_tools {
+            Self::convert_tool_specs(request.tools)
+        } else {
+            None
+        };
+        let pre_budget = if self.merge_system_into_user {
             Self::flatten_system_messages(request.messages)
         } else {
             request.messages.to_vec()
         };
-        let native_request = NativeChatRequest {
+        let effective_messages = super::traits::enforce_context_budget_native_with_window(
+            pre_budget,
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
+        let mut native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages_for_native(
                 &effective_messages,
                 !self.merge_system_into_user,
             ),
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(false),
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_param_for_model(model),
             tool_stream: self
                 .tool_stream_for_tools(tools.as_ref().is_some_and(|tools| !tools.is_empty())),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
         };
+        if native_request.thinking.is_none() {
+            for message in native_request.messages.iter_mut() {
+                message.reasoning_content = None;
+            }
+        }
 
         let url = self.chat_completions_url();
         let response = match self
@@ -1744,6 +2077,20 @@ impl Provider for OpenAiCompatibleProvider {
             let status = response.status();
             let error = response.text().await?;
             let sanitized = super::sanitize_api_error(&error);
+
+            if !self.is_thinking_blacklisted(model)
+                && Self::is_thinking_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.compatible",
+                    provider = %self.name,
+                    model,
+                    status = %status,
+                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
+                );
+                self.blacklist_thinking(model);
+                return Box::pin(self.chat(request, model, temperature)).await;
+            }
 
             if Self::is_native_tool_schema_unsupported(status, &sanitized) {
                 let fallback_messages =
@@ -1836,25 +2183,69 @@ impl Provider for OpenAiCompatibleProvider {
             }
         };
 
-        let effective_messages = if self.merge_system_into_user {
-            Self::flatten_system_messages(request.messages)
+        let raw_messages_owned = request.messages.to_vec();
+        let raw_tools_owned: Option<Vec<crate::tools::ToolSpec>> =
+            request.tools.map(|t| t.to_vec());
+
+        let model_supports_native = Self::model_supports_native_tools(model);
+        let has_tools = raw_tools_owned.as_ref().is_some_and(|t| !t.is_empty());
+        let allow_native_tools = has_tools && model_supports_native;
+
+        let mut effective_messages = if self.merge_system_into_user {
+            Self::flatten_system_messages(&raw_messages_owned)
         } else {
-            request.messages.to_vec()
+            raw_messages_owned.clone()
         };
 
-        let tools = Self::convert_tool_specs(request.tools);
+        if !model_supports_native && has_tools {
+            effective_messages = Self::with_prompt_guided_tool_instructions(
+                &effective_messages,
+                raw_tools_owned.as_deref(),
+            );
+        }
 
-        let use_native_wire = self.native_tool_calling;
+        if !allow_native_tools {
+            effective_messages = super::traits::sanitize_messages_for_legacy(&effective_messages);
+            effective_messages = super::traits::enforce_context_budget_with_window(
+                effective_messages,
+                model,
+                self.reserved_output_tokens(model),
+                Some(self.context_window_for(model)),
+            );
+        } else {
+            effective_messages = super::traits::enforce_context_budget_native_with_window(
+                effective_messages,
+                model,
+                self.reserved_output_tokens(model),
+                Some(self.context_window_for(model)),
+            );
+        }
+
+        let tools = if allow_native_tools {
+            Self::convert_tool_specs(raw_tools_owned.as_deref())
+        } else {
+            None
+        };
+
+        let use_native_wire = self.native_tool_calling && allow_native_tools;
         let payload = if use_native_wire {
             let tool_list_non_empty = tools.as_ref().is_some_and(|specs| !specs.is_empty());
+            let mut native_messages = Self::convert_messages_for_native(
+                &effective_messages,
+                !self.merge_system_into_user,
+            );
+            let thinking_value = self.thinking_param_for_model(model);
+            if thinking_value.is_none() {
+                for message in native_messages.iter_mut() {
+                    message.reasoning_content = None;
+                }
+            }
             serde_json::to_value(NativeChatRequest {
                 model: model.to_string(),
-                messages: Self::convert_messages_for_native(
-                    &effective_messages,
-                    !self.merge_system_into_user,
-                ),
-                temperature,
+                messages: native_messages,
+                temperature: Self::adjust_temperature_for_model(model, temperature),
                 reasoning_effort: self.reasoning_effort_for_model(model),
+                thinking: thinking_value,
                 tool_stream: if options.enabled {
                     self.tool_stream_for_tools(tool_list_non_empty)
                 } else {
@@ -1886,8 +2277,9 @@ impl Provider for OpenAiCompatibleProvider {
             serde_json::to_value(ApiChatRequest {
                 model: model.to_string(),
                 messages,
-                temperature,
+                temperature: Self::adjust_temperature_for_model(model, temperature),
                 reasoning_effort: self.reasoning_effort.clone(),
+                thinking: self.thinking_param_for_model(model),
                 tool_stream: if options.enabled { Some(true) } else { None },
                 stream: Some(options.enabled),
                 stream_options: if options.enabled {
@@ -1912,6 +2304,14 @@ impl Provider for OpenAiCompatibleProvider {
         let client = self.http_client();
         let auth_header = self.auth_header.clone();
         let count_tokens = options.count_tokens;
+        let provider_clone = self.clone();
+        let model_owned = model.to_string();
+        let fallback_messages = effective_messages.clone();
+        let fallback_tools = raw_tools_owned.clone();
+        let fallback_temperature = temperature;
+        let thinking_retry_messages = raw_messages_owned.clone();
+        let thinking_retry_tools = raw_tools_owned.clone();
+        let thinking_retry_options = options;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
@@ -1939,12 +2339,92 @@ impl Provider for OpenAiCompatibleProvider {
 
                 if !response.status().is_success() {
                     let status = response.status();
-                    let error = match response.text().await {
+                    let error_body = match response.text().await {
                         Ok(text) => text,
                         Err(_) => format!("HTTP error: {}", status),
                     };
+                    let sanitized = super::sanitize_api_error(&error_body);
+
+                    if !provider_clone.is_thinking_blacklisted(&model_owned)
+                        && Self::is_thinking_param_unsupported(status, &sanitized)
+                    {
+                        tracing::warn!(
+                            target: "providers.compatible.stream",
+                            provider = %provider_clone.name,
+                            model = %model_owned,
+                            status = %status,
+                            "thinking parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without thinking"
+                        );
+                        provider_clone.blacklist_thinking(&model_owned);
+                        let retry_request = crate::providers::traits::ChatRequest {
+                            messages: thinking_retry_messages.as_slice(),
+                            tools: thinking_retry_tools.as_deref(),
+                        };
+                        let mut retry_stream = provider_clone.stream_chat(
+                            retry_request,
+                            &model_owned,
+                            fallback_temperature,
+                            thinking_retry_options,
+                        );
+                        while let Some(event) = retry_stream.next().await {
+                            if tx.send(event).await.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+
+                    if Self::is_native_tool_schema_unsupported(status, &sanitized) {
+                        tracing::warn!(
+                            target: "providers.compatible.stream",
+                            provider = %provider_clone.name,
+                            model = %model_owned,
+                            status = %status,
+                            "stream rejected by upstream ({sanitized}); falling back to non-streaming chat_with_history"
+                        );
+                        let guided = Self::with_prompt_guided_tool_instructions(
+                            &fallback_messages,
+                            fallback_tools.as_deref(),
+                        );
+                        match provider_clone
+                            .chat_with_history(
+                                &guided,
+                                &model_owned,
+                                fallback_temperature,
+                            )
+                            .await
+                        {
+                            Ok(text) => {
+                                if !text.is_empty() {
+                                    let chunk = StreamChunk {
+                                        delta: text,
+                                        is_final: false,
+                                        token_count: 0,
+                                        reasoning: None,
+                                    };
+                                    let _ = tx
+                                        .send(Ok(StreamEvent::TextDelta(chunk)))
+                                        .await;
+                                }
+                                let _ = tx.send(Ok(StreamEvent::Final)).await;
+                            }
+                            Err(fallback_err) => {
+                                let _ = tx
+                                    .send(Err(StreamError::Provider(format!(
+                                        "{}: {} (fallback chat_with_history failed: {fallback_err})",
+                                        status, sanitized
+                                    ))))
+                                    .await;
+                            }
+                        }
+                        return;
+                    }
+
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
+                        .send(Err(StreamError::Provider(format!(
+                            "{}: {}",
+                            status, sanitized
+                        ))))
                         .await;
                     return;
                 }
@@ -2001,7 +2481,7 @@ impl Provider for OpenAiCompatibleProvider {
         let request = ApiChatRequest {
             model: model.to_string(),
             messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(options.enabled),
             stream_options: if options.enabled {
                 Some(StreamOptionsField { include_usage: true })
@@ -2009,6 +2489,7 @@ impl Provider for OpenAiCompatibleProvider {
                 None
             },
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_param_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -2020,6 +2501,13 @@ impl Provider for OpenAiCompatibleProvider {
         let auth_header = self.auth_header.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        let provider_clone = self.clone();
+        let model_owned = model.to_string();
+        let system_prompt_owned = system_prompt.map(ToString::to_string);
+        let message_owned = message.to_string();
+        let temperature_owned = temperature;
+        let options_owned = options;
 
         let _ = crate::runtime::spawn_supervised("providers.compatible.chat_stream", async move {
 
@@ -2049,6 +2537,34 @@ impl Provider for OpenAiCompatibleProvider {
                     Ok(e) => e,
                     Err(_) => format!("HTTP error: {}", status),
                 };
+                let sanitized = super::sanitize_api_error(&error);
+
+                if !provider_clone.is_thinking_blacklisted(&model_owned)
+                    && Self::is_thinking_param_unsupported(status, &sanitized)
+                {
+                    tracing::warn!(
+                        target: "providers.compatible.stream",
+                        provider = %provider_clone.name,
+                        model = %model_owned,
+                        status = %status,
+                        "thinking parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without thinking"
+                    );
+                    provider_clone.blacklist_thinking(&model_owned);
+                    let mut retry_stream = provider_clone.stream_chat_with_system(
+                        system_prompt_owned.as_deref(),
+                        &message_owned,
+                        &model_owned,
+                        temperature_owned,
+                        options_owned,
+                    );
+                    while let Some(chunk) = retry_stream.next().await {
+                        if tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    return;
+                }
+
                 let _ = tx
                     .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
                     .await;
@@ -2090,10 +2606,17 @@ impl Provider for OpenAiCompatibleProvider {
             }
         };
 
+        let sanitized_input = super::traits::sanitize_messages_for_legacy(messages);
+        let budgeted_input = super::traits::enforce_context_budget_with_window(
+            sanitized_input,
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
         let effective_messages = if self.merge_system_into_user {
-            Self::flatten_system_messages(messages)
+            Self::flatten_system_messages(&budgeted_input)
         } else {
-            messages.to_vec()
+            budgeted_input
         };
         let api_messages: Vec<Message> = effective_messages
             .iter()
@@ -2110,7 +2633,7 @@ impl Provider for OpenAiCompatibleProvider {
         let request = ApiChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(options.enabled),
             stream_options: if options.enabled {
                 Some(StreamOptionsField { include_usage: true })
@@ -2118,6 +2641,7 @@ impl Provider for OpenAiCompatibleProvider {
                 None
             },
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_param_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -2129,6 +2653,12 @@ impl Provider for OpenAiCompatibleProvider {
         let auth_header = self.auth_header.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        let provider_clone = self.clone();
+        let model_owned = model.to_string();
+        let temperature_owned = temperature;
+        let options_owned = options;
+        let retry_messages: Vec<ChatMessage> = messages.to_vec();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.compatible.stream_chat_with_history",
@@ -2159,6 +2689,33 @@ impl Provider for OpenAiCompatibleProvider {
                         Ok(e) => e,
                         Err(_) => format!("HTTP error: {}", status),
                     };
+                    let sanitized = super::sanitize_api_error(&error);
+
+                    if !provider_clone.is_thinking_blacklisted(&model_owned)
+                        && Self::is_thinking_param_unsupported(status, &sanitized)
+                    {
+                        tracing::warn!(
+                            target: "providers.compatible.stream",
+                            provider = %provider_clone.name,
+                            model = %model_owned,
+                            status = %status,
+                            "thinking parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without thinking"
+                        );
+                        provider_clone.blacklist_thinking(&model_owned);
+                        let mut retry_stream = provider_clone.stream_chat_with_history(
+                            &retry_messages,
+                            &model_owned,
+                            temperature_owned,
+                            options_owned,
+                        );
+                        while let Some(chunk) = retry_stream.next().await {
+                            if tx.send(chunk).await.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+
                     let _ = tx
                         .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
                         .await;
@@ -2191,4 +2748,14 @@ impl Provider for OpenAiCompatibleProvider {
         }
         Ok(())
     }
+}
+
+fn thinking_blacklist_store()
+-> &'static std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| {
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()))
+    })
 }

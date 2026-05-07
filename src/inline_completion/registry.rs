@@ -130,6 +130,7 @@ pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle
     let extra_headers = config.extra_headers.clone();
     let api_path = config.api_path.clone();
     let provider_max_tokens = config.provider_max_tokens;
+    let model_context_windows = config.model_context_windows.clone();
     let temperature = config.default_temperature;
 
     let runtime_options = crate::providers::ProviderRuntimeOptions {
@@ -146,6 +147,7 @@ pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle
         extra_headers,
         api_path,
         provider_max_tokens,
+        model_context_windows,
     };
     let provider = crate::providers::create_provider_with_options(
         &provider_name,

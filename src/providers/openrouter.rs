@@ -15,10 +15,12 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone)]
 pub struct OpenRouterProvider {
     credential: Option<String>,
     timeout_secs: u64,
     max_tokens: Option<u32>,
+    model_context_windows: std::collections::HashMap<String, u32>,
 }
 
 const DEFAULT_OPENROUTER_TIMEOUT_SECS: u64 = 120;
@@ -37,6 +39,9 @@ struct ChatRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +98,9 @@ struct NativeChatRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,7 +171,7 @@ struct NativeResponseMessage {
     #[serde(default)]
     content: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<NativeToolCall>>,
@@ -177,6 +185,7 @@ impl OpenRouterProvider {
                 .filter(|secs| *secs > 0)
                 .unwrap_or(DEFAULT_OPENROUTER_TIMEOUT_SECS),
             max_tokens: None,
+            model_context_windows: std::collections::HashMap::new(),
         }
     }
 
@@ -188,6 +197,208 @@ impl OpenRouterProvider {
     pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
         self
+    }
+
+    pub fn with_model_context_windows(
+        mut self,
+        windows: std::collections::HashMap<String, u32>,
+    ) -> Self {
+        self.model_context_windows = windows;
+        self
+    }
+
+    fn context_window_for(&self, model: &str) -> usize {
+        if let Some(value) = self.model_context_windows.get(model).copied() {
+            return value as usize;
+        }
+        let id = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        if let Some(value) = self.model_context_windows.get(id.as_str()).copied() {
+            return value as usize;
+        }
+        crate::constants::api_limits::context_window_for_model(model) as usize
+    }
+
+    fn reserved_output_tokens(&self, model: &str) -> usize {
+        let window = self.context_window_for(model);
+        let configured = self.max_tokens.map(|v| v as usize);
+        let default_reserve = (window / 8).clamp(512, 4096);
+        let raw = configured.unwrap_or(default_reserve);
+        let max_reserve = window.saturating_sub(512).max(512);
+        raw.clamp(256, max_reserve)
+    }
+
+    fn adjust_temperature_for_model(model: &str, requested: f64) -> f64 {
+        if Self::model_requires_unit_temperature(model) {
+            1.0
+        } else {
+            requested
+        }
+    }
+
+    fn model_requires_unit_temperature(model: &str) -> bool {
+        let id = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        id.starts_with("kimi-k2") || id.starts_with("kimi-thinking")
+    }
+
+    fn reasoning_param_for_model(&self, model: &str) -> Option<serde_json::Value> {
+        if Self::is_reasoning_blacklisted(model) {
+            return None;
+        }
+        Some(serde_json::json!({
+            "enabled": true,
+            "effort": "high",
+        }))
+    }
+
+    fn reasoning_blacklist_key(model: &str) -> String {
+        format!("openrouter::{}", model.to_ascii_lowercase())
+    }
+
+    fn is_reasoning_blacklisted(model: &str) -> bool {
+        let key = Self::reasoning_blacklist_key(model);
+        let store = reasoning_blacklist_store();
+        store
+            .read()
+            .map(|set| set.contains(&key))
+            .unwrap_or(false)
+    }
+
+    fn blacklist_reasoning(model: &str) {
+        let key = Self::reasoning_blacklist_key(model);
+        let store = reasoning_blacklist_store();
+        if let Ok(mut set) = store.write() {
+            set.insert(key);
+        }
+    }
+
+    fn is_reasoning_param_unsupported(status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let lower = error.to_lowercase();
+        let mentions = lower.contains("reasoning") || lower.contains("thinking");
+        if !mentions {
+            return false;
+        }
+        [
+            "unknown parameter",
+            "unsupported parameter",
+            "unrecognized field",
+            "unrecognized parameter",
+            "unknown field",
+            "invalid parameter",
+            "invalid field",
+            "not supported",
+            "does not support",
+            "extra field",
+            "extra fields not permitted",
+            "unexpected field",
+            "unexpected parameter",
+            "additional properties",
+            "no additional properties",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint))
+    }
+
+    fn model_supports_native_tools(model: &str) -> bool {
+        let id = model.to_ascii_lowercase();
+
+        let denylist_substrings: [&str; 8] = [
+            "moonshotai/moonshot-v1",
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k",
+            "moonshot-v1-auto",
+            "qwen-72b",
+            "-instruct-v0.1",
+            "-instruct-v0.2",
+        ];
+
+        !denylist_substrings.iter().any(|p| id.contains(p))
+    }
+
+    fn is_native_tool_schema_unsupported(status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let lower = error.to_lowercase();
+        [
+            "unknown parameter: tools",
+            "unsupported parameter: tools",
+            "unrecognized field `tools`",
+            "does not support tools",
+            "function calling is not supported",
+            "tool_choice",
+            "tool call validation failed",
+            "was not in request",
+            "tokenization failed",
+            "invalid request: tokenization",
+            "tokenizer error",
+            "tokenizer failed",
+            "invalid tools",
+            "invalid tool schema",
+            "invalid function schema",
+            "invalid `tools`",
+            "invalid 'tools'",
+            "tool definition invalid",
+            "tools schema",
+            "function schema",
+            "json schema validation failed",
+            "schema validation failed",
+            "invalid messages",
+            "invalid `messages`",
+            "messages content type",
+            "content must be a string",
+            "image_url is not supported",
+            "vision is not supported",
+            "multimodal not supported",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint))
+    }
+
+    fn with_prompt_guided_tool_instructions(
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+    ) -> Vec<ChatMessage> {
+        let Some(tools) = tools else {
+            return messages.to_vec();
+        };
+        if tools.is_empty() {
+            return messages.to_vec();
+        }
+        let instructions = crate::providers::traits::build_tool_instructions_text(tools);
+        let mut modified = messages.to_vec();
+        if let Some(sys) = modified.iter_mut().find(|m| m.role == "system") {
+            if !sys.content.is_empty() {
+                sys.content.push_str("\n\n");
+            }
+            sys.content.push_str(&instructions);
+        } else {
+            modified.insert(0, ChatMessage::system(instructions));
+        }
+        modified
+    }
+
+    async fn api_error_text(response: reqwest::Response) -> (reqwest::StatusCode, String) {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        (status, body)
     }
 
     fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
@@ -438,10 +649,11 @@ impl Provider for OpenRouterProvider {
         let request = ChatRequest {
             model: model.to_string(),
             messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             max_tokens: self.max_tokens,
             response_format: None,
             stream: None,
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let response = self
@@ -458,7 +670,22 @@ impl Provider for OpenRouterProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(super::api_error("OpenRouter", response).await);
+            let (status, body) = Self::api_error_text(response).await;
+            let sanitized = super::sanitize_api_error(&body);
+            if !Self::is_reasoning_blacklisted(model)
+                && Self::is_reasoning_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and retrying without reasoning"
+                );
+                Self::blacklist_reasoning(model);
+                return Box::pin(self.chat_with_system(system_prompt, message, model, temperature))
+                    .await;
+            }
+            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -485,7 +712,14 @@ impl Provider for OpenRouterProvider {
             )
         })?;
 
-        let api_messages: Vec<Message> = messages
+        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let budgeted = super::traits::enforce_context_budget_with_window(
+            sanitized,
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
+        let api_messages: Vec<Message> = budgeted
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
@@ -496,10 +730,11 @@ impl Provider for OpenRouterProvider {
         let request = ChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             max_tokens: self.max_tokens,
             response_format: None,
             stream: None,
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let response = self
@@ -516,7 +751,21 @@ impl Provider for OpenRouterProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(super::api_error("OpenRouter", response).await);
+            let (status, body) = Self::api_error_text(response).await;
+            let sanitized = super::sanitize_api_error(&body);
+            if !Self::is_reasoning_blacklisted(model)
+                && Self::is_reasoning_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and retrying without reasoning"
+                );
+                Self::blacklist_reasoning(model);
+                return Box::pin(self.chat_with_history(messages, model, temperature)).await;
+            }
+            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -543,15 +792,53 @@ impl Provider for OpenRouterProvider {
             )
         })?;
 
-        let tools = Self::convert_tools(request.tools);
+        let model_supports_native = Self::model_supports_native_tools(model);
+        let has_tools = request.tools.is_some_and(|t| !t.is_empty());
+        let allow_native_tools = has_tools && model_supports_native;
+
+        if !model_supports_native {
+            tracing::debug!(
+                target: "providers.openrouter",
+                model,
+                has_tools,
+                "model is on the legacy/no-tools allowlist; routing chat() through chat_with_history"
+            );
+            let guided = if has_tools {
+                Self::with_prompt_guided_tool_instructions(request.messages, request.tools)
+            } else {
+                request.messages.to_vec()
+            };
+            let text = self
+                .chat_with_history(&guided, model, temperature)
+                .await?;
+            return Ok(ProviderChatResponse {
+                text: Some(text),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            });
+        }
+
+        let tools = if allow_native_tools {
+            Self::convert_tools(request.tools)
+        } else {
+            None
+        };
+        let budgeted_messages = super::traits::enforce_context_budget_native_with_window(
+            request.messages.to_vec(),
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages),
-            temperature,
+            messages: Self::convert_messages(&budgeted_messages),
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
             stream: None,
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let response = self
@@ -568,7 +855,42 @@ impl Provider for OpenRouterProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(super::api_error("OpenRouter", response).await);
+            let (status, body) = Self::api_error_text(response).await;
+            let sanitized = super::sanitize_api_error(&body);
+            if !Self::is_reasoning_blacklisted(model)
+                && Self::is_reasoning_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and retrying without reasoning"
+                );
+                Self::blacklist_reasoning(model);
+                return Box::pin(self.chat(request, model, temperature)).await;
+            }
+            if Self::is_native_tool_schema_unsupported(status, &sanitized) {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "OpenRouter rejected native tools ({sanitized}); retrying via chat_with_history"
+                );
+                let guided = Self::with_prompt_guided_tool_instructions(
+                    request.messages,
+                    request.tools,
+                );
+                let text = self
+                    .chat_with_history(&guided, model, temperature)
+                    .await?;
+                return Ok(ProviderChatResponse {
+                    text: Some(text),
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning_content: None,
+                });
+            }
+            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -608,7 +930,27 @@ impl Provider for OpenRouterProvider {
             )
         })?;
 
-        let native_tools: Option<Vec<NativeToolSpec>> = if tools.is_empty() {
+        let model_supports_native = Self::model_supports_native_tools(model);
+        let has_tools = !tools.is_empty();
+        let allow_native_tools = has_tools && model_supports_native;
+
+        if !model_supports_native {
+            tracing::debug!(
+                target: "providers.openrouter",
+                model,
+                has_tools,
+                "model is on the legacy/no-tools allowlist; chat_with_tools routing through chat_with_history"
+            );
+            let text = self.chat_with_history(messages, model, temperature).await?;
+            return Ok(ProviderChatResponse {
+                text: Some(text),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            });
+        }
+
+        let native_tools: Option<Vec<NativeToolSpec>> = if !allow_native_tools {
             None
         } else {
             let specs: Vec<NativeToolSpec> = tools
@@ -635,16 +977,23 @@ impl Provider for OpenRouterProvider {
             if specs.is_empty() { None } else { Some(specs) }
         };
 
-        let native_messages = Self::convert_messages(messages);
+        let budgeted_messages = super::traits::enforce_context_budget_native_with_window(
+            messages.to_vec(),
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
+        let native_messages = Self::convert_messages(&budgeted_messages);
 
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: native_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
             max_tokens: self.max_tokens,
             stream: None,
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let response = self
@@ -661,7 +1010,36 @@ impl Provider for OpenRouterProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(super::api_error("OpenRouter", response).await);
+            let (status, body) = Self::api_error_text(response).await;
+            let sanitized = super::sanitize_api_error(&body);
+            if !Self::is_reasoning_blacklisted(model)
+                && Self::is_reasoning_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and retrying without reasoning"
+                );
+                Self::blacklist_reasoning(model);
+                return Box::pin(self.chat_with_tools(messages, tools, model, temperature)).await;
+            }
+            if Self::is_native_tool_schema_unsupported(status, &sanitized) {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "OpenRouter rejected native tools ({sanitized}); retrying via chat_with_history"
+                );
+                let text = self.chat_with_history(messages, model, temperature).await?;
+                return Ok(ProviderChatResponse {
+                    text: Some(text),
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning_content: None,
+                });
+            }
+            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -717,10 +1095,11 @@ impl Provider for OpenRouterProvider {
         let request = ChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             max_tokens: self.max_tokens,
             response_format: Some(response_format),
             stream: None,
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let response = self
@@ -737,7 +1116,21 @@ impl Provider for OpenRouterProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(super::api_error("OpenRouter", response).await);
+            let (status, body) = Self::api_error_text(response).await;
+            let sanitized = super::sanitize_api_error(&body);
+            if !Self::is_reasoning_blacklisted(model)
+                && Self::is_reasoning_param_unsupported(status, &sanitized)
+            {
+                tracing::warn!(
+                    target: "providers.openrouter",
+                    model,
+                    status = %status,
+                    "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and retrying without reasoning"
+                );
+                Self::blacklist_reasoning(model);
+                return Box::pin(self.chat_structured(messages, schema, model, temperature)).await;
+            }
+            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -797,11 +1190,12 @@ impl Provider for OpenRouterProvider {
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
             stream: Some(true),
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let payload = match serde_json::to_value(&native_request) {
@@ -814,6 +1208,13 @@ impl Provider for OpenRouterProvider {
         let client = self.http_client();
         let count_tokens = options.count_tokens;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
+
+        let provider_clone = self.clone();
+        let model_owned = model.to_string();
+        let temperature_owned = temperature;
+        let options_owned = options;
+        let retry_messages: Vec<ChatMessage> = request.messages.to_vec();
+        let retry_tools: Option<Vec<ToolSpec>> = request.tools.map(|t| t.to_vec());
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat",
@@ -845,8 +1246,38 @@ impl Provider for OpenRouterProvider {
                         .text()
                         .await
                         .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                    let sanitized = super::sanitize_api_error(&error);
+
+                    if !Self::is_reasoning_blacklisted(&model_owned)
+                        && Self::is_reasoning_param_unsupported(status, &sanitized)
+                    {
+                        tracing::warn!(
+                            target: "providers.openrouter.stream",
+                            model = %model_owned,
+                            status = %status,
+                            "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without reasoning"
+                        );
+                        Self::blacklist_reasoning(&model_owned);
+                        let retry_request = crate::providers::traits::ChatRequest {
+                            messages: retry_messages.as_slice(),
+                            tools: retry_tools.as_deref(),
+                        };
+                        let mut retry_stream = provider_clone.stream_chat(
+                            retry_request,
+                            &model_owned,
+                            temperature_owned,
+                            options_owned,
+                        );
+                        while let Some(event) = retry_stream.next().await {
+                            if tx.send(event).await.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{status}: {error}"))))
+                        .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
                         .await;
                     return;
                 }
@@ -902,15 +1333,23 @@ impl Provider for OpenRouterProvider {
         let request = ChatRequest {
             model: model.to_string(),
             messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             max_tokens: self.max_tokens,
             response_format: None,
             stream: Some(options.enabled),
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let client = self.http_client();
         let count_tokens = options.count_tokens;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        let provider_clone = self.clone();
+        let model_owned = model.to_string();
+        let temperature_owned = temperature;
+        let options_owned = options;
+        let system_prompt_owned = system_prompt.map(ToString::to_string);
+        let message_owned = message.to_string();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat_with_system",
@@ -942,8 +1381,35 @@ impl Provider for OpenRouterProvider {
                         .text()
                         .await
                         .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                    let sanitized = super::sanitize_api_error(&error);
+
+                    if !Self::is_reasoning_blacklisted(&model_owned)
+                        && Self::is_reasoning_param_unsupported(status, &sanitized)
+                    {
+                        tracing::warn!(
+                            target: "providers.openrouter.stream",
+                            model = %model_owned,
+                            status = %status,
+                            "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without reasoning"
+                        );
+                        Self::blacklist_reasoning(&model_owned);
+                        let mut retry_stream = provider_clone.stream_chat_with_system(
+                            system_prompt_owned.as_deref(),
+                            &message_owned,
+                            &model_owned,
+                            temperature_owned,
+                            options_owned,
+                        );
+                        while let Some(chunk) = retry_stream.next().await {
+                            if tx.send(chunk).await.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{status}: {error}"))))
+                        .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
                         .await;
                     return;
                 }
@@ -983,7 +1449,14 @@ impl Provider for OpenRouterProvider {
             }
         };
 
-        let api_messages: Vec<Message> = messages
+        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let budgeted = super::traits::enforce_context_budget_with_window(
+            sanitized,
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
+        let api_messages: Vec<Message> = budgeted
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
@@ -994,15 +1467,22 @@ impl Provider for OpenRouterProvider {
         let request = ChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
             max_tokens: self.max_tokens,
             response_format: None,
             stream: Some(options.enabled),
+            reasoning: self.reasoning_param_for_model(model),
         };
 
         let client = self.http_client();
         let count_tokens = options.count_tokens;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        let provider_clone = self.clone();
+        let model_owned = model.to_string();
+        let temperature_owned = temperature;
+        let options_owned = options;
+        let retry_messages: Vec<ChatMessage> = messages.to_vec();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat_with_history",
@@ -1034,8 +1514,34 @@ impl Provider for OpenRouterProvider {
                         .text()
                         .await
                         .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                    let sanitized = super::sanitize_api_error(&error);
+
+                    if !Self::is_reasoning_blacklisted(&model_owned)
+                        && Self::is_reasoning_param_unsupported(status, &sanitized)
+                    {
+                        tracing::warn!(
+                            target: "providers.openrouter.stream",
+                            model = %model_owned,
+                            status = %status,
+                            "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without reasoning"
+                        );
+                        Self::blacklist_reasoning(&model_owned);
+                        let mut retry_stream = provider_clone.stream_chat_with_history(
+                            &retry_messages,
+                            &model_owned,
+                            temperature_owned,
+                            options_owned,
+                        );
+                        while let Some(chunk) = retry_stream.next().await {
+                            if tx.send(chunk).await.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{status}: {error}"))))
+                        .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
                         .await;
                     return;
                 }
@@ -1062,4 +1568,14 @@ fn is_valid_openai_tool_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn reasoning_blacklist_store()
+-> &'static std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| {
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()))
+    })
 }

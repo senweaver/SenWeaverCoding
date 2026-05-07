@@ -562,6 +562,7 @@ async fn run_gateway_inner(
             extra_headers: config.extra_headers.clone(),
             api_path: config.api_path.clone(),
             provider_max_tokens: config.provider_max_tokens,
+            model_context_windows: config.model_context_windows.clone(),
         },
     )?);
     let model = config
@@ -1423,6 +1424,10 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_conversations_list),
         )
         .route("/api/desktop/status", get(desktop_routes::handle_status))
+        .route(
+            "/api/runtime/snapshot",
+            get(desktop_routes::handle_runtime_snapshot),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             api::auth_middleware,

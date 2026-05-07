@@ -40,6 +40,8 @@ pub struct ToolLoopCostTrackingContext {
     pub prices: Arc<std::collections::HashMap<String, ModelPricing>>,
 
     pub chat_session_id: Option<String>,
+
+    pub coding_mode: Option<String>,
 }
 
 impl ToolLoopCostTrackingContext {
@@ -51,11 +53,17 @@ impl ToolLoopCostTrackingContext {
             tracker,
             prices,
             chat_session_id: None,
+            coding_mode: None,
         }
     }
 
     pub fn with_chat_session_id(mut self, chat_session_id: impl Into<String>) -> Self {
         self.chat_session_id = Some(chat_session_id.into());
+        self
+    }
+
+    pub fn with_coding_mode(mut self, coding_mode: impl Into<String>) -> Self {
+        self.coding_mode = Some(coding_mode.into());
         self
     }
 }
@@ -122,10 +130,11 @@ pub(crate) fn record_tool_loop_cost_usage(
         );
     }
 
-    if let Err(error) = ctx
-        .tracker
-        .record_usage_for_session(ctx.chat_session_id.as_deref(), cost_usage.clone())
-    {
+    if let Err(error) = ctx.tracker.record_usage_for_session_with_mode(
+        ctx.chat_session_id.as_deref(),
+        ctx.coding_mode.as_deref(),
+        cost_usage.clone(),
+    ) {
         tracing::warn!(
             provider = provider_name,
             model,
@@ -2480,6 +2489,15 @@ async fn consume_provider_streaming_response(
                 if let Some(rc) = &chunk.reasoning {
                     if !rc.is_empty() {
                         outcome.reasoning_content.push_str(rc);
+                        if let Some(tx) = delta_sender {
+                            if tx
+                                .send(DraftEvent::Thinking(rc.clone()))
+                                .await
+                                .is_err()
+                            {
+                                delta_sender = None;
+                            }
+                        }
                     }
                 }
 

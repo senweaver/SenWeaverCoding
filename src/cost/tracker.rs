@@ -104,12 +104,21 @@ impl CostTracker {
     }
 
     pub fn record_usage(&self, usage: TokenUsage) -> Result<()> {
-        self.record_usage_for_session(None, usage)
+        self.record_usage_for_session_with_mode(None, None, usage)
     }
 
     pub fn record_usage_for_session(
         &self,
         chat_session_id: Option<&str>,
+        usage: TokenUsage,
+    ) -> Result<()> {
+        self.record_usage_for_session_with_mode(chat_session_id, None, usage)
+    }
+
+    pub fn record_usage_for_session_with_mode(
+        &self,
+        chat_session_id: Option<&str>,
+        coding_mode: Option<&str>,
         usage: TokenUsage,
     ) -> Result<()> {
         if !self.config.enabled {
@@ -122,9 +131,10 @@ impl CostTracker {
             ));
         }
 
-        let record = CostRecord::for_chat_session(
+        let record = CostRecord::for_chat_session_with_mode(
             &self.session_id,
             chat_session_id.map(|s| s.to_string()),
+            coding_mode.map(|s| s.to_string()),
             usage,
         );
 

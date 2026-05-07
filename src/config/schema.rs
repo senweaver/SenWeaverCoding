@@ -815,6 +815,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_max_tokens: Option<u32>,
 
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_context_windows: HashMap<String, u32>,
+
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
 
@@ -6250,6 +6253,7 @@ impl Default for Config {
             default_temperature: default_temperature(),
             provider_timeout_secs: default_provider_timeout_secs(),
             provider_max_tokens: None,
+            model_context_windows: HashMap::new(),
             extra_headers: HashMap::new(),
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),

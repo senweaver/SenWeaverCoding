@@ -711,6 +711,8 @@ pub struct ProviderRuntimeOptions {
     pub api_path: Option<String>,
 
     pub provider_max_tokens: Option<u32>,
+
+    pub model_context_windows: std::collections::HashMap<String, u32>,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -726,6 +728,7 @@ impl Default for ProviderRuntimeOptions {
             extra_headers: std::collections::HashMap::new(),
             api_path: None,
             provider_max_tokens: None,
+            model_context_windows: std::collections::HashMap::new(),
         }
     }
 }
@@ -744,6 +747,7 @@ pub fn provider_runtime_options_from_config(
         extra_headers: config.extra_headers.clone(),
         api_path: config.api_path.clone(),
         provider_max_tokens: config.provider_max_tokens,
+        model_context_windows: config.model_context_windows.clone(),
     }
 }
 
@@ -1119,6 +1123,7 @@ fn create_provider_with_url_and_options(
         let extra_headers = options.extra_headers.clone();
         let api_path = options.api_path.clone();
         let max_tokens = options.provider_max_tokens;
+        let context_windows = options.model_context_windows.clone();
         move |p: OpenAiCompatibleProvider| -> Box<dyn Provider> {
             let mut p = p;
             if let Some(t) = timeout {
@@ -1135,6 +1140,9 @@ fn create_provider_with_url_and_options(
             }
             if let Some(mt) = max_tokens {
                 p = p.with_max_tokens(Some(mt));
+            }
+            if !context_windows.is_empty() {
+                p = p.with_model_context_windows(context_windows.clone());
             }
             Box::new(p)
         }
@@ -1180,10 +1188,14 @@ fn create_provider_with_url_and_options(
             )?))
         }
 
-        "openrouter" => Ok(Box::new(
-            openrouter::OpenRouterProvider::new(key, options.provider_timeout_secs)
-                .with_max_tokens(options.provider_max_tokens),
-        )),
+        "openrouter" => {
+            let mut p = openrouter::OpenRouterProvider::new(key, options.provider_timeout_secs)
+                .with_max_tokens(options.provider_max_tokens);
+            if !options.model_context_windows.is_empty() {
+                p = p.with_model_context_windows(options.model_context_windows.clone());
+            }
+            Ok(Box::new(p))
+        }
         "anthropic" => {
             let mut p = anthropic::AnthropicProvider::new(key);
             if let Some(mt) = options.provider_max_tokens {

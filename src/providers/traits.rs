@@ -536,6 +536,406 @@ pub fn build_tool_instructions_text(tools: &[ToolSpec]) -> String {
     instructions
 }
 
+pub fn estimate_message_tokens(message: &ChatMessage) -> usize {
+    let role_overhead = 4_usize;
+    let content_tokens = message.content.len().div_ceil(4);
+    role_overhead.saturating_add(content_tokens)
+}
+
+pub fn estimate_total_tokens(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(estimate_message_tokens)
+        .sum::<usize>()
+        .saturating_add(8)
+}
+
+pub fn enforce_context_budget_native(
+    messages: Vec<ChatMessage>,
+    model: &str,
+    reserve_output_tokens: usize,
+) -> Vec<ChatMessage> {
+    enforce_context_budget_native_with_window(messages, model, reserve_output_tokens, None)
+}
+
+pub fn enforce_context_budget_native_with_window(
+    messages: Vec<ChatMessage>,
+    model: &str,
+    reserve_output_tokens: usize,
+    context_window_override: Option<usize>,
+) -> Vec<ChatMessage> {
+    let window = context_window_override
+        .unwrap_or_else(|| crate::constants::api_limits::context_window_for_model(model) as usize);
+    let safety_margin = 256_usize;
+    let reserve = reserve_output_tokens
+        .saturating_add(safety_margin)
+        .min(window.saturating_sub(512).max(512));
+    let max_input = window.saturating_sub(reserve).max(512);
+
+    let total = estimate_total_tokens(&messages);
+    if total <= max_input {
+        return messages;
+    }
+
+    let mut groups: Vec<Vec<ChatMessage>> = Vec::new();
+    let mut leading_system: Vec<ChatMessage> = Vec::new();
+    let mut current_group: Vec<ChatMessage> = Vec::new();
+    let mut started_non_system = false;
+
+    for msg in messages {
+        if !started_non_system && msg.role == "system" {
+            leading_system.push(msg);
+            continue;
+        }
+        started_non_system = true;
+        if msg.role == "tool" {
+            if current_group.is_empty() {
+                current_group.push(msg);
+            } else {
+                current_group.push(msg);
+            }
+            continue;
+        }
+        if !current_group.is_empty() {
+            groups.push(std::mem::take(&mut current_group));
+        }
+        current_group.push(msg);
+    }
+    if !current_group.is_empty() {
+        groups.push(current_group);
+    }
+
+    let last_group = groups.pop();
+    let last_group_tokens = last_group
+        .as_ref()
+        .map(|g| g.iter().map(estimate_message_tokens).sum::<usize>())
+        .unwrap_or(0);
+
+    let mut system_tokens: usize = leading_system
+        .iter()
+        .map(estimate_message_tokens)
+        .sum::<usize>();
+
+    let mut available = max_input
+        .saturating_sub(system_tokens)
+        .saturating_sub(last_group_tokens);
+
+    let mut kept_groups: Vec<Vec<ChatMessage>> = Vec::new();
+    let mut used: usize = 0;
+    for group in groups.into_iter().rev() {
+        let cost: usize = group.iter().map(estimate_message_tokens).sum();
+        if used.saturating_add(cost) > available {
+            break;
+        }
+        used = used.saturating_add(cost);
+        kept_groups.push(group);
+    }
+    kept_groups.reverse();
+
+    if system_tokens.saturating_add(last_group_tokens) > max_input {
+        let target_for_system = max_input
+            .saturating_sub(last_group_tokens)
+            .saturating_sub(64)
+            .max(256);
+        truncate_system_messages(&mut leading_system, target_for_system);
+        system_tokens = leading_system
+            .iter()
+            .map(estimate_message_tokens)
+            .sum::<usize>();
+        available = max_input
+            .saturating_sub(system_tokens)
+            .saturating_sub(last_group_tokens);
+        if used > available {
+            kept_groups.clear();
+        }
+    }
+
+    let mut out: Vec<ChatMessage> = leading_system;
+    for group in kept_groups {
+        out.extend(group);
+    }
+    if let Some(group) = last_group {
+        out.extend(group);
+    }
+    out
+}
+
+pub fn enforce_context_budget(
+    messages: Vec<ChatMessage>,
+    model: &str,
+    reserve_output_tokens: usize,
+) -> Vec<ChatMessage> {
+    enforce_context_budget_with_window(messages, model, reserve_output_tokens, None)
+}
+
+pub fn enforce_context_budget_with_window(
+    messages: Vec<ChatMessage>,
+    model: &str,
+    reserve_output_tokens: usize,
+    context_window_override: Option<usize>,
+) -> Vec<ChatMessage> {
+    let window = context_window_override
+        .unwrap_or_else(|| crate::constants::api_limits::context_window_for_model(model) as usize);
+    let safety_margin = 256_usize;
+    let reserve = reserve_output_tokens
+        .saturating_add(safety_margin)
+        .min(window.saturating_sub(512).max(512));
+    let max_input = window.saturating_sub(reserve).max(512);
+
+    let total = estimate_total_tokens(&messages);
+    if total <= max_input {
+        return messages;
+    }
+
+    let mut system_msgs: Vec<ChatMessage> = Vec::new();
+    let mut other: Vec<ChatMessage> = Vec::new();
+    for m in messages {
+        if m.role == "system" {
+            system_msgs.push(m);
+        } else {
+            other.push(m);
+        }
+    }
+
+    let last = other.pop();
+    let last_tokens = last
+        .as_ref()
+        .map(estimate_message_tokens)
+        .unwrap_or(0);
+
+    let mut system_tokens: usize = system_msgs
+        .iter()
+        .map(estimate_message_tokens)
+        .sum::<usize>();
+
+    let mut available = max_input
+        .saturating_sub(system_tokens)
+        .saturating_sub(last_tokens);
+
+    let mut kept: Vec<ChatMessage> = Vec::new();
+    let mut used: usize = 0;
+    for msg in other.into_iter().rev() {
+        let cost = estimate_message_tokens(&msg);
+        if used.saturating_add(cost) > available {
+            break;
+        }
+        used = used.saturating_add(cost);
+        kept.push(msg);
+    }
+    kept.reverse();
+
+    if system_tokens.saturating_add(last_tokens) > max_input {
+        let mut target_for_system = max_input.saturating_sub(last_tokens).saturating_sub(64);
+        if target_for_system < 256 {
+            target_for_system = 256;
+        }
+        truncate_system_messages(&mut system_msgs, target_for_system);
+        system_tokens = system_msgs
+            .iter()
+            .map(estimate_message_tokens)
+            .sum::<usize>();
+        available = max_input
+            .saturating_sub(system_tokens)
+            .saturating_sub(last_tokens);
+        if used > available {
+            kept.clear();
+        }
+    }
+
+    let mut out: Vec<ChatMessage> = system_msgs;
+    out.extend(kept);
+    if let Some(l) = last {
+        out.push(l);
+    }
+    out
+}
+
+fn truncate_system_messages(messages: &mut Vec<ChatMessage>, target_tokens: usize) {
+    if messages.is_empty() {
+        return;
+    }
+    let mut current: usize = messages
+        .iter()
+        .map(estimate_message_tokens)
+        .sum::<usize>();
+    if current <= target_tokens {
+        return;
+    }
+
+    if messages.len() > 1 {
+        while messages.len() > 1 && current > target_tokens {
+            if let Some(removed) = messages.pop() {
+                current = current.saturating_sub(estimate_message_tokens(&removed));
+            } else {
+                break;
+            }
+        }
+        if current <= target_tokens {
+            return;
+        }
+    }
+
+    if let Some(first) = messages.first_mut() {
+        let target_chars = target_tokens.saturating_mul(4).saturating_sub(64).max(256);
+        if first.content.len() > target_chars {
+            let head_chars = (target_chars * 2 / 3).max(128);
+            let tail_chars = target_chars.saturating_sub(head_chars).saturating_sub(96);
+            let head = safe_char_slice(&first.content, 0, head_chars);
+            let tail = safe_char_slice_from_end(&first.content, tail_chars);
+            first.content = format!(
+                "{head}\n\n[...truncated to fit model context window...]\n\n{tail}"
+            );
+        }
+    }
+}
+
+fn safe_char_slice(text: &str, start: usize, len: usize) -> String {
+    text.chars().skip(start).take(len).collect()
+}
+
+fn safe_char_slice_from_end(text: &str, len: usize) -> String {
+    let total = text.chars().count();
+    let start = total.saturating_sub(len);
+    text.chars().skip(start).collect()
+}
+
+pub fn sanitize_messages_for_legacy(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        match msg.role.as_str() {
+            "tool" => {
+                let (call_id, body) = parse_tool_envelope(&msg.content);
+                let header = match call_id {
+                    Some(id) if !id.is_empty() => format!("[Tool result for {id}]\n"),
+                    _ => "[Tool result]\n".to_string(),
+                };
+                let formatted = format!("{header}{body}");
+                if let Some(prev) = out.last_mut() {
+                    if prev.role == "user" {
+                        prev.content.push_str("\n\n");
+                        prev.content.push_str(&formatted);
+                        continue;
+                    }
+                }
+                out.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: formatted,
+                    metadata: msg.metadata.clone(),
+                });
+            }
+            "assistant" => {
+                let flattened = flatten_assistant_envelope(&msg.content);
+                out.push(ChatMessage {
+                    role: msg.role.clone(),
+                    content: flattened,
+                    metadata: msg.metadata.clone(),
+                });
+            }
+            _ => out.push(msg.clone()),
+        }
+    }
+    out
+}
+
+fn parse_tool_envelope(content: &str) -> (Option<String>, String) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        let id = value
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let body = value
+            .get("content")
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                other => Some(other.to_string()),
+            })
+            .unwrap_or_else(|| content.to_string());
+        return (id, body);
+    }
+    (None, content.to_string())
+}
+
+fn flatten_assistant_envelope(content: &str) -> String {
+    let trimmed = content.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return content.to_string();
+    }
+    let value = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(v) => v,
+        Err(_) => return content.to_string(),
+    };
+    let text_part = value
+        .get("content")
+        .and_then(|c| match c {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Array(arr) => {
+                let mut joined = String::new();
+                for item in arr {
+                    if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                        if !joined.is_empty() {
+                            joined.push('\n');
+                        }
+                        joined.push_str(t);
+                    }
+                }
+                if joined.is_empty() { None } else { Some(joined) }
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let calls_part = value
+        .get("tool_calls")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            let mut summary = String::new();
+            for call in arr {
+                let name = call
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .or_else(|| {
+                        call.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                    })
+                    .unwrap_or("unknown_tool");
+                let args = call
+                    .get("arguments")
+                    .map(|a| match a {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .or_else(|| {
+                        call.get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .map(|a| match a {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                    })
+                    .unwrap_or_default();
+                if !summary.is_empty() {
+                    summary.push('\n');
+                }
+                summary.push_str(&format!("- {name}({args})"));
+            }
+            summary
+        })
+        .unwrap_or_default();
+
+    if calls_part.is_empty() {
+        if text_part.is_empty() {
+            content.to_string()
+        } else {
+            text_part
+        }
+    } else if text_part.is_empty() {
+        format!("[Tool calls]\n{calls_part}")
+    } else {
+        format!("{text_part}\n\n[Tool calls]\n{calls_part}")
+    }
+}
+
 pub fn parse_first_json_object(text: &str) -> Option<serde_json::Value> {
     let bytes = text.as_bytes();
     let mut depth = 0i32;

@@ -980,8 +980,14 @@ async fn run_turn(
             let cfg = state.config.lock();
             std::sync::Arc::new(cfg.cost.prices.clone())
         };
-        crate::agent::ToolLoopCostTrackingContext::new(std::sync::Arc::clone(tracker), prices)
-            .with_chat_session_id(session_id.to_string())
+        let mut ctx =
+            crate::agent::ToolLoopCostTrackingContext::new(std::sync::Arc::clone(tracker), prices)
+                .with_chat_session_id(session_id.to_string());
+        if let Some(svc) = crate::services::try_get_services() {
+            let mode = *svc.coding_mode.read();
+            ctx = ctx.with_coding_mode(mode.display_name().to_string());
+        }
+        ctx
     });
 
     let turn_fut = async {

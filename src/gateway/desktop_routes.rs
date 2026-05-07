@@ -1083,6 +1083,8 @@ pub(crate) fn apply_active_profile_to_top_level(
         cfg.provider_max_tokens = Some(max_tokens);
     }
 
+    cfg.model_context_windows = profile.model_context_windows.clone();
+
     let models = effective_model_names(profile);
     let current_model_belongs = cfg
         .default_model
@@ -4075,6 +4077,77 @@ pub async fn handle_status(
     .into_response()
 }
 
+pub async fn handle_runtime_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let started_at = crate::runtime::task_manager::process_started_at();
+    let uptime_secs = crate::runtime::task_manager::process_uptime_secs();
+
+    let now = std::time::Instant::now();
+    let mut buckets: std::collections::BTreeMap<String, (u64, Option<u64>)> =
+        std::collections::BTreeMap::new();
+    for info in crate::runtime::task_manager::snapshot() {
+        let elapsed_ms = now.saturating_duration_since(info.spawned_at).as_millis() as u64;
+        let entry = buckets.entry(info.name.clone()).or_insert((0, None));
+        entry.0 += 1;
+        entry.1 = Some(entry.1.map_or(elapsed_ms, |existing| existing.max(elapsed_ms)));
+    }
+    let task_groups: Vec<serde_json::Value> = buckets
+        .into_iter()
+        .map(|(name, (count, oldest_ms))| {
+            serde_json::json!({
+                "name": name,
+                "count": count,
+                "oldestAgeMs": oldest_ms.unwrap_or(0),
+            })
+        })
+        .collect();
+
+    let listen_host = config.gateway.host.clone();
+    let listen_port = config.gateway.port;
+    let public_url = if listen_host.is_empty() {
+        format!("http://127.0.0.1:{listen_port}")
+    } else {
+        format!("http://{listen_host}:{listen_port}")
+    };
+
+    let process_id = std::process::id();
+    let cpu_count = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(0);
+
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "buildProfile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "pid": process_id,
+        "cpuCount": cpu_count,
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "startedAt": started_at.to_rfc3339(),
+        "uptimeSecs": uptime_secs,
+        "workspaceDir": config.workspace_dir.to_string_lossy().to_string(),
+        "defaultProvider": config.default_provider.clone(),
+        "defaultModel": config.default_model.clone(),
+        "gateway": {
+            "host": listen_host,
+            "port": listen_port,
+            "url": public_url,
+            "pathPrefix": state.path_prefix.clone(),
+        },
+        "tasks": {
+            "liveCount": crate::runtime::task_manager::live_count() as u64,
+            "groups": task_groups,
+        },
+    }))
+    .into_response()
+}
+
 fn build_hooks_payload(config: &crate::config::Config) -> serde_json::Value {
     let snake = serde_json::to_value(&config.hooks).unwrap_or_else(|_| serde_json::json!({}));
     let mut value = to_camel_case_keys(snake);
@@ -4694,33 +4767,135 @@ pub async fn handle_usage_get(
         .map(|s| s.eq_ignore_ascii_case("all") || s.eq_ignore_ascii_case("lifetime"))
         .unwrap_or(true);
 
-    let (lifetime, by_session) = if include_lifetime {
+    let aggregates = if include_lifetime {
         let config = state.config.lock().clone();
         compute_lifetime_by_model_and_session(&config.workspace_dir)
     } else {
-        (
-            serde_json::Value::Object(serde_json::Map::new()),
-            serde_json::Value::Object(serde_json::Map::new()),
-        )
+        UsageAggregates::empty()
     };
 
     let mut summary_camel = to_camel_case_keys(summary_value);
     if let serde_json::Value::Object(ref mut map) = summary_camel {
-        map.insert("byModelLifetime".to_string(), lifetime);
-        map.insert("bySession".to_string(), by_session);
+        map.insert("byModelLifetime".to_string(), aggregates.by_model);
+        map.insert("bySession".to_string(), aggregates.by_session);
+        map.insert("byProvider".to_string(), aggregates.by_provider);
+        map.insert("byWorkspace".to_string(), aggregates.by_workspace);
+        map.insert("byCodingMode".to_string(), aggregates.by_coding_mode);
+        map.insert(
+            "tokenRatePerMin".to_string(),
+            serde_json::json!(aggregates.token_rate_per_min),
+        );
+        map.insert(
+            "last24hTokens".to_string(),
+            serde_json::json!(aggregates.last_24h_tokens),
+        );
+        map.insert(
+            "last24hCostUsd".to_string(),
+            serde_json::json!(aggregates.last_24h_cost_usd),
+        );
+        map.insert(
+            "last24hRequests".to_string(),
+            serde_json::json!(aggregates.last_24h_requests),
+        );
+        map.insert(
+            "last7dTokens".to_string(),
+            serde_json::json!(aggregates.last_7d_tokens),
+        );
+        map.insert(
+            "last7dCostUsd".to_string(),
+            serde_json::json!(aggregates.last_7d_cost_usd),
+        );
+        map.insert(
+            "last7dRequests".to_string(),
+            serde_json::json!(aggregates.last_7d_requests),
+        );
     }
     Json(serde_json::json!({"cost": summary_camel})).into_response()
 }
 
+struct UsageAggregates {
+    by_model: serde_json::Value,
+    by_session: serde_json::Value,
+    by_provider: serde_json::Value,
+    by_workspace: serde_json::Value,
+    by_coding_mode: serde_json::Value,
+    token_rate_per_min: f64,
+    last_24h_tokens: u64,
+    last_24h_cost_usd: f64,
+    last_24h_requests: u64,
+    last_7d_tokens: u64,
+    last_7d_cost_usd: f64,
+    last_7d_requests: u64,
+}
+
+impl UsageAggregates {
+    fn empty() -> Self {
+        let empty = || serde_json::Value::Object(serde_json::Map::new());
+        Self {
+            by_model: empty(),
+            by_session: empty(),
+            by_provider: empty(),
+            by_workspace: empty(),
+            by_coding_mode: empty(),
+            token_rate_per_min: 0.0,
+            last_24h_tokens: 0,
+            last_24h_cost_usd: 0.0,
+            last_24h_requests: 0,
+            last_7d_tokens: 0,
+            last_7d_cost_usd: 0.0,
+            last_7d_requests: 0,
+        }
+    }
+}
+
+fn provider_from_model(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    if let Some((prefix, _)) = lower.split_once('/') {
+        return prefix.to_string();
+    }
+    if lower.starts_with("gpt-") || lower.starts_with("o1") || lower.starts_with("o3")
+        || lower.starts_with("o4") || lower.starts_with("chatgpt-")
+    {
+        return "openai".to_string();
+    }
+    if lower.starts_with("claude") {
+        return "anthropic".to_string();
+    }
+    if lower.starts_with("kimi") || lower.starts_with("moonshot") {
+        return "moonshot".to_string();
+    }
+    if lower.starts_with("deepseek") {
+        return "deepseek".to_string();
+    }
+    if lower.starts_with("qwen") {
+        return "qwen".to_string();
+    }
+    if lower.starts_with("glm") {
+        return "zhipu".to_string();
+    }
+    if lower.starts_with("gemini") {
+        return "google".to_string();
+    }
+    if lower.starts_with("grok") {
+        return "xai".to_string();
+    }
+    if lower.starts_with("mistral") || lower.starts_with("mixtral") {
+        return "mistral".to_string();
+    }
+    if lower.starts_with("llama") {
+        return "meta".to_string();
+    }
+    "other".to_string()
+}
+
 fn compute_lifetime_by_model_and_session(
     workspace_dir: &std::path::Path,
-) -> (serde_json::Value, serde_json::Value) {
+) -> UsageAggregates {
     use std::io::{BufRead, BufReader};
 
-    let empty_map = || serde_json::Value::Object(serde_json::Map::new());
     let path = workspace_dir.join("state").join("costs.jsonl");
     if !path.exists() {
-        return (empty_map(), empty_map());
+        return UsageAggregates::empty();
     }
 
     #[derive(Default)]
@@ -4746,16 +4921,60 @@ fn compute_lifetime_by_model_and_session(
         by_model: std::collections::BTreeMap<String, ModelAgg>,
     }
 
+    #[derive(Default)]
+    struct ProviderAgg {
+        cost_usd: f64,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        request_count: u64,
+        models: std::collections::BTreeSet<String>,
+        first_used: Option<chrono::DateTime<chrono::Utc>>,
+        last_used: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    #[derive(Default)]
+    struct CodingModeAgg {
+        cost_usd: f64,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        request_count: u64,
+        sessions: std::collections::BTreeSet<String>,
+        models: std::collections::BTreeSet<String>,
+        first_used: Option<chrono::DateTime<chrono::Utc>>,
+        last_used: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
     let mut by_model: std::collections::BTreeMap<String, ModelAgg> =
         std::collections::BTreeMap::new();
     let mut by_session: std::collections::BTreeMap<String, SessionAgg> =
         std::collections::BTreeMap::new();
+    let mut by_provider: std::collections::BTreeMap<String, ProviderAgg> =
+        std::collections::BTreeMap::new();
+    let mut by_coding_mode: std::collections::BTreeMap<String, CodingModeAgg> =
+        std::collections::BTreeMap::new();
+
+    let now = chrono::Utc::now();
+    let one_minute_ago = now - chrono::Duration::minutes(1);
+    let one_hour_ago = now - chrono::Duration::hours(1);
+    let twenty_four_hours_ago = now - chrono::Duration::hours(24);
+    let seven_days_ago = now - chrono::Duration::days(7);
+
+    let mut last_minute_tokens: u64 = 0;
+    let mut last_hour_tokens: u64 = 0;
+    let mut last_24h_tokens: u64 = 0;
+    let mut last_24h_cost_usd: f64 = 0.0;
+    let mut last_24h_requests: u64 = 0;
+    let mut last_7d_tokens: u64 = 0;
+    let mut last_7d_cost_usd: f64 = 0.0;
+    let mut last_7d_requests: u64 = 0;
 
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(err) => {
             tracing::warn!(error = %err, "usage: failed to open costs.jsonl");
-            return (empty_map(), empty_map());
+            return UsageAggregates::empty();
         }
     };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -4767,24 +4986,90 @@ fn compute_lifetime_by_model_and_session(
             continue;
         };
         let ts = record.usage.timestamp;
+        let model = record.usage.model.clone();
+        let provider = provider_from_model(&model);
+        let total = record.usage.total_tokens;
+        let cost = record.usage.cost_usd;
 
-        let entry = by_model.entry(record.usage.model.clone()).or_default();
-        entry.cost_usd += record.usage.cost_usd;
+        if ts >= one_minute_ago {
+            last_minute_tokens += total;
+        }
+        if ts >= one_hour_ago {
+            last_hour_tokens += total;
+        }
+        if ts >= twenty_four_hours_ago {
+            last_24h_tokens += total;
+            last_24h_cost_usd += cost;
+            last_24h_requests += 1;
+        }
+        if ts >= seven_days_ago {
+            last_7d_tokens += total;
+            last_7d_cost_usd += cost;
+            last_7d_requests += 1;
+        }
+
+        let entry = by_model.entry(model.clone()).or_default();
+        entry.cost_usd += cost;
         entry.input_tokens += record.usage.input_tokens;
         entry.output_tokens += record.usage.output_tokens;
-        entry.total_tokens += record.usage.total_tokens;
+        entry.total_tokens += total;
         entry.request_count += 1;
         entry.first_used = Some(entry.first_used.map_or(ts, |existing| existing.min(ts)));
         entry.last_used = Some(entry.last_used.map_or(ts, |existing| existing.max(ts)));
+
+        let provider_entry = by_provider.entry(provider).or_default();
+        provider_entry.cost_usd += cost;
+        provider_entry.input_tokens += record.usage.input_tokens;
+        provider_entry.output_tokens += record.usage.output_tokens;
+        provider_entry.total_tokens += total;
+        provider_entry.request_count += 1;
+        provider_entry.models.insert(model.clone());
+        provider_entry.first_used = Some(
+            provider_entry
+                .first_used
+                .map_or(ts, |existing| existing.min(ts)),
+        );
+        provider_entry.last_used = Some(
+            provider_entry
+                .last_used
+                .map_or(ts, |existing| existing.max(ts)),
+        );
+
+        if let Some(coding_mode) = record.coding_mode.as_deref() {
+            let trimmed = coding_mode.trim();
+            if !trimmed.is_empty() {
+                let key = trimmed.to_ascii_lowercase();
+                let mode_entry = by_coding_mode.entry(key).or_default();
+                mode_entry.cost_usd += cost;
+                mode_entry.input_tokens += record.usage.input_tokens;
+                mode_entry.output_tokens += record.usage.output_tokens;
+                mode_entry.total_tokens += total;
+                mode_entry.request_count += 1;
+                mode_entry.models.insert(model.clone());
+                if let Some(chat_session_id) = record.chat_session_id.as_deref() {
+                    mode_entry.sessions.insert(chat_session_id.to_string());
+                }
+                mode_entry.first_used = Some(
+                    mode_entry
+                        .first_used
+                        .map_or(ts, |existing| existing.min(ts)),
+                );
+                mode_entry.last_used = Some(
+                    mode_entry
+                        .last_used
+                        .map_or(ts, |existing| existing.max(ts)),
+                );
+            }
+        }
 
         if let Some(chat_session_id) = record.chat_session_id.as_deref() {
             let session_entry = by_session
                 .entry(chat_session_id.to_string())
                 .or_default();
-            session_entry.cost_usd += record.usage.cost_usd;
+            session_entry.cost_usd += cost;
             session_entry.input_tokens += record.usage.input_tokens;
             session_entry.output_tokens += record.usage.output_tokens;
-            session_entry.total_tokens += record.usage.total_tokens;
+            session_entry.total_tokens += total;
             session_entry.request_count += 1;
             session_entry.first_used =
                 Some(session_entry.first_used.map_or(ts, |existing| existing.min(ts)));
@@ -4793,12 +5078,12 @@ fn compute_lifetime_by_model_and_session(
 
             let per_model = session_entry
                 .by_model
-                .entry(record.usage.model.clone())
+                .entry(model.clone())
                 .or_default();
-            per_model.cost_usd += record.usage.cost_usd;
+            per_model.cost_usd += cost;
             per_model.input_tokens += record.usage.input_tokens;
             per_model.output_tokens += record.usage.output_tokens;
-            per_model.total_tokens += record.usage.total_tokens;
+            per_model.total_tokens += total;
             per_model.request_count += 1;
             per_model.first_used = Some(
                 per_model
@@ -4864,10 +5149,64 @@ fn compute_lifetime_by_model_and_session(
         );
     }
 
-    (
-        serde_json::Value::Object(model_out),
-        serde_json::Value::Object(session_out),
-    )
+    let mut provider_out = serde_json::Map::with_capacity(by_provider.len());
+    for (provider, agg) in by_provider {
+        provider_out.insert(
+            provider.clone(),
+            serde_json::json!({
+                "provider": provider,
+                "costUsd": agg.cost_usd,
+                "inputTokens": agg.input_tokens,
+                "outputTokens": agg.output_tokens,
+                "totalTokens": agg.total_tokens,
+                "requestCount": agg.request_count,
+                "modelCount": agg.models.len() as u64,
+                "models": agg.models.into_iter().collect::<Vec<_>>(),
+                "firstUsed": agg.first_used.map(|t| t.to_rfc3339()),
+                "lastUsed": agg.last_used.map(|t| t.to_rfc3339()),
+            }),
+        );
+    }
+
+    let mut coding_mode_out = serde_json::Map::with_capacity(by_coding_mode.len());
+    for (mode, agg) in by_coding_mode {
+        coding_mode_out.insert(
+            mode.clone(),
+            serde_json::json!({
+                "mode": mode,
+                "costUsd": agg.cost_usd,
+                "inputTokens": agg.input_tokens,
+                "outputTokens": agg.output_tokens,
+                "totalTokens": agg.total_tokens,
+                "requestCount": agg.request_count,
+                "sessionCount": agg.sessions.len() as u64,
+                "modelCount": agg.models.len() as u64,
+                "firstUsed": agg.first_used.map(|t| t.to_rfc3339()),
+                "lastUsed": agg.last_used.map(|t| t.to_rfc3339()),
+            }),
+        );
+    }
+
+    let token_rate_per_min = if last_minute_tokens > 0 {
+        last_minute_tokens as f64
+    } else {
+        last_hour_tokens as f64 / 60.0
+    };
+
+    UsageAggregates {
+        by_model: serde_json::Value::Object(model_out),
+        by_session: serde_json::Value::Object(session_out),
+        by_provider: serde_json::Value::Object(provider_out),
+        by_workspace: serde_json::Value::Object(serde_json::Map::new()),
+        by_coding_mode: serde_json::Value::Object(coding_mode_out),
+        token_rate_per_min,
+        last_24h_tokens,
+        last_24h_cost_usd,
+        last_24h_requests,
+        last_7d_tokens,
+        last_7d_cost_usd,
+        last_7d_requests,
+    }
 }
 
 fn build_agent_config_payload(config: &crate::config::Config) -> serde_json::Value {
