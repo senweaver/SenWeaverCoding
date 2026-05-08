@@ -96,7 +96,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     ro.observe(el)
     return () => {
       ro.disconnect()
-      root.style.removeProperty('--composer-height')
+      root.style.setProperty('--composer-height', '0px')
     }
   }, [])
 

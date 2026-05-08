@@ -269,7 +269,14 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory"
+        concat!(
+            "Execute a shell command in the workspace directory. ",
+            "**For long-running processes** (HTTP servers like `python -m http.server`, `vite`, `next dev`, ",
+            "`cargo watch`, `npm run dev`, `tail -f`, etc.), set `background: true` — otherwise the default ",
+            "60s timeout will kill the process and any subsequent `browser` navigate to its URL will fail with ",
+            "`ERR_CONNECTION_REFUSED`. Background mode returns a `bg-<id>` handle immediately so you can keep ",
+            "issuing other tool calls (e.g. `browser` open) in parallel."
+        )
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

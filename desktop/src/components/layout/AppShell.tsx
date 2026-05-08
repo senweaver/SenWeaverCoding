@@ -141,6 +141,13 @@ export function AppShell() {
   useKeyboardShortcuts()
   useTerminalCwdSync()
 
+  useEffect(() => {
+    const root = document.documentElement
+    if (!root.style.getPropertyValue('--composer-height')) {
+      root.style.setProperty('--composer-height', '0px')
+    }
+  }, [])
+
   if (!ready) {
     return (
       <>

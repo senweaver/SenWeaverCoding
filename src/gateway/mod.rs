@@ -494,6 +494,9 @@ async fn run_gateway_inner(
         data_dir: svc_data_dir,
         ..Default::default()
     });
+    if let Some(svc) = crate::services::try_get_services() {
+        svc.update_config(config.clone());
+    }
     crate::event_bus::integration::publish_system(
         "gateway",
         crate::event_bus::types::SystemCategory::Startup,
@@ -593,6 +596,17 @@ async fn run_gateway_inner(
         &config.autonomy,
         &config.workspace_dir,
     ));
+    if let Some(svc) = crate::services::try_get_services() {
+        let security_for_sub = Arc::clone(&security);
+        let handle = svc.config_subscribe_filtered(
+            vec!["".into()],
+            move |cfg| {
+                security_for_sub
+                    .set_command_policy_enabled(cfg.autonomy.enable_command_policy);
+            },
+        );
+        std::mem::forget(handle);
+    }
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (

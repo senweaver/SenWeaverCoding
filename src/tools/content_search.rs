@@ -196,22 +196,24 @@ impl Tool for ContentSearchTool {
             });
         }
 
-        if std::path::Path::new(search_path).is_absolute()
-            && !self.security.is_under_allowed_root(search_path)
-        {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Absolute paths are not allowed. Use a relative path.".into()),
-            });
-        }
+        if self.security.is_command_policy_enabled() {
+            if std::path::Path::new(search_path).is_absolute()
+                && !self.security.is_under_allowed_root(search_path)
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("Absolute paths are not allowed. Use a relative path.".into()),
+                });
+            }
 
-        if search_path.contains("../") || search_path.contains("..\\") || search_path == ".." {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Path traversal ('..') is not allowed.".into()),
-            });
+            if search_path.contains("../") || search_path.contains("..\\") || search_path == ".." {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("Path traversal ('..') is not allowed.".into()),
+                });
+            }
         }
 
         if !self.security.is_path_allowed(search_path) {

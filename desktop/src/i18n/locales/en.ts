@@ -89,6 +89,9 @@ export const en = {
   'browser.panel.tabs.close': 'Close tab',
   'browser.panel.tabs.untitled': 'New tab',
   'browser.panel.tabs.activate': 'Switch to this tab',
+  'browser.panel.toast.screenshotSaved': 'Screenshot saved',
+  'browser.panel.toast.screenshotCopied': 'Screenshot copied to clipboard',
+  'browser.panel.toast.screenshotFailed': 'Screenshot failed',
 
   'rightSidebar.title': 'Workspace',
   'rightSidebar.toggleOpen': 'Open file explorer',
@@ -2004,6 +2007,13 @@ export const en = {
   'settings.lsp.installState.installing': 'Installing',
   'settings.lsp.installState.failed': 'Install failed',
   'settings.lsp.installState.notInstalled': 'Not installed',
+  'settings.lsp.toast.installFailed': 'Failed to install language server',
+  'settings.lsp.toast.installSucceeded': 'Language server installed',
+  'settings.lsp.toast.toggleFailed': 'Failed to toggle language server',
+  'settings.lsp.toast.restartFailed': 'Failed to restart language server',
+  'settings.lsp.toast.deleteFailed': 'Failed to delete language server',
+  'settings.lsp.toast.saveFailed': 'Failed to save language server',
+  'settings.lsp.toast.globalToggleFailed': 'Failed to update LSP integration',
 
 } as const
 

@@ -39,6 +39,50 @@ import {
   type BrowserDockTabInfo,
 } from '../lib/browserDock'
 
+const SCHEME_RE = /^[a-z][a-z0-9+\-.]*:/i
+const WINDOWS_PATH_RE = /^[a-z]:[\\/]/i
+const UNIX_PATH_RE = /^\/[^/]/
+
+function isLoopbackAuthority(input: string): boolean {
+  const authority = input.split('/')[0] ?? ''
+  const afterUserInfo = authority.includes('@') ? authority.split('@').pop()! : authority
+  if (!afterUserInfo) return false
+  if (afterUserInfo.startsWith('[')) {
+    const close = afterUserInfo.indexOf(']')
+    if (close === -1) return false
+    const v6 = afterUserInfo.slice(1, close).toLowerCase()
+    return v6 === '::1'
+  }
+  const host = afterUserInfo.split(':')[0]?.toLowerCase() ?? ''
+  if (!host) return false
+  if (host === 'localhost') return true
+  if (host.endsWith('.localhost')) return true
+  if (/^127\.\d+\.\d+\.\d+$/.test(host)) return true
+  return false
+}
+
+export function normalizeAddressBarUrl(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+  if (trimmed === 'about:blank') return trimmed
+  if (SCHEME_RE.test(trimmed)) return trimmed
+
+  if (WINDOWS_PATH_RE.test(trimmed)) {
+    const forward = trimmed.replace(/\\/g, '/')
+    return `file:///${forward}`
+  }
+
+  if (UNIX_PATH_RE.test(trimmed)) {
+    return `file://${trimmed}`
+  }
+
+  if (isLoopbackAuthority(trimmed)) {
+    return `http://${trimmed}`
+  }
+
+  return `https://${trimmed}`
+}
+
 export type BrowserPanelSource = 'manual' | 'tool' | 'agent'
 
 export type BrowserConsoleEntry = {
@@ -226,7 +270,9 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     const owns = get().activeSessionId === sessionId
     const expanded = get().panels[sessionId]?.expanded
     if (owns && expanded) {
-      void dockSetRect(rect)
+      dockSetRect(rect).catch((err) => {
+        console.warn('[browserDock] dockSetRect failed', err)
+      })
     }
   },
 
@@ -303,12 +349,18 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       }
     })
     const rect = get().panels[sessionId]?.anchorRect ?? null
-    if (rect) {
-      await dockOpen(rect, seedUrl)
-    } else {
-      await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl)
+    try {
+      if (rect) {
+        await dockOpen(rect, seedUrl)
+      } else {
+        await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl)
+      }
+    } catch (err) {
+      console.warn('[browserDock] openForTool dockOpen failed', err)
     }
-    void dockRequestState()
+    dockRequestState().catch((err) => {
+      console.warn('[browserDock] dockRequestState failed', err)
+    })
   },
 
   toggle: async (sessionId, opts) => {
@@ -327,53 +379,86 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         url: seedUrl ?? cur.url,
       }),
     }))
-    if (wantsExpanded) {
-      const rect = get().panels[sessionId]?.anchorRect ?? { x: 0, y: 0, w: 1, h: 1 }
-      await dockOpen(rect, seedUrl ?? cur.url ?? null)
-      void dockRequestState()
-    } else {
-      await dockHide()
+    try {
+      if (wantsExpanded) {
+        const rect = get().panels[sessionId]?.anchorRect ?? { x: 0, y: 0, w: 1, h: 1 }
+        await dockOpen(rect, seedUrl ?? cur.url ?? null)
+        dockRequestState().catch((err) => {
+          console.warn('[browserDock] dockRequestState failed', err)
+        })
+      } else {
+        await dockHide()
+      }
+    } catch (err) {
+      console.warn('[browserDock] toggle dock failed', err)
     }
   },
 
   navigate: async (sessionId, url) => {
     const trimmed = url.trim()
     if (!trimmed) return
-    const normalized =
-      /^https?:\/\//i.test(trimmed) || trimmed === 'about:blank'
-        ? trimmed
-        : `https://${trimmed}`
+    const normalized = normalizeAddressBarUrl(trimmed)
     set((state) => ({ panels: patchPanel(state.panels, sessionId, { url: normalized }) }))
     if (get().activeSessionId !== sessionId) {
-      await get().openForTool(sessionId, { source: 'manual', url: normalized })
+      try {
+        await get().openForTool(sessionId, { source: 'manual', url: normalized })
+      } catch (err) {
+        console.warn('[browserDock] navigate openForTool failed', err)
+      }
       return
     }
-    await dockNavigate(normalized)
+    try {
+      await dockNavigate(normalized)
+    } catch (err) {
+      console.warn('[browserDock] dockNavigate failed', err)
+    }
   },
 
   back: async () => {
-    await import('../lib/browserDock').then(({ dockBack }) => dockBack())
+    try {
+      const { dockBack } = await import('../lib/browserDock')
+      await dockBack()
+    } catch (err) {
+      console.warn('[browserDock] back failed', err)
+    }
   },
 
   forward: async () => {
-    await import('../lib/browserDock').then(({ dockForward }) => dockForward())
+    try {
+      const { dockForward } = await import('../lib/browserDock')
+      await dockForward()
+    } catch (err) {
+      console.warn('[browserDock] forward failed', err)
+    }
   },
 
   reload: async (_sessionId, hard) => {
-    await dockReload(hard ?? false)
+    try {
+      await dockReload(hard ?? false)
+    } catch (err) {
+      console.warn('[browserDock] reload failed', err)
+    }
   },
 
   zoom: async (sessionId, delta) => {
     const cur = get().panels[sessionId]?.zoom ?? 1
     const next = delta === 'reset' ? 1 : Math.min(3, Math.max(0.25, cur + delta))
     set((state) => ({ panels: patchPanel(state.panels, sessionId, { zoom: next }) }))
-    await dockSetZoom(next)
+    try {
+      await dockSetZoom(next)
+    } catch (err) {
+      console.warn('[browserDock] zoom failed', err)
+    }
   },
 
   togglePick: async (sessionId) => {
     const enabled = !(get().panels[sessionId]?.pickMode ?? false)
     set((state) => ({ panels: patchPanel(state.panels, sessionId, { pickMode: enabled }) }))
-    await dockSetPickMode(enabled)
+    try {
+      await dockSetPickMode(enabled)
+    } catch (err) {
+      console.warn('[browserDock] togglePick failed', err)
+    }
   },
 
   toggleConsole: async (sessionId) => {
@@ -388,11 +473,19 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
 
   inspectSelector: async (_sessionId, selector) => {
     if (!selector) return
-    await dockInspectSelector(selector)
+    try {
+      await dockInspectSelector(selector)
+    } catch (err) {
+      console.warn('[browserDock] inspectSelector failed', err)
+    }
   },
 
   clearStorage: async (_sessionId, opts) => {
-    await dockClear(opts)
+    try {
+      await dockClear(opts)
+    } catch (err) {
+      console.warn('[browserDock] clearStorage failed', err)
+    }
   },
 
   closeForSession: async (sessionId) => {
@@ -400,7 +493,11 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
       panels: patchPanel(state.panels, sessionId, { visible: false, expanded: false, pickMode: false }),
     }))
-    await dockClose()
+    try {
+      await dockClose()
+    } catch (err) {
+      console.warn('[browserDock] closeForSession dockClose failed', err)
+    }
   },
 
   toggleDriver: (sessionId) => {
@@ -414,32 +511,49 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     set((state) => ({ panels: patchPanel(state.panels, sessionId, { agentLog: [] }) })),
 
   refreshTabs: async (sessionId) => {
-    const tabs = await dockListTabs()
-    const active = tabs.find((t) => t.active)?.id ?? null
-    set((state) => ({
-      panels: patchPanel(state.panels, sessionId, { tabs, activeTabId: active }),
-    }))
+    try {
+      const tabs = await dockListTabs()
+      const active = tabs.find((t) => t.active)?.id ?? null
+      set((state) => ({
+        panels: patchPanel(state.panels, sessionId, { tabs, activeTabId: active }),
+      }))
+    } catch (err) {
+      console.warn('[browserDock] refreshTabs failed', err)
+    }
   },
 
   newTab: async (sessionId, url, activate) => {
-    const id = await dockNewTab(url ?? null, activate ?? true)
-    if (id != null && (activate ?? true)) {
-      set((state) => ({
-        panels: patchPanel(state.panels, sessionId, { activeTabId: id }),
-      }))
+    try {
+      const id = await dockNewTab(url ?? null, activate ?? true)
+      if (id != null && (activate ?? true)) {
+        set((state) => ({
+          panels: patchPanel(state.panels, sessionId, { activeTabId: id }),
+        }))
+      }
+      return id
+    } catch (err) {
+      console.warn('[browserDock] newTab failed', err)
+      return null
     }
-    return id
   },
 
   closeTab: async (_sessionId, tabId) => {
-    await dockCloseTab(tabId)
+    try {
+      await dockCloseTab(tabId)
+    } catch (err) {
+      console.warn('[browserDock] closeTab failed', err)
+    }
   },
 
   activateTab: async (sessionId, tabId) => {
-    await dockActivateTab(tabId)
-    set((state) => ({
-      panels: patchPanel(state.panels, sessionId, { activeTabId: tabId }),
-    }))
+    try {
+      await dockActivateTab(tabId)
+      set((state) => ({
+        panels: patchPanel(state.panels, sessionId, { activeTabId: tabId }),
+      }))
+    } catch (err) {
+      console.warn('[browserDock] activateTab failed', err)
+    }
   },
 
   ingestEvent: (event) => {
@@ -470,8 +584,12 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         h: 1,
       }
       const seedUrl = get().panels[sessionId]?.url || null
-      void dockOpen(seedRect, seedUrl)
-      void dockRequestState()
+      dockOpen(seedRect, seedUrl).catch((err) => {
+        console.warn('[browserDock] ingestEvent dockOpen failed', err)
+      })
+      dockRequestState().catch((err) => {
+        console.warn('[browserDock] ingestEvent dockRequestState failed', err)
+      })
       return
     }
 

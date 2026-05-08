@@ -245,6 +245,7 @@ pub fn run() {
             browser_dock::browser_dock_close_tab,
             browser_dock::browser_dock_activate_tab,
             browser_dock::browser_dock_list_tabs,
+            browser_dock::browser_dock_screenshot,
         ]);
 
     let app = builder

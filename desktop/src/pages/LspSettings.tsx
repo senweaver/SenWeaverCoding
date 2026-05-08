@@ -3,6 +3,7 @@ import { Button } from '../components/shared/Button'
 import { Input } from '../components/shared/Input'
 import { useTranslation } from '../i18n'
 import { listLspTemplates, lspTemplate, useLspStore } from '../stores/lspStore'
+import { useUIStore } from '../stores/uiStore'
 import type { LspServerRecord, LspUpsertPayload } from '../types/lsp'
 
 type Mode = 'managed' | 'manual'
@@ -132,6 +133,23 @@ export function LspSettings() {
   const installServer = useLspStore((s) => s.installServer)
   const restartServer = useLspStore((s) => s.restartServer)
   const selectServer = useLspStore((s) => s.selectServer)
+  const addToast = useUIStore((s) => s.addToast)
+
+  const runWithToast = async (
+    op: () => Promise<unknown>,
+    failureLabel: string,
+    successLabel?: string,
+  ) => {
+    try {
+      await op()
+      if (successLabel) {
+        addToast({ type: 'success', message: successLabel })
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      addToast({ type: 'error', message: `${failureLabel}: ${reason}` })
+    }
+  }
 
   const [draft, setDraft] = useState<Draft>(emptyDraft())
   const [isCreating, setIsCreating] = useState(false)
@@ -139,7 +157,9 @@ export function LspSettings() {
   const [isSaving, setIsSaving] = useState(false)
 
   useEffect(() => {
-    void fetch()
+    void fetch().catch((err) => {
+      console.error('[lsp] fetch failed', err)
+    })
   }, [fetch])
 
   const selected = useMemo(
@@ -192,6 +212,9 @@ export function LspSettings() {
       } else if (selected) {
         await updateServer(selected.id, payload)
       }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      addToast({ type: 'error', message: `${t('settings.lsp.toast.saveFailed')}: ${reason}` })
     } finally {
       setIsSaving(false)
     }
@@ -230,7 +253,12 @@ export function LspSettings() {
           <input
             type="checkbox"
             checked={enabled}
-            onChange={(e) => void setGlobalEnabled(e.target.checked)}
+            onChange={(e) =>
+              void runWithToast(
+                () => setGlobalEnabled(e.target.checked),
+                t('settings.lsp.toast.globalToggleFailed'),
+              )
+            }
             className="h-4 w-4 rounded border-[var(--color-border)] text-[var(--color-brand)]"
           />
           {t('settings.lsp.globalEnable')}
@@ -426,7 +454,13 @@ export function LspSettings() {
                 <ManagedActions
                   server={selected}
                   progress={installPhase(selected.id)}
-                  onInstall={() => void installServer(selected.id)}
+                  onInstall={() =>
+                    void runWithToast(
+                      () => installServer(selected.id),
+                      t('settings.lsp.toast.installFailed'),
+                      t('settings.lsp.toast.installSucceeded'),
+                    )
+                  }
                 />
               )}
 
@@ -435,7 +469,12 @@ export function LspSettings() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => void toggleServer(selected.id)}
+                    onClick={() =>
+                      void runWithToast(
+                        () => toggleServer(selected.id),
+                        t('settings.lsp.toast.toggleFailed'),
+                      )
+                    }
                   >
                     <span className="material-symbols-outlined text-[14px]">power_settings_new</span>
                     {selected.enabled
@@ -445,7 +484,12 @@ export function LspSettings() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => void restartServer(selected.id)}
+                    onClick={() =>
+                      void runWithToast(
+                        () => restartServer(selected.id),
+                        t('settings.lsp.toast.restartFailed'),
+                      )
+                    }
                   >
                     <span className="material-symbols-outlined text-[14px]">restart_alt</span>
                     {t('settings.lsp.action.restart')}
@@ -454,7 +498,12 @@ export function LspSettings() {
                     variant="ghost"
                     size="sm"
                     className="text-[var(--color-error)] hover:text-[var(--color-error)]"
-                    onClick={() => void deleteServer(selected.id)}
+                    onClick={() =>
+                      void runWithToast(
+                        () => deleteServer(selected.id),
+                        t('settings.lsp.toast.deleteFailed'),
+                      )
+                    }
                   >
                     <span className="material-symbols-outlined text-[14px]">delete</span>
                     {t('common.delete')}

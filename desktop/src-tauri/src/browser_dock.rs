@@ -241,9 +241,59 @@ const BRIDGE_JS: &str = r#"
       send('result_chunk', { reqId, seq: i, total, payload: slice });
     }
   }
+  function escapeAttr(value) {
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+  function resolveSelector(selector) {
+    if (selector == null) return null;
+    const raw = String(selector).trim();
+    if (!raw) return null;
+    if (raw.charAt(0) === '@') {
+      try {
+        return document.querySelector('[data-zc-ref="' + escapeAttr(raw) + '"]');
+      } catch (_) { return null; }
+    }
+    const lower = raw.toLowerCase();
+    if (lower.indexOf('text=') === 0) {
+      const needle = raw.slice(5).trim();
+      if (!needle) return null;
+      const all = document.body ? document.body.querySelectorAll('*') : [];
+      for (const el of all) {
+        if (!(el instanceof Element)) continue;
+        const inner = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (inner === needle) return el;
+      }
+      for (const el of all) {
+        if (!(el instanceof Element)) continue;
+        const inner = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (inner.indexOf(needle) >= 0) return el;
+      }
+      return null;
+    }
+    if (lower.indexOf('label=') === 0) {
+      const needle = raw.slice(6).trim();
+      if (!needle) return null;
+      const labels = Array.from(document.querySelectorAll('label'));
+      for (const label of labels) {
+        const txt = (label.innerText || label.textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt.indexOf(needle) < 0) continue;
+        const forId = label.getAttribute('for');
+        if (forId) {
+          const target = document.getElementById(forId);
+          if (target) return target;
+        }
+        const inner = label.querySelector('input,textarea,select,button');
+        if (inner) return inner;
+      }
+      const aria = document.querySelector('[aria-label="' + escapeAttr(needle) + '"]');
+      if (aria) return aria;
+      return null;
+    }
+    try { return document.querySelector(raw); } catch (_) { return null; }
+  }
   function findOne(selector) {
     if (!selector) throw new Error('selector is required');
-    const el = document.querySelector(selector);
+    const el = resolveSelector(selector);
     if (!el) throw new Error(`element not found: ${selector}`);
     return el;
   }
@@ -294,7 +344,7 @@ const BRIDGE_JS: &str = r#"
         for (const c of el.children) { const v = visit(c, depth + 1); if (v) acc.push(v); }
         return acc.length === 1 ? acc[0] : (acc.length ? { tag: 'group', children: acc } : null);
       }
-      const ref = '@' + (++refSeq).toString(36);
+      const ref = '@e' + (++refSeq);
       el.setAttribute('data-zc-ref', ref);
       const node = {
         ref,
@@ -331,6 +381,39 @@ const BRIDGE_JS: &str = r#"
       if (!url) throw new Error('url is required');
       window.location.assign(url);
       return { navigated: true, url };
+    },
+    get_html(args) {
+      const sel = args && args.selector;
+      if (sel) {
+        const el = findOne(sel);
+        return { selector: sel, html: (el.outerHTML || '').slice(0, 60000) };
+      }
+      return { html: (document.documentElement && document.documentElement.outerHTML || '').slice(0, 60000) };
+    },
+    get_attribute(args) {
+      const el = findOne(args && args.selector);
+      const name = (args && args.name) || '';
+      if (!name) throw new Error('attribute name is required');
+      return { selector: args.selector, name, value: el.getAttribute(name) };
+    },
+    select_option(args) {
+      const el = findOne(args && args.selector);
+      const value = args && args.value;
+      const label = args && args.label;
+      if (!(el instanceof HTMLSelectElement)) {
+        throw new Error('select_option requires a <select> element');
+      }
+      let chosen = null;
+      if (value != null) {
+        chosen = Array.from(el.options).find((opt) => opt.value === String(value)) || null;
+      } else if (label != null) {
+        chosen = Array.from(el.options).find((opt) => (opt.text || '').trim() === String(label)) || null;
+      }
+      if (!chosen) throw new Error('option not found');
+      el.value = chosen.value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { selected: chosen.value, label: chosen.text };
     },
     click(args) {
       const el = findOne(args && args.selector);
@@ -385,8 +468,8 @@ const BRIDGE_JS: &str = r#"
       return { x: window.scrollX, y: window.scrollY };
     },
     is_visible(args) {
-      const el = document.querySelector(args && args.selector);
-      return { selector: args.selector, visible: isVisibleEl(el) };
+      const el = resolveSelector(args && args.selector);
+      return { selector: args && args.selector, visible: isVisibleEl(el) };
     },
     get_text(args) {
       const el = findOne(args && args.selector);
@@ -398,24 +481,44 @@ const BRIDGE_JS: &str = r#"
     wait_for(args) {
       const sel = args && args.selector;
       const text = args && args.text;
-      const timeoutMs = (args && args.timeout_ms) || 15000;
+      const readyState = args && (args.ready_state || args.readyState);
+      const timeoutMs = (args && (args.timeout_ms || args.ms)) || 15000;
+      const onlyMs = !sel && !text && !readyState && (args && (args.ms != null));
+      if (onlyMs) {
+        const ms = Number(args.ms) || 0;
+        return new Promise((resolve) => {
+          setTimeout(() => resolve({ slept_ms: ms }), ms);
+        });
+      }
       return new Promise((resolve, reject) => {
         const start = Date.now();
         function check() {
           if (sel) {
-            const el = document.querySelector(sel);
+            const el = resolveSelector(sel);
             if (el && isVisibleEl(el)) { resolve({ found: true, selector: sel, elapsed_ms: Date.now() - start }); return true; }
           }
           if (text) {
             const body = document.body && document.body.innerText ? document.body.innerText : '';
             if (body.indexOf(String(text)) >= 0) { resolve({ found: true, text, elapsed_ms: Date.now() - start }); return true; }
           }
+          if (readyState) {
+            const target = String(readyState).toLowerCase();
+            const cur = String(document.readyState || '').toLowerCase();
+            const ok = target === 'complete'
+              ? cur === 'complete'
+              : target === 'interactive'
+                ? (cur === 'interactive' || cur === 'complete')
+                : cur === target;
+            if (ok) { resolve({ ready_state: cur, elapsed_ms: Date.now() - start }); return true; }
+          }
           return false;
         }
         if (check()) return;
-        const obs = new MutationObserver(() => { if (check()) { obs.disconnect(); clearTimeout(to); } });
+        const onState = () => { if (check()) { obs.disconnect(); clearTimeout(to); document.removeEventListener('readystatechange', onState, true); } };
+        const obs = new MutationObserver(() => { if (check()) { obs.disconnect(); clearTimeout(to); document.removeEventListener('readystatechange', onState, true); } });
         obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
-        const to = setTimeout(() => { obs.disconnect(); reject(new Error('wait_for timeout')); }, timeoutMs);
+        document.addEventListener('readystatechange', onState, true);
+        const to = setTimeout(() => { obs.disconnect(); document.removeEventListener('readystatechange', onState, true); reject(new Error('wait_for timeout')); }, timeoutMs);
       });
     },
     find(args) {
@@ -440,6 +543,14 @@ const BRIDGE_JS: &str = r#"
       if (action === 'fill') { dispatchSyntheticInput(target, args.fill_value ?? ''); return { found: true, action: 'fill' }; }
       if (action === 'hover') { target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return { found: true, action: 'hover' }; }
       if (action === 'text') { return { found: true, action: 'text', text: (target.innerText || '').slice(0, 4000) }; }
+      if (action === 'check') {
+        const before = !!target.checked;
+        if (!before) {
+          try { target.click(); } catch (_) {}
+        }
+        const after = !!target.checked;
+        return { found: true, action: 'check', checked_before: before, checked_after: after };
+      }
       throw new Error(`unsupported find action: ${action}`);
     },
     dock_close() { return { closed: true }; },
@@ -473,7 +584,7 @@ const BRIDGE_JS: &str = r#"
     },
     inspect(selector) {
       try {
-        const el = document.querySelector(selector);
+        const el = resolveSelector(selector);
         if (!el) { send('inspect', { selector, error: 'not found' }); return; }
         send('inspect', { selector, props: computedStyleOf(el) });
       } catch (err) {
@@ -630,6 +741,36 @@ impl DockSharedState {
         }
         if g.active.is_none() {
             g.active = Some(id);
+        }
+    }
+
+    fn acquire_active_or_reserve(&self, url: Option<String>) -> (TabId, bool) {
+        let mut g = self.0.lock();
+        if let Some(active) = g.active {
+            return (active, false);
+        }
+        g.next_id = g.next_id.checked_add(1).unwrap_or(1);
+        let id = g.next_id;
+        g.tabs.insert(
+            id,
+            TabRecord {
+                last_url: url,
+                last_title: None,
+            },
+        );
+        if !g.order.contains(&id) {
+            g.order.push(id);
+        }
+        g.active = Some(id);
+        (id, true)
+    }
+
+    fn discard_reserved(&self, id: TabId) {
+        let mut g = self.0.lock();
+        g.tabs.remove(&id);
+        g.order.retain(|x| *x != id);
+        if g.active == Some(id) {
+            g.active = g.order.last().copied();
         }
     }
 
@@ -919,21 +1060,14 @@ pub async fn browser_dock_open(
     state.set_rect(rect);
     let s = state.inner().clone();
 
-    let active = s.active();
-    let active = match active {
-        Some(id) => id,
-        None => {
-            let id = s.alloc_id();
-            ensure_tab_webview(&app, &s, id, url.clone())?;
-            s.register_tab(id, url.clone());
-            id
+    let (active, created) = s.acquire_active_or_reserve(url.clone());
+    if created {
+        if let Err(err) = ensure_tab_webview(&app, &s, active, url.clone()) {
+            s.discard_reserved(active);
+            return Err(err);
         }
-    };
-
-    if s.active() == Some(active) {
-        if let Some(target) = url.as_ref().filter(|s| !s.trim().is_empty()) {
-            ensure_tab_webview(&app, &s, active, Some(target.clone()))?;
-        }
+    } else if let Some(target) = url.as_ref().filter(|t| !t.trim().is_empty()) {
+        ensure_tab_webview(&app, &s, active, Some(target.clone()))?;
     }
 
     update_active_layout(&app, &s)?;
@@ -1192,6 +1326,53 @@ pub async fn browser_dock_request_state(
 }
 
 #[tauri::command]
+pub async fn browser_dock_screenshot(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    full_page: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let _ = state;
+    let full = full_page.unwrap_or(false);
+    if full {
+        if let Some(active_id) = app
+            .try_state::<DockSharedState>()
+            .and_then(|s| s.inner().active())
+        {
+            if let Some(webview) = app.get_webview(&tab_label(active_id)) {
+                let warmup = r#"(async () => {
+                  try {
+                    const total = Math.max(
+                      document.documentElement.scrollHeight,
+                      document.body && document.body.scrollHeight || 0,
+                    );
+                    const step = Math.max(window.innerHeight * 0.9, 400);
+                    for (let y = 0; y <= total; y += step) {
+                      window.scrollTo({ top: y, behavior: 'instant' in window ? 'instant' : 'auto' });
+                      await new Promise((r) => setTimeout(r, 30));
+                    }
+                    window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
+                  } catch (_) {}
+                })();"#;
+                let _ = webview.eval(warmup);
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
+        }
+    }
+    let app_xcap = app.clone();
+    let bytes = tokio::task::spawn_blocking(move || capture_dock_window(&app_xcap))
+        .await
+        .map_err(|e| format!("screenshot join: {e}"))?
+        .map_err(|e| format!("screenshot capture: {e}"))?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(serde_json::json!({
+        "png_base64": encoded,
+        "bytes": bytes.len(),
+        "full_page": full,
+    }))
+}
+
+#[tauri::command]
 pub async fn browser_dock_get_state(
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<serde_json::Value, String> {
@@ -1432,13 +1613,12 @@ impl DockController for TauriDockController {
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .unwrap_or_default();
-        if state.active().is_none() {
-            let id = state.alloc_id();
-            if let Err(err) = ensure_tab_webview(&self.0.app, &state, id, None) {
+        let (active, created) = state.acquire_active_or_reserve(None);
+        if created {
+            if let Err(err) = ensure_tab_webview(&self.0.app, &state, active, None) {
                 tracing::warn!("[browser_dock] auto-create on ensure_visible failed: {err}");
+                state.discard_reserved(active);
             } else {
-                state.register_tab(id, None);
-                let _ = state.set_active(id);
                 if state.rect().is_none() {
                     state.set_rect(DockRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
                 }

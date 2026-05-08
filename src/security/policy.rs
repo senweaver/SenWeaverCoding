@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -88,8 +89,20 @@ pub struct SecurityPolicy {
     pub require_approval_for_medium_risk: bool,
     pub block_high_risk_commands: bool,
     pub shell_env_passthrough: Vec<String>,
-    pub enable_command_policy: bool,
+    enable_command_policy: Arc<AtomicBool>,
     pub tracker: ActionTracker,
+}
+
+impl SecurityPolicy {
+    #[inline]
+    pub fn is_command_policy_enabled(&self) -> bool {
+        self.enable_command_policy.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_command_policy_enabled(&self, value: bool) {
+        self.enable_command_policy.store(value, Ordering::Release);
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -214,7 +227,7 @@ impl Default for SecurityPolicy {
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],
-            enable_command_policy: false,
+            enable_command_policy: Arc::new(AtomicBool::new(false)),
             tracker: ActionTracker::new(),
         }
     }
@@ -823,7 +836,7 @@ impl SecurityPolicy {
         command: &str,
         approved: bool,
     ) -> Result<CommandRiskLevel, String> {
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             if self.autonomy == AutonomyLevel::ReadOnly {
                 return Err("Command blocked: autonomy level is ReadOnly".into());
             }
@@ -908,7 +921,7 @@ impl SecurityPolicy {
             return false;
         }
 
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             return true;
         }
 
@@ -993,7 +1006,7 @@ impl SecurityPolicy {
     }
 
     pub fn forbidden_path_argument(&self, command: &str) -> Option<String> {
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             return None;
         }
         let forbidden_candidate = |raw: &str| {
@@ -1066,7 +1079,7 @@ impl SecurityPolicy {
             return false;
         }
 
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             return true;
         }
 
@@ -1109,7 +1122,7 @@ impl SecurityPolicy {
     }
 
     pub fn is_resolved_path_allowed(&self, resolved: &Path) -> bool {
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             return true;
         }
 
@@ -1147,6 +1160,9 @@ impl SecurityPolicy {
     }
 
     pub fn is_runtime_config_path(&self, resolved: &Path) -> bool {
+        if !self.is_command_policy_enabled() {
+            return false;
+        }
         let Some(config_dir) = self.runtime_config_dir() else {
             return false;
         };
@@ -1229,7 +1245,7 @@ impl SecurityPolicy {
     }
 
     pub fn record_action(&self) -> bool {
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             return true;
         }
         if self.max_actions_per_hour == 0 {
@@ -1240,7 +1256,7 @@ impl SecurityPolicy {
     }
 
     pub fn is_rate_limited(&self) -> bool {
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             return false;
         }
         if self.max_actions_per_hour == 0 {
@@ -1250,7 +1266,7 @@ impl SecurityPolicy {
     }
 
     pub fn should_filter_shell_env(&self) -> bool {
-        self.enable_command_policy
+        self.is_command_policy_enabled()
     }
 
     pub fn resolve_tool_path(&self, path: &str) -> PathBuf {
@@ -1313,7 +1329,7 @@ impl SecurityPolicy {
             require_approval_for_medium_risk: autonomy_config.require_approval_for_medium_risk,
             block_high_risk_commands: autonomy_config.block_high_risk_commands,
             shell_env_passthrough: autonomy_config.shell_env_passthrough.clone(),
-            enable_command_policy: autonomy_config.enable_command_policy,
+            enable_command_policy: Arc::new(AtomicBool::new(autonomy_config.enable_command_policy)),
             tracker: ActionTracker::new(),
         }
     }
@@ -1325,7 +1341,7 @@ impl SecurityPolicy {
 
         let _ = writeln!(out, "**Autonomy level**: {:?}", self.autonomy);
 
-        if !self.enable_command_policy {
+        if !self.is_command_policy_enabled() {
             let _ = writeln!(
                 out,
                 "**Command policy**: disabled. Per-tool execution approval is the only gate; \

@@ -70,10 +70,7 @@ impl GitOperationsTool {
                 let resolved = candidate
                     .canonicalize()
                     .map_err(|e| anyhow::anyhow!("Cannot resolve path '{}': {}", p, e))?;
-                let workspace_canonical = workspace_dir
-                    .canonicalize()
-                    .unwrap_or(workspace_dir.clone());
-                if !resolved.starts_with(&workspace_canonical) {
+                if !self.security.is_resolved_path_allowed(&resolved) {
                     anyhow::bail!("Path '{}' resolves outside the workspace directory", p);
                 }
                 resolved

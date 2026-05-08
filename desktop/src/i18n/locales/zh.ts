@@ -91,6 +91,9 @@ export const zh: Record<TranslationKey, string> = {
   'browser.panel.tabs.close': '关闭标签页',
   'browser.panel.tabs.untitled': '新标签页',
   'browser.panel.tabs.activate': '切换到此标签页',
+  'browser.panel.toast.screenshotSaved': '截图已保存',
+  'browser.panel.toast.screenshotCopied': '截图已复制到剪贴板',
+  'browser.panel.toast.screenshotFailed': '截图失败',
 
   'rightSidebar.title': '工作区',
   'rightSidebar.toggleOpen': '打开文件浏览器',
@@ -1953,4 +1956,11 @@ export const zh: Record<TranslationKey, string> = {
   'settings.lsp.installState.installing': '安装中',
   'settings.lsp.installState.failed': '安装失败',
   'settings.lsp.installState.notInstalled': '未安装',
+  'settings.lsp.toast.installFailed': '语言服务器安装失败',
+  'settings.lsp.toast.installSucceeded': '语言服务器安装完成',
+  'settings.lsp.toast.toggleFailed': '语言服务器启停失败',
+  'settings.lsp.toast.restartFailed': '语言服务器重启失败',
+  'settings.lsp.toast.deleteFailed': '语言服务器删除失败',
+  'settings.lsp.toast.saveFailed': '语言服务器保存失败',
+  'settings.lsp.toast.globalToggleFailed': 'LSP 集成开关更新失败',
 }

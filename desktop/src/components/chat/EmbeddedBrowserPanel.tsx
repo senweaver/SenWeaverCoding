@@ -21,7 +21,8 @@ import {
   useBrowserPanelStore,
 } from '../../stores/browserPanelStore'
 import { useTeamStore } from '../../stores/teamStore'
-import { listenDockEvents } from '../../lib/browserDock'
+import { useUIStore } from '../../stores/uiStore'
+import { dockHide, dockOpen, dockScreenshot, listenDockEvents } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { useTranslation } from '../../i18n'
 
@@ -92,20 +93,24 @@ export function EmbeddedBrowserPanel() {
   useEffect(() => {
     if (!isTauriRuntime()) return
     let cancelled = false
-    void listenDockEvents((event) => {
+    listenDockEvents((event) => {
       if (cancelled) return
       ingestEvent(event)
-    }).then((unlisten) => {
-      if (cancelled) {
-        try {
-          unlisten()
-        } catch {
-
-        }
-        return
-      }
-      unsubRef.current = unlisten
     })
+      .then((unlisten) => {
+        if (cancelled) {
+          try {
+            unlisten()
+          } catch {
+
+          }
+          return
+        }
+        unsubRef.current = unlisten
+      })
+      .catch((err) => {
+        console.warn('[browserDock] listenDockEvents subscription failed', err)
+      })
     return () => {
       cancelled = true
       if (unsubRef.current) {
@@ -185,6 +190,32 @@ export function EmbeddedBrowserPanel() {
     void refreshTabs(sessionId)
   }, [sessionId, visible, refreshTabs])
 
+  const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
+  const prevSettingsOpenRef = useRef(settingsOverlayOpen)
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      prevSettingsOpenRef.current = settingsOverlayOpen
+      return
+    }
+    const wasOpen = prevSettingsOpenRef.current
+    prevSettingsOpenRef.current = settingsOverlayOpen
+    if (!visible || !expanded) return
+    if (settingsOverlayOpen && !wasOpen) {
+      dockHide().catch((err) => {
+        console.warn('[browserDock] hide on settings open failed', err)
+      })
+      return
+    }
+    if (!settingsOverlayOpen && wasOpen) {
+      if (!ownsDock) return
+      const rect = panel?.anchorRect
+      if (!rect) return
+      dockOpen(rect, panel?.url ?? null).catch((err) => {
+        console.warn('[browserDock] re-open after settings close failed', err)
+      })
+    }
+  }, [settingsOverlayOpen, visible, expanded, ownsDock, panel?.anchorRect, panel?.url])
+
   const [draftUrl, setDraftUrl] = useState(url)
   useEffect(() => {
     setDraftUrl(url)
@@ -219,31 +250,72 @@ export function EmbeddedBrowserPanel() {
     setMenuOpen(false)
   }, [liveUrl, url])
 
+  const addToast = useUIStore((s) => s.addToast)
+
+  const triggerScreenshot = useCallback(
+    async (fullPage: boolean) => {
+      if (!sessionId) return
+      try {
+        const result = await dockScreenshot(fullPage)
+        if (!result || !result.png_base64) {
+          addToast({
+            type: 'warning',
+            message: t('browser.panel.toast.screenshotFailed'),
+          })
+          return
+        }
+        const dataUrl = `data:image/png;base64,${result.png_base64}`
+        const ts = new Date().toISOString().replace(/[:.]/g, '-')
+        const filename = `browser-screenshot-${ts}.png`
+        try {
+          const a = document.createElement('a')
+          a.href = dataUrl
+          a.download = filename
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          addToast({
+            type: 'success',
+            message: t('browser.panel.toast.screenshotSaved'),
+          })
+        } catch (err) {
+          console.warn('[browserDock] screenshot download failed', err)
+          try {
+            await navigator.clipboard.writeText(dataUrl)
+            addToast({
+              type: 'success',
+              message: t('browser.panel.toast.screenshotCopied'),
+            })
+          } catch (clipErr) {
+            console.warn('[browserDock] screenshot clipboard fallback failed', clipErr)
+            addToast({
+              type: 'error',
+              message: t('browser.panel.toast.screenshotFailed'),
+            })
+          }
+        }
+      } catch (err) {
+        console.warn('[browserDock] screenshot failed', err)
+        addToast({
+          type: 'error',
+          message: `${t('browser.panel.toast.screenshotFailed')}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        })
+      }
+    },
+    [sessionId, addToast, t],
+  )
+
   const handleScreenshot = useCallback(() => {
-    if (!sessionId) return
-    if (!viewportRef.current) return
-    const rect = viewportRef.current.getBoundingClientRect()
-    const payload = {
-      sessionId,
-      area: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
-      area_capture: false,
-    }
-    window.dispatchEvent(new CustomEvent('browser-dock:screenshot', { detail: payload }))
     setMenuOpen(false)
-  }, [sessionId])
+    void triggerScreenshot(false)
+  }, [triggerScreenshot])
 
   const handleAreaScreenshot = useCallback(() => {
-    if (!sessionId) return
-    if (!viewportRef.current) return
-    const rect = viewportRef.current.getBoundingClientRect()
-    const payload = {
-      sessionId,
-      area: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
-      area_capture: true,
-    }
-    window.dispatchEvent(new CustomEvent('browser-dock:screenshot', { detail: payload }))
     setMenuOpen(false)
-  }, [sessionId])
+    void triggerScreenshot(true)
+  }, [triggerScreenshot])
 
   if (!sessionId) return null
   if (isMemberSession) return null

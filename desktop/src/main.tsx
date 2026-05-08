@@ -1,5 +1,7 @@
 import './theme/globals.css'
 
+let bootCompleted = false
+
 function paintBootError(label: string, message: string, stack?: string) {
   const root = document.getElementById('root')
   if (!root) return
@@ -33,20 +35,42 @@ function paintBootError(label: string, message: string, stack?: string) {
   root.appendChild(wrap)
 }
 
+function reportRuntimeError(label: string, message: string, stack?: string) {
+  if (typeof console !== 'undefined') {
+    if (stack) {
+      console.error(`[runtime:${label}]`, message, '\n', stack)
+    } else {
+      console.error(`[runtime:${label}]`, message)
+    }
+  }
+  try {
+    window.dispatchEvent(
+      new CustomEvent('app:runtime-error', { detail: { label, message, stack } }),
+    )
+  } catch {
+  }
+}
+
 window.addEventListener('error', (e) => {
-  paintBootError(
-    'window.error',
-    e.message ?? String(e.error ?? 'Unknown error'),
-    e.error instanceof Error ? e.error.stack : undefined,
-  )
+  const message = e.message ?? String(e.error ?? 'Unknown error')
+  const stack = e.error instanceof Error ? e.error.stack : undefined
+  if (bootCompleted) {
+    reportRuntimeError('window.error', message, stack)
+    return
+  }
+  paintBootError('window.error', message, stack)
 })
+
 window.addEventListener('unhandledrejection', (e) => {
   const reason = e.reason
-  paintBootError(
-    'unhandledrejection',
-    reason instanceof Error ? reason.message : String(reason ?? 'Unknown rejection'),
-    reason instanceof Error ? reason.stack : undefined,
-  )
+  const message = reason instanceof Error ? reason.message : String(reason ?? 'Unknown rejection')
+  const stack = reason instanceof Error ? reason.stack : undefined
+  if (bootCompleted) {
+    e.preventDefault?.()
+    reportRuntimeError('unhandledrejection', message, stack)
+    return
+  }
+  paintBootError('unhandledrejection', message, stack)
 })
 
 async function boot() {
@@ -76,6 +100,7 @@ async function boot() {
         ),
       ),
     )
+    bootCompleted = true
   } catch (err) {
     paintBootError(
       'module-load',

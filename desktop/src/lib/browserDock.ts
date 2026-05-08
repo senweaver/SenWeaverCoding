@@ -62,12 +62,7 @@ async function invokeIfTauri<T>(cmd: string, args?: Record<string, unknown>): Pr
   if (!isTauriRuntime()) return null
   await ensureBoot()
   if (!invokeRef) return null
-  try {
-    return await invokeRef<T>(cmd, args)
-  } catch (err) {
-    console.warn(`[browserDock] ${cmd} failed`, err)
-    return null
-  }
+  return invokeRef<T>(cmd, args)
 }
 
 export async function dockOpen(rect: BrowserDockRect, url: string | null): Promise<void> {
@@ -168,6 +163,20 @@ export async function dockActivateTab(tabId: number): Promise<void> {
 export async function dockListTabs(): Promise<BrowserDockTabInfo[]> {
   const res = await invokeIfTauri<BrowserDockTabInfo[]>('browser_dock_list_tabs')
   return res ?? []
+}
+
+export type BrowserDockScreenshotPayload = {
+  png_base64: string
+  bytes: number
+  full_page: boolean
+}
+
+export async function dockScreenshot(
+  fullPage = false,
+): Promise<BrowserDockScreenshotPayload | null> {
+  return invokeIfTauri<BrowserDockScreenshotPayload>('browser_dock_screenshot', {
+    fullPage,
+  })
 }
 
 export async function listenDockEvents(

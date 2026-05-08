@@ -495,7 +495,7 @@ impl BrowserTool {
         }
     }
 
-    fn validate_url(&self, url: &str) -> anyhow::Result<()> {
+    fn validate_url(&self, url: &str, permissive: bool) -> anyhow::Result<()> {
         let url = url.trim();
 
         if url.is_empty() {
@@ -503,11 +503,31 @@ impl BrowserTool {
         }
 
         if url.starts_with("file://") {
-            anyhow::bail!("file:// URLs are not allowed in browser automation");
+            if permissive {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "file:// URLs are blocked by browser security policy. \
+                 Disable [autonomy].enable_command_policy or use the embedded dock backend \
+                 to preview local HTML files."
+            );
         }
 
         if !url.starts_with("https://") && !url.starts_with("http://") {
-            anyhow::bail!("Only http:// and https:// URLs are allowed");
+            anyhow::bail!("Only http://, https:// and file:// URLs are allowed");
+        }
+
+        let host = extract_host(url)?;
+
+        if is_loopback_host(&host) {
+            if permissive {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Loopback host '{host}' is blocked by browser security policy. \
+                 Disable [autonomy].enable_command_policy or call this URL through the \
+                 embedded dock backend (browser.backend='auto' inside the desktop app)."
+            );
         }
 
         if self.allowed_domains.is_empty() {
@@ -517,9 +537,10 @@ impl BrowserTool {
             );
         }
 
-        let host = extract_host(url)?;
-
         if is_private_host(&host) {
+            if permissive {
+                return Ok(());
+            }
             anyhow::bail!("Blocked local/private host: {host}");
         }
 
@@ -528,6 +549,10 @@ impl BrowserTool {
         }
 
         Ok(())
+    }
+
+    fn url_validation_permissive(&self) -> bool {
+        !self.security.is_command_policy_enabled()
     }
 
     async fn run_command(&self, args: &[&str]) -> anyhow::Result<AgentBrowserResponse> {
@@ -589,7 +614,7 @@ impl BrowserTool {
     ) -> anyhow::Result<ToolResult> {
         match action {
             BrowserAction::Open { url } => {
-                self.validate_url(&url)?;
+                self.validate_url(&url, self.url_validation_permissive())?;
                 let resp = self.run_command(&["open", &url]).await?;
                 self.to_result(resp)
             }
@@ -719,46 +744,18 @@ impl BrowserTool {
                 self.to_result(resp)
             }
 
-            BrowserAction::OpenTab { url, .. } => Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string_pretty(&json!({
-                    "action": "open_tab",
-                    "tab": 1,
-                    "url": url,
-                    "note": "agent_browser backend has no real multi-tab support; treated as a single shared session",
-                }))
-                .unwrap_or_default(),
-                error: None,
-            }),
-            BrowserAction::CloseTab { tab } => Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string_pretty(&json!({
-                    "action": "close_tab",
-                    "tab": tab,
-                    "note": "agent_browser backend has no real multi-tab support",
-                }))
-                .unwrap_or_default(),
-                error: None,
-            }),
-            BrowserAction::ActivateTab { tab } => Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string_pretty(&json!({
-                    "action": "activate_tab",
-                    "tab": tab,
-                    "note": "agent_browser backend has no real multi-tab support",
-                }))
-                .unwrap_or_default(),
-                error: None,
-            }),
-            BrowserAction::ListTabs => Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string_pretty(&json!({
-                    "action": "list_tabs",
-                    "tabs": [],
-                    "note": "agent_browser backend has no real multi-tab support",
-                }))
-                .unwrap_or_default(),
-                error: None,
+            BrowserAction::OpenTab { .. }
+            | BrowserAction::CloseTab { .. }
+            | BrowserAction::ActivateTab { .. }
+            | BrowserAction::ListTabs => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "Multi-tab actions (open_tab/close_tab/activate_tab/list_tabs) are only \
+                     supported by the embedded dock backend (tauri_dock). Run inside the \
+                     SenAgentOS desktop app or switch to backend='tauri_dock'."
+                        .to_string(),
+                ),
             }),
         }
     }
@@ -770,6 +767,10 @@ impl BrowserTool {
     ) -> anyhow::Result<ToolResult> {
         #[cfg(feature = "browser-native")]
         {
+            if let BrowserAction::Open { url } = &action {
+                self.validate_url(url, self.url_validation_permissive())?;
+            }
+
             let mut state = self.native_state.lock().await;
 
             let first_attempt = state
@@ -854,7 +855,7 @@ impl BrowserTool {
                     .get("url")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("Missing 'url' for open action"))?;
-                self.validate_url(url)?;
+                self.validate_url(url, self.url_validation_permissive())?;
             }
             "mouse_move" | "mouse_click" => {
                 let x = self.read_required_i64(params, "x")?;
@@ -1022,7 +1023,7 @@ impl BrowserTool {
         match &action {
             BrowserAction::OpenTab { url, activate } => {
                 if let Some(url) = url.as_ref() {
-                    self.validate_url(url)?;
+                    self.validate_url(url, true)?;
                 }
                 let new_id = controller
                     .new_tab(url.clone(), *activate)
@@ -1107,7 +1108,7 @@ impl BrowserTool {
         let (kind, args, timeout_ms, action_name): (&'static str, Value, u64, &'static str) =
             match action {
                 BrowserAction::Open { url } => {
-                    self.validate_url(&url)?;
+                    self.validate_url(&url, true)?;
                     (
                         "navigate",
                         json!({ "url": url }),
@@ -1232,18 +1233,33 @@ impl BrowserTool {
             })
             .await?;
 
-        if resp.ok {
-            Ok(dock_ok_result(action_name, resp.value))
-        } else {
-            Ok(ToolResult {
+        if !resp.ok {
+            return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
                     resp.error
                         .unwrap_or_else(|| format!("dock backend reported failure for {kind}")),
                 ),
-            })
+            });
         }
+
+        if kind == "navigate" {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            const NAV_READY_TIMEOUT_MS: u64 = 12_000;
+            let _ = controller
+                .exec(DockRequest {
+                    kind: "wait_for".to_string(),
+                    args: json!({
+                        "ready_state": "interactive",
+                        "timeout_ms": NAV_READY_TIMEOUT_MS,
+                    }),
+                    timeout_ms: NAV_READY_TIMEOUT_MS.saturating_add(2_000),
+                })
+                .await;
+        }
+
+        Ok(dock_ok_result(action_name, resp.value))
     }
 
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
@@ -1281,9 +1297,25 @@ impl Tool for BrowserTool {
             "browser dock** (TauriDockController) so the user sees every navigate/click/fill/screenshot live; ",
             "prefer this for Debug-mode reproduction & verification and for Agent-mode web-facing tasks. ",
             "Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, ",
-            "key_type, key_press, screen_capture) through a computer-use sidecar. Use 'snapshot' to map ",
-            "interactive elements to refs (@e1, @e2). Enforces browser.allowed_domains for open actions. ",
-            "Do NOT use `browser_open` (system browser) for in-app debugging when the dock is available."
+            "key_type, key_press, screen_capture) through a computer-use sidecar. ",
+            "**Selector formats** (all backends): `@e1`-style refs returned by `snapshot`, raw CSS (e.g. `#id`, ",
+            "`.class`, `[data-x=y]`), `text=<exact-or-substring>`, and `label=<label-text>`. ",
+            "**Workflow**: call `action='snapshot'` to enumerate interactive elements (each gets an `@e<n>` ref), ",
+            "then drive them via click/fill/type/hover passing that ref as `selector`. ",
+            "**Navigation**: `action='open'` on the dock backend automatically waits for the new page to become ",
+            "interactive before returning, so a follow-up `click`/`get_text` will run against the loaded DOM. ",
+            "**Wait**: `action='wait'` with only `ms` sleeps for that many milliseconds (use it sparingly — prefer ",
+            "`selector` or `text` for resilience). Use `selector` to wait until an element is visible, or `text` ",
+            "to wait until specific text appears anywhere in the body. ",
+            "**Multi-tab** (`open_tab`/`close_tab`/`activate_tab`/`list_tabs`) is only available in the dock backend. ",
+            "Enforces `browser.allowed_domains` for public hosts when the command policy is enabled. ",
+            "Do NOT use `browser_open` (system browser) for in-app debugging when the dock is available. ",
+            "**Local preview workflow**: for static HTML/JS/CSS, navigate directly to a `file:///<absolute path>/index.html` ",
+            "URL — the embedded dock backend supports file:// natively, no HTTP server required. ",
+            "For dev servers (e.g. `python -m http.server`, `vite`, `next dev`), first launch the server with the ",
+            "`shell` tool and `background: true` (otherwise the foreground command will time out and be killed), ",
+            "then call this tool with `action='open'` and `url='http://localhost:<port>'`. The dock backend always ",
+            "permits localhost / 127.0.0.1 / ::1 / file:// so allowed_domains and private-host blocks do not apply there."
         )
     }
 
@@ -1296,9 +1328,18 @@ impl Tool for BrowserTool {
                     "enum": ["open", "snapshot", "click", "fill", "type", "get_text",
                              "get_title", "get_url", "screenshot", "wait", "press",
                              "hover", "scroll", "is_visible", "close", "find",
+                             "open_tab", "close_tab", "activate_tab", "list_tabs",
                              "mouse_move", "mouse_click", "mouse_drag", "key_type",
                              "key_press", "screen_capture"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use)"
+                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_* actions require backend=tauri_dock)"
+                },
+                "tab": {
+                    "type": "integer",
+                    "description": "Tab id (for close_tab / activate_tab; tauri_dock backend only)"
+                },
+                "activate": {
+                    "type": "boolean",
+                    "description": "When true (default), focus the new tab after open_tab"
                 },
                 "url": {
                     "type": "string",
@@ -1306,7 +1347,7 @@ impl Tool for BrowserTool {
                 },
                 "selector": {
                     "type": "string",
-                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or text=..."
+                    "description": "Element selector. Supports: @e<n> refs from snapshot (e.g. @e1), CSS (#id, .class, [attr=val]), text=<substring|exact> or label=<text>"
                 },
                 "value": {
                     "type": "string",
@@ -1739,10 +1780,10 @@ mod native_backend {
                 }
                 BrowserAction::IsVisible { selector } => {
                     let client = self.active_client()?;
-                    let visible = find_element(client, &selector)
-                        .await?
-                        .is_displayed()
-                        .await?;
+                    let visible = match find_element(client, &selector).await {
+                        Ok(element) => element.is_displayed().await.unwrap_or(false),
+                        Err(_) => false,
+                    };
 
                     Ok(json!({
                         "backend": "rust_native",
@@ -1818,31 +1859,13 @@ mod native_backend {
                     }))
                 }
 
-                BrowserAction::OpenTab { url, .. } => Ok(json!({
-                    "backend": "rust_native",
-                    "action": "open_tab",
-                    "tab": 1,
-                    "url": url,
-                    "note": "rust_native backend has no real multi-tab support",
-                })),
-                BrowserAction::CloseTab { tab } => Ok(json!({
-                    "backend": "rust_native",
-                    "action": "close_tab",
-                    "tab": tab,
-                    "note": "rust_native backend has no real multi-tab support",
-                })),
-                BrowserAction::ActivateTab { tab } => Ok(json!({
-                    "backend": "rust_native",
-                    "action": "activate_tab",
-                    "tab": tab,
-                    "note": "rust_native backend has no real multi-tab support",
-                })),
-                BrowserAction::ListTabs => Ok(json!({
-                    "backend": "rust_native",
-                    "action": "list_tabs",
-                    "tabs": [],
-                    "note": "rust_native backend has no real multi-tab support",
-                })),
+                BrowserAction::OpenTab { .. }
+                | BrowserAction::CloseTab { .. }
+                | BrowserAction::ActivateTab { .. }
+                | BrowserAction::ListTabs => anyhow::bail!(
+                    "Multi-tab actions are only supported by the embedded dock backend \
+                     (tauri_dock). Switch backend or run inside the SenAgentOS desktop app."
+                ),
             }
         }
 
@@ -2495,6 +2518,26 @@ fn extract_host(url_str: &str) -> anyhow::Result<String> {
     }
 
     Ok(host.to_lowercase())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+
+    if bare == "localhost" || bare.ends_with(".localhost") {
+        return true;
+    }
+
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        };
+    }
+
+    false
 }
 
 fn is_private_host(host: &str) -> bool {

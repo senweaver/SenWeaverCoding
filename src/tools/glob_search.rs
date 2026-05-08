@@ -63,22 +63,26 @@ impl Tool for GlobSearchTool {
             });
         }
 
-        if (pattern.starts_with('/') || pattern.starts_with('\\'))
-            && !self.security.is_under_allowed_root(pattern)
-        {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Absolute paths are not allowed. Use a relative glob pattern.".into()),
-            });
-        }
+        if self.security.is_command_policy_enabled() {
+            if (pattern.starts_with('/') || pattern.starts_with('\\'))
+                && !self.security.is_under_allowed_root(pattern)
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "Absolute paths are not allowed. Use a relative glob pattern.".into(),
+                    ),
+                });
+            }
 
-        if pattern.contains("../") || pattern.contains("..\\") || pattern == ".." {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Path traversal ('..') is not allowed in glob patterns.".into()),
-            });
+            if pattern.contains("../") || pattern.contains("..\\") || pattern == ".." {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("Path traversal ('..') is not allowed in glob patterns.".into()),
+                });
+            }
         }
 
         if !self.security.record_action() {

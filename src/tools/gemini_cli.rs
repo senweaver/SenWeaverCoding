@@ -106,7 +106,8 @@ impl Tool for GeminiCliTool {
                     });
                 }
             };
-            if !canonical_wd.starts_with(&canonical_workspace_dir) {
+            if !self.security.is_resolved_path_allowed(&canonical_wd) {
+                let _ = canonical_workspace_dir;
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
