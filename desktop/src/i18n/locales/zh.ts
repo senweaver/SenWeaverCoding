@@ -890,6 +890,11 @@ export const zh: Record<TranslationKey, string> = {
   'settings.general.effort.medium': '中',
   'settings.general.effort.high': '高',
   'settings.general.effort.max': '最大',
+  'settings.general.securityPolicyTitle': '安全策略',
+  'settings.general.securityPolicyDescription': '关闭后将仅保留逐工具的执行权限审批。命令白名单、风险等级阻断、路径限制、输出重定向限制等约束都会被跳过。',
+  'settings.general.securityPolicyToggle': '启用安全策略',
+  'settings.general.securityPolicyEnabledHint': '已启用：命令白名单、风险等级、工作区边界等限制全部生效。',
+  'settings.general.securityPolicyDisabledHint': '已关闭：仅保留执行权限的逐次审批，其余命令/路径限制全部跳过。',
 
   'empty.title': '新建会话',
   'empty.subtitle': '开始一个新的编码会话。Sen 已准备好帮你构建、调试和架构你的项目。',

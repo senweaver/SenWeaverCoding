@@ -21,6 +21,7 @@ const DEFAULT_AUTONOMY: AutonomySettings = {
   protectBrowserTools: true,
   protectMcpTools: true,
   autoApproveModeTransitions: [],
+  enableCommandPolicy: false,
 }
 
 export const useAutonomyStore = create<AutonomyStore>((set, get) => ({

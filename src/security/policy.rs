@@ -88,6 +88,7 @@ pub struct SecurityPolicy {
     pub require_approval_for_medium_risk: bool,
     pub block_high_risk_commands: bool,
     pub shell_env_passthrough: Vec<String>,
+    pub enable_command_policy: bool,
     pub tracker: ActionTracker,
 }
 
@@ -213,6 +214,7 @@ impl Default for SecurityPolicy {
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],
+            enable_command_policy: false,
             tracker: ActionTracker::new(),
         }
     }
@@ -821,6 +823,12 @@ impl SecurityPolicy {
         command: &str,
         approved: bool,
     ) -> Result<CommandRiskLevel, String> {
+        if !self.enable_command_policy {
+            if self.autonomy == AutonomyLevel::ReadOnly {
+                return Err("Command blocked: autonomy level is ReadOnly".into());
+            }
+            return Ok(CommandRiskLevel::Low);
+        }
         if !self.is_command_allowed(command) {
             return Err(format!("Command not allowed by security policy: {command}"));
         }
@@ -898,6 +906,10 @@ impl SecurityPolicy {
     pub fn is_command_allowed(&self, command: &str) -> bool {
         if self.autonomy == AutonomyLevel::ReadOnly {
             return false;
+        }
+
+        if !self.enable_command_policy {
+            return true;
         }
 
         if command.contains('`')
@@ -981,6 +993,9 @@ impl SecurityPolicy {
     }
 
     pub fn forbidden_path_argument(&self, command: &str) -> Option<String> {
+        if !self.enable_command_policy {
+            return None;
+        }
         let forbidden_candidate = |raw: &str| {
             let candidate = strip_wrapping_quotes(raw).trim();
             if candidate.is_empty() || candidate.contains("://") {
@@ -1051,6 +1066,10 @@ impl SecurityPolicy {
             return false;
         }
 
+        if !self.enable_command_policy {
+            return true;
+        }
+
         if path.starts_with('~') && path != "~" && !path.starts_with("~/") {
             return false;
         }
@@ -1090,6 +1109,9 @@ impl SecurityPolicy {
     }
 
     pub fn is_resolved_path_allowed(&self, resolved: &Path) -> bool {
+        if !self.enable_command_policy {
+            return true;
+        }
 
         let ws = self.workspace_dir();
         let workspace_root = ws.canonicalize().unwrap_or(ws);
@@ -1207,6 +1229,9 @@ impl SecurityPolicy {
     }
 
     pub fn record_action(&self) -> bool {
+        if !self.enable_command_policy {
+            return true;
+        }
         if self.max_actions_per_hour == 0 {
             return true;
         }
@@ -1215,10 +1240,17 @@ impl SecurityPolicy {
     }
 
     pub fn is_rate_limited(&self) -> bool {
+        if !self.enable_command_policy {
+            return false;
+        }
         if self.max_actions_per_hour == 0 {
             return false;
         }
         self.tracker.count() >= self.max_actions_per_hour as usize
+    }
+
+    pub fn should_filter_shell_env(&self) -> bool {
+        self.enable_command_policy
     }
 
     pub fn resolve_tool_path(&self, path: &str) -> PathBuf {
@@ -1281,6 +1313,7 @@ impl SecurityPolicy {
             require_approval_for_medium_risk: autonomy_config.require_approval_for_medium_risk,
             block_high_risk_commands: autonomy_config.block_high_risk_commands,
             shell_env_passthrough: autonomy_config.shell_env_passthrough.clone(),
+            enable_command_policy: autonomy_config.enable_command_policy,
             tracker: ActionTracker::new(),
         }
     }
@@ -1291,6 +1324,16 @@ impl SecurityPolicy {
         let mut out = String::new();
 
         let _ = writeln!(out, "**Autonomy level**: {:?}", self.autonomy);
+
+        if !self.enable_command_policy {
+            let _ = writeln!(
+                out,
+                "**Command policy**: disabled. Per-tool execution approval is the only gate; \
+                 there is no command allowlist, risk classification, output-redirection ban, \
+                 forbidden-path list, or workspace boundary on shell commands or file paths."
+            );
+            return out;
+        }
 
         if self.workspace_only {
             let _ = writeln!(

@@ -581,65 +581,47 @@ pub async fn handle_providers_presets(
             "",
             true),
         preset("anthropic", "Anthropic", "https://api.anthropic.com", "anthropic",
-            &[
-                "claude-3-5-sonnet-latest",
-                "claude-3-5-haiku-latest",
-                "claude-3-opus-latest",
-            ],
+            &[],
             "https://www.anthropic.com",
             true),
         preset("openai", "OpenAI", "https://api.openai.com/v1", "openai_chat",
-            &["gpt-4o", "gpt-4o-mini", "o3-mini"],
+            &[],
             "https://platform.openai.com",
             true),
         preset("openai-codex", "OpenAI Responses (Codex)", "https://api.openai.com/v1", "openai_responses",
-            &["gpt-4o", "gpt-4o-mini"],
+            &[],
             "https://platform.openai.com",
             true),
         preset("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai_chat",
-            &[
-                "anthropic/claude-sonnet-4",
-                "anthropic/claude-opus-4",
-                "anthropic/claude-haiku-4",
-                "openai/gpt-4o",
-                "google/gemini-2.5-pro",
-            ],
+            &[],
             "https://openrouter.ai",
             true),
         preset("deepseek", "DeepSeek", "https://api.deepseek.com", "openai_chat",
-            &["deepseek-chat", "deepseek-reasoner"],
+            &[],
             "https://platform.deepseek.com",
             true),
         preset("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "openai_chat",
-            &["gemini-2.5-pro", "gemini-2.5-flash"],
+            &[],
             "https://aistudio.google.com",
             true),
         preset("groq", "Groq", "https://api.groq.com/openai/v1", "openai_chat",
-            &["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+            &[],
             "https://console.groq.com",
             true),
         preset("together", "Together AI", "https://api.together.xyz/v1", "openai_chat",
-            &[
-                "meta-llama/Meta-Llama-3.3-70B-Instruct-Turbo",
-                "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-                "Qwen/Qwen2.5-72B-Instruct-Turbo",
-            ],
+            &[],
             "https://www.together.ai",
             true),
         preset("mistral", "Mistral", "https://api.mistral.ai/v1", "openai_chat",
-            &["mistral-large-latest", "ministral-8b-latest"],
+            &[],
             "https://console.mistral.ai",
             true),
-        preset("xai", "xAI Grok", "https://api.x.ai/v1", "openai_chat",
-            &["grok-2-latest"],
-            "https://console.x.ai",
-            true),
         preset("moonshot", "Moonshot (月之暗面)", "https://api.moonshot.cn/v1", "openai_chat",
-            &["moonshot-v1-32k", "moonshot-v1-128k", "moonshot-v1-8k"],
+            &["kimi-k2.6"],
             "https://platform.moonshot.cn",
             true),
         preset("zhipu", "智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", "openai_chat",
-            &["glm-4-plus", "glm-4-flash"],
+            &[],
             "https://open.bigmodel.cn",
             true),
     ]);
@@ -3325,6 +3307,7 @@ fn autonomy_view_json(cfg: &crate::config::schema::Config) -> serde_json::Value 
         "protectBrowserTools": cfg.autonomy.protect_browser_tools,
         "protectMcpTools": cfg.autonomy.protect_mcp_tools,
         "autoApproveModeTransitions": cfg.autonomy.auto_approve_mode_transitions.clone(),
+        "enableCommandPolicy": cfg.autonomy.enable_command_policy,
     })
 }
 
@@ -3343,6 +3326,7 @@ pub async fn handle_permissions_autonomy_get(
             "protectBrowserTools": true,
             "protectMcpTools": true,
             "autoApproveModeTransitions": Vec::<String>::new(),
+            "enableCommandPolicy": false,
         }),
     };
     Json(view).into_response()
@@ -3360,6 +3344,8 @@ pub struct SetAutonomyBody {
     pub protect_mcp_tools: Option<bool>,
     #[serde(default, rename = "autoApproveModeTransitions")]
     pub auto_approve_mode_transitions: Option<Vec<String>>,
+    #[serde(default, rename = "enableCommandPolicy")]
+    pub enable_command_policy: Option<bool>,
 }
 
 pub async fn handle_permissions_autonomy_put(
@@ -3393,6 +3379,9 @@ pub async fn handle_permissions_autonomy_put(
     }
     if let Some(v) = body.auto_approve_mode_transitions {
         next_cfg.autonomy.auto_approve_mode_transitions = v;
+    }
+    if let Some(v) = body.enable_command_policy {
+        next_cfg.autonomy.enable_command_policy = v;
     }
 
     if let Err(e) = next_cfg.save().await {

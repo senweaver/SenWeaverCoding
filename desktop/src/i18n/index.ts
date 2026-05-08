@@ -35,4 +35,24 @@ export function t(key: TranslationKey, params?: Record<string, string | number>)
   return translate(locale, key, params)
 }
 
+export function translateCodingMode(
+  locale: Locale,
+  modeId: string,
+  kind: 'label' | 'description',
+  fallback: string,
+): string {
+  const key = `codingMode.${modeId}.${kind}` as TranslationKey
+  const value = translations[locale]?.[key] ?? translations.en[key]
+  return value && value !== key ? value : fallback
+}
+
+export function useCodingModeText() {
+  const locale = useSettingsStore((s) => s.locale)
+  return useCallback(
+    (modeId: string, kind: 'label' | 'description', fallback: string) =>
+      translateCodingMode(locale, modeId, kind, fallback),
+    [locale],
+  )
+}
+
 export type { TranslationKey }

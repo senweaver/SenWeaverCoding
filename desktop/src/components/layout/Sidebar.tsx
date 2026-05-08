@@ -503,9 +503,13 @@ export function Sidebar() {
             onClick={() => {
               const sessionId = useTabStore.getState().activeTabId
               if (!sessionId) return
-              void useBrowserPanelStore
-                .getState()
-                .toggle(sessionId, { source: 'manual' })
+              const store = useBrowserPanelStore.getState()
+              const panel = store.panels[sessionId]
+              if (panel?.visible) {
+                void store.closeForSession(sessionId)
+              } else {
+                void store.toggle(sessionId, { source: 'manual' })
+              }
             }}
             title={t('sidebar.browserPanel')}
             aria-label={t('sidebar.browserPanel')}

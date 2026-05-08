@@ -1,10 +1,11 @@
 import { useShallow } from 'zustand/react/shallow'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
-import { useTranslation } from '../../i18n'
+import { useTranslation, useCodingModeText } from '../../i18n'
 import { useSettingsStore } from '../../stores/settingsStore'
 
 export function CodingModeTransitionGuard() {
   const t = useTranslation()
+  const tCodingMode = useCodingModeText()
   const { pending, codingModes, resolve } = useSettingsStore(
     useShallow((s) => ({
       pending: s.pendingCodingModeTransition,
@@ -13,8 +14,11 @@ export function CodingModeTransitionGuard() {
     })),
   )
 
-  const targetLabel =
-    codingModes.find((m) => m.id === pending?.target)?.label ?? pending?.target ?? ''
+  const targetId = pending?.target ?? ''
+  const backendLabel = codingModes.find((m) => m.id === targetId)?.label
+  const targetLabel = targetId
+    ? tCodingMode(targetId, 'label', backendLabel ?? targetId)
+    : ''
 
   return (
     <ConfirmDialog

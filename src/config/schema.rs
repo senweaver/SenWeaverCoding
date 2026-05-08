@@ -4204,6 +4204,9 @@ pub struct AutonomyConfig {
 
     #[serde(default)]
     pub auto_approve_mode_transitions: Vec<String>,
+
+    #[serde(default)]
+    pub enable_command_policy: bool,
 }
 
 fn default_auto_approve() -> Vec<String> {
@@ -4303,6 +4306,7 @@ impl Default for AutonomyConfig {
             protect_browser_tools: true,
             protect_mcp_tools: true,
             auto_approve_mode_transitions: Vec::new(),
+            enable_command_policy: false,
         }
     }
 }

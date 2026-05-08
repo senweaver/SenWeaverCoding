@@ -4,7 +4,7 @@ import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../../store
 import { useProviderStore } from '../../stores/providerStore'
 import { useTabStore } from '../../stores/tabStore'
 import type { CodingModeId } from '../../types/codingMode'
-import { useTranslation } from '../../i18n'
+import { useTranslation, useCodingModeText } from '../../i18n'
 
 const STATUS_MODE_GLYPH: Record<CodingModeId, string> = {
   vibe: 'bolt',
@@ -26,6 +26,7 @@ const STATUS_READONLY_MODES = new Set<CodingModeId>(['ask'])
 
 export function StatusBar() {
   const t = useTranslation()
+  const tCodingMode = useCodingModeText()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const providers = useProviderStore((s) => s.providers)
 
@@ -40,9 +41,12 @@ export function StatusBar() {
   const settingsModel = useSettingsStore((s) => s.currentModel)
   const settingsProviderName = useSettingsStore((s) => s.activeProviderName)
 
-  const codingModeLabel =
-    codingModes.find((m) => m.id === codingMode)?.label ??
-    codingMode.charAt(0).toUpperCase() + codingMode.slice(1)
+  const codingModeBackendLabel = codingModes.find((m) => m.id === codingMode)?.label
+  const codingModeLabel = tCodingMode(
+    codingMode,
+    'label',
+    codingModeBackendLabel ?? codingMode.charAt(0).toUpperCase() + codingMode.slice(1),
+  )
 
   const codingModeGlyph = STATUS_MODE_GLYPH[codingMode] ?? 'tune'
   const codingModeIsAutonomous = STATUS_AUTONOMOUS_MODES.has(codingMode)

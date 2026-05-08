@@ -57,6 +57,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const composerRootRef = useRef<HTMLDivElement>(null)
   const sendMessage = useChatStore((s) => s.sendMessage)
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -81,6 +82,23 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   useEffect(() => {
     textareaRef.current?.focus()
   }, [isActive])
+
+  useEffect(() => {
+    const el = composerRootRef.current
+    if (!el) return
+    const root = document.documentElement
+    const update = () => {
+      const h = Math.round(el.getBoundingClientRect().height)
+      root.style.setProperty('--composer-height', `${h}px`)
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      root.style.removeProperty('--composer-height')
+    }
+  }, [])
 
   useEffect(() => {
     if (!composerPrefill) return
@@ -480,7 +498,10 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           : t('chat.placeholder')
 
   return (
-    <div className={isHeroComposer ? 'bg-[var(--color-surface)] px-8 pb-4' : 'bg-[var(--color-surface)] px-4 py-3'}>
+    <div
+      ref={composerRootRef}
+      className={isHeroComposer ? 'bg-[var(--color-surface)] px-8 pb-4' : 'bg-[var(--color-surface)] px-4 py-3'}
+    >
       <div className={isHeroComposer ? 'mx-auto flex w-full max-w-3xl flex-col gap-1.5' : 'mx-auto max-w-[860px]'}>
         {!isMemberSession && <ReviewCard />}
         <div

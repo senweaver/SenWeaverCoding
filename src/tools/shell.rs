@@ -367,11 +367,13 @@ impl Tool for ShellTool {
             .wrap_command(cmd.as_std_mut())
             .map_err(|e| anyhow::anyhow!("Sandbox error: {}", e))?;
 
-        cmd.env_clear();
+        if self.security.should_filter_shell_env() {
+            cmd.env_clear();
 
-        for var in collect_allowed_shell_env_vars(&self.security) {
-            if let Ok(val) = std::env::var(&var) {
-                cmd.env(&var, val);
+            for var in collect_allowed_shell_env_vars(&self.security) {
+                if let Ok(val) = std::env::var(&var) {
+                    cmd.env(&var, val);
+                }
             }
         }
 

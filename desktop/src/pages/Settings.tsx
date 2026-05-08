@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useAutonomyStore } from '../stores/autonomyStore'
 import { useProviderStore } from '../stores/providerStore'
-import { useTranslation } from '../i18n'
+import { useTranslation, useCodingModeText } from '../i18n'
 import { Modal } from '../components/shared/Modal'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
 import { Input } from '../components/shared/Input'
@@ -754,6 +755,7 @@ function CodingModeSettings() {
   const requestSetCodingMode = useSettingsStore((s) => s.requestSetCodingMode)
   const permissionMode = useSettingsStore((s) => s.permissionMode)
   const t = useTranslation()
+  const tCodingMode = useCodingModeText()
 
   const MODE_GLYPH: Record<string, string> = {
     vibe: 'bolt',
@@ -804,12 +806,14 @@ function CodingModeSettings() {
               </span>
               <div className="flex-1">
                 <div className="text-xs font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
-                  {m.label}
+                  {tCodingMode(m.id, 'label', m.label)}
                   <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)]">
                     {m.permissionMode}
                   </span>
                 </div>
-                <div className="text-xs text-[var(--color-text-tertiary)]">{m.description}</div>
+                <div className="text-xs text-[var(--color-text-tertiary)]">
+                  {tCodingMode(m.id, 'description', m.description ?? '')}
+                </div>
               </div>
               {isSelected && (
                 <span
@@ -839,7 +843,21 @@ function GeneralSettings() {
   const setLocale = useSettingsStore((s) => s.setLocale)
   const theme = useSettingsStore((s) => s.theme)
   const setTheme = useSettingsStore((s) => s.setTheme)
+  const autonomyData = useAutonomyStore((s) => s.data)
+  const autonomyFetch = useAutonomyStore((s) => s.fetch)
+  const autonomyUpdate = useAutonomyStore((s) => s.updatePartial)
+  const autonomyHasFetched = useAutonomyStore((s) => s.hasFetched)
+  const autonomyIsLoading = useAutonomyStore((s) => s.isLoading)
+  const autonomyIsSaving = useAutonomyStore((s) => s.isSaving)
   const t = useTranslation()
+
+  useEffect(() => {
+    if (!autonomyHasFetched && !autonomyIsLoading) {
+      void autonomyFetch()
+    }
+  }, [autonomyHasFetched, autonomyIsLoading, autonomyFetch])
+
+  const enableCommandPolicy = autonomyData?.enableCommandPolicy ?? false
 
   const EFFORT_LABELS: Record<EffortLevel, string> = {
     low: t('settings.general.effort.low'),
@@ -901,7 +919,7 @@ function GeneralSettings() {
       {}
       <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.effortTitle')}</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.effortDescription')}</p>
-      <div className="flex gap-2">
+      <div className="flex gap-2 mb-8">
         {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
           <button
             key={level}
@@ -915,6 +933,40 @@ function GeneralSettings() {
             {EFFORT_LABELS[level]}
           </button>
         ))}
+      </div>
+
+      {}
+      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.securityPolicyTitle')}</h2>
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.securityPolicyDescription')}</p>
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-[var(--color-text-primary)]">
+            {t('settings.general.securityPolicyToggle')}
+          </div>
+          <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+            {enableCommandPolicy
+              ? t('settings.general.securityPolicyEnabledHint')
+              : t('settings.general.securityPolicyDisabledHint')}
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enableCommandPolicy}
+          disabled={autonomyIsSaving || autonomyIsLoading}
+          onClick={() => {
+            void autonomyUpdate({ enableCommandPolicy: !enableCommandPolicy })
+          }}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+            enableCommandPolicy ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
+          }`}
+        >
+          <span
+            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+              enableCommandPolicy ? 'translate-x-5' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
       </div>
 
     </div>

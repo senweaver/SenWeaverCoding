@@ -8,7 +8,6 @@ import { useTranslation } from '../i18n'
 import { MessageList } from '../components/chat/MessageList'
 import { ChatInput } from '../components/chat/ChatInput'
 import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermissionModal'
-import { EmbeddedBrowserPanel } from '../components/chat/EmbeddedBrowserPanel'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { QuestionStrip } from '../components/chat/QuestionStrip'
@@ -212,8 +211,6 @@ export function ActiveSession() {
       {!isMemberSession && <QuestionStrip />}
 
       <TeamStatusBar />
-
-      {!isMemberSession && <EmbeddedBrowserPanel />}
 
       <ChatInput variant={isEmpty && !isMemberSession ? 'hero' : 'default'} />
 

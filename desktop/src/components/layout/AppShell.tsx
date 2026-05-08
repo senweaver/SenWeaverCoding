@@ -24,6 +24,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
 import { Settings } from '../../pages/Settings'
+import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
 import { TerminalPanel } from '../terminal/TerminalPanel'
 import { startBackgroundShellMirror } from '../../api/backgroundShell'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
@@ -205,6 +206,7 @@ export function AppShell() {
               <Settings />
             </div>
           )}
+          <EmbeddedBrowserPanel />
         </div>
       </div>
       {terminalPanelOpen && <TerminalPanel />}

@@ -14,6 +14,7 @@ export type AutonomySettings = {
   protectBrowserTools: boolean
   protectMcpTools: boolean
   autoApproveModeTransitions: string[]
+  enableCommandPolicy: boolean
 }
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
-import { useTranslation, type TranslationKey } from '../i18n'
+import { useTranslation, useCodingModeText, type TranslationKey } from '../i18n'
 import { Button } from '../components/shared/Button'
 import { Input } from '../components/shared/Input'
 import { useAgentSettingsStore } from '../stores/agentSettingsStore'
@@ -303,6 +303,7 @@ function ToggleRow({
 
 function AutoRunSection() {
   const t = useTranslation()
+  const tCodingMode = useCodingModeText()
   const permissionMode = useSettingsStore((s) => s.permissionMode)
   const setPermissionMode = useSettingsStore((s) => s.setPermissionMode)
   const codingMode = useSettingsStore((s) => s.codingMode)
@@ -423,8 +424,8 @@ function AutoRunSection() {
                 return (
                   <ToggleRow
                     key={m.id}
-                    label={m.label}
-                    hint={m.description ?? ''}
+                    label={tCodingMode(m.id, 'label', m.label)}
+                    hint={tCodingMode(m.id, 'description', m.description ?? '')}
                     checked={checked}
                     onChange={(next) => {
                       const nextList = next

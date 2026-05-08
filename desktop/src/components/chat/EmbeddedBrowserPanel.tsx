@@ -260,10 +260,10 @@ export function EmbeddedBrowserPanel() {
   return (
     <div
       data-testid="embedded-browser-panel"
-      className="px-4 pb-2"
-      style={{ paddingTop: 6 }}
+      className="pointer-events-none absolute inset-x-0 z-40 px-4 pb-2"
+      style={{ paddingTop: 6, bottom: 'var(--composer-height, 0px)' }}
     >
-      <div className="mx-auto w-full max-w-[860px]">
+      <div className="pointer-events-auto mx-auto w-full max-w-[860px]">
         <div
           ref={panelShellRef}
           className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-[var(--shadow-dropdown)]"

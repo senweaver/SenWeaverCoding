@@ -894,6 +894,11 @@ export const en = {
   'settings.general.effort.medium': 'Medium',
   'settings.general.effort.high': 'High',
   'settings.general.effort.max': 'Max',
+  'settings.general.securityPolicyTitle': 'Security Policy',
+  'settings.general.securityPolicyDescription': 'When off, only per-tool execution approval remains. Command allowlist, risk classification, path restrictions, and output-redirection bans are all skipped.',
+  'settings.general.securityPolicyToggle': 'Enable security policy',
+  'settings.general.securityPolicyEnabledHint': 'Enabled: command allowlist, risk levels, workspace boundary, and forbidden paths are all enforced.',
+  'settings.general.securityPolicyDisabledHint': 'Disabled: only per-tool execution approval applies; all other command/path restrictions are skipped.',
 
   'empty.title': 'New session',
   'empty.subtitle': 'Start a fresh coding session. Sen is ready to help you build, debug, and architect your project.',

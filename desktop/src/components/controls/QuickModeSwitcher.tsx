@@ -74,15 +74,17 @@ export function QuickModeSwitcher() {
 
   const open = activeModal === 'quick-mode-switcher'
 
-  const items = QUICK_MODE_ORDER.map((id) => ({
-    id,
-    label: t(`codingMode.${id}.label` as TranslationKey),
-    description: t(`codingMode.${id}.description` as TranslationKey),
-    backendLabel: codingModes.find((m) => m.id === id)?.label,
-    hotkey: QUICK_MODE_HOTKEY[id],
-    autonomous: QUICK_MODE_AUTONOMOUS.has(id),
-    readOnly: QUICK_MODE_READONLY.has(id),
-  }))
+  const items = QUICK_MODE_ORDER.map((id) => {
+    const backendLabel = codingModes.find((m) => m.id === id)?.label
+    return {
+      id,
+      label: t(`codingMode.${id}.label` as TranslationKey) || backendLabel || id,
+      description: t(`codingMode.${id}.description` as TranslationKey),
+      hotkey: QUICK_MODE_HOTKEY[id],
+      autonomous: QUICK_MODE_AUTONOMOUS.has(id),
+      readOnly: QUICK_MODE_READONLY.has(id),
+    }
+  })
 
   useEffect(() => {
     if (!open) return
@@ -158,7 +160,7 @@ export function QuickModeSwitcher() {
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-1.5">
                     <span className="truncate">
-                      {item.backendLabel ?? item.label}
+                      {item.label}
                     </span>
                     {item.autonomous && (
                       <span className="shrink-0 text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/12 text-[var(--color-error)]">
