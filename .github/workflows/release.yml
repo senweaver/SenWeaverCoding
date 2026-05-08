@@ -173,6 +173,53 @@ jobs:
         with:
           bun-version: latest
 
+      # Inject the release tag (e.g. v0.1.1) into every version source so
+      # the produced installers, package metadata and `sen --version`
+      # output all align on the same X.Y.Z without a manual bump commit.
+      # Touches: root Cargo.toml, desktop/package.json,
+      #          desktop/src-tauri/tauri.conf.json,
+      #          desktop/src-tauri/Cargo.toml.
+      # Cargo.lock is intentionally left to `cargo build` to refresh.
+      - name: Inject version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${{ needs.create-release.outputs.tag_name }}"
+          version="${raw#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag '$raw' is not semver vX.Y.Z" >&2
+            exit 1
+          fi
+          echo "Injecting version=$version"
+          python3 - "$version" <<'PY'
+          import json, re, sys, pathlib
+          version = sys.argv[1]
+
+          p = pathlib.Path("desktop/src-tauri/tauri.conf.json")
+          obj = json.loads(p.read_text(encoding="utf-8"))
+          obj["version"] = version
+          p.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+          p = pathlib.Path("desktop/package.json")
+          obj = json.loads(p.read_text(encoding="utf-8"))
+          obj["version"] = version
+          p.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+          cargo_re = re.compile(r'^(version\s*=\s*)"[^"]*"', re.MULTILINE)
+          for path in ("Cargo.toml", "desktop/src-tauri/Cargo.toml"):
+              p = pathlib.Path(path)
+              text = p.read_text(encoding="utf-8")
+              new_text, n = cargo_re.subn(rf'\1"{version}"', text, count=1)
+              if n != 1:
+                  raise SystemExit(f"failed to patch [package].version in {path}")
+              p.write_text(new_text, encoding="utf-8")
+          PY
+          echo "--- patched ---"
+          grep -E '^version\s*=' Cargo.toml
+          grep -E '^version\s*=' desktop/src-tauri/Cargo.toml
+          python3 -c "import json; print('tauri:', json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])"
+          python3 -c "import json; print('pkg:', json.load(open('desktop/package.json'))['version'])"
+
       - name: Install frontend dependencies
         working-directory: desktop
         run: bun install --frozen-lockfile
