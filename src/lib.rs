@@ -197,6 +197,8 @@ pub mod error;
 
 pub mod evals;
 
+pub mod evolution;
+
 pub mod flow_canvas;
 pub mod gateway;
 pub mod guardrails;
@@ -486,7 +488,8 @@ pub enum SkillCommands {
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MigrateCommands {
 
-    Openclaw {
+    #[command(name = "legacy-memory")]
+    LegacyMemory {
 
         #[arg(long)]
         source: Option<std::path::PathBuf>,

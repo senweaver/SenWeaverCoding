@@ -51,6 +51,7 @@ impl SystemPromptBuilder {
                 Box::new(DateTimeSection),
                 Box::new(IdentitySection),
                 Box::new(GlobalDirectivesSection),
+                Box::new(EvolutionLessonsSection),
                 Box::new(ToolHonestySection),
                 Box::new(ToolsSection),
                 Box::new(TaskPlanningSection),
@@ -93,6 +94,7 @@ pub struct RuntimeSection;
 pub struct DateTimeSection;
 pub struct ChannelMediaSection;
 pub struct GlobalDirectivesSection;
+pub struct EvolutionLessonsSection;
 
 impl PromptSection for GlobalDirectivesSection {
     fn name(&self) -> &str {
@@ -387,5 +389,21 @@ impl PromptSection for ChannelMediaSection {
             - `[IMAGE:<path>]` — An image attachment, processed by the vision pipeline.\n\
             - `[Document: <name>] <path>` — A file attachment saved to the workspace."
             .into())
+    }
+}
+
+impl PromptSection for EvolutionLessonsSection {
+    fn name(&self) -> &str {
+        "evolution_lessons"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let Some(engine) = crate::evolution::try_global() else {
+            return Ok(String::new());
+        };
+        if !engine.enabled() {
+            return Ok(String::new());
+        }
+        Ok(crate::evolution::build_lesson_block(&engine, ctx.coding_mode_label).unwrap_or_default())
     }
 }

@@ -77,6 +77,7 @@ export type SettingsTab =
   | 'skills'
   | 'hooks'
   | 'usage'
+  | 'evolution'
   | 'plugins'
   | 'lsp'
   | 'keyboard'

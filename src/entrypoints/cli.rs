@@ -132,6 +132,17 @@ impl CliEntrypoint {
 
         crate::bootstrap::init_state(cwd.clone());
 
+        let svc_data_dir = config
+            .config_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| cwd.join(".senweavercoding"));
+        let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
+            data_dir: svc_data_dir,
+            ..Default::default()
+        });
+        let _ = crate::event_bus::integration::init_global_bus();
+
         let multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
         {
             use crate::agent::registry::{AgentCapability, AgentInfo};

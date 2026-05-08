@@ -26,6 +26,7 @@ pub mod channels_core;
 pub mod cloud_ops;
 pub mod conversational_ai;
 pub mod delegate_agents;
+pub mod evolution;
 pub mod gateway_net;
 pub mod hardware;
 pub mod heartbeat;

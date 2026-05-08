@@ -233,6 +233,11 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
+    let session_cost_usd = match crate::cost::tracker::CostTracker::try_get_global() {
+        Some(tracker) => tracker.cost_for_chat_session(&config.session_id),
+        None => 0.0,
+    };
+
     io.notify_session_state(
         &config.session_id,
         "completed",
@@ -240,12 +245,13 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
             "exit_reason": exit_reason,
             "num_turns": num_turns,
             "duration_ms": duration_ms,
+            "cost": session_cost_usd,
         }),
     );
 
     let _ = io.write(&StdoutMessage::Result {
         session_id: Some(config.session_id.clone()),
-        cost: Some(0.0),
+        cost: Some(session_cost_usd),
         duration_ms: Some(duration_ms),
         num_turns: Some(num_turns),
     });
@@ -254,7 +260,7 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
         session_id: config.session_id,
         num_turns,
         duration_ms,
-        cost: 0.0,
+        cost: session_cost_usd,
         final_response,
         exit_reason,
     })

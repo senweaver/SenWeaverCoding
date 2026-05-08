@@ -52,6 +52,7 @@ mod cron;
 mod daemon;
 mod doctor;
 mod event_bus;
+mod evolution;
 mod gateway;
 mod guardrails;
 mod hands;

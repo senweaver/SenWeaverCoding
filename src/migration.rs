@@ -4,7 +4,6 @@
 use crate::config::Config;
 use crate::memory::{self, Memory, MemoryCategory};
 use anyhow::{Context, Result, bail};
-use directories::UserDirs;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::collections::HashSet;
 use std::fs;
@@ -28,21 +27,21 @@ struct MigrationStats {
 
 pub async fn handle_command(command: crate::MigrateCommands, config: &Config) -> Result<()> {
     match command {
-        crate::MigrateCommands::Openclaw { source, dry_run } => {
-            migrate_openclaw_memory(config, source, dry_run).await
+        crate::MigrateCommands::LegacyMemory { source, dry_run } => {
+            migrate_legacy_memory(config, source, dry_run).await
         }
     }
 }
 
-async fn migrate_openclaw_memory(
+async fn migrate_legacy_memory(
     config: &Config,
     source_workspace: Option<PathBuf>,
     dry_run: bool,
 ) -> Result<()> {
-    let source_workspace = resolve_openclaw_workspace(source_workspace)?;
+    let source_workspace = resolve_legacy_workspace(source_workspace)?;
     if !source_workspace.exists() {
         bail!(
-            "OpenClaw workspace not found at {}. Pass --source <path> if needed.",
+            "Legacy memory workspace not found at {}. Pass --source <path> to point at a directory containing memory/brain.db, MEMORY.md, or memory/*.md.",
             source_workspace.display()
         );
     }
@@ -66,7 +65,7 @@ async fn migrate_openclaw_memory(
     }
 
     if dry_run {
-        println!("🔎 Dry run: OpenClaw migration preview");
+        println!("🔎 Dry run: legacy memory migration preview");
         println!("  Source: {}", source_workspace.display());
         println!("  Target: {}", config.workspace_dir.display());
         println!("  Candidates: {}", entries.len());
@@ -86,7 +85,7 @@ async fn migrate_openclaw_memory(
     for (idx, entry) in entries.into_iter().enumerate() {
         let mut key = entry.key.trim().to_string();
         if key.is_empty() {
-            key = format!("openclaw_{idx}");
+            key = format!("legacy_memory_{idx}");
         }
 
         if let Some(existing) = memory.get(&key).await? {
@@ -106,7 +105,7 @@ async fn migrate_openclaw_memory(
         stats.imported += 1;
     }
 
-    println!("✅ OpenClaw memory migration complete");
+    println!("✅ Legacy memory migration complete");
     println!("  Source: {}", source_workspace.display());
     println!("  Target: {}", config.workspace_dir.display());
     println!("  Imported:         {}", stats.imported);
@@ -129,11 +128,11 @@ fn collect_source_entries(
     let mut entries = Vec::new();
 
     let sqlite_path = source_workspace.join("memory").join("brain.db");
-    let sqlite_entries = read_openclaw_sqlite_entries(&sqlite_path)?;
+    let sqlite_entries = read_legacy_sqlite_entries(&sqlite_path)?;
     stats.from_sqlite = sqlite_entries.len();
     entries.extend(sqlite_entries);
 
-    let markdown_entries = read_openclaw_markdown_entries(source_workspace)?;
+    let markdown_entries = read_legacy_markdown_entries(source_workspace)?;
     stats.from_markdown = markdown_entries.len();
     entries.extend(markdown_entries);
 
@@ -146,7 +145,7 @@ fn collect_source_entries(
     Ok(entries)
 }
 
-fn read_openclaw_sqlite_entries(db_path: &Path) -> Result<Vec<SourceEntry>> {
+fn read_legacy_sqlite_entries(db_path: &Path) -> Result<Vec<SourceEntry>> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
@@ -171,7 +170,7 @@ fn read_openclaw_sqlite_entries(db_path: &Path) -> Result<Vec<SourceEntry>> {
     let Some(content_expr) =
         pick_optional_column_expr(&columns, &["content", "value", "text", "memory"])
     else {
-        bail!("OpenClaw memories table found but no content-like column was detected");
+        bail!("Memories table found but no content-like column was detected");
     };
     let category_expr = pick_column_expr(&columns, &["category", "kind", "type"], "'core'");
 
@@ -188,7 +187,7 @@ fn read_openclaw_sqlite_entries(db_path: &Path) -> Result<Vec<SourceEntry>> {
     while let Some(row) = rows.next()? {
         let key: String = row
             .get(0)
-            .unwrap_or_else(|_| format!("openclaw_sqlite_{idx}"));
+            .unwrap_or_else(|_| format!("legacy_sqlite_{idx}"));
         let content: String = row.get(1).unwrap_or_default();
         let category_raw: String = row.get(2).unwrap_or_else(|_| "core".to_string());
 
@@ -208,7 +207,7 @@ fn read_openclaw_sqlite_entries(db_path: &Path) -> Result<Vec<SourceEntry>> {
     Ok(entries)
 }
 
-fn read_openclaw_markdown_entries(source_workspace: &Path) -> Result<Vec<SourceEntry>> {
+fn read_legacy_markdown_entries(source_workspace: &Path) -> Result<Vec<SourceEntry>> {
     let mut all = Vec::new();
 
     let core_path = source_workspace.join("MEMORY.md");
@@ -218,7 +217,7 @@ fn read_openclaw_markdown_entries(source_workspace: &Path) -> Result<Vec<SourceE
             &core_path,
             &content,
             MemoryCategory::Core,
-            "openclaw_core",
+            "legacy_core",
         ));
     }
 
@@ -234,7 +233,7 @@ fn read_openclaw_markdown_entries(source_workspace: &Path) -> Result<Vec<SourceE
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or("openclaw_daily");
+                .unwrap_or("legacy_daily");
             all.extend(parse_markdown_file(
                 &path,
                 &content,
@@ -266,7 +265,7 @@ fn parse_markdown_file(
         let (key, text) = match parse_structured_memory_line(line) {
             Some((k, v)) => (normalize_key(k, idx), v.trim().to_string()),
             None => (
-                format!("openclaw_{stem}_{}", idx + 1),
+                format!("legacy_{stem}_{}", idx + 1),
                 line.trim().to_string(),
             ),
         };
@@ -314,14 +313,14 @@ fn parse_category(raw: &str) -> MemoryCategory {
 fn normalize_key(key: &str, fallback_idx: usize) -> String {
     let trimmed = key.trim();
     if trimmed.is_empty() {
-        return format!("openclaw_{fallback_idx}");
+        return format!("legacy_memory_{fallback_idx}");
     }
     trimmed.to_string()
 }
 
 async fn next_available_key(memory: &dyn Memory, base: &str) -> Result<String> {
     for i in 1..=10_000 {
-        let candidate = format!("{base}__openclaw_{i}");
+        let candidate = format!("{base}__legacy_{i}");
         if memory.get(&candidate).await?.is_none() {
             return Ok(candidate);
         }
@@ -354,16 +353,14 @@ fn pick_column_expr(columns: &[String], candidates: &[&str], fallback: &str) -> 
     pick_optional_column_expr(columns, candidates).unwrap_or_else(|| fallback.to_string())
 }
 
-fn resolve_openclaw_workspace(source: Option<PathBuf>) -> Result<PathBuf> {
+fn resolve_legacy_workspace(source: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(src) = source {
         return Ok(src);
     }
 
-    let home = UserDirs::new()
-        .map(|u| u.home_dir().to_path_buf())
-        .context("Could not find home directory")?;
-
-    Ok(home.join(".openclaw").join("workspace"))
+    bail!(
+        "No --source <path> provided. Pass the legacy workspace directory containing memory/brain.db, MEMORY.md, or memory/*.md."
+    )
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -378,7 +375,7 @@ fn backup_target_memory(workspace_dir: &Path) -> Result<Option<PathBuf>> {
     let backup_root = workspace_dir
         .join("memory")
         .join("migrations")
-        .join(format!("openclaw-{timestamp}"));
+        .join(format!("legacy-memory-{timestamp}"));
 
     let mut copied_any = false;
     fs::create_dir_all(&backup_root)?;

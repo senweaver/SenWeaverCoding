@@ -1079,6 +1079,26 @@ impl Agent {
                 self.last_usage = turn_aggregated_usage
                     .clone()
                     .or_else(|| response.usage.clone());
+
+                crate::evolution::record_provider_model(
+                    Some(self.cached_provider.as_str()),
+                    Some(effective_model.as_str()),
+                );
+                crate::evolution::set_response_text(&final_text);
+                if let Some(ref reasoning) = response.reasoning_content {
+                    crate::evolution::set_thinking_text(reasoning);
+                }
+                if let Some(ref usage) = self.last_usage {
+                    let input = usage.input_tokens.unwrap_or(0);
+                    let output = usage.output_tokens.unwrap_or(0);
+                    crate::evolution::record_cost(
+                        input,
+                        output,
+                        input.saturating_add(output),
+                        0.0,
+                    );
+                }
+
                 _turn_metrics_n1v2.mark_ok();
                 return Ok(final_text);
             }
@@ -1176,7 +1196,22 @@ impl Agent {
                 pending_post_tool_system_messages.push(msg.to_string());
             }
 
-            for result in &results {
+            for (idx, result) in results.iter().enumerate() {
+                let args = deduped_calls.get(idx).map(|c| &c.arguments);
+                let error_excerpt = if result.success {
+                    None
+                } else {
+                    Some(result.output.as_str())
+                };
+                crate::evolution::record_tool_outcome(
+                    &result.name,
+                    result.success,
+                    None,
+                    None,
+                    args,
+                    Some(result.output.as_str()),
+                    error_excerpt,
+                );
                 let _ = event_tx
                     .send(TurnEvent::ToolResult {
                         name: result.name.clone(),
@@ -1403,6 +1438,10 @@ impl Agent {
 
         self.mode_tool_filter = filter;
         self.mode_filter_dirty = true;
+    }
+
+    pub fn current_coding_mode(&self) -> Option<crate::agent::coding_mode::CodingMode> {
+        self.current_coding_mode
     }
 
     pub fn set_coding_mode(&mut self, mode: crate::agent::coding_mode::CodingMode) {

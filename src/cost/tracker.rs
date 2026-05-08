@@ -149,6 +149,21 @@ impl CostTracker {
         Ok(())
     }
 
+    pub fn cost_for_chat_session(&self, chat_session_id: &str) -> f64 {
+        let session_costs = self.lock_session_costs();
+        session_costs
+            .iter()
+            .filter(|record| {
+                record
+                    .chat_session_id
+                    .as_deref()
+                    .map(|sid| sid == chat_session_id)
+                    .unwrap_or(false)
+            })
+            .map(|record| record.usage.cost_usd)
+            .sum()
+    }
+
     pub fn get_summary(&self) -> Result<CostSummary> {
         let (daily_cost, monthly_cost) = {
             let mut storage = self.lock_storage();
@@ -207,6 +222,10 @@ impl CostTracker {
                 }
             })
             .clone()
+    }
+
+    pub fn try_get_global() -> Option<Arc<Self>> {
+        GLOBAL_COST_TRACKER.get().and_then(|opt| opt.clone())
     }
 }
 

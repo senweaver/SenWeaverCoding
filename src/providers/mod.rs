@@ -1399,7 +1399,7 @@ fn create_provider_with_url_and_options(
                 BAILIAN_BASE_URL,
                 key,
                 AuthStyle::Bearer,
-                "openclaw",
+                "SenWeaverCoding/1.0",
                 true,
             ),
         )),

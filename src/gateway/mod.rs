@@ -25,6 +25,7 @@ pub mod sse;
 pub mod tls;
 pub mod ws;
 pub mod desktop_routes;
+pub mod evolution_routes;
 pub mod workspace_files;
 pub mod ws_desktop;
 
@@ -484,6 +485,15 @@ async fn run_gateway_inner(
 
     let _event_bus = crate::event_bus::integration::init_global_bus();
     let _multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
+    let svc_data_dir = config
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| config.workspace_dir.join(".senweavercoding"));
+    let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
+        data_dir: svc_data_dir,
+        ..Default::default()
+    });
     crate::event_bus::integration::publish_system(
         "gateway",
         crate::event_bus::types::SystemCategory::Startup,
@@ -961,6 +971,30 @@ async fn run_gateway_inner(
         None
     };
 
+    if config.evolution.enabled {
+        match crate::evolution::init_global(
+            config.workspace_dir.clone(),
+            config.evolution.clone(),
+        ) {
+            Ok(engine) => {
+                engine.set_judge_provider(crate::evolution::JudgeProviderRef {
+                    provider: Arc::clone(&provider),
+                    model: model.clone(),
+                });
+                engine.ensure_judge_worker();
+                tracing::info!(
+                    workspace_dir = %config.workspace_dir.display(),
+                    persist_training_data = config.evolution.persist_training_data,
+                    judge_enabled = config.evolution.next_state_judge_enabled,
+                    "Evolution engine initialised"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to initialise evolution engine");
+            }
+        }
+    }
+
     let state = AppState {
         config: config_state,
         live_config: live_config_state,
@@ -1242,6 +1276,75 @@ async fn run_gateway_inner(
         )
         .route("/api/usage", get(desktop_routes::handle_usage_get))
         .route(
+            "/api/evolution/overview",
+            get(evolution_routes::handle_overview),
+        )
+        .route(
+            "/api/evolution/lessons",
+            get(evolution_routes::handle_lessons_list),
+        )
+        .route(
+            "/api/evolution/lessons/{id}",
+            put(evolution_routes::handle_lesson_put)
+                .delete(evolution_routes::handle_lesson_delete),
+        )
+        .route(
+            "/api/evolution/thumbs",
+            post(evolution_routes::handle_thumbs),
+        )
+        .route(
+            "/api/evolution/distill",
+            post(evolution_routes::handle_distill),
+        )
+        .route(
+            "/api/evolution/rescore",
+            post(evolution_routes::handle_rescore),
+        )
+        .route(
+            "/api/evolution/config",
+            get(evolution_routes::handle_config_get).put(evolution_routes::handle_config_put),
+        )
+        .route(
+            "/api/evolution/persistence",
+            get(evolution_routes::handle_persistence_get)
+                .put(evolution_routes::handle_persistence_put),
+        )
+        .route(
+            "/api/evolution/persistence/purge",
+            post(evolution_routes::handle_persistence_purge),
+        )
+        .route(
+            "/api/evolution/export/formats",
+            get(evolution_routes::handle_export_formats),
+        )
+        .route(
+            "/api/evolution/exports",
+            get(evolution_routes::handle_export_list)
+                .post(evolution_routes::handle_export_create),
+        )
+        .route(
+            "/api/evolution/exports/{id}",
+            axum::routing::delete(evolution_routes::handle_export_delete),
+        )
+        .route(
+            "/api/evolution/cloud/targets",
+            get(evolution_routes::handle_cloud_targets_list)
+                .post(evolution_routes::handle_cloud_targets_upsert),
+        )
+        .route(
+            "/api/evolution/cloud/targets/{id}",
+            put(evolution_routes::handle_cloud_targets_upsert)
+                .delete(evolution_routes::handle_cloud_target_delete),
+        )
+        .route(
+            "/api/evolution/cloud/push",
+            post(evolution_routes::handle_cloud_push),
+        )
+        .route(
+            "/api/evolution/cloud/history",
+            get(evolution_routes::handle_push_history),
+        )
+        .route(
             "/api/mcp",
             get(desktop_routes::handle_mcp_list).post(desktop_routes::handle_mcp_create),
         )
@@ -1493,7 +1596,10 @@ async fn run_gateway_inner(
         .route("/api/guardrails", get(api::handle_api_guardrails_get))
         .route("/api/tool-groups", get(api::handle_api_tool_groups))
         .route("/api/reinforcement", get(api::handle_api_reinforcement))
-        .route("/api/evolution", get(api::handle_api_evolution))
+        .route(
+            "/api/learning-features",
+            get(api::handle_api_learning_features),
+        )
 
         .route("/api/multi-agent/agents", get(api::handle_api_agents_list))
         .route("/api/multi-agent/agents/status", get(api::handle_api_agents_status))

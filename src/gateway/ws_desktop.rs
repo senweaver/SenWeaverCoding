@@ -975,6 +975,22 @@ async fn run_turn(
     let sqlite_persist = std::sync::Arc::new(std::sync::Mutex::new(DesktopSqlitePersist::default()));
     let sqlite_persist_forward = std::sync::Arc::clone(&sqlite_persist);
 
+    let coding_mode_label = agent
+        .current_coding_mode()
+        .map(|m| m.display_name().to_string())
+        .or_else(|| {
+            crate::services::try_get_services()
+                .map(|svc| svc.coding_mode.read().display_name().to_string())
+        });
+    if let (Some(svc), Some(ref label)) = (
+        crate::services::try_get_services(),
+        coding_mode_label.as_ref(),
+    ) {
+        if let Some(parsed) = crate::agent::coding_mode::CodingMode::from_str_loose(label) {
+            *svc.coding_mode.write() = parsed;
+        }
+    }
+
     let cost_tracking_ctx = state.cost_tracker.as_ref().map(|tracker| {
         let prices = {
             let cfg = state.config.lock();
@@ -983,19 +999,49 @@ async fn run_turn(
         let mut ctx =
             crate::agent::ToolLoopCostTrackingContext::new(std::sync::Arc::clone(tracker), prices)
                 .with_chat_session_id(session_id.to_string());
-        if let Some(svc) = crate::services::try_get_services() {
-            let mode = *svc.coding_mode.read();
-            ctx = ctx.with_coding_mode(mode.display_name().to_string());
+        if let Some(ref mode) = coding_mode_label {
+            ctx = ctx.with_coding_mode(mode.clone());
         }
         ctx
     });
 
+    if let Some(engine) = crate::evolution::try_global() {
+        if engine.enabled() {
+            engine.flush_next_state(session_id, "user", &content_owned);
+        }
+    }
+
+    let evolution_ctx = crate::evolution::try_global().and_then(|engine| {
+        if !engine.enabled() {
+            return None;
+        }
+        let mut ctx =
+            crate::evolution::EvolutionCtx::new(engine, session_id.to_string())
+                .with_turn_class(crate::evolution::TurnClass::Main);
+        if let Some(ref mode) = coding_mode_label {
+            ctx = ctx.with_coding_mode(mode.clone());
+        }
+        Some(ctx)
+    });
+
     let turn_fut = async {
-        crate::agent::scope_tool_loop_cost_tracking(
-            cost_tracking_ctx,
-            agent.turn_streamed(&content_owned, event_tx),
-        )
-        .await
+        let inner = async {
+            crate::agent::scope_tool_loop_cost_tracking(
+                cost_tracking_ctx,
+                agent.turn_streamed(&content_owned, event_tx),
+            )
+            .await
+        };
+        let result = crate::evolution::scope_evolution_ctx(evolution_ctx.clone(), inner).await;
+        if let Some(ref ctx) = evolution_ctx {
+            let aborted = match &result {
+                Ok(_) => None,
+                Err(error) => Some(format!("{error}")),
+            };
+            let final_text = result.as_ref().ok().cloned();
+            let _ = ctx.finalize_turn(final_text, aborted);
+        }
+        result
     };
 
     let forward_fut = async {

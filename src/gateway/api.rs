@@ -3247,7 +3247,7 @@ pub async fn handle_api_reinforcement(
     .into_response()
 }
 
-pub async fn handle_api_evolution(
+pub async fn handle_api_learning_features(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {

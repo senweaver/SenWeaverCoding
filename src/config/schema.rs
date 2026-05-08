@@ -960,6 +960,9 @@ pub struct Config {
     pub cost: CostConfig,
 
     #[serde(default)]
+    pub evolution: crate::config::domain::evolution::EvolutionConfig,
+
+    #[serde(default)]
     pub peripherals: PeripheralsConfig,
 
     #[serde(default)]
@@ -2388,7 +2391,7 @@ pub struct IdentityConfig {
 }
 
 fn default_identity_format() -> String {
-    "openclaw".into()
+    "markdown".into()
 }
 
 impl Default for IdentityConfig {
@@ -6300,6 +6303,7 @@ impl Default for Config {
             proxy: ProxyConfig::default(),
             identity: IdentityConfig::default(),
             cost: CostConfig::default(),
+            evolution: crate::config::domain::evolution::EvolutionConfig::default(),
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
             agents: HashMap::new(),

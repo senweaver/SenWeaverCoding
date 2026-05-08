@@ -2636,6 +2636,16 @@ pub async fn run_tui(config: Config) -> anyhow::Result<()> {
 }
 
 pub async fn run_tui_with_opts(config: Config, legacy: bool) -> anyhow::Result<()> {
+    let svc_data_dir = config
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| config.workspace_dir.join(".senweavercoding"));
+    let _ = crate::services::init_services(crate::services::container::ServiceContainerConfig {
+        data_dir: svc_data_dir,
+        ..Default::default()
+    });
+
     let bridge = agent_bridge::spawn_agent_task(config.clone());
     run_tui_inner(config, bridge, legacy).await
 }

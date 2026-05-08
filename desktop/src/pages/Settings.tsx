@@ -14,6 +14,7 @@ import { AdapterSettings } from './AdapterSettings'
 import { ToolsAndMcpsSettings } from './ToolsAndMcpsSettings'
 import { HooksSettings } from './HooksSettings'
 import { UsageSettings } from './UsageSettings'
+import { EvolutionSettings } from './EvolutionSettings'
 import { RulesSkillsSubagentsSettings } from './RulesSkillsSubagentsSettings'
 import { AgentsSettings } from './AgentsSettings'
 import { LspSettings } from './LspSettings'
@@ -42,6 +43,7 @@ export function Settings() {
             <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
             <TabButton icon="chat" label={t('settings.tab.adapters')} active={activeTab === 'adapters'} onClick={() => setActiveTab('adapters')} />
             <TabButton icon="bar_chart" label={t('settings.tab.usage')} active={activeTab === 'usage'} onClick={() => setActiveTab('usage')} />
+            <TabButton icon="auto_awesome" label={t('settings.tab.evolution')} active={activeTab === 'evolution'} onClick={() => setActiveTab('evolution')} />
             <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
             <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <TabButton icon="psychology" label={t('settings.tab.codingMode')} active={activeTab === 'codingMode'} onClick={() => setActiveTab('codingMode')} />
@@ -74,6 +76,7 @@ export function Settings() {
           {activeTab === 'skills' && <RulesSkillsSubagentsSettings />}
           {activeTab === 'hooks' && <HooksSettings />}
           {activeTab === 'usage' && <UsageSettings />}
+          {activeTab === 'evolution' && <EvolutionSettings />}
         </div>
       </div>
     </div>

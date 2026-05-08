@@ -166,7 +166,7 @@ tempfile = "3.26"
 flate2 = "1.1"
 tar = "0.4"
 
-# Zip extraction for ClawhHub / OpenClaw registry installers
+# Zip extraction for skill / extension / registry installers
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 # Error handling

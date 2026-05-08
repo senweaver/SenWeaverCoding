@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Identity system supporting OpenClaw (markdown) and AIEOS (JSON) formats.
+//! Identity system supporting Markdown and AIEOS (JSON) formats.
 //!
 //! AIEOS (AI Entity Object Specification) is a standardization framework for
 //! portable AI agent identity. This module handles loading and converting
