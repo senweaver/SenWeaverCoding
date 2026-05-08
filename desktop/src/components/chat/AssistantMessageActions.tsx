@@ -63,7 +63,7 @@ export function AssistantMessageActions({ copyText, sessionId, workDir, disableF
     <div ref={wrapRef} className="relative flex w-full justify-end">
       <button
         type="button"
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--color-text-tertiary)] opacity-0 transition-opacity hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
         aria-label={t('chat.messageMoreActions')}
         aria-expanded={open}
         aria-haspopup="menu"
