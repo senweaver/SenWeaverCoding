@@ -1363,6 +1363,10 @@ export const en = {
   'update.restarting': 'Restarting to finish update...',
   'update.upToDate': 'You are up to date on v{version}.',
   'update.failed': 'Update failed: {error}',
+  'update.toast.checking': 'Checking for updates…',
+  'update.toast.upToDate': 'You are on the latest version v{version}',
+  'update.toast.error': 'Update check failed: {error}',
+  'update.toast.dismiss': 'Dismiss',
 
   'session.untitled': 'Untitled Session',
   'session.active': 'session active',

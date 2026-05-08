@@ -202,6 +202,12 @@ fn restart_embedded_gateway(handle: AppHandle, state: State<'_, ServerState>) ->
     spawn_gateway_bootstrap_thread(handle, state.inner().clone())
 }
 
+#[tauri::command]
+fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
+    terminal::shutdown_all(&handle);
+    Ok(())
+}
+
 pub fn run() {
     let builder = tauri::Builder::default()
         .manage(ServerState::default())
@@ -210,9 +216,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_server_url,
             restart_embedded_gateway,
+            prepare_for_update_install,
             terminal::terminal_spawn,
             terminal::terminal_write,
             terminal::terminal_resize,

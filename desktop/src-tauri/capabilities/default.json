@@ -20,6 +20,7 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "process:allow-exit",
-    "process:allow-restart"
+    "process:allow-restart",
+    "updater:default"
   ]
 }

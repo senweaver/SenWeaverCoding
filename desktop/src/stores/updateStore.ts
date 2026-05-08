@@ -20,6 +20,8 @@ const DISMISSED_UPDATE_VERSION_KEY = 'sen-dismissed-update-version'
 type UpdateStore = {
   status: UpdateStatus
   availableVersion: string | null
+  currentVersion: string | null
+  latestVersion: string | null
   releaseNotes: string | null
   progressPercent: number
   downloadedBytes: number
@@ -27,14 +29,25 @@ type UpdateStore = {
   error: string | null
   checkedAt: number | null
   shouldPrompt: boolean
+  manualCheckActive: boolean
   initialize: () => Promise<void>
   checkForUpdates: (options?: CheckOptions) => Promise<Update | null>
   installUpdate: () => Promise<void>
   dismissPrompt: () => void
+  clearManualCheck: () => void
 }
 
 let pendingUpdate: Update | null = null
 let startupCheckPromise: Promise<void> | null = null
+
+async function readCurrentVersion(): Promise<string | null> {
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app')
+    return await getVersion()
+  } catch {
+    return null
+  }
+}
 
 function readDismissedUpdateVersion(): string | null {
   if (typeof window === 'undefined') return null
@@ -80,6 +93,8 @@ function getErrorMessage(error: unknown) {
 export const useUpdateStore = create<UpdateStore>((set, get) => ({
   status: 'idle',
   availableVersion: null,
+  currentVersion: null,
+  latestVersion: null,
   releaseNotes: null,
   progressPercent: 0,
   downloadedBytes: 0,
@@ -87,6 +102,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   error: null,
   checkedAt: null,
   shouldPrompt: false,
+  manualCheckActive: false,
 
   initialize: async () => {
     if (!isTauriRuntime()) return
@@ -105,10 +121,17 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   checkForUpdates: async ({ silent = false } = {}) => {
     if (!isTauriRuntime()) return null
 
+    let { currentVersion } = get()
+    if (!currentVersion) {
+      currentVersion = await readCurrentVersion()
+    }
+
     set((state) => ({
       ...state,
       status: 'checking',
       error: null,
+      currentVersion: currentVersion ?? state.currentVersion,
+      manualCheckActive: silent ? state.manualCheckActive : true,
     }))
 
     try {
@@ -124,6 +147,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           ...state,
           status: 'up-to-date',
           availableVersion: null,
+          latestVersion: state.currentVersion ?? currentVersion ?? state.latestVersion,
           releaseNotes: null,
           progressPercent: 0,
           downloadedBytes: 0,
@@ -142,6 +166,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         ...state,
         status: 'available',
         availableVersion: update.version,
+        latestVersion: update.version,
         releaseNotes: update.body ?? null,
         progressPercent: 0,
         downloadedBytes: 0,
@@ -252,6 +277,13 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     set((state) => ({
       ...state,
       shouldPrompt: false,
+    }))
+  },
+
+  clearManualCheck: () => {
+    set((state) => ({
+      ...state,
+      manualCheckActive: false,
     }))
   },
 }))

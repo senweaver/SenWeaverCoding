@@ -314,6 +314,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri's official updater requires every produced bundle to be
+          # signed with the project's minisign-format private key.  CI has
+          # the key in repo secret TAURI_SIGNING_PRIVATE_KEY (and the
+          # matching password in TAURI_SIGNING_PRIVATE_KEY_PASSWORD).  When
+          # `bundle.createUpdaterArtifacts: true` in tauri.conf.json is on,
+          # tauri-action emits both the installer and a `.sig` next to it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           projectPath: desktop
@@ -321,10 +329,107 @@ jobs:
           releaseName: SenWeaverCoding ${{ needs.create-release.outputs.tag_name }}
           args: ${{ matrix.tauri_args }}
 
-  # ── Stage 3: publish the release once every platform succeeded.
+  # ── Stage 3: aggregate per-platform signed installers into a
+  # single `latest.json` manifest the in-app updater fetches at
+  # `https://github.com/.../releases/latest/download/latest.json`.
+  publish-updater-manifest:
+    name: Publish updater manifest
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build latest.json from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys, datetime, urllib.request
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          token = os.environ["GH_TOKEN"]
+          version = tag[1:] if tag.startswith("v") else tag
+
+          def gh_get(url, accept="application/vnd.github+json"):
+              req = urllib.request.Request(url, headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": accept,
+                  "User-Agent": "sen-release-publisher",
+              })
+              with urllib.request.urlopen(req) as resp:
+                  return resp.read()
+
+          api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+          release = json.loads(gh_get(api))
+          notes = release.get("body") or ""
+          assets = {a["name"]: a for a in release.get("assets", [])}
+          dl_base = f"https://github.com/{repo}/releases/download/{tag}"
+
+          def find(pattern):
+              rx = re.compile(pattern)
+              for name in assets:
+                  if rx.search(name):
+                      return name
+              return None
+
+          def fetch_sig(name):
+              return gh_get(f"{dl_base}/{name}", accept="application/octet-stream").decode("utf-8").strip()
+
+          # Tauri v2 update payload conventions per platform:
+          #   - Windows: NSIS `.exe` (file pattern `_x64-setup.exe`)
+          #   - macOS:   `.app.tar.gz` (universal bundle)
+          #   - Linux:   `.AppImage`  (file pattern `_amd64.AppImage`)
+          targets = {
+              "windows-x86_64": find(r"_x64-setup\.exe$"),
+              "darwin-universal": find(r"\.app\.tar\.gz$"),
+              "linux-x86_64": find(r"_amd64\.AppImage$"),
+          }
+          targets["darwin-x86_64"] = targets["darwin-universal"]
+          targets["darwin-aarch64"] = targets["darwin-universal"]
+
+          missing = [k for k, v in targets.items() if v is None or f"{v}.sig" not in assets]
+          if missing:
+              print(f"::error::missing signed bundle for platforms: {missing}", file=sys.stderr)
+              print("available assets:", file=sys.stderr)
+              for n in sorted(assets):
+                  print(f"  - {n}", file=sys.stderr)
+              sys.exit(1)
+
+          platforms = {}
+          for key, bundle in targets.items():
+              platforms[key] = {
+                  "signature": fetch_sig(f"{bundle}.sig"),
+                  "url": f"{dl_base}/{bundle}",
+              }
+
+          manifest = {
+              "version": version,
+              "notes": notes,
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+          }
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2, ensure_ascii=False)
+          print(json.dumps(manifest, indent=2, ensure_ascii=False))
+          PY
+          ls -la latest.json
+
+      - name: Upload latest.json to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag_name }}
+          files: latest.json
+          draft: true
+          prerelease: false
+
+  # ── Stage 4: publish the release once every platform succeeded
+  # AND the updater manifest is attached.
   publish-release:
     name: Publish release
-    needs: [create-release, build]
+    needs: [create-release, build, publish-updater-manifest]
     runs-on: ubuntu-latest
     steps:
       - name: Mark release as published

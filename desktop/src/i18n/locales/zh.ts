@@ -1357,6 +1357,10 @@ export const zh: Record<TranslationKey, string> = {
   'update.restarting': '正在重启以完成更新...',
   'update.upToDate': '当前已是最新版本 v{version}。',
   'update.failed': '更新失败: {error}',
+  'update.toast.checking': '正在检查更新…',
+  'update.toast.upToDate': '已是最新版本 v{version}',
+  'update.toast.error': '检查更新失败：{error}',
+  'update.toast.dismiss': '关闭',
 
   'session.untitled': '未命名会话',
   'session.active': '会话活跃中',

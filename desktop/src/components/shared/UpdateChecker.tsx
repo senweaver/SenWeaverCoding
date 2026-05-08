@@ -5,30 +5,112 @@ import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { useUpdateStore } from '../../stores/updateStore'
 import { formatBytes } from '../../lib/formatBytes'
 
+const UP_TO_DATE_AUTO_DISMISS_MS = 4000
+const ERROR_AUTO_DISMISS_MS = 6000
+
 export function UpdateChecker() {
   const t = useTranslation()
   const status = useUpdateStore((s) => s.status)
   const availableVersion = useUpdateStore((s) => s.availableVersion)
+  const currentVersion = useUpdateStore((s) => s.currentVersion)
+  const latestVersion = useUpdateStore((s) => s.latestVersion)
   const releaseNotes = useUpdateStore((s) => s.releaseNotes)
   const progressPercent = useUpdateStore((s) => s.progressPercent)
   const downloadedBytes = useUpdateStore((s) => s.downloadedBytes)
   const totalBytes = useUpdateStore((s) => s.totalBytes)
   const error = useUpdateStore((s) => s.error)
   const shouldPrompt = useUpdateStore((s) => s.shouldPrompt)
+  const manualCheckActive = useUpdateStore((s) => s.manualCheckActive)
   const initialize = useUpdateStore((s) => s.initialize)
   const installUpdate = useUpdateStore((s) => s.installUpdate)
   const dismissPrompt = useUpdateStore((s) => s.dismissPrompt)
+  const clearManualCheck = useUpdateStore((s) => s.clearManualCheck)
 
   useEffect(() => {
     void initialize()
   }, [initialize])
 
+  useEffect(() => {
+    if (!manualCheckActive) return
+    if (status === 'up-to-date') {
+      const handle = window.setTimeout(clearManualCheck, UP_TO_DATE_AUTO_DISMISS_MS)
+      return () => window.clearTimeout(handle)
+    }
+    if (status === 'error') {
+      const handle = window.setTimeout(clearManualCheck, ERROR_AUTO_DISMISS_MS)
+      return () => window.clearTimeout(handle)
+    }
+    if (status === 'available' || status === 'downloading' || status === 'restarting') {
+      clearManualCheck()
+    }
+    return undefined
+  }, [manualCheckActive, status, clearManualCheck])
+
   if (!isTauriRuntime()) return null
 
-  const showPopup =
+  const showUpdateCard =
     shouldPrompt && !!availableVersion && ['available', 'downloading', 'restarting'].includes(status)
 
-  if (!showPopup) return null
+  const showCheckingToast = manualCheckActive && status === 'checking'
+  const showUpToDateToast = manualCheckActive && status === 'up-to-date'
+  const showErrorToast = manualCheckActive && status === 'error'
+
+  if (!showUpdateCard && !showCheckingToast && !showUpToDateToast && !showErrorToast) {
+    return null
+  }
+
+  if (showCheckingToast) {
+    return (
+      <div className="fixed top-4 right-4 z-[200] max-w-sm">
+        <div className="flex items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 shadow-[var(--shadow-dropdown)]">
+          <span
+            className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--color-text-accent)] border-t-transparent"
+            aria-hidden="true"
+          />
+          <p className="text-sm text-[var(--color-text-primary)]">{t('update.toast.checking')}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (showUpToDateToast) {
+    const versionLabel = latestVersion ?? currentVersion ?? ''
+    return (
+      <div className="fixed top-4 right-4 z-[200] max-w-sm">
+        <div className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 shadow-[var(--shadow-dropdown)]">
+          <p className="flex-1 text-sm text-[var(--color-text-primary)]">
+            {t('update.toast.upToDate', { version: versionLabel })}
+          </p>
+          <button
+            type="button"
+            onClick={clearManualCheck}
+            className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+          >
+            {t('update.toast.dismiss')}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (showErrorToast) {
+    return (
+      <div className="fixed top-4 right-4 z-[200] max-w-sm">
+        <div className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-error)]/40 bg-[var(--color-surface-container-low)] px-4 py-3 shadow-[var(--shadow-dropdown)]">
+          <p className="flex-1 text-sm text-[var(--color-error)]">
+            {t('update.toast.error', { error: error ?? '' })}
+          </p>
+          <button
+            type="button"
+            onClick={clearManualCheck}
+            className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+          >
+            {t('update.toast.dismiss')}
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   const hasKnownProgress = typeof totalBytes === 'number' && totalBytes > 0
   const downloadedText = formatBytes(downloadedBytes)
@@ -45,7 +127,7 @@ export function UpdateChecker() {
     <div className="fixed top-4 right-4 z-[200] max-w-sm">
       <div className="bg-[var(--color-surface-container-low)] border border-[var(--color-border)] rounded-[var(--radius-lg)] shadow-[var(--shadow-dropdown)] p-4">
         <p className="text-sm font-medium text-[var(--color-text-primary)]">
-          {t('update.available', { version: availableVersion })}
+          {t('update.available', { version: availableVersion ?? '' })}
         </p>
 
         {releaseNotes && (

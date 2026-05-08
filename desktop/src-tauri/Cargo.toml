@@ -44,6 +44,7 @@ tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
 
 # Async + HTTP server stack (mirrors the workspace root).
 tokio = { version = "1.50", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
