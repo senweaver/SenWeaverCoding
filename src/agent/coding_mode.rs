@@ -105,7 +105,18 @@ impl CodingMode {
                  (`cargo check`, `npm test`, `tsc --noEmit`, etc.). Do NOT silently skip a \
                  failing test.\n\
                  - When a critical or irreversible design decision is unclear, call \
-                 `ask_question` instead of guessing — Vibe is fast, not careless.\n\n{verification}"
+                 `ask_question` instead of guessing — Vibe is fast, not careless.\n\
+                 - File mutations (`file_write`, `file_edit`, `multi_edit`, `patch_apply`, \
+                 `glob_edit`) trigger an auto-verify nudge from the runtime — DO honour it; \
+                 silently moving past a red `cargo check` is a Vibe-mode bug, not a feature.\n\n\
+                 ### External Information (web is for facts, browser is for UI)\n\
+                 When the question needs external information — library versions, latest spec, \
+                 vendor docs, error-string lookup — call `web_search` FIRST (and `web_fetch` for \
+                 the chosen result). NEVER use `browser` to perform a web search; the embedded \
+                 dock is reserved for actually rendering / clicking through a web app you are \
+                 building or debugging. Opening a search engine in `browser` is forbidden — it \
+                 bypasses the search tool's provider failover and the user gets a worse trace.\n\n\
+                 {web_research}\n\n{verification}"
             ),
             Self::Spec => format!(
                 "\n\n## Mode: Spec (plan-driven execution with progress tracking)\n\n\
@@ -458,6 +469,14 @@ impl CodingMode {
                  After the cycle completes, run:\n\
                  `incremental_optimize(action=\"report\", description=\"TDD Cycle: <feature>\")`\n\
                  to document what was tested, verified, and improved.\n\n\
+                 ### Web Research for the Red Phase\n\
+                 If the failing test references an unfamiliar API, third-party library, or \
+                 verbatim error string, run `web_search` (and follow up with `web_fetch` for \
+                 the chosen doc URL) BEFORE writing the test — this is part of the Red phase, \
+                 not a substitute for it. Quote the cited URL in the test file's leading \
+                 comment so the next reader can re-derive the assertion. NEVER use `browser` \
+                 to perform a web search; `browser` is reserved for actually exercising a \
+                 web app whose UI you are testing.\n\n\
                  ### Forbidden\n\
                  - **You MUST NOT write implementation code BEFORE a failing test exists** for the \
                  behaviour you intend to implement. \"A failing test exists\" means: the test file is \
@@ -465,7 +484,9 @@ impl CodingMode {
                  RIGHT reason (asserting the missing behaviour, not a syntax/import error). If no \
                  failing test exists, write the test first, run it, and only then implement.\n\
                  - Skipping verification (\"this should work\") is forbidden — every Red and Green \
-                 transition MUST be evidenced by a test-command run in the same turn.\n\n{}\n\n{verification}",
+                 transition MUST be evidenced by a test-command run in the same turn.\n\
+                 - Opening Baidu / Google / Bing in `browser` and screen-scraping the search \
+                 result list is forbidden — call `web_search` instead.\n\n{}\n\n{web_research}\n\n{verification}",
                 builtin_skills::tdd_rules()
             ),
             Self::Debug => format!(
@@ -554,13 +575,21 @@ impl CodingMode {
                  capture impact.\n\
                  - Forbidden: emitting 20+ near-identical `file_edit` calls when a single `glob_edit` \
                  would do the job.\n\n\
+                 ### Architectural References (web research, not browser scraping)\n\
+                 RFCs, framework changelogs, vendor design docs, pattern catalogs, security \
+                 advisories — anything that justifies a load-bearing architectural choice — \
+                 MUST be sourced via `web_search` followed by `web_fetch` on the chosen URL, \
+                 then quoted in the design narrative. NEVER use `browser` to open a search \
+                 engine and screen-scrape the result list — that bypasses the search tool's \
+                 provider failover and gives the user a worse trace. Reserve `browser` for \
+                 the UI-validation step below.\n\n\
                  ### Web-Facing Architecture (validate via the embedded dock)\n\
                  When the architectural change touches a UI / web-facing surface, validate it \
                  end-to-end via the **embedded browser dock** using the `browser` tool — inside the \
                  SenAgentOS desktop the dock is a real, user-visible webview, so navigation and DOM \
                  assertions are observed live. Use `browser` action=open → snapshot → click / fill / \
                  press → screenshot to confirm the new architecture renders correctly across the \
-                 affected views. Do NOT use `browser_open` (system browser) for in-app validation.\n\n{verification}",
+                 affected views. Do NOT use `browser_open` (system browser) for in-app validation.\n\n{web_research}\n\n{verification}",
                 builtin_skills::architect_rules()
             ),
             Self::Pair => format!(
@@ -571,14 +600,36 @@ impl CodingMode {
                  - Before starting a session: `incremental_optimize(action=\"checkpoint\", description=\"Pair session: <topic>\")`\n\
                  - After each change: `incremental_optimize(action=\"track\", file=\"<path>\", change_type=\"<type>\", summary=\"<desc>\", lines_added=N, lines_removed=M)`\n\
                  - After the session: `incremental_optimize(action=\"report\", description=\"Pair Session: <topic>\")`\n\
-                 This gives both partners a shared log of what was discussed, decided, and changed.\n\n{verification}",
+                 This gives both partners a shared log of what was discussed, decided, and changed.\n\n\
+                 ### External Facts in a Pair Session\n\
+                 When the partner asks an external-fact question (\"what's the latest stable \
+                 version of X\", \"does this CVE apply to our version\", \"what does the spec \
+                 say about Y\"), lead with `web_search` and follow up with `web_fetch` on the \
+                 chosen result. Quote the cited URL in the next checkpoint summary so the \
+                 partner can re-verify offline. NEVER use `browser` to open a search engine \
+                 — `browser` is for live UI validation only, and the after-batch checkpoint \
+                 will pause the turn so you cannot recover from a wasted browser round trip \
+                 inside the same iteration.\n\n{web_research}\n\n{verification}",
                 builtin_skills::pair_rules()
             ),
             Self::ContextEng => format!(
                 "\n\n## Mode: Context Engineering (explore-first, precision-strike)\n\n\
                  CRITICAL: You MUST follow the four-phase protocol. Do NOT write code \
                  before completing the Explore and Map phases.\n\n\
-                 {}\n\n{verification}",
+                 {}\n\n\
+                 ### Explore Phase — Local + Web (both, not either)\n\
+                 The Explore phase is dual-track:\n\
+                 - **Local explore**: `dir_list`, `glob_search`, `code_search`, `code_outline`, \
+                 `code_graph_query`, `Read` — you map the in-repo surface.\n\
+                 - **Web explore**: when the task touches an external API / framework / spec \
+                 / CVE / vendor product, run `web_search` (and follow up with `web_fetch` for \
+                 the chosen result URL) to anchor your understanding to primary sources. \
+                 Capture the cited URLs in the Map artefact alongside the local file paths.\n\n\
+                 Web evidence is **explore-only**. It NEVER enters the Strike phase as a \
+                 substitute for a real diff — Strike still has to be a precision edit to a \
+                 single in-repo file backed by local evidence. NEVER use `browser` to perform \
+                 a web search; `browser` is reserved for actually exercising a UI you are \
+                 instrumenting in a later Strike.\n\n{web_research}\n\n{verification}",
                 builtin_skills::context_eng_rules()
             ),
             Self::Mvai => format!(
@@ -589,6 +640,15 @@ impl CodingMode {
                  SEPARATE file: trait / abstract type / typed contract / protocol / API schema. \
                  The interface file MUST be self-contained, observable, and testable in isolation \
                  (typed inputs/outputs, no hidden state).\n\n\
+                 ### Step 1.5 — Anchor External Contracts (when applicable)\n\
+                 If the contract you are about to write mirrors an external standard (OpenAPI, \
+                 JSON-RPC, gRPC, a language stdlib trait, an RFC, a vendor protocol), FIRST \
+                 anchor it to the canonical source via `web_search` and `web_fetch` on the \
+                 official spec / docs / reference implementation. Quote the cited URL in a \
+                 leading doc-comment of the interface file so reviewers can re-derive every \
+                 method signature from primary evidence. NEVER use `browser` to perform a \
+                 web search — `browser` would not even be allowed in MVAI's tool allowlist, \
+                 and trying to scrape a search engine page is a wasted round trip.\n\n\
                  ### Step 2 — Implementation\n\
                  Only after the interface file exists (or has been read into context this session) \
                  may you write the implementation file. The implementation MUST satisfy the \
@@ -603,7 +663,7 @@ impl CodingMode {
                  written or read this session.\n\
                  - Adding public methods to the implementation that are not declared in the interface.\n\
                  - Calling `delegate` / `delegate_parallel` / `task_create` (interface-first does \
-                 not allow concurrent multi-agent design).\n\n{verification}",
+                 not allow concurrent multi-agent design).\n\n{web_research}\n\n{verification}",
                 builtin_skills::mvai_rules()
             ),
             Self::Harness => format!(
@@ -689,6 +749,8 @@ impl CodingMode {
                 | Self::Mvai
                 | Self::ContextEng
                 | Self::Harness
+                | Self::Vibe
+                | Self::Architect
         )
     }
 

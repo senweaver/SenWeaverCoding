@@ -19,7 +19,7 @@ IDE。
 | **桌面优先** | Tauri 2 外壳，原生菜单 / 多 Tab 会话 / 内嵌终端 / 文件浏览 / 嵌入式浏览器面板。 |
 | **Rust Agent 运行时** | 与无头部署完全相同的 crate，通过 `crate-type = ["cdylib", "staticlib", "rlib"]` 直接嵌入，零 IPC 开销。 |
 | **5 种 Coding Mode** | Agent / Plan / Ask / Debug / Harness，会话中可随时切换；每种模式重写系统提示、工具白名单、自动验证策略。Agent 为默认模式，开放完整工具集。 |
-| **130+ 工具** | 文件操作、PTY 镜像 Shell、Git、ripgrep 检索、glob/multi-edit、Web 搜索/抓取、无头浏览器、记忆存取、Todo 写入、图像生成、MCP、Skill、Subagent。 |
+| **130+ 工具** | 文件操作、PTY 镜像 Shell、Git、ripgrep 检索、glob/multi-edit、Web 搜索/获取、无头浏览器、记忆存取、Todo 写入、图像生成、MCP、Skill、Subagent。 |
 | **多 Provider** | OpenAI / Anthropic / DeepSeek / Gemini / Copilot / OpenRouter / 任意 OpenAI 兼容端点；Provider 设置完全在应用内完成。 |
 | **持久化记忆** | SQLite + Markdown 双后端 + 向量索引，会话级工作目录隔离，rewind/restore 检查点。 |
 | **性能调优** | 流式 Markdown 降级、rAF 批量增量 flush、`content-visibility: auto` 离屏跳过、所有 IO 热点 `tokio::task::spawn_blocking` 落到阻塞池。详见 `AGENTS.md`。 |

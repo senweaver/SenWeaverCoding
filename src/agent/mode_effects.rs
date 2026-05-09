@@ -252,6 +252,20 @@ pub fn file_mod_auto_verify_nudge(mode: CodingMode) -> Option<&'static str> {
              2) Run the relevant check/test to verify. \
              3) Check if downstream dependents need updates."
         }
+        CodingMode::Vibe => {
+            "[Vibe Mode] File modified. Vibe is fast, NOT careless: run \
+             the project's check command (cargo check / npm test / tsc \
+             --noEmit) before moving on. Silently skipping a red verify \
+             is a Vibe-mode bug, not a feature."
+        }
+        CodingMode::Architect => {
+            "[Architect Mode] File modified. After a cross-module batch \
+             (`glob_edit` / `patch_apply` / multi-file refactor) run \
+             `cargo check` (or the equivalent) AND \
+             `code_to_spec(action=\"analyze\", paths=[\"./src\"])` to \
+             confirm the dependency graph still matches the design. \
+             Quote the verify output before the next batch."
+        }
         _ => {
             "[Auto-verify] File modified. Run the project's check/build \
              command (e.g. cargo check, npm run build) to verify."
@@ -289,7 +303,9 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              to confirm it passes; (3) refactor while keeping tests green. After \
              every `file_write`/`file_edit`/`patch_apply` you MUST run the test \
              command IMMEDIATELY in the same turn. Forbidden: writing implementation \
-             code before a failing test exists.",
+             code before a failing test exists. \
+             External info (unfamiliar API / verbatim error string) → `web_search` \
+             FIRST, then `web_fetch`; `browser` is UI-only, never a search tool.",
         ),
         CodingMode::Agent => Some(
             "[Agent Reminder] You auto-approve all tool calls — every action is real. \
@@ -322,7 +338,11 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              assistant message BEFORE the pause to: (1) summarize what just changed, \
              (2) state the verification result (pass/fail/skipped), (3) propose the \
              next step in one sentence and ask if the user wants to proceed. Do NOT \
-             schedule additional tool calls expecting them to run this turn.",
+             schedule additional tool calls expecting them to run this turn. \
+             External-fact questions → `web_search` FIRST (then `web_fetch`); cite \
+             the URL in the next checkpoint summary. `browser` is UI-only, never a \
+             search tool — the post-batch pause makes a wasted browser round trip \
+             especially expensive.",
         ),
         CodingMode::Architect => Some(
             "[Architect Reminder] Before any cross-module edit: (1) run \
@@ -331,14 +351,22 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              `patch_apply` for batch changes (NOT one-by-one `file_edit` for each \
              callsite). After edits, run `incremental_optimize(action=\"report\", ...)` \
              to summarize impact. For web-facing architecture, validate end-to-end via \
-             the embedded `browser` dock.",
+             the embedded `browser` dock. \
+             Architectural references (RFCs / changelogs / pattern catalogs / CVEs) → \
+             `web_search` FIRST (then `web_fetch` on the canonical URL); quote the \
+             cited URL in the design narrative. NEVER use `browser` to scrape a \
+             search engine.",
         ),
         CodingMode::ContextEng => Some(
             "[Context Eng Reminder] STRICT four-phase: Explore → Map → Plan → Strike. \
              Forbidden: writing code before Explore + Map are complete. Each Strike \
              MUST be a precision edit to a SINGLE file; after the Strike the post-tool \
              ImpactAnalysis hook will require listing every downstream dependent and \
-             confirming their tests still pass. Do NOT batch unrelated edits in one Strike.",
+             confirming their tests still pass. Do NOT batch unrelated edits in one Strike. \
+             The Explore phase is dual-track: local (`dir_list` / `code_search` / \
+             `Read`) AND web (`web_search` then `web_fetch`) when the task touches \
+             external APIs / specs. Web evidence is explore-only — it never enters \
+             a Strike. NEVER use `browser` for search.",
         ),
         CodingMode::Mvai => Some(
             "[MVAI Reminder] Interface-first: write/extend the public interface \
@@ -346,7 +374,11 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              implementation `file_write`. Forbidden: implementation edits when the \
              interface for that contract has not been written or read this session. \
              After every implementation file_write, run boundary tests via `shell` / \
-             `diagnostics` to confirm observable behaviour matches the interface.",
+             `diagnostics` to confirm observable behaviour matches the interface. \
+             When the contract mirrors an external standard (OpenAPI / JSON-RPC / \
+             stdlib trait / RFC), anchor it via `web_search` then `web_fetch` and \
+             quote the canonical URL in the interface file's leading doc-comment. \
+             `browser` is not in MVAI's allowlist — never try.",
         ),
         CodingMode::Harness => Some(
             "[Harness Reminder] Engineering-grade pipeline, four phases — DO NOT skip: \
@@ -360,7 +392,9 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
             "[Vibe Reminder] Full autonomy — move fast, but: (1) verify after every batch \
              (cargo check / npm test / equivalent); (2) call `ask_question` for \
              irreversible architectural decisions instead of guessing; (3) never silently \
-             skip a failing test or check.",
+             skip a failing test or check; (4) external info (library version / spec / \
+             error string) → `web_search` FIRST, then `web_fetch`; `browser` is for \
+             live UI only, not search.",
         ),
         CodingMode::Debug => Some(
             "[Debug Reminder] STRICT four-stage protocol — do NOT skip steps: \
@@ -401,23 +435,11 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
 }
 
 pub fn web_research_disabled_reminder(
-    mode: CodingMode,
+    _mode: CodingMode,
     web_search_enabled: bool,
     web_fetch_enabled: bool,
 ) -> Option<&'static str> {
     if web_search_enabled && web_fetch_enabled {
-        return None;
-    }
-    let inject = matches!(
-        mode,
-        CodingMode::Agent
-            | CodingMode::Plan
-            | CodingMode::Spec
-            | CodingMode::Ask
-            | CodingMode::Debug
-            | CodingMode::Harness
-    );
-    if !inject {
         return None;
     }
     match (web_search_enabled, web_fetch_enabled) {

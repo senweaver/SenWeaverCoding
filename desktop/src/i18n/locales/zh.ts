@@ -1484,7 +1484,7 @@ export const zh: Record<TranslationKey, string> = {
     'Agent / Harness 模式下，助手会自动拆分任务并执行文件编辑、Shell 命令和工具调用。请只在你信任并已备份的工作区使用。',
   'codingMode.confirmAutonomousBtn': '启用自主模式',
   'codingMode.webSearchStatus': '联网搜索',
-  'codingMode.webFetchStatus': '联网抓取',
+  'codingMode.webFetchStatus': '联网获取',
   'codingMode.webStatusOn': '已开启',
   'codingMode.webStatusOff': '已关闭',
   'codingMode.vibe.label': 'Vibe 自由',
@@ -1847,7 +1847,7 @@ export const zh: Record<TranslationKey, string> = {
 
   'settings.web.title': '联网研究',
   'settings.web.description':
-    '允许助手在解题前通过联网搜索 / 联网抓取来核实第三方文档、API 版本、规范、错误信息等本地仓库无法回答的问题。两个开关默认都为开启，关闭后 agent 将仅使用本地上下文回答。',
+    '允许助手在解题前通过联网搜索 / 联网获取来核实第三方文档、API 版本、规范、错误信息等本地仓库无法回答的问题。两个开关默认都为开启，关闭后 agent 将仅使用本地上下文回答。',
   'settings.web.loading': '正在加载联网研究设置…',
   'settings.web.disabledHint':
     '当前为关闭状态。模型不会调用对应工具，运行期会通过系统提醒告知它仅用本地上下文作答。',
@@ -1859,9 +1859,9 @@ export const zh: Record<TranslationKey, string> = {
   'settings.web.search.provider': '搜索提供商',
   'settings.web.search.maxResults': '结果数（1-10）',
   'settings.web.search.timeout': '超时（秒）',
-  'settings.web.fetch.title': '联网抓取',
+  'settings.web.fetch.title': '联网获取',
   'settings.web.fetch.description':
-    '允许 agent 抓取并阅读指定 URL 的内容，与联网搜索配合使用以获得一手资料。',
+    '允许 agent 获取并阅读指定 URL 的内容，与联网搜索配合使用以获得一手资料。',
   'settings.web.fetch.allowedDomains': '允许的域名',
   'settings.web.fetch.allowedDomainsHint':
     '使用英文逗号分隔；填入 "*" 表示放行任意 host。黑名单优先级高于白名单。',
