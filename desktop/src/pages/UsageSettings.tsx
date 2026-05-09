@@ -16,32 +16,18 @@ import type {
 } from '../types/usage'
 
 const CODING_MODE_BACKEND_TO_ID: Record<string, CodingModeId> = {
-  vibe: 'vibe',
-  spec: 'spec',
+  agent: 'agent',
   plan: 'plan',
   ask: 'ask',
-  tdd: 'tdd',
   debug: 'debug',
-  agent: 'agent',
-  architect: 'architect',
-  pair: 'pair',
-  context: 'context',
-  mvai: 'mvai',
   harness: 'harness',
 }
 
 const CODING_MODE_ORDER: CodingModeId[] = [
-  'vibe',
-  'spec',
+  'agent',
   'plan',
   'ask',
-  'tdd',
   'debug',
-  'agent',
-  'architect',
-  'pair',
-  'context',
-  'mvai',
   'harness',
 ]
 
@@ -184,7 +170,9 @@ export function UsageSettings() {
     if (!summary) {
       return { totalTokens: 0, requestCount: 0, costUsd: 0, activeModes: 0 }
     }
-    const values = Object.values(summary.byCodingMode)
+    const values = Object.entries(summary.byCodingMode)
+      .filter(([key]) => CODING_MODE_BACKEND_TO_ID[key.toLowerCase()] != null)
+      .map(([, raw]) => raw)
     return {
       totalTokens: values.reduce((acc, r) => acc + r.totalTokens, 0),
       requestCount: values.reduce((acc, r) => acc + r.requestCount, 0),

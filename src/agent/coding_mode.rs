@@ -20,7 +20,6 @@ pub type CodingModeHandle = Arc<RwLock<CodingMode>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CodingMode {
 
-    #[default]
     Vibe,
 
     Spec,
@@ -33,6 +32,7 @@ pub enum CodingMode {
 
     Debug,
 
+    #[default]
     Agent,
 
     Architect,
@@ -68,6 +68,8 @@ pub enum PostToolBehavior {
     ImpactAnalysis,
 
     PlanRefresh,
+
+    HarnessGate,
 }
 
 impl CodingMode {
@@ -92,6 +94,7 @@ impl CodingMode {
 
     pub fn system_prompt_injection(&self) -> String {
         let verification = builtin_skills::verification_rules();
+        let web_research = builtin_skills::web_research_rules();
         match self {
             Self::Vibe => format!(
                 "\n\n## Mode: Vibe (full autonomy)\n\n\
@@ -140,38 +143,78 @@ impl CodingMode {
                  - You MUST verify each step compiles before moving to the next.\n\
                  - You MUST update plan status after completing each step.\n\
                  - You MUST save the plan periodically to persist progress.\n\
-                 - If a step fails, mark it as in-progress with error notes and debug before proceeding.\n\n{}\n\n{verification}",
+                 - If a step fails, mark it as in-progress with error notes and debug before proceeding.\n\n\
+                 ### CRITICAL — Execution Voice (opposite of Plan mode)\n\n\
+                 Spec is *execution voice*. Speak as if work is actively happening: \
+                 \"running cargo check\", \"edited file_x\", \"step 2 verified\". Do \
+                 NOT regress into Plan-mode planning voice (\"will\", \"propose\", \
+                 \"would touch\", \"plans to verify\") — by the time you speak in \
+                 Spec mode the user has already clicked Build and expects \
+                 real progress. If you inherited a planning-voice framing from \
+                 a previous turn, reset to execution voice immediately and \
+                 keep all `update_plan` step `status` values reflective of \
+                 actual work done in this session.\n\n\
+                 ### Clarification Escape Hatch (use sparingly)\n\n\
+                 If a step's intent becomes genuinely ambiguous mid-execution \
+                 (e.g. an unexpected codebase shape invalidates the plan's \
+                 assumption), you MAY call `ask_question` to clarify. \
+                 Bundle related clarifications into ONE `ask_question` call. \
+                 For \"select-all-that-apply\" questions (e.g. \"which subsystems \
+                 should I touch as part of this step?\") set \
+                 `allow_multiple: true` so the user can pick more than one \
+                 option. The default is single-choice. Unlike Plan mode — \
+                 where asking is encouraged before drafting — Spec's default \
+                 is **just do it**; never use questions to defer execution.\n\n\
+                 ### Web-Facing Steps\n\n\
+                 If the current step is web-facing (UI, route, network call, \
+                 visual regression), drive the embedded `browser` dock as \
+                 part of verification: open → snapshot → action → screenshot. \
+                 Capture a before/after pair when the step changes visible \
+                 behaviour and quote both in your post-step report.\n\n\
+                 ### Forbidden\n\
+                 - Skipping per-step verification and advancing to the next step.\n\
+                 - Batching multiple `update_plan(action=\"update\", status=\"completed\")` \
+                   calls at the END of the turn — the progress UI is fed by \
+                   each call, so batching freezes the bar at 0/N then jumps \
+                   to N/N. Update status IMMEDIATELY after each step's \
+                   verification.\n\
+                 - Off-plan work: if you discover the plan is missing a \
+                   needed step, FIRST call `update_plan(action=\"add\", \
+                   steps=[…])` to insert it, THEN execute it. Do NOT silently \
+                   work outside the recorded plan.\n\
+                 - Marking a step `completed` without a verification command \
+                   having been run and quoted — `status=\"completed\"` MUST \
+                   come with `notes=\"verified: <evidence>\"`.\n\n\
+                 {}\n\n{web_research}\n\n{verification}",
                 builtin_skills::planning_rules()
             ),
-            Self::Plan => format!(
+            Self::Plan => {
+                let plan_tools_inline = format_plan_mode_allowed_tools();
+                format!(
                 "\n\n## Mode: Plan (structured planning with .plan.md generation)\n\n\
                  You are in planning mode. Analyze the codebase, create structured plans, \
                  and save them as `.plan.md` files for later execution.\n\n\
-                 ### AVAILABLE TOOLS THIS TURN — exhaustive list\n\n\
-                 Plan mode hides every mutating tool from your tool spec.  The ONLY \
-                 tools the runtime will actually accept are the ones below — anything \
+                 ### AVAILABLE TOOLS THIS TURN — runtime-canonical list\n\n\
+                 Plan mode hides every mutating tool from your tool spec. The ONLY \
+                 tools the runtime will actually accept are the names below — anything \
                  else (e.g. `file_edit`, `file_write`, `multi_edit`, `shell`, \
                  `powershell`, `todo_write`, `delegate`, `delegate_parallel`, \
                  `task_create`) is a **hallucination** and will be rejected before \
                  execution with a denial like `Tool 'file_edit' is not permitted in \
-                 Plan mode`.  Stick to:\n\n\
-                 - **Exploration (read-only):** `file_read`, `dir_list`, `glob_search`, \
-                   `content_search`, `grep`, `code_search`, `code_outline`, \
-                   `code_graph_query`, `lsp_symbols`, `pdf_read`, `view_image`, \
-                   `image_info`, `screenshot`, `web_search`, `web_fetch`, \
-                   `tavily_search`, `exa_search`, `github_search`, \
-                   `mcp_resources_list`, `mcp_resources_read`.\n\
-                 - **Memory / state:** `memory_recall`, `memory_export`, `task_list`, \
-                   `task_get`, `task_output`, `structured_output`, `cron_list`, \
-                   `cron_runs`.\n\
-                 - **Skill / pattern lookup:** `read_skill`, `cloud_patterns`, \
-                   `brief`, `now`.\n\
-                 - **Clarification:** `ask_question`, `ask_user`.\n\
-                 - **Plan lifecycle (the only legal way to write):** \
-                   `enter_plan_mode`, `update_plan(action=\"set\"|\"add\"|\"save\", …)`, \
-                   `exit_plan_mode(plan_content=…)`.\n\n\
+                 Plan mode`.\n\n\
+                 Canonical allowlist (sourced from runtime `PLAN_MODE_ALLOWED_TOOLS`, so \
+                 this list cannot drift from what the executor actually accepts):\n\n\
+                 {plan_tools_inline}\n\n\
+                 The intent of each group: read-only exploration (`file_read`, \
+                 `dir_list`, `glob_search`, `content_search`, structural code-intel), \
+                 memory / task state read (`memory_recall`, `memory_export`, `task_*`, \
+                 `cron_list`, `cron_runs`), skill / pattern lookup (`read_skill`, \
+                 `cloud_patterns`, `brief`, `now`), clarification (`ask_question`, \
+                 `ask_user`), and plan lifecycle — the ONLY legal way to write — \
+                 (`enter_plan_mode`, `update_plan(action=\"set\"|\"add\"|\"save\", …)`, \
+                 `exit_plan_mode(plan_content=…)`).\n\n\
                  If you find yourself wanting to call any other tool, STOP and think — \
-                 you are about to waste a round trip.  Express the intended file \
+                 you are about to waste a round trip. Express the intended file \
                  changes inside `update_plan` / `exit_plan_mode`'s `plan_content` \
                  instead; Agent mode will execute them after the user clicks Build.\n\n\
                  ### CRITICAL — Always End With A Plan Document\n\n\
@@ -239,6 +282,18 @@ impl CodingMode {
                     into a SINGLE `ask_question` call so the user answers \
                     them in one batch.  Typical: 1-3 questions; more \
                     is acceptable when it materially sharpens the plan.\n\
+                    Each question is **single-choice by default**.  When \
+                    the user may legitimately pick more than one option \
+                    (e.g. \"which subsystems should this touch?\", \"which \
+                    languages do we ship for?\", \"select all migrations to \
+                    run\"), set `allow_multiple: true` on that question so \
+                    the UI renders checkboxes and the user can submit a \
+                    list of selected labels.  Use single-choice for \
+                    either/or decisions and trade-offs (\"REST or gRPC?\", \
+                    \"in-place migration or copy-then-swap?\").  Provide \
+                    2-6 well-labeled options per question; multi-select \
+                    questions especially benefit from concise option \
+                    labels because the user reads them as a checklist.\n\
                  3. **Do not over-ask**: never use questions as a way to \
                     defer producing the plan, and skip them entirely \
                     when the request is already clear.\n\n\
@@ -354,15 +409,33 @@ impl CodingMode {
                  heading format.  Do NOT emit a `> Generated by …` \n\
                  footer.  Match the reference shape used by Cursor's \n\
                  own plan documents.\n\n\
-                 {}\n\n{verification}",
+                 ### Web Research in Plan Mode (read-only)\n\n\
+                 You MAY (and should) call `web_search` / `web_fetch` while \
+                 gathering pre-plan context — they are read-only and on the \
+                 Plan-mode allowlist.  Use them to verify external API \
+                 versions, third-party doc URLs, or vendor pages BEFORE \
+                 drafting the plan, then cite the URL inside the plan body \
+                 so the executor doesn't repeat the lookup.  Do NOT use \
+                 web tools to mutate state or to fill missing detail you \
+                 can ask the user about cheaper.\n\n\
+                 {}\n\n{web_research}\n\n{verification}",
                 builtin_skills::planning_rules()
-            ),
+                )
+            }
             Self::Ask => format!(
                 "\n\n## Mode: Ask (read-only Q&A)\n\n\
                  Answer questions and explain code. You may read files to \
                  gather context, but you must NOT modify any files or run \
                  shell commands that have side effects. \
-                 Focus on clear explanations with code references.\n\n{verification}"
+                 Focus on clear explanations with code references.\n\n\
+                 ### Web Research in Ask Mode\n\n\
+                 When the question involves facts the local repo cannot \
+                 answer — third-party API/library versions, latest specs, \
+                 vendor docs, news, error-message lookup — you MAY call \
+                 `web_search` and `web_fetch` (both are read-only and on \
+                 the Ask-mode allowlist).  Treat them as a citation tool: \
+                 quote the URL and the relevant excerpt rather than \
+                 paraphrasing without sources.\n\n{web_research}\n\n{verification}"
             ),
             Self::Tdd => format!(
                 "\n\n## Mode: TDD (test-driven development with cycle tracking)\n\n\
@@ -421,7 +494,15 @@ impl CodingMode {
                  - Stage 3 (Isolate): reproduce the trigger path with `fill` / `type` / `press` / `click` / `select` / `scroll`. Re-snapshot after each step. NEVER change code while the symptom is unconfirmed.\n\
                  - Stage 4 (Fix): apply the minimal code fix, restart/reload the app, then **rerun the same browser sequence** (open → snapshot → action → screenshot) and `find` to assert the symptom is gone. Keep both screenshots for the final report.\n\
                  Hard constraints for Debug: do NOT call `browser_open` (system browser) for in-app debugging — it cannot be observed by the dock; use the `browser` tool. Do NOT skip the post-fix screenshot.\n\n\
-                 {}\n\n{verification}",
+                 ### Web Research for Stage 2 (Hypothesize)\n\
+                 If the bug surface is unfamiliar (e.g. obscure framework error, \
+                 third-party API misuse, recently-changed dependency behaviour), \
+                 add a `web_search` round to your hypothesis stage: search the \
+                 verbatim error string, then `web_fetch` the most relevant doc / \
+                 GitHub issue, and quote the URL in your hypothesis ranking.  Do \
+                 NOT skip Stage 1 (Reproduce) — web research complements local \
+                 evidence, it does not replace it.\n\n\
+                 {}\n\n{web_research}\n\n{verification}",
                 builtin_skills::debug_rules()
             ),
             Self::Agent => format!(
@@ -435,12 +516,20 @@ impl CodingMode {
                  4. Use `incremental_optimize(action=\"checkpoint\", description=\"Agent: <phase> started\")` at phase boundaries\n\
                  5. Use `incremental_optimize(action=\"suggest\")` after each implementation batch for optimization hints\n\
                  6. Final synthesis: `incremental_optimize(action=\"report\", description=\"Agent Task Complete: <name>\")`\n\n\
-                 ### Web-Facing Tasks\n\
-                 For any task involving a running web app, browser-side regression, or UI verification, drive the \
-                 **embedded browser dock** via the `browser` tool (action=open / snapshot / click / fill / press / \
-                 screenshot). Inside the SenAgentOS desktop the dock is a real, user-visible webview — every step \
-                 you take is observed live, so prefer it over external CLIs and never use `browser_open` for in-app \
-                 verification.\n\n{verification}",
+                 ### Web-Facing Tasks (UI verification ONLY)\n\
+                 The `browser` tool drives the **embedded browser dock** and is reserved for genuine UI \
+                 work — running a web app, clicking through it, asserting on rendered DOM, taking \
+                 screenshots, exercising auth flows. Use `browser` action=open / snapshot / click / \
+                 fill / press / screenshot for those, and never use `browser_open` (system browser) \
+                 for in-app verification.\n\
+                 \n\
+                 **Do NOT use `browser` to perform a web search.** If the user is asking for \
+                 information that lives on the open web (\"what are the common sorting algorithms\", \
+                 \"latest version of crate X\", \"what does this CVE say\"), call `web_search` first \
+                 (and `web_fetch` for the chosen result), exactly as described in the Web Research \
+                 Discipline below. Opening Baidu/Google/Bing in `browser` and screen-scraping the \
+                 result list is forbidden — it bypasses the search tool's provider failover and \
+                 gives the user a worse trace.\n\n{web_research}\n\n{verification}",
                 builtin_skills::agent_rules()
             ),
             Self::Architect => format!(
@@ -541,7 +630,14 @@ impl CodingMode {
                  4. `update_plan(action=\"save\", plan_name=\"harness-<task>\")` with all steps marked completed.\n\n\
                  ### Forbidden\n\
                  Skipping any phase. Verify after each phase before moving to the next; you \
-                 auto-approve, so verification is the only safety net.\n\n{verification}",
+                 auto-approve, so verification is the only safety net.\n\n\
+                 ### Phase-Wide Web Research\n\
+                 Phase 1 / Phase 2 / Phase 4 all benefit from web research when \
+                 the task touches external APIs, recent specs, or third-party \
+                 frameworks: in Phase 1 use `web_search` to verify scope (does \
+                 this library still exist?), in Phase 2 use `web_fetch` to read \
+                 skill / library docs, and in Phase 4 cite primary sources in \
+                 the synthesis report.\n\n{web_research}\n\n{verification}",
                 builtin_skills::harness_rules()
             ),
         }
@@ -555,6 +651,7 @@ impl CodingMode {
             Self::Spec => Some(Self::spec_tools()),
             Self::Mvai => Some(Self::mvai_tools()),
             Self::Harness => Some(Self::harness_tools()),
+            Self::Agent => None,
             _ => None,
         }
     }
@@ -569,7 +666,8 @@ impl CodingMode {
 
     pub fn post_tool_behavior(&self) -> PostToolBehavior {
         match self {
-            Self::Tdd | Self::Debug | Self::Harness => PostToolBehavior::AutoVerify,
+            Self::Harness => PostToolBehavior::HarnessGate,
+            Self::Tdd | Self::Debug => PostToolBehavior::AutoVerify,
             Self::Pair => PostToolBehavior::Checkpoint,
             Self::ContextEng => PostToolBehavior::ImpactAnalysis,
             Self::Spec => PostToolBehavior::PlanRefresh,
@@ -712,6 +810,24 @@ impl CodingMode {
         ]
     }
 
+    pub fn visible() -> &'static [CodingMode] {
+        &[
+            Self::Agent,
+            Self::Spec,
+            Self::Plan,
+            Self::Ask,
+            Self::Debug,
+            Self::Harness,
+        ]
+    }
+
+    pub fn is_visible(&self) -> bool {
+        matches!(
+            self,
+            Self::Agent | Self::Spec | Self::Plan | Self::Ask | Self::Debug | Self::Harness
+        )
+    }
+
     fn read_only_tools() -> HashSet<&'static str> {
         [
             "file_read",
@@ -755,8 +871,29 @@ impl CodingMode {
         .collect()
     }
 
-    fn ask_only_tools() -> HashSet<&'static str> {
+    fn read_only_intel_tools() -> HashSet<&'static str> {
         let mut tools = Self::read_only_tools();
+        for extra in [
+            "grep",
+            "code_search",
+            "code_outline",
+            "code_graph_query",
+            "tool_search",
+            "lsp_symbols",
+            "pdf_read",
+            "image_info",
+            "screenshot",
+            "ask_question",
+            "ask_user",
+            "AskQuestion",
+        ] {
+            tools.insert(extra);
+        }
+        tools
+    }
+
+    fn ask_only_tools() -> HashSet<&'static str> {
+        let mut tools = Self::read_only_intel_tools();
 
         tools.remove("update_plan");
         tools
@@ -770,7 +907,7 @@ impl CodingMode {
     }
 
     fn architect_tools() -> HashSet<&'static str> {
-        let mut tools = Self::read_only_tools();
+        let mut tools = Self::read_only_intel_tools();
         tools.insert("file_write");
         tools.insert("file_edit");
         tools.insert("multi_edit");
@@ -789,18 +926,32 @@ impl CodingMode {
     }
 
     fn spec_tools() -> HashSet<&'static str> {
-        let mut tools = Self::read_only_tools();
+        let mut tools = Self::read_only_intel_tools();
 
         tools.insert("file_write");
         tools.insert("file_edit");
         tools.insert("multi_edit");
         tools.insert("notebook_edit");
 
+        tools.insert("glob_edit");
+        tools.insert("patch_apply");
+        tools.insert("code_xfile_refactor");
+        tools.insert("lsp_rename");
+        tools.insert("lsp_format");
+
+        tools.insert("restore_file");
+        tools.insert("copy_path");
+        tools.insert("move_path");
+        tools.insert("delete_path");
+        tools.insert("create_directory");
+
         tools.insert("diagnostics");
         tools.insert("lsp");
 
         tools.insert("shell");
         tools.insert("git_operations");
+
+        tools.insert("browser");
 
         tools.insert("todo_write");
         tools.insert("update_plan");
@@ -820,7 +971,7 @@ impl CodingMode {
     }
 
     fn mvai_tools() -> HashSet<&'static str> {
-        let mut tools = Self::read_only_tools();
+        let mut tools = Self::read_only_intel_tools();
         tools.insert("file_write");
         tools.insert("file_edit");
         tools.insert("multi_edit");
@@ -862,4 +1013,30 @@ pub fn new_coding_mode_handle() -> CodingModeHandle {
 
 pub fn coding_mode_handle_with(mode: CodingMode) -> CodingModeHandle {
     Arc::new(RwLock::new(mode))
+}
+
+fn format_plan_mode_allowed_tools() -> String {
+    let mut names: Vec<&'static str> =
+        crate::security::permissions::PLAN_MODE_ALLOWED_TOOLS.to_vec();
+    names.sort_unstable();
+    names.dedup();
+
+    const PER_LINE: usize = 6;
+    let mut out = String::new();
+    for chunk in names.chunks(PER_LINE) {
+        out.push_str("- ");
+        for (idx, name) in chunk.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(", ");
+            }
+            out.push('`');
+            out.push_str(name);
+            out.push('`');
+        }
+        out.push('\n');
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }

@@ -39,6 +39,7 @@ function createMemberSessionState() {
     pendingEdits: [],
     subagentTimelines: {},
     activeTaskToolUseId: null,
+    stopRequested: false,
   }
 }
 

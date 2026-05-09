@@ -482,8 +482,15 @@ async fn process_chat_message(
                 TurnEvent::ToolCall { name, args } => {
                     serde_json::json!({ "type": "tool_call", "name": name, "args": args })
                 }
-                TurnEvent::ToolResult { name, output } => {
-                    serde_json::json!({ "type": "tool_result", "name": name, "output": output })
+                TurnEvent::ToolResult { name, output, success } => {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "name": name,
+                        "output": output,
+                        "success": success,
+                        "isError": !success
+                            || crate::agent::tool_event_status::output_indicates_error(&output),
+                    })
                 }
                 TurnEvent::Error { message } => {
                     serde_json::json!({ "type": "error", "content": message })

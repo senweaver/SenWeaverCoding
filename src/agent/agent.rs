@@ -37,7 +37,7 @@ pub enum TurnEvent {
         args: serde_json::Value,
     },
 
-    ToolResult { name: String, output: String },
+    ToolResult { name: String, output: String, success: bool },
 
     Error { message: String },
 
@@ -160,6 +160,8 @@ pub struct Agent {
     baseline_max_tool_iterations: usize,
 
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+
+    cancel_signal: Arc<arc_swap::ArcSwap<tokio_util::sync::CancellationToken>>,
 
     shared_config: crate::config::live::LiveConfig,
 
@@ -513,6 +515,9 @@ impl AgentBuilder {
             current_coding_mode: None,
             baseline_max_tool_iterations: baseline_max_iter,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel_signal: Arc::new(arc_swap::ArcSwap::from_pointee(
+                tokio_util::sync::CancellationToken::new(),
+            )),
             shared_config: self
                 .shared_config
                 .unwrap_or_else(crate::config::live::LiveConfig::default),
@@ -689,8 +694,7 @@ impl Agent {
             }
         }));
 
-        self.cancelled
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let cancel = self.cancel_signal.load_full().as_ref().clone();
 
         let mut _pacing_gov = crate::agent::executor_core::PacingGovernor::new(
             self.config.max_tool_iterations.max(1),
@@ -722,14 +726,16 @@ impl Agent {
                 })
                 .await;
 
-            if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            if self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                || cancel.is_cancelled()
+            {
 
                 let _ = event_tx
                     .send(TurnEvent::Cancelling {
                         reason: "user_requested".into(),
                     })
                     .await;
-                return Ok("[Cancelled]".to_string());
+                return Ok(String::new());
             }
 
             if let Some(crate::cost::types::BudgetCheck::Exceeded {
@@ -818,76 +824,113 @@ impl Agent {
             let mut seen_streaming_tool_sigs: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
 
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(event) => match event {
-                        crate::providers::traits::StreamEvent::TextDelta(chunk) => {
-                            if let Some(reasoning) = chunk.reasoning {
-                                if !reasoning.is_empty() {
+            let mut cancelled_during_stream = false;
 
-                                    streamed_reasoning.push_str(&reasoning);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        cancelled_during_stream = true;
+                        break;
+                    }
+                    next = stream.next() => {
+                        let Some(item) = next else { break };
+                        match item {
+                            Ok(event) => match event {
+                                crate::providers::traits::StreamEvent::TextDelta(chunk) => {
+                                    if let Some(reasoning) = chunk.reasoning {
+                                        if !reasoning.is_empty() {
+
+                                            streamed_reasoning.push_str(&reasoning);
+                                            let _ = event_tx
+                                                .send(TurnEvent::Thinking { delta: reasoning })
+                                                .await;
+                                        }
+                                    }
+                                    if !chunk.delta.is_empty() {
+                                        got_stream = true;
+                                        streamed_text.push_str(&chunk.delta);
+                                        let _ = event_tx
+                                            .send(TurnEvent::Chunk { delta: chunk.delta })
+                                            .await;
+                                    }
+                                }
+                                crate::providers::traits::StreamEvent::ToolCall(tc) => {
+                                    got_stream = true;
+                                    let sig = format!("{}|{}", tc.name, tc.arguments);
+                                    if seen_streaming_tool_sigs.insert(sig) {
+                                        let _ = event_tx
+                                            .send(TurnEvent::ToolCall {
+                                                name: tc.name.clone(),
+                                                args: serde_json::from_str(&tc.arguments)
+                                                    .unwrap_or_default(),
+                                            })
+                                            .await;
+                                        streamed_tool_calls.push(tc);
+                                    } else {
+                                        tracing::debug!(
+                                            target: "agent.stream",
+                                            tool = %tc.name,
+                                            "suppressed duplicate streaming tool_call (model emitted identical signature in same turn)"
+                                        );
+                                    }
+                                }
+                                crate::providers::traits::StreamEvent::PreExecutedToolCall {
+                                    name,
+                                    args,
+                                } => {
                                     let _ = event_tx
-                                        .send(TurnEvent::Thinking { delta: reasoning })
+                                        .send(TurnEvent::ToolCall {
+                                            name,
+                                            args: serde_json::from_str(&args).unwrap_or_default(),
+                                        })
                                         .await;
                                 }
-                            }
-                            if !chunk.delta.is_empty() {
-                                got_stream = true;
-                                streamed_text.push_str(&chunk.delta);
-                                let _ =
-                                    event_tx.send(TurnEvent::Chunk { delta: chunk.delta }).await;
-                            }
-                        }
-                        crate::providers::traits::StreamEvent::ToolCall(tc) => {
-                            got_stream = true;
-                            let sig = format!("{}|{}", tc.name, tc.arguments);
-                            if seen_streaming_tool_sigs.insert(sig) {
-                                let _ = event_tx
-                                    .send(TurnEvent::ToolCall {
-                                        name: tc.name.clone(),
-                                        args: serde_json::from_str(&tc.arguments)
-                                            .unwrap_or_default(),
-                                    })
-                                    .await;
-                                streamed_tool_calls.push(tc);
-                            } else {
-                                tracing::debug!(
-                                    target: "agent.stream",
-                                    tool = %tc.name,
-                                    "suppressed duplicate streaming tool_call (model emitted identical signature in same turn)"
-                                );
-                            }
-                        }
-                        crate::providers::traits::StreamEvent::PreExecutedToolCall {
-                            name,
-                            args,
-                        } => {
-                            let _ = event_tx
-                                .send(TurnEvent::ToolCall {
+                                crate::providers::traits::StreamEvent::PreExecutedToolResult {
                                     name,
-                                    args: serde_json::from_str(&args).unwrap_or_default(),
-                                })
-                                .await;
-                        }
-                        crate::providers::traits::StreamEvent::PreExecutedToolResult {
-                            name,
-                            output,
-                        } => {
-                            let _ = event_tx.send(TurnEvent::ToolResult { name, output }).await;
-                        }
-                        crate::providers::traits::StreamEvent::Usage(usage) => {
+                                    output,
+                                } => {
+                                    let success = !crate::agent::tool_event_status::output_indicates_error(&output);
+                                    let _ = event_tx
+                                        .send(TurnEvent::ToolResult { name, output, success })
+                                        .await;
+                                }
+                                crate::providers::traits::StreamEvent::Usage(usage) => {
 
-                            streamed_usage = Some(usage);
+                                    streamed_usage = Some(usage);
+                                }
+                                crate::providers::traits::StreamEvent::Final => break,
+                            },
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Stream error from provider; ending stream"
+                                );
+                                break;
+                            }
                         }
-                        crate::providers::traits::StreamEvent::Final => break,
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Stream error from provider; ending stream");
-                        break;
                     }
                 }
             }
             drop(stream);
+
+            if cancelled_during_stream
+                || cancel.is_cancelled()
+                || self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let trimmed = streamed_text.trim();
+                if !trimmed.is_empty() {
+                    self.history.push(ConversationMessage::Chat(
+                        ChatMessage::assistant(streamed_text.clone()),
+                    ));
+                }
+                let _ = event_tx
+                    .send(TurnEvent::Cancelling {
+                        reason: "user_requested".into(),
+                    })
+                    .await;
+                return Ok(streamed_text);
+            }
 
             let response = if got_stream {
 
@@ -1118,6 +1161,7 @@ impl Agent {
                             name: call.name.clone(),
                             output: "[Deduplicated] Already executed with identical arguments."
                                 .into(),
+                            success: true,
                         })
                         .await;
                 } else {
@@ -1216,6 +1260,7 @@ impl Agent {
                     .send(TurnEvent::ToolResult {
                         name: result.name.clone(),
                         output: result.output.clone(),
+                        success: result.success,
                     })
                     .await;
             }
@@ -1242,30 +1287,12 @@ impl Agent {
             {
                 let had_file_edit = results.iter().any(|r| {
                     r.success
-                        && matches!(
-                            r.name.as_str(),
-                            "file_write"
-                                | "file_edit"
-                                | "multi_edit"
-                                | "notebook_edit"
-                                | "glob_edit"
-                                | "patch_apply"
-                                | "restore_file"
-                        )
+                        && crate::agent::mode_effects::is_file_mutation_tool(r.name.as_str())
                 });
                 if had_file_edit {
                     for r in results.iter().filter(|r| {
                         r.success
-                            && matches!(
-                                r.name.as_str(),
-                                "file_write"
-                                    | "file_edit"
-                                    | "multi_edit"
-                                    | "notebook_edit"
-                                    | "glob_edit"
-                                    | "patch_apply"
-                                    | "restore_file"
-                            )
+                            && crate::agent::mode_effects::is_file_mutation_tool(r.name.as_str())
                     }) {
                         let path = extract_file_edit_path(&r.name, &r.output);
                         if !path.is_empty() {
@@ -1307,6 +1334,17 @@ impl Agent {
 
             let formatted = self.tool_dispatcher.format_results(&results);
             self.history.push(formatted);
+
+            if cancel.is_cancelled()
+                || self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let _ = event_tx
+                    .send(TurnEvent::Cancelling {
+                        reason: "user_requested".into(),
+                    })
+                    .await;
+                return Ok(String::new());
+            }
 
             for body in pending_post_tool_system_messages.drain(..) {
                 self.history
@@ -1493,9 +1531,30 @@ impl Agent {
         Arc::clone(&self.cancelled)
     }
 
+    pub fn cancel_signal(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel_signal.load_full().as_ref().clone()
+    }
+
+    pub fn cancel_signal_handle(
+        &self,
+    ) -> Arc<arc_swap::ArcSwap<tokio_util::sync::CancellationToken>> {
+        Arc::clone(&self.cancel_signal)
+    }
+
     pub fn request_cancel(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_signal.load_full().cancel();
+    }
+
+    pub fn reset_cancel(&self) {
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let token = self.cancel_signal.load_full();
+        if token.is_cancelled() {
+            self.cancel_signal
+                .store(Arc::new(tokio_util::sync::CancellationToken::new()));
+        }
     }
 
     pub fn set_max_iterations_override(&mut self, max: usize) {
@@ -2628,6 +2687,17 @@ impl Agent {
     async fn execute_tool_call(&self, call: &ParsedToolCall) -> ToolExecutionResult {
         let start = Instant::now();
 
+        if self.cancel_signal.load_full().is_cancelled()
+            || self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return ToolExecutionResult {
+                name: call.name.clone(),
+                output: "[Cancelled by user]".to_string(),
+                success: true,
+                tool_call_id: call.tool_call_id.clone(),
+            };
+        }
+
         if let (Some(engine), Some(identity)) = (&self.rbac_engine, &self.rbac_identity) {
             let auth = engine.authorize_tool(identity, &call.name);
             if !auth.allowed {
@@ -2790,6 +2860,52 @@ impl Agent {
         };
         let dispatch_call: &ParsedToolCall = effective_call.as_ref().unwrap_or(call);
 
+        {
+            let web_search_enabled = crate::services::try_get_services()
+                .map(|svc| svc.config().web_search.enabled)
+                .unwrap_or(true);
+            match crate::agent::web_search_url_guard::evaluate_browser_or_web_fetch_call(
+                dispatch_call.name.as_str(),
+                &dispatch_call.arguments,
+                web_search_enabled,
+            ) {
+                crate::agent::web_search_url_guard::GuardDecision::Allow => {}
+                crate::agent::web_search_url_guard::GuardDecision::AllowWithFallbackTrace => {
+                    tracing::info!(
+                        tool = %dispatch_call.name,
+                        "Permitting search-engine URL as fallback; web_search recently failed"
+                    );
+                }
+                crate::agent::web_search_url_guard::GuardDecision::Refuse(refusal) => {
+                    tracing::warn!(
+                        tool = %dispatch_call.name,
+                        "Blocked search-engine URL misuse; web_search has not been tried yet"
+                    );
+                    self.observer.record_event(&ObserverEvent::ToolCall {
+                        tool: call.name.clone(),
+                        duration: start.elapsed(),
+                        success: false,
+                    });
+                    if let Some(ref runner) = self.hook_runner {
+                        let hook_result = crate::tools::ToolResult {
+                            success: false,
+                            output: refusal.clone(),
+                            error: Some(refusal.clone()),
+                        };
+                        runner
+                            .fire_after_tool_call(&call.name, &hook_result, start.elapsed())
+                            .await;
+                    }
+                    return ToolExecutionResult {
+                        name: call.name.clone(),
+                        output: refusal,
+                        success: false,
+                        tool_call_id: call.tool_call_id.clone(),
+                    };
+                }
+            }
+        }
+
         async fn run_tool(
             tool: &dyn Tool,
             call: &ParsedToolCall,
@@ -2840,19 +2956,33 @@ impl Agent {
             id = ?dispatch_call.tool_call_id,
             "tool execution start"
         );
-        let (output, success) =
-            if let Some(tool) = self.tools.iter().find(|t| t.name() == dispatch_call.name) {
-                run_tool(tool.as_ref(), dispatch_call, &self.observer).await
-            } else if let Some(activated_arc) = self.activated_tools.as_ref() {
-                let activated_opt = activated_arc.lock().get_resolved(&dispatch_call.name);
-                if let Some(tool) = activated_opt {
-                    run_tool(tool.as_ref(), dispatch_call, &self.observer).await
-                } else {
-                    (format!("Unknown tool: {}", dispatch_call.name), false)
+        let cancel_handle = self.cancel_signal.load_full().as_ref().clone();
+        let (output, success) = if let Some(tool) =
+            self.tools.iter().find(|t| t.name() == dispatch_call.name)
+        {
+            tokio::select! {
+                biased;
+                _ = cancel_handle.cancelled() => {
+                    ("[Cancelled by user]".to_string(), true)
+                }
+                res = run_tool(tool.as_ref(), dispatch_call, &self.observer) => res,
+            }
+        } else if let Some(activated_arc) = self.activated_tools.as_ref() {
+            let activated_opt = activated_arc.lock().get_resolved(&dispatch_call.name);
+            if let Some(tool) = activated_opt {
+                tokio::select! {
+                    biased;
+                    _ = cancel_handle.cancelled() => {
+                        ("[Cancelled by user]".to_string(), true)
+                    }
+                    res = run_tool(tool.as_ref(), dispatch_call, &self.observer) => res,
                 }
             } else {
                 (format!("Unknown tool: {}", dispatch_call.name), false)
-            };
+            }
+        } else {
+            (format!("Unknown tool: {}", dispatch_call.name), false)
+        };
 
         let wall_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(
@@ -2864,6 +2994,14 @@ impl Agent {
             "tool execution end"
         );
         crate::agent::runtime_hooks::publish_tool_event(&dispatch_call.name, success, wall_ms);
+
+        if crate::agent::web_search_url_guard::is_web_search_tool_name(&dispatch_call.name) {
+            if success {
+                crate::agent::web_search_url_guard::record_web_search_success();
+            } else {
+                crate::agent::web_search_url_guard::record_web_search_failure();
+            }
+        }
 
         if let Some(ref runner) = self.hook_runner {
             let hook_result = crate::tools::ToolResult {
@@ -3436,10 +3574,20 @@ Use a read-only tool, or call `exit_plan_mode` first.",
 
         let mut enriched = Self::build_user_envelope(user_message, &context);
 
-        if let Some(mode) = crate::services::try_get_services().map(|s| *s.coding_mode.read()) {
+        if let Some(svc) = crate::services::try_get_services() {
+            let mode = *svc.coding_mode.read();
             if let Some(reminder) = crate::agent::mode_effects::pre_turn_reminder(mode) {
                 enriched.push_str("\n\n");
                 enriched.push_str(reminder);
+            }
+            let cfg = svc.config();
+            if let Some(web_reminder) = crate::agent::mode_effects::web_research_disabled_reminder(
+                mode,
+                cfg.web_search.enabled,
+                cfg.web_fetch.enabled,
+            ) {
+                enriched.push_str("\n\n");
+                enriched.push_str(web_reminder);
             }
         }
 

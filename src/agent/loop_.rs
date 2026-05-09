@@ -392,7 +392,7 @@ pub enum DraftEvent {
         args: serde_json::Value,
     },
 
-    ToolResult { name: String, output: String },
+    ToolResult { name: String, output: String, success: bool },
 
     FileEdit {
         path: String,
@@ -2796,6 +2796,43 @@ async fn execute_one_tool(
         });
     }
 
+    {
+        let web_search_enabled = crate::services::try_get_services()
+            .map(|svc| svc.config().web_search.enabled)
+            .unwrap_or(true);
+        match crate::agent::web_search_url_guard::evaluate_browser_or_web_fetch_call(
+            call_name,
+            &call_arguments,
+            web_search_enabled,
+        ) {
+            crate::agent::web_search_url_guard::GuardDecision::Allow => {}
+            crate::agent::web_search_url_guard::GuardDecision::AllowWithFallbackTrace => {
+                tracing::info!(
+                    tool = %call_name,
+                    "Permitting search-engine URL as fallback; web_search recently failed"
+                );
+            }
+            crate::agent::web_search_url_guard::GuardDecision::Refuse(refusal) => {
+                tracing::warn!(
+                    tool = %call_name,
+                    "Blocked search-engine URL misuse; web_search has not been tried yet"
+                );
+                let duration = start.elapsed();
+                observer.record_event(&ObserverEvent::ToolCall {
+                    tool: call_name.to_string(),
+                    duration,
+                    success: false,
+                });
+                return Ok(ToolExecutionOutcome {
+                    output: refusal.clone(),
+                    success: false,
+                    error_reason: Some(refusal),
+                    duration,
+                });
+            }
+        }
+    }
+
     let cache_fp = tool.fingerprint(&call_arguments);
     if let Some(fp) = cache_fp.as_ref() {
         if let Some(entry) =
@@ -2840,6 +2877,15 @@ async fn execute_one_tool(
             "error"
         };
         crate::observability::agent_metrics::inc_tool_call(&svc.agent_metrics, call_name, status);
+    }
+
+    if crate::agent::web_search_url_guard::is_web_search_tool_name(call_name) {
+        let succeeded = matches!(&tool_result, Ok(r) if r.success);
+        if succeeded {
+            crate::agent::web_search_url_guard::record_web_search_success();
+        } else {
+            crate::agent::web_search_url_guard::record_web_search_failure();
+        }
     }
 
     match tool_result {
@@ -3222,6 +3268,17 @@ pub(crate) async fn run_tool_call_loop(
             crate::agent::mode_effects::replace_or_push_system_reminder(
                 history,
                 reminder.to_string(),
+            );
+        }
+        let cfg = svc.config();
+        if let Some(web_reminder) = crate::agent::mode_effects::web_research_disabled_reminder(
+            mode,
+            cfg.web_search.enabled,
+            cfg.web_fetch.enabled,
+        ) {
+            crate::agent::mode_effects::replace_or_push_system_reminder(
+                history,
+                web_reminder.to_string(),
             );
         }
     }
@@ -4315,23 +4372,20 @@ pub(crate) async fn run_tool_call_loop(
                     .send(DraftEvent::ToolResult {
                         name: call.name.clone(),
                         output: outcome.output.clone(),
+                        success: outcome.success,
                     })
                     .await;
             }
 
-            if outcome.success {
-                let is_file_mod = matches!(
-                    call.name.as_str(),
-                    "file_write" | "file_edit" | "multi_edit" | "notebook_edit"
-                );
-                if is_file_mod {
-                    if let Some(svc) = crate::services::try_get_services() {
-                        let mode = *svc.coding_mode.read();
-                        if let Some(nudge) =
-                            crate::agent::mode_effects::file_mod_auto_verify_nudge(mode)
-                        {
-                            deferred_system_after_tool_batch.push(nudge.to_string());
-                        }
+            if outcome.success
+                && crate::agent::mode_effects::is_file_mutation_tool(call.name.as_str())
+            {
+                if let Some(svc) = crate::services::try_get_services() {
+                    let mode = *svc.coding_mode.read();
+                    if let Some(nudge) =
+                        crate::agent::mode_effects::file_mod_auto_verify_nudge(mode)
+                    {
+                        deferred_system_after_tool_batch.push(nudge.to_string());
                     }
                 }
             }
@@ -5083,6 +5137,10 @@ pub async fn run(
             "Load the full source for an available skill by name. Use when: compact mode only shows a summary and you need the complete skill instructions.",
         ));
     }
+    tool_descs.push((
+        "read_user_rule",
+        "Load the full body of a user instruction rule by name. Use when: an entry in <available_user_rules> looks relevant and you need its complete content.",
+    ));
     tool_descs.push((
         "cron_add",
         "Create a cron job. Supports schedule kinds: cron, at, every; and job types: shell or agent.",
@@ -5974,6 +6032,10 @@ pub async fn process_message(
             "Load the full source for an available skill by name.",
         ));
     }
+    tool_descs.push((
+        "read_user_rule",
+        "Load the full body of a user instruction rule by name.",
+    ));
     if config.browser.enabled {
         tool_descs.push(("browser_open", "Open approved URLs in browser."));
     }

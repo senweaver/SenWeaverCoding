@@ -25,33 +25,21 @@ const QUICK_MODE_GLYPH: Record<CodingModeId, string> = {
 }
 
 const QUICK_MODE_ORDER: CodingModeId[] = [
-  'vibe',
   'agent',
   'spec',
   'plan',
   'ask',
-  'tdd',
   'debug',
-  'architect',
-  'pair',
-  'context',
-  'mvai',
   'harness',
 ]
 
-const QUICK_MODE_HOTKEY: Record<CodingModeId, string> = {
-  vibe: '1',
-  agent: '2',
-  spec: '3',
-  plan: '4',
-  ask: '5',
-  tdd: '6',
-  debug: '7',
-  architect: '8',
-  pair: '9',
-  context: '0',
-  mvai: 'Q',
-  harness: 'W',
+const QUICK_MODE_HOTKEY: Partial<Record<CodingModeId, string>> = {
+  agent: '1',
+  spec: '2',
+  plan: '3',
+  ask: '4',
+  debug: '5',
+  harness: '6',
 }
 
 const QUICK_MODE_AUTONOMOUS = new Set<CodingModeId>(['agent', 'harness'])

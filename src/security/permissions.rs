@@ -323,6 +323,14 @@ pub fn is_plan_mode_allowed_tool(name: &str) -> bool {
     PLAN_MODE_ALLOWED_TOOLS.contains(&name)
 }
 
+pub fn plan_mode_allowed_tools() -> Vec<&'static str> {
+    PLAN_MODE_ALLOWED_TOOLS.to_vec()
+}
+
+pub fn read_only_tool_names() -> Vec<&'static str> {
+    READ_ONLY_TOOLS.to_vec()
+}
+
 pub fn is_interactive_question_tool(name: &str) -> bool {
     matches!(name, "ask_question" | "ask_user" | "AskQuestion")
 }

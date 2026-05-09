@@ -63,6 +63,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
   const chatState = sessionState?.chatState ?? 'idle'
+  const stopRequested = sessionState?.stopRequested ?? false
   const slashCommands = sessionState?.slashCommands ?? []
   const composerPrefill = sessionState?.composerPrefill ?? null
   const codingMode = useSettingsStore((s) => s.codingMode)
@@ -74,6 +75,39 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
 
   const isMemberSession = !!memberInfo
   const isActive = chatState !== 'idle'
+  const [stopCooldown, setStopCooldown] = useState(false)
+  const stopCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!isActive && !stopRequested) {
+      setStopCooldown(false)
+      if (stopCooldownTimerRef.current) {
+        clearTimeout(stopCooldownTimerRef.current)
+        stopCooldownTimerRef.current = null
+      }
+    }
+  }, [isActive, stopRequested])
+  useEffect(() => {
+    return () => {
+      if (stopCooldownTimerRef.current) {
+        clearTimeout(stopCooldownTimerRef.current)
+        stopCooldownTimerRef.current = null
+      }
+    }
+  }, [])
+  const handleStopClick = () => {
+    if (!activeTabId) return
+    if (stopCooldown || stopRequested) return
+    setStopCooldown(true)
+    if (stopCooldownTimerRef.current) {
+      clearTimeout(stopCooldownTimerRef.current)
+    }
+    stopCooldownTimerRef.current = setTimeout(() => {
+      setStopCooldown(false)
+      stopCooldownTimerRef.current = null
+    }, 800)
+    stopGeneration(activeTabId)
+  }
+  const showStopping = isActive && (stopRequested || stopCooldown)
   const isWorkspaceMissing = activeSession?.workDirExists === false
   const canSubmit = !isWorkspaceMissing && (input.trim().length > 0 || (!isMemberSession && attachments.length > 0))
   const isHeroComposer = variant === 'hero' && !isMemberSession
@@ -650,19 +684,27 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                 <TokenUsageRing sessionId={activeTabId ?? null} size={14} />
               )}
               <button
-                onClick={!isMemberSession && isActive ? () => stopGeneration(activeTabId!) : handleSubmit}
-                disabled={!isMemberSession && isActive ? false : !canSubmit}
+                onClick={!isMemberSession && isActive ? handleStopClick : handleSubmit}
+                disabled={
+                  !isMemberSession && isActive
+                    ? showStopping
+                    : !canSubmit
+                }
                 aria-label={
                   !isMemberSession && isActive
-                    ? t('chat.stopTitle')
+                    ? showStopping
+                      ? t('chat.stopping')
+                      : t('chat.stopTitle')
                     : isMemberSession ? t('common.send') : t('common.run')
                 }
                 title={
                   !isMemberSession && isActive
-                    ? t('chat.stopTitle')
+                    ? showStopping
+                      ? t('chat.stopping')
+                      : t('chat.stopTitle')
                     : isMemberSession ? t('common.send') : t('common.run')
                 }
-                className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30 ${
+                className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50 ${
                   !isMemberSession && isActive
                     ? isPlanMode
                       ? 'bg-[var(--color-plan-accent)] text-[var(--color-on-plan-accent-container)] shadow-[var(--shadow-button-primary)]'
@@ -672,8 +714,16 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                       : 'bg-[var(--color-text-primary)] text-[var(--color-surface)] shadow-[var(--shadow-button-primary)]'
                 }`}
               >
-                <span className="material-symbols-outlined text-[8px]">
-                  {!isMemberSession && isActive ? 'stop' : 'arrow_upward'}
+                <span
+                  className={`material-symbols-outlined text-[8px] ${
+                    showStopping ? 'animate-spin' : ''
+                  }`}
+                >
+                  {!isMemberSession && isActive
+                    ? showStopping
+                      ? 'progress_activity'
+                      : 'stop'
+                    : 'arrow_upward'}
                 </span>
               </button>
             </div>

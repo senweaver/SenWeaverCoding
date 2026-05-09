@@ -259,7 +259,7 @@ pub enum SdkTurnEvent {
         args: serde_json::Value,
     },
 
-    ToolResult { name: String, output: String },
+    ToolResult { name: String, output: String, success: bool },
 
     Error { message: String },
 }
@@ -271,7 +271,7 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
             T::Chunk { delta } => Self::Chunk { delta },
             T::Thinking { delta } => Self::Thinking { delta },
             T::ToolCall { name, args } => Self::ToolCall { name, args },
-            T::ToolResult { name, output } => Self::ToolResult { name, output },
+            T::ToolResult { name, output, success } => Self::ToolResult { name, output, success },
             T::Error { message } => Self::Error { message },
 
             T::FileEdit {
@@ -282,6 +282,7 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
             } => Self::ToolResult {
                 name: "file_edit".into(),
                 output: format!("{path} (+{additions}/-{deletions})"),
+                success: true,
             },
             T::StatusUpdate { action, detail } => Self::Chunk {
                 delta: format!("[{action}] {detail}"),
@@ -336,6 +337,7 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
                     crate::agent::SubagentChunkKind::ToolResult => Self::ToolResult {
                         name: format!("{label} subagent_tool"),
                         output: delta,
+                        success: true,
                     },
                     crate::agent::SubagentChunkKind::Status => Self::Chunk {
                         delta: format!("{label} [status] {delta}"),

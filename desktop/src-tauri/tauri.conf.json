@@ -16,8 +16,8 @@
         "title": "SenWeaverCoding",
         "width": 1280,
         "height": 800,
-        "minWidth": 960,
-        "minHeight": 640,
+        "minWidth": 480,
+        "minHeight": 360,
         "center": true,
         "decorations": false,
         "shadow": false,
@@ -27,7 +27,7 @@
     ],
     "security": {
       "dangerousDisableAssetCspModification": ["style-src"],
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https://asset.localhost; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:* ws://localhost:* http://localhost:*; media-src 'self' blob:"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https://asset.localhost https://www.google.com https://icons.duckduckgo.com https://*.gstatic.com; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:* ws://localhost:* http://localhost:*; media-src 'self' blob:"
     }
   },
   "bundle": {

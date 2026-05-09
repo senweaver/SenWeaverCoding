@@ -243,8 +243,8 @@ impl<'a> AgentLoopCore<'a> {
                         crate::agent::loop_::DraftEvent::ToolCall { name, args } => {
                             crate::agent::TurnEvent::ToolCall { name, args }
                         }
-                        crate::agent::loop_::DraftEvent::ToolResult { name, output } => {
-                            crate::agent::TurnEvent::ToolResult { name, output }
+                        crate::agent::loop_::DraftEvent::ToolResult { name, output, success } => {
+                            crate::agent::TurnEvent::ToolResult { name, output, success }
                         }
                         crate::agent::loop_::DraftEvent::FileEdit {
                             path,

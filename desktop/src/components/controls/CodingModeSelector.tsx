@@ -3,8 +3,10 @@ import { createPortal } from 'react-dom'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useWebResearchStore } from '../../stores/webResearchStore'
 import { useTranslation } from '../../i18n'
 import type { CodingModeId } from '../../types/codingMode'
+import { isVisibleCodingMode } from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
 
 type Props = {
@@ -14,17 +16,11 @@ type Props = {
 }
 
 const FALLBACK_MODES: { id: CodingModeId; label: string; descriptionKey: TranslationKey }[] = [
-  { id: 'vibe', label: 'Vibe', descriptionKey: 'codingMode.vibe.description' },
   { id: 'agent', label: 'Agent', descriptionKey: 'codingMode.agent.description' },
   { id: 'spec', label: 'Spec', descriptionKey: 'codingMode.spec.description' },
   { id: 'plan', label: 'Plan', descriptionKey: 'codingMode.plan.description' },
   { id: 'ask', label: 'Ask', descriptionKey: 'codingMode.ask.description' },
-  { id: 'tdd', label: 'TDD', descriptionKey: 'codingMode.tdd.description' },
   { id: 'debug', label: 'Debug', descriptionKey: 'codingMode.debug.description' },
-  { id: 'architect', label: 'Architect', descriptionKey: 'codingMode.architect.description' },
-  { id: 'pair', label: 'Pair', descriptionKey: 'codingMode.pair.description' },
-  { id: 'context', label: 'Context', descriptionKey: 'codingMode.context.description' },
-  { id: 'mvai', label: 'MVAI', descriptionKey: 'codingMode.mvai.description' },
   { id: 'harness', label: 'Harness', descriptionKey: 'codingMode.harness.description' },
 ]
 
@@ -43,9 +39,9 @@ const MODE_BADGE_GLYPH: Record<CodingModeId, string> = {
   harness: 'precision_manufacturing',
 }
 
-const READONLY_MODES = new Set<CodingModeId>(['ask'])
+const FALLBACK_READONLY_MODES = new Set<CodingModeId>(['ask'])
 
-const AUTONOMOUS_MODES = new Set<CodingModeId>(['agent', 'harness'])
+const FALLBACK_AUTONOMOUS_MODES = new Set<CodingModeId>(['agent', 'harness'])
 
 export function CodingModeSelector({ value, onChange }: Props = {}) {
   const t = useTranslation()
@@ -54,23 +50,48 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const codingModes = useSettingsStore((s) => s.codingModes)
   const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
+  const webSearchEnabled = useWebResearchStore((s) => s.webSearch?.enabled ?? null)
+  const webFetchEnabled = useWebResearchStore((s) => s.webFetch?.enabled ?? null)
+  const webHasFetched = useWebResearchStore((s) => s.hasFetched)
+  const webIsLoading = useWebResearchStore((s) => s.isLoading)
+  const fetchWebResearch = useWebResearchStore((s) => s.fetch)
   const [open, setOpen] = useState(false)
   const [pendingAutonomous, setPendingAutonomous] = useState<CodingModeId | null>(null)
   const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (open && !webHasFetched && !webIsLoading) {
+      void fetchWebResearch()
+    }
+  }, [open, webHasFetched, webIsLoading, fetchWebResearch])
 
   const isControlled = value !== undefined
   const currentMode: CodingModeId = isControlled ? value : storeMode
 
   const sourceModes =
     codingModes.length > 0
-      ? codingModes.map((m) => ({ id: m.id }))
-      : FALLBACK_MODES.map((m) => ({ id: m.id }))
+      ? codingModes.map((m) => ({ id: m.id, permissionMode: m.permissionMode }))
+      : FALLBACK_MODES.map((m) => ({ id: m.id, permissionMode: undefined }))
 
-  const items = sourceModes.map((m) => ({
-    id: m.id,
-    label: t(`codingMode.${m.id}.label` as TranslationKey),
-    description: t(`codingMode.${m.id}.description` as TranslationKey),
-  }))
+  const items = sourceModes
+    .filter((m) => isVisibleCodingMode(m.id))
+    .map((m) => {
+      const isAutonomous =
+        m.permissionMode !== undefined
+          ? m.permissionMode === 'bypassPermissions' || m.permissionMode === 'dontAsk'
+          : FALLBACK_AUTONOMOUS_MODES.has(m.id)
+      const isReadOnly =
+        m.permissionMode !== undefined
+          ? m.permissionMode === 'plan' && m.id === 'ask'
+          : FALLBACK_READONLY_MODES.has(m.id)
+      return {
+        id: m.id,
+        label: t(`codingMode.${m.id}.label` as TranslationKey),
+        description: t(`codingMode.${m.id}.description` as TranslationKey),
+        isAutonomous,
+        isReadOnly,
+      }
+    })
 
   const currentLabel = items.find((i) => i.id === currentMode)?.label ?? currentMode
 
@@ -100,7 +121,11 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   }
 
   function handleSelect(modeId: CodingModeId) {
-    if (AUTONOMOUS_MODES.has(modeId) && modeId !== currentMode) {
+    const targetItem = items.find((i) => i.id === modeId)
+    const isAutonomousTarget = targetItem
+      ? targetItem.isAutonomous
+      : FALLBACK_AUTONOMOUS_MODES.has(modeId)
+    if (isAutonomousTarget && modeId !== currentMode) {
       setOpen(false)
       setPendingAutonomous(modeId)
       return
@@ -134,8 +159,8 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
             {t('codingMode.title')}
           </div>
           {items.map((item) => {
-            const readOnly = READONLY_MODES.has(item.id)
-            const autonomous = AUTONOMOUS_MODES.has(item.id)
+            const readOnly = item.isReadOnly
+            const autonomous = item.isAutonomous
             return (
               <button
                 key={item.id}
@@ -191,6 +216,11 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
               </button>
             )
           })}
+          <WebResearchStatusFooter
+            searchEnabled={webSearchEnabled}
+            fetchEnabled={webFetchEnabled}
+            t={t}
+          />
         </div>
       )}
 
@@ -243,6 +273,40 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
           </div>,
           document.body,
         )}
+    </div>
+  )
+}
+
+function WebResearchStatusFooter({
+  searchEnabled,
+  fetchEnabled,
+  t,
+}: {
+  searchEnabled: boolean | null
+  fetchEnabled: boolean | null
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
+}) {
+  const searchOn = searchEnabled === true
+  const fetchOn = fetchEnabled === true
+  const dotClass = (on: boolean) =>
+    on ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-tertiary)]'
+
+  return (
+    <div className="mt-2 border-t border-[var(--color-border)]/60 px-3 pt-2 pb-1 text-[10px] text-[var(--color-text-tertiary)]">
+      <div className="flex items-center gap-2">
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass(searchOn)}`} />
+        <span className="flex-1 truncate">{t('codingMode.webSearchStatus')}</span>
+        <span className="font-medium text-[var(--color-text-secondary)]">
+          {t(searchOn ? 'codingMode.webStatusOn' : 'codingMode.webStatusOff')}
+        </span>
+      </div>
+      <div className="mt-1 flex items-center gap-2">
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass(fetchOn)}`} />
+        <span className="flex-1 truncate">{t('codingMode.webFetchStatus')}</span>
+        <span className="font-medium text-[var(--color-text-secondary)]">
+          {t(fetchOn ? 'codingMode.webStatusOn' : 'codingMode.webStatusOff')}
+        </span>
+      </div>
     </div>
   )
 }

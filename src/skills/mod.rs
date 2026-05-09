@@ -43,6 +43,8 @@ pub struct Skill {
     pub prompts: Vec<String>,
     #[serde(skip)]
     pub location: Option<PathBuf>,
+    #[serde(default)]
+    pub always_apply: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +78,8 @@ struct SkillMeta {
     author: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default, alias = "alwaysApply", alias = "alwaysapply")]
+    always_apply: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +89,7 @@ struct SkillMarkdownMeta {
     version: Option<String>,
     author: Option<String>,
     tags: Vec<String>,
+    always_apply: Option<bool>,
 }
 
 fn default_version() -> String {
@@ -256,6 +261,11 @@ pub fn load_skills_from_directory(skills_dir: &Path, allow_scripts: bool) -> Vec
         if !path.is_dir() {
             continue;
         }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') {
+                continue;
+            }
+        }
 
         match audit::audit_skill_directory_with_options(
             &path,
@@ -318,6 +328,11 @@ fn load_open_skills_from_directory(skills_dir: &Path, allow_scripts: bool) -> Ve
         let path = entry.path();
         if !path.is_dir() {
             continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') {
+                continue;
+            }
         }
 
         match audit::audit_skill_directory_with_options(
@@ -598,6 +613,7 @@ fn load_skill_toml(path: &Path) -> Result<Skill> {
     let manifest: SkillManifest = toml::from_str(&content)?;
 
     Ok(Skill {
+        always_apply: manifest.skill.always_apply,
         name: manifest.skill.name,
         description: manifest.skill.description,
         version: manifest.skill.version,
@@ -619,6 +635,7 @@ fn load_skill_md(path: &Path, dir: &Path) -> Result<Skill> {
         .to_string();
 
     Ok(Skill {
+        always_apply: parsed.meta.always_apply.unwrap_or(false),
         name: parsed.meta.name.unwrap_or(name),
         description: parsed
             .meta
@@ -652,6 +669,7 @@ fn load_open_skill_md(path: &Path) -> Result<Skill> {
         file_stem
     };
     Ok(finalize_open_skill(Skill {
+        always_apply: parsed.meta.always_apply.unwrap_or(false),
         name: parsed.meta.name.unwrap_or(name),
         description: parsed
             .meta
@@ -717,6 +735,13 @@ fn parse_simple_frontmatter(s: &str) -> SkillMarkdownMeta {
             "description" => meta.description = Some(val.to_string()),
             "version" => meta.version = Some(val.to_string()),
             "author" => meta.author = Some(val.to_string()),
+            "always_apply" | "alwaysApply" | "alwaysapply" => {
+                meta.always_apply = match val.to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "1" | "on" => Some(true),
+                    "false" | "no" | "0" | "off" => Some(false),
+                    _ => None,
+                };
+            }
             "tags" => {
                 if val.is_empty() {
 
@@ -824,6 +849,8 @@ pub fn skills_to_prompt_with_mode(
         return String::new();
     }
 
+    let mode_is_compact = matches!(mode, crate::config::SkillsPromptInjectionMode::Compact);
+
     let mut prompt = match mode {
         crate::config::SkillsPromptInjectionMode::Full => String::from(
             "## Available Skills\n\n\
@@ -833,27 +860,31 @@ pub fn skills_to_prompt_with_mode(
         ),
         crate::config::SkillsPromptInjectionMode::Compact => String::from(
             "## Available Skills\n\n\
-             Skill summaries are preloaded below to keep context compact.\n\
-             Skill instructions are loaded on demand: call `read_skill(name)` with the skill's `<name>` when you need the full skill file.\n\
-             The `location` field is included for reference.\n\n\
+             To keep the system prompt compact, most skills below expose only their \
+             `<name>`, `<description>` and `<location>`. Two rules govern usage:\n\
+             1. Skills marked `always_apply=\"true\"` ARE fully expanded below; treat their \
+                instructions as binding for every relevant request.\n\
+             2. For all other skills, the moment a `<description>` even partially matches the \
+                user's task, call `read_skill(name=\"...\")` to load the full skill file \
+                BEFORE acting. Never guess at a skill's contents from its description alone.\n\n\
              <available_skills>\n",
         ),
     };
 
     for skill in skills {
+        let expand_full = !mode_is_compact || skill.always_apply;
+        let location_relative = mode_is_compact && !skill.always_apply;
+
         let _ = writeln!(prompt, "  <skill>");
         write_xml_text_element(&mut prompt, 4, "name", &skill.name);
         write_xml_text_element(&mut prompt, 4, "description", &skill.description);
-        let location = render_skill_location(
-            skill,
-            workspace_dir,
-            matches!(mode, crate::config::SkillsPromptInjectionMode::Compact),
-        );
+        let location = render_skill_location(skill, workspace_dir, location_relative);
         write_xml_text_element(&mut prompt, 4, "location", &location);
+        if skill.always_apply {
+            write_xml_text_element(&mut prompt, 4, "always_apply", "true");
+        }
 
-        if matches!(mode, crate::config::SkillsPromptInjectionMode::Full)
-            && !skill.prompts.is_empty()
-        {
+        if expand_full && !skill.prompts.is_empty() {
             let _ = writeln!(prompt, "    <instructions>");
             for instruction in &skill.prompts {
                 write_xml_text_element(&mut prompt, 6, "instruction", instruction);
@@ -861,8 +892,7 @@ pub fn skills_to_prompt_with_mode(
             let _ = writeln!(prompt, "    </instructions>");
         }
 
-        if !skill.tools.is_empty() {
-
+        if expand_full && !skill.tools.is_empty() {
             let registered: Vec<_> = skill
                 .tools
                 .iter()

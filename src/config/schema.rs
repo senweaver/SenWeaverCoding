@@ -3115,7 +3115,7 @@ fn default_http_timeout_secs() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WebFetchConfig {
 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     #[serde(default = "default_web_fetch_allowed_domains")]
@@ -3287,7 +3287,7 @@ impl Default for ShellToolConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WebSearchConfig {
 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     #[serde(default = "default_web_search_provider")]

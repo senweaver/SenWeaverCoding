@@ -208,6 +208,85 @@ fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    use std::path::PathBuf;
+    use std::process::Command as StdCommand;
+
+    let target = PathBuf::from(&path);
+    let target_for_open: PathBuf = if target.exists() {
+        target.clone()
+    } else {
+        let parent_exists = target
+            .parent()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        let needs_dir = !parent_exists
+            || target.extension().is_none();
+        if needs_dir {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("create dir failed for {}: {e}", target.display()))?;
+            target.clone()
+        } else {
+            target
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(target.clone())
+        }
+    };
+
+    let is_file = target_for_open.is_file();
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = StdCommand::new("explorer.exe");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        if is_file {
+            cmd.arg(format!("/select,{}", target_for_open.display()));
+        } else {
+            cmd.arg(target_for_open.as_os_str());
+        }
+        cmd.spawn()
+            .map_err(|e| format!("explorer.exe spawn failed: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = StdCommand::new("open");
+        if is_file {
+            cmd.arg("-R").arg(target_for_open.as_os_str());
+        } else {
+            cmd.arg(target_for_open.as_os_str());
+        }
+        cmd.spawn()
+            .map_err(|e| format!("open spawn failed: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir_to_open = if is_file {
+            target_for_open
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(target_for_open.clone())
+        } else {
+            target_for_open.clone()
+        };
+        StdCommand::new("xdg-open")
+            .arg(dir_to_open.as_os_str())
+            .spawn()
+            .map_err(|e| format!("xdg-open spawn failed: {e}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("unsupported platform".to_string())
+}
+
 pub fn run() {
     let builder = tauri::Builder::default()
         .manage(ServerState::default())
@@ -221,13 +300,16 @@ pub fn run() {
             get_server_url,
             restart_embedded_gateway,
             prepare_for_update_install,
+            reveal_in_explorer,
             terminal::terminal_spawn,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_kill,
             browser_dock::browser_dock_open,
             browser_dock::browser_dock_set_rect,
+            browser_dock::browser_dock_resync,
             browser_dock::browser_dock_hide,
+            browser_dock::browser_dock_park,
             browser_dock::browser_dock_close,
             browser_dock::browser_dock_navigate,
             browser_dock::browser_dock_back,

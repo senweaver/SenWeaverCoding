@@ -8,6 +8,20 @@ pub enum WebSearchProviderRoute {
     SearXNG,
     Tavily,
     Exa,
+    Baidu,
+}
+
+impl WebSearchProviderRoute {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "DuckDuckGo",
+            Self::Brave => "Brave",
+            Self::SearXNG => "SearXNG",
+            Self::Tavily => "Tavily",
+            Self::Exa => "Exa",
+            Self::Baidu => "Baidu",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +36,7 @@ const BRAVE_PROVIDER: &str = "brave";
 const SEARXNG_PROVIDER: &str = "searxng";
 const TAVILY_PROVIDER: &str = "tavily";
 const EXA_PROVIDER: &str = "exa";
+const BAIDU_PROVIDER: &str = "baidu";
 
 pub fn resolve_web_search_provider(raw_provider: &str) -> WebSearchProviderResolution {
     let normalized = raw_provider.trim().to_ascii_lowercase();
@@ -51,6 +66,11 @@ pub fn resolve_web_search_provider(raw_provider: &str) -> WebSearchProviderResol
         "exa" | "exa-search" | "exa_search" => WebSearchProviderResolution {
             route: WebSearchProviderRoute::Exa,
             canonical_provider: EXA_PROVIDER,
+            used_fallback: false,
+        },
+        "baidu" | "baidu-search" | "baidu_search" => WebSearchProviderResolution {
+            route: WebSearchProviderRoute::Baidu,
+            canonical_provider: BAIDU_PROVIDER,
             used_fallback: false,
         },
         _ => WebSearchProviderResolution {

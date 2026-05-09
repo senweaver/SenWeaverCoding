@@ -293,3 +293,181 @@ export function lineCountLabel(count: number | undefined): string {
   if (!count || count <= 0) return ''
   return `${count.toLocaleString()} ${count === 1 ? 'line' : 'lines'}`
 }
+
+export type WebSearchHit = {
+  title: string
+  url: string
+  snippet?: string
+  host: string
+}
+
+export type WebSearchSummary = {
+  query: string
+  provider?: string
+  hits: WebSearchHit[]
+  raw: string
+  looksLikeError: boolean
+  errorMessage?: string
+  fallbackHeader?: string
+}
+
+const WEB_SEARCH_ERROR_PREFIXES = [
+  'Error:',
+  'error:',
+  'Error executing ',
+  'Unknown tool: ',
+  '[Tool error]',
+  '[Refused]',
+  'Tool failed:',
+  'Blocked by guardrails:',
+]
+
+const WEB_SEARCH_ERROR_NEEDLES = [
+  'error sending request for url',
+  'failed to send request',
+  'connection refused',
+  'connection reset',
+  'operation timed out',
+  'dns error',
+  'tls handshake',
+  'all web search providers failed',
+  'baidu blocked the request',
+]
+
+function detectWebSearchError(raw: string): { isError: boolean; message?: string } {
+  const trimmed = raw.trimStart()
+  if (!trimmed) return { isError: false }
+  for (const prefix of WEB_SEARCH_ERROR_PREFIXES) {
+    if (trimmed.startsWith(prefix)) {
+      const firstLine = trimmed.split(/\r?\n/, 1)[0] ?? trimmed
+      return { isError: true, message: firstLine.trim() }
+    }
+  }
+  const head = trimmed.slice(0, 1024).toLowerCase()
+  for (const needle of WEB_SEARCH_ERROR_NEEDLES) {
+    if (head.includes(needle)) {
+      const lineWithNeedle =
+        trimmed
+          .split(/\r?\n/)
+          .find((line) => line.toLowerCase().includes(needle)) ?? trimmed
+      return { isError: true, message: lineWithNeedle.trim() }
+    }
+  }
+  return { isError: false }
+}
+
+export function safeHost(url: string): string {
+  if (!url) return ''
+  try {
+    const u = new URL(url)
+    return u.hostname.replace(/^www\./i, '')
+  } catch {
+    const m = url.match(/^[a-z]+:\/\/([^/]+)/i)
+    if (m && m[1]) return m[1].replace(/^www\./i, '')
+    const slashSplit = url.split('/').filter(Boolean)
+    return (slashSplit[0] ?? url).replace(/^www\./i, '')
+  }
+}
+
+export function parseWebSearchResults(text: string): WebSearchSummary {
+  const summary: WebSearchSummary = {
+    query: '',
+    hits: [],
+    raw: text || '',
+    looksLikeError: false,
+  }
+  if (!text) return summary
+
+  const errorDetection = detectWebSearchError(text)
+  if (errorDetection.isError) {
+    summary.looksLikeError = true
+    summary.errorMessage = errorDetection.message
+  }
+
+  const lines = text.split(/\r?\n/)
+  let cursor = 0
+  while (cursor < lines.length && !(lines[cursor] ?? '').trim()) cursor += 1
+  if (cursor < lines.length) {
+    const head = (lines[cursor] ?? '').trim()
+    const fallbackMatch = head.match(/^\[Fallback\]\s*(.+)$/i)
+    if (fallbackMatch && fallbackMatch[1]) {
+      summary.fallbackHeader = fallbackMatch[1].trim()
+      cursor += 1
+      while (cursor < lines.length && !(lines[cursor] ?? '').trim()) cursor += 1
+    }
+  }
+  if (cursor < lines.length) {
+    const head = (lines[cursor] ?? '').trim()
+    const headMatch = head.match(/^Search results for:\s*(.+?)(?:\s+\(via\s+([^)]+)\))?\.?$/i)
+    if (headMatch) {
+      summary.query = (headMatch[1] ?? '').trim()
+      if (headMatch[2]) summary.provider = headMatch[2].trim()
+      cursor += 1
+    } else if (/^No results found for:/i.test(head)) {
+      const m = head.match(/^No results found for:\s*(.+)$/i)
+      if (m && m[1]) summary.query = m[1].trim()
+      return summary
+    }
+  }
+
+  let i = cursor
+  while (i < lines.length) {
+    const numberMatch = lines[i]?.match(/^\s*(\d+)\.\s+(.+?)\s*$/)
+    if (!numberMatch) {
+      i += 1
+      continue
+    }
+    const title = (numberMatch[2] ?? '').trim()
+    let url = ''
+    let snippet: string | undefined
+
+    let j = i + 1
+    while (j < lines.length) {
+      const next = lines[j]
+      if (!next || !next.trim()) {
+        j += 1
+        continue
+      }
+      if (/^\s*\d+\.\s+/.test(next)) break
+      const indented = /^\s+\S/.test(next)
+      if (!indented && !url) break
+      const stripped = next.trim()
+      if (!url && /^[a-z][a-z0-9+\-.]*:\/\//i.test(stripped)) {
+        url = stripped
+      } else if (url && !snippet) {
+        snippet = stripped
+      } else if (url && snippet) {
+        snippet = `${snippet} ${stripped}`.trim()
+      }
+      j += 1
+    }
+
+    summary.hits.push({
+      title,
+      url,
+      snippet,
+      host: safeHost(url),
+    })
+    i = j
+  }
+
+  return summary
+}
+
+export const WEB_SEARCH_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'web_search',
+  'web_search_tool',
+  'WebSearch',
+  'tavily_search',
+  'exa_search',
+  'multi_search',
+  'github_search',
+  'youtube_search',
+  'reddit_search',
+  'image_search',
+  'discord_search',
+])
+
+export function isWebSearchTool(name: string | undefined | null): boolean {
+  return !!name && WEB_SEARCH_TOOL_NAMES.has(name)
+}

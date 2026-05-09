@@ -4,6 +4,7 @@ import type { ThemeMode } from '../types/settings'
 const THEME_STORAGE_KEY = 'sen-theme'
 const RIGHT_SIDEBAR_OPEN_KEY = 'sen-right-sidebar-open'
 const RIGHT_SIDEBAR_WIDTH_KEY = 'sen-right-sidebar-width'
+const RIGHT_SIDEBAR_WIDTH_AUTO_KEY = 'sen-right-sidebar-width-auto'
 
 const RIGHT_SIDEBAR_MIN_WIDTH = 240
 const RIGHT_SIDEBAR_MAX_WIDTH = 720
@@ -37,6 +38,15 @@ function getStoredRightSidebarWidth(): number {
     }
   } catch {  }
   return RIGHT_SIDEBAR_DEFAULT_WIDTH
+}
+
+function getStoredRightSidebarWidthAuto(): boolean {
+  try {
+    const stored = localStorage.getItem(RIGHT_SIDEBAR_WIDTH_AUTO_KEY)
+    if (stored === 'false') return false
+    if (stored === 'true') return true
+  } catch {  }
+  return true
 }
 
 function clampRightSidebarWidth(value: number): number {
@@ -89,6 +99,7 @@ type UIStore = {
   sidebarOpen: boolean
   rightSidebarOpen: boolean
   rightSidebarWidth: number
+  rightSidebarWidthAuto: boolean
   activeView: ActiveView
 
   settingsOverlayOpen: boolean
@@ -103,6 +114,7 @@ type UIStore = {
   toggleRightSidebar: () => void
   setRightSidebarOpen: (open: boolean) => void
   setRightSidebarWidth: (px: number) => void
+  setRightSidebarWidthAuto: (auto: boolean) => void
   setActiveView: (view: ActiveView) => void
   openSettingsOverlay: (tab?: SettingsTab) => void
   closeSettingsOverlay: () => void
@@ -121,6 +133,7 @@ export const useUIStore = create<UIStore>((set) => ({
   sidebarOpen: true,
   rightSidebarOpen: getStoredRightSidebarOpen(),
   rightSidebarWidth: getStoredRightSidebarWidth(),
+  rightSidebarWidthAuto: getStoredRightSidebarWidthAuto(),
   activeView: 'code',
   settingsOverlayOpen: false,
   pendingSettingsTab: null,
@@ -157,7 +170,13 @@ export const useUIStore = create<UIStore>((set) => ({
   setRightSidebarWidth: (px) => {
     const clamped = clampRightSidebarWidth(px)
     try { localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(clamped)) } catch {  }
-    set({ rightSidebarWidth: clamped })
+    try { localStorage.setItem(RIGHT_SIDEBAR_WIDTH_AUTO_KEY, 'false') } catch {  }
+    set({ rightSidebarWidth: clamped, rightSidebarWidthAuto: false })
+  },
+
+  setRightSidebarWidthAuto: (auto) => {
+    try { localStorage.setItem(RIGHT_SIDEBAR_WIDTH_AUTO_KEY, auto ? 'true' : 'false') } catch {  }
+    set({ rightSidebarWidthAuto: auto })
   },
 
   setActiveView: (view) => set({ activeView: view }),

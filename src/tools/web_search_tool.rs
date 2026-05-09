@@ -334,6 +334,88 @@ impl WebSearchTool {
 
         Ok(lines.join("\n"))
     }
+
+    async fn search_baidu(&self, query: &str) -> anyhow::Result<String> {
+        let encoded_query = urlencoding::encode(query);
+        let search_url = format!(
+            "https://www.baidu.com/s?wd={}&rn={}&ie=utf-8",
+            encoded_query,
+            self.max_results.clamp(5, 10)
+        );
+
+        let builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            );
+        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let client = builder.build()?;
+
+        let response = client
+            .get(&search_url)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Baidu search failed with status: {}", response.status());
+        }
+
+        let html = response.text().await?;
+        if html.contains("百度安全验证") || html.contains("请输入验证码") {
+            anyhow::bail!("Baidu blocked the request with a captcha challenge");
+        }
+        self.parse_baidu_results(&html, query)
+    }
+
+    fn parse_baidu_results(&self, html: &str, query: &str) -> anyhow::Result<String> {
+        let title_re = Regex::new(
+            r#"<h3[^>]*class="[^"]*c-title[^"]*"[^>]*>[\s\S]{0,800}?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#,
+        )?;
+        let abstract_re = Regex::new(
+            r#"<(?:span|div)[^>]*class="[^"]*(?:c-abstract|content-right_[^"]*)[^"]*"[^>]*>([\s\S]*?)</(?:span|div)>"#,
+        )?;
+
+        let title_matches: Vec<_> = title_re
+            .captures_iter(html)
+            .take(self.max_results + 2)
+            .collect();
+
+        if title_matches.is_empty() {
+            return Ok(format!("No results found for: {}", query));
+        }
+
+        let abstract_matches: Vec<_> = abstract_re
+            .captures_iter(html)
+            .take(self.max_results + 4)
+            .collect();
+
+        let mut lines = vec![format!("Search results for: {} (via Baidu)", query)];
+
+        let count = title_matches.len().min(self.max_results);
+        for i in 0..count {
+            let caps = &title_matches[i];
+            let url_str = caps[1].to_string();
+            let title = strip_tags(&caps[2]);
+            lines.push(format!("{}. {}", i + 1, title.trim()));
+            lines.push(format!("   {}", url_str.trim()));
+
+            if i < abstract_matches.len() {
+                let snippet = strip_tags(&abstract_matches[i][1]);
+                let snippet = snippet.trim();
+                if !snippet.is_empty() {
+                    lines.push(format!("   {}", snippet));
+                }
+            }
+        }
+
+        Ok(lines.join("\n"))
+    }
 }
 
 fn decode_ddg_redirect_url(raw_url: &str) -> String {
@@ -397,20 +479,107 @@ impl Tool for WebSearchTool {
             );
         }
 
-        let result = match resolution.route {
-            WebSearchProviderRoute::DuckDuckGo => self.search_duckduckgo(query).await?,
-            WebSearchProviderRoute::Brave => self.search_brave(query).await?,
-            WebSearchProviderRoute::SearXNG => self.search_searxng(query).await?,
-            WebSearchProviderRoute::Tavily | WebSearchProviderRoute::Exa => {
+        let primary = effective_route(resolution.route);
+        let fallback_chain = self.compute_fallback_chain(primary);
 
-                self.search_duckduckgo(query).await?
+        let mut attempts: Vec<String> = Vec::new();
+
+        match self.dispatch_search(primary, query).await {
+            Ok(out) => {
+                return Ok(ToolResult {
+                    success: true,
+                    output: out,
+                    error: None,
+                });
             }
-        };
+            Err(e) => {
+                tracing::warn!(
+                    "web_search primary provider {} failed: {e}",
+                    primary.label()
+                );
+                attempts.push(format!("{}: {e}", primary.label()));
+            }
+        }
 
-        Ok(ToolResult {
-            success: true,
-            output: result,
-            error: None,
-        })
+        for fallback in fallback_chain {
+            tracing::info!(
+                "web_search trying fallback provider: {}",
+                fallback.label()
+            );
+            match self.dispatch_search(fallback, query).await {
+                Ok(out) => {
+                    let header = format!(
+                        "[Fallback] Primary {} failed; results from {}.\n",
+                        primary.label(),
+                        fallback.label()
+                    );
+                    return Ok(ToolResult {
+                        success: true,
+                        output: format!("{header}{out}"),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "web_search fallback provider {} failed: {e}",
+                        fallback.label()
+                    );
+                    attempts.push(format!("{}: {e}", fallback.label()));
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "All web search providers failed:\n  - {}",
+            attempts.join("\n  - ")
+        )
+    }
+}
+
+fn effective_route(route: WebSearchProviderRoute) -> WebSearchProviderRoute {
+    match route {
+        WebSearchProviderRoute::Tavily | WebSearchProviderRoute::Exa => {
+            WebSearchProviderRoute::DuckDuckGo
+        }
+        other => other,
+    }
+}
+
+impl WebSearchTool {
+    async fn dispatch_search(
+        &self,
+        route: WebSearchProviderRoute,
+        query: &str,
+    ) -> anyhow::Result<String> {
+        match route {
+            WebSearchProviderRoute::DuckDuckGo => self.search_duckduckgo(query).await,
+            WebSearchProviderRoute::Brave => self.search_brave(query).await,
+            WebSearchProviderRoute::SearXNG => self.search_searxng(query).await,
+            WebSearchProviderRoute::Baidu => self.search_baidu(query).await,
+            WebSearchProviderRoute::Tavily | WebSearchProviderRoute::Exa => {
+                self.search_duckduckgo(query).await
+            }
+        }
+    }
+
+    fn compute_fallback_chain(
+        &self,
+        primary: WebSearchProviderRoute,
+    ) -> Vec<WebSearchProviderRoute> {
+        let mut chain: Vec<WebSearchProviderRoute> = Vec::new();
+        for candidate in [
+            WebSearchProviderRoute::DuckDuckGo,
+            WebSearchProviderRoute::Baidu,
+        ] {
+            if candidate != primary {
+                chain.push(candidate);
+            }
+        }
+        if let Some(ref url) = self.searxng_instance_url {
+            if !url.trim().is_empty() && primary != WebSearchProviderRoute::SearXNG {
+                chain.push(WebSearchProviderRoute::SearXNG);
+            }
+        }
+        chain
     }
 }

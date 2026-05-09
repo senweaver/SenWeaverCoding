@@ -70,7 +70,9 @@ pub mod thinking;
 pub mod token_budget;
 pub mod token_optimizer;
 pub mod tool_error_handler;
+pub mod tool_event_status;
 pub mod tool_output_compressor;
+pub mod web_search_url_guard;
 pub mod turn_common;
 
 pub mod turn_engine;

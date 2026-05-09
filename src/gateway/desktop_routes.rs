@@ -1301,6 +1301,7 @@ pub async fn handle_skills_list(
         .filter(|s| !s.is_empty())
         .collect();
     let workspace_skills_dir = cwd.join("skills");
+    let user_skills_dir = user_senweaver_subdir("skills");
     let payload: Vec<serde_json::Value> = skills
         .into_iter()
         .map(|s| {
@@ -1317,6 +1318,8 @@ pub async fn handle_skills_list(
                 "source": path_str.clone(),
                 "path": path_str,
                 "enabled": enabled,
+                "always_apply": s.always_apply,
+                "tier": if s.always_apply { "always" } else { "on_demand" },
             })
         })
         .collect();
@@ -1326,6 +1329,7 @@ pub async fn handle_skills_list(
     };
     Json(serde_json::json!({
         "workspace_skills_dir": workspace_skills_dir.display().to_string(),
+        "user_skills_dir": user_skills_dir.as_ref().map(|p| p.display().to_string()),
         "open_skills_enabled": config.skills.open_skills_enabled,
         "allow_scripts": config.skills.allow_scripts,
         "disabled_skills": config.skills.disabled_skills,
@@ -1333,6 +1337,945 @@ pub async fn handle_skills_list(
         "skills": payload,
     }))
     .into_response()
+}
+
+fn user_senweaver_subdir(child: &str) -> Option<PathBuf> {
+    let raw = std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))?;
+    Some(PathBuf::from(raw).join(".senweavercoding").join(child))
+}
+
+pub async fn handle_user_rules_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(rules_dir) = crate::user_rules::user_rules_dir() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "could not resolve home directory (HOME / USERPROFILE not set)",
+            })),
+        )
+            .into_response();
+    };
+    let exists = rules_dir.is_dir();
+    let metas = crate::user_rules::list_user_rules();
+    let files: Vec<serde_json::Value> = metas
+        .into_iter()
+        .map(|meta| {
+            serde_json::json!({
+                "name": meta.name,
+                "path": meta.path.display().to_string(),
+                "size": meta.size,
+                "summary": meta.summary,
+                "description": meta.description,
+                "alwaysApply": meta.always_apply,
+                "tier": if meta.always_apply { "always" } else { "on_demand" },
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "directory": rules_dir.display().to_string(),
+        "exists": exists,
+        "files": files,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserRuleNameQuery {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserRuleUpsertBody {
+    pub name: String,
+    pub content: String,
+}
+
+const USER_RULE_MAX_BODY_BYTES: usize = 256 * 1024;
+
+fn sanitize_rule_filename(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if trimmed.contains(['/', '\\', '\0']) || trimmed.contains("..") {
+        return Err("name must not contain path separators or '..'".to_string());
+    }
+    if trimmed.starts_with('.') {
+        return Err("name must not start with '.'".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let normalized =
+        if lower.ends_with(".md") || lower.ends_with(".mdc") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}.md")
+        };
+    if normalized.len() > 200 {
+        return Err("name is too long (>200 chars)".to_string());
+    }
+    Ok(normalized)
+}
+
+fn resolve_rule_path(name: &str) -> Result<(PathBuf, PathBuf), (StatusCode, String)> {
+    let dir = crate::user_rules::user_rules_dir().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "could not resolve home directory".to_string(),
+    ))?;
+    let filename =
+        sanitize_rule_filename(name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let path = dir.join(&filename);
+    if !path.starts_with(&dir) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "resolved path escapes the rules directory".to_string(),
+        ));
+    }
+    Ok((dir, path))
+}
+
+pub async fn handle_user_rule_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UserRuleNameQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let (_, path) = match resolve_rule_path(&q.name) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if !path.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "rule file not found" })),
+        )
+            .into_response();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Json(serde_json::json!({
+            "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            "path": path.display().to_string(),
+            "content": content,
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("read failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_user_rule_upsert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UserRuleUpsertBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if body.content.len() > USER_RULE_MAX_BODY_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "rule body exceeds {USER_RULE_MAX_BODY_BYTES} byte limit"
+                ),
+            })),
+        )
+            .into_response();
+    }
+    let (dir, path) = match resolve_rule_path(&body.name) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to create rules dir: {err}"),
+            })),
+        )
+            .into_response();
+    }
+    if let Err(err) = std::fs::write(&path, body.content.as_bytes()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("write failed: {err}") })),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({
+        "status": "ok",
+        "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        "path": path.display().to_string(),
+    }))
+    .into_response()
+}
+
+pub async fn handle_user_rule_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UserRuleNameQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let (_, path) = match resolve_rule_path(&q.name) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if !path.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "rule file not found" })),
+        )
+            .into_response();
+    }
+    match std::fs::remove_file(&path) {
+        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("delete failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserSkillNameQuery {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserSkillUpsertBody {
+    pub name: String,
+    pub content: String,
+}
+
+const USER_SKILL_MAX_BODY_BYTES: usize = 512 * 1024;
+
+fn sanitize_skill_dirname(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if trimmed.contains(['/', '\\', '\0', ' ']) || trimmed.contains("..") {
+        return Err(
+            "name must not contain path separators, spaces, or '..'".to_string(),
+        );
+    }
+    if trimmed.starts_with('.') {
+        return Err("name must not start with '.'".to_string());
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "name may only contain ASCII letters, digits, '-' and '_'".to_string(),
+        );
+    }
+    if trimmed.len() > 100 {
+        return Err("name is too long (>100 chars)".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn resolve_user_skill_paths(
+    name: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf), (StatusCode, String)> {
+    let raw = std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not resolve home directory".to_string(),
+        ))?;
+    let root = PathBuf::from(raw).join(".senweavercoding").join("skills");
+    let safe = sanitize_skill_dirname(name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let dir = root.join(&safe);
+    if !dir.starts_with(&root) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "resolved skill path escapes user skills root".to_string(),
+        ));
+    }
+    let entry = dir.join("SKILL.md");
+    Ok((root, dir, entry))
+}
+
+pub async fn handle_user_skill_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UserSkillNameQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let (_, _, entry) = match resolve_user_skill_paths(&q.name) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if !entry.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "SKILL.md not found for this skill" })),
+        )
+            .into_response();
+    }
+    match std::fs::read_to_string(&entry) {
+        Ok(content) => Json(serde_json::json!({
+            "name": q.name,
+            "path": entry.display().to_string(),
+            "content": content,
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("read failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_user_skill_upsert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UserSkillUpsertBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if body.content.len() > USER_SKILL_MAX_BODY_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "skill body exceeds {USER_SKILL_MAX_BODY_BYTES} byte limit"
+                ),
+            })),
+        )
+            .into_response();
+    }
+    let (_, dir, entry) = match resolve_user_skill_paths(&body.name) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to create skill dir: {err}"),
+            })),
+        )
+            .into_response();
+    }
+    if let Err(err) = std::fs::write(&entry, body.content.as_bytes()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("write failed: {err}") })),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({
+        "status": "ok",
+        "name": body.name,
+        "path": entry.display().to_string(),
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserSkillInstallBody {
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallMode {
+    Abort,
+    Overwrite,
+    Rename,
+}
+
+impl InstallMode {
+    fn from_body(mode: Option<&str>, overwrite_legacy: bool) -> Self {
+        match mode {
+            Some("overwrite") => InstallMode::Overwrite,
+            Some("rename") => InstallMode::Rename,
+            Some("abort") => InstallMode::Abort,
+            _ if overwrite_legacy => InstallMode::Overwrite,
+            _ => InstallMode::Abort,
+        }
+    }
+}
+
+fn derive_skill_dirname(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    let mut last_dash = false;
+    for ch in trimmed.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else if ch == '-' || ch == '_' {
+            ch
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if last_dash {
+                continue;
+            }
+            last_dash = true;
+        } else {
+            last_dash = false;
+        }
+        out.push(mapped);
+    }
+    let cleaned = out.trim_matches(|c: char| c == '-' || c == '_').to_string();
+    if cleaned.is_empty() {
+        return Err(
+            "name has no usable ASCII letters or digits; rename the source first".to_string(),
+        );
+    }
+    let truncated = if cleaned.chars().count() > 80 {
+        cleaned.chars().take(80).collect::<String>()
+    } else {
+        cleaned
+    };
+    let truncated = truncated
+        .trim_matches(|c: char| c == '-' || c == '_')
+        .to_string();
+    if truncated.is_empty() {
+        return Err("derived name is empty after sanitization".to_string());
+    }
+    Ok(truncated)
+}
+
+
+const USER_SKILL_INSTALL_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const USER_SKILL_INSTALL_MAX_FILES: usize = 2_000;
+
+fn user_skills_root() -> Option<PathBuf> {
+    let raw = std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))?;
+    Some(PathBuf::from(raw).join(".senweavercoding").join("skills"))
+}
+
+fn parse_skill_name_from_md(content: &str) -> Option<String> {
+    let normalized = content.replace("\r\n", "\n");
+    let rest = normalized.strip_prefix("---\n")?;
+    let end_idx = rest.find("\n---")?;
+    let frontmatter = &rest[..end_idx];
+    for line in frontmatter.lines() {
+        let Some((key, val)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("name") {
+            let v = val.trim().trim_matches('"').trim_matches('\'');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn find_skill_md_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.eq_ignore_ascii_case("SKILL.md") {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn measure_dir(dir: &std::path::Path) -> Result<(u64, usize), String> {
+    let mut total_bytes: u64 = 0;
+    let mut total_files: usize = 0;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = std::fs::read_dir(&current)
+            .map_err(|e| format!("read_dir {} failed: {e}", current.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_symlink() {
+                return Err(format!("symlinks are not allowed: {}", path.display()));
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let meta = std::fs::metadata(&path)
+                    .map_err(|e| format!("metadata {} failed: {e}", path.display()))?;
+                total_bytes = total_bytes.saturating_add(meta.len());
+                total_files = total_files.saturating_add(1);
+                if total_bytes > USER_SKILL_INSTALL_MAX_BYTES {
+                    return Err(format!(
+                        "skill exceeds {}MB size limit",
+                        USER_SKILL_INSTALL_MAX_BYTES / (1024 * 1024)
+                    ));
+                }
+                if total_files > USER_SKILL_INSTALL_MAX_FILES {
+                    return Err(format!(
+                        "skill exceeds {} files limit",
+                        USER_SKILL_INSTALL_MAX_FILES
+                    ));
+                }
+            }
+        }
+    }
+    Ok((total_bytes, total_files))
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let name = entry.file_name();
+        let to = dst.join(&name);
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("symlink not allowed: {}", from.display()),
+            ));
+        }
+        if ft.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ft.is_file() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn unique_suffix() -> String {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{pid}.{nanos}")
+}
+
+fn install_skill_atomic(
+    src: &std::path::Path,
+    final_dir: &std::path::Path,
+    is_dir_source: bool,
+    overwriting: bool,
+) -> Result<(), String> {
+    let final_name = final_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "invalid final directory name".to_string())?;
+    let parent = final_dir
+        .parent()
+        .ok_or_else(|| "final directory has no parent".to_string())?;
+
+    let suffix = unique_suffix();
+    let staging = parent.join(format!(".sw_install_{final_name}.{suffix}"));
+
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    if is_dir_source {
+        copy_dir_recursive(src, &staging).map_err(|err| {
+            let _ = std::fs::remove_dir_all(&staging);
+            format!("stage copy failed: {err}")
+        })?;
+    } else {
+        if let Err(err) = std::fs::create_dir_all(&staging) {
+            return Err(format!("stage mkdir failed: {err}"));
+        }
+        if let Err(err) = std::fs::copy(src, staging.join("SKILL.md")) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("stage copy SKILL.md failed: {err}"));
+        }
+    }
+
+    if overwriting {
+        let backup = parent.join(format!(".sw_backup_{final_name}.{suffix}"));
+        if let Err(err) = std::fs::rename(final_dir, &backup) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("backup existing failed: {err}"));
+        }
+        if let Err(err) = std::fs::rename(&staging, final_dir) {
+            let restore = std::fs::rename(&backup, final_dir);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(if restore.is_ok() {
+                format!("activate failed: {err} (existing skill restored)")
+            } else {
+                format!(
+                    "activate failed: {err}; restore also failed; backup left at {}",
+                    backup.display()
+                )
+            });
+        }
+        let _ = std::fs::remove_dir_all(&backup);
+    } else if let Err(err) = std::fs::rename(&staging, final_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("activate failed: {err}"));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct InstallEntryReport {
+    source: String,
+    name: Option<String>,
+    target: Option<String>,
+    status: &'static str,
+    error: Option<String>,
+}
+
+struct InstallPlan {
+    raw_source: String,
+    base_name: String,
+    src_path: PathBuf,
+    is_dir: bool,
+}
+
+pub async fn handle_user_skill_install(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UserSkillInstallBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(root) = user_skills_root() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "could not resolve home directory",
+            })),
+        )
+            .into_response();
+    };
+    if let Err(err) = std::fs::create_dir_all(&root) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to create skills root: {err}"),
+            })),
+        )
+            .into_response();
+    }
+    let canonical_root = std::fs::canonicalize(&root).unwrap_or(root.clone());
+    let mode = InstallMode::from_body(body.mode.as_deref(), body.overwrite);
+
+    let mut reports: Vec<InstallEntryReport> = Vec::with_capacity(body.sources.len());
+    let mut plans: Vec<InstallPlan> = Vec::with_capacity(body.sources.len());
+
+    for raw_source in &body.sources {
+        let source = PathBuf::from(raw_source);
+        let canonical_src = match std::fs::canonicalize(&source) {
+            Ok(p) => p,
+            Err(err) => {
+                reports.push(InstallEntryReport {
+                    source: raw_source.clone(),
+                    name: None,
+                    target: None,
+                    status: "error",
+                    error: Some(format!("path not accessible: {err}")),
+                });
+                continue;
+            }
+        };
+        if canonical_src.starts_with(&canonical_root) {
+            reports.push(InstallEntryReport {
+                source: raw_source.clone(),
+                name: None,
+                target: None,
+                status: "error",
+                error: Some("source is inside the user skills directory".to_string()),
+            });
+            continue;
+        }
+
+        let metadata = match std::fs::metadata(&canonical_src) {
+            Ok(m) => m,
+            Err(err) => {
+                reports.push(InstallEntryReport {
+                    source: raw_source.clone(),
+                    name: None,
+                    target: None,
+                    status: "error",
+                    error: Some(format!("metadata read failed: {err}")),
+                });
+                continue;
+            }
+        };
+
+        let derived: Result<(String, PathBuf, bool), String> = if metadata.is_dir() {
+            let skill_md = find_skill_md_in_dir(&canonical_src);
+            if skill_md.is_none() {
+                Err("directory has no SKILL.md at the top level".to_string())
+            } else {
+                let inferred_name = canonical_src
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let frontmatter_name = skill_md
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .and_then(|c| parse_skill_name_from_md(&c));
+                let chosen = frontmatter_name.unwrap_or(inferred_name);
+                derive_skill_dirname(&chosen).map(|safe| (safe, canonical_src.clone(), true))
+            }
+        } else if metadata.is_file() {
+            let ext_ok = canonical_src
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("md") || s.eq_ignore_ascii_case("mdc"))
+                .unwrap_or(false);
+            if !ext_ok {
+                Err(
+                    "only directories with SKILL.md or single .md/.mdc files are supported"
+                        .to_string(),
+                )
+            } else {
+                let raw_content = std::fs::read_to_string(&canonical_src).unwrap_or_default();
+                let frontmatter_name = parse_skill_name_from_md(&raw_content);
+                let stem_name = canonical_src
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let chosen = frontmatter_name.unwrap_or(stem_name);
+                derive_skill_dirname(&chosen).map(|safe| (safe, canonical_src.clone(), false))
+            }
+        } else {
+            Err("source is neither a regular file nor a directory".to_string())
+        };
+
+        match derived {
+            Ok((base_name, src_path, is_dir)) => {
+                plans.push(InstallPlan {
+                    raw_source: raw_source.clone(),
+                    base_name,
+                    src_path,
+                    is_dir,
+                });
+            }
+            Err(err) => {
+                reports.push(InstallEntryReport {
+                    source: raw_source.clone(),
+                    name: None,
+                    target: None,
+                    status: "error",
+                    error: Some(err),
+                });
+            }
+        }
+    }
+
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for plan in &plans {
+        *name_counts.entry(plan.base_name.clone()).or_insert(0) += 1;
+    }
+    let mut planned_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for plan in plans {
+        let InstallPlan {
+            raw_source,
+            base_name,
+            src_path,
+            is_dir,
+        } = plan;
+
+        let dup_in_batch = name_counts.get(&base_name).copied().unwrap_or(0) > 1;
+
+        let final_name = if dup_in_batch && mode != InstallMode::Rename {
+            reports.push(InstallEntryReport {
+                source: raw_source,
+                name: Some(base_name.clone()),
+                target: None,
+                status: "duplicate",
+                error: Some(format!(
+                    "multiple dropped items resolve to the same name '{base_name}'; choose 'Keep both' to auto-rename"
+                )),
+            });
+            continue;
+        } else {
+            let target_existed = root.join(&base_name).exists()
+                || planned_names.contains(&base_name);
+            if target_existed {
+                match mode {
+                    InstallMode::Abort => {
+                        reports.push(InstallEntryReport {
+                            source: raw_source,
+                            name: Some(base_name.clone()),
+                            target: Some(root.join(&base_name).display().to_string()),
+                            status: "exists",
+                            error: None,
+                        });
+                        continue;
+                    }
+                    InstallMode::Overwrite => base_name.clone(),
+                    InstallMode::Rename => {
+                        let mut idx = 2u32;
+                        let mut candidate = format!("{base_name}-{idx}");
+                        while root.join(&candidate).exists() || planned_names.contains(&candidate)
+                        {
+                            idx += 1;
+                            if idx > 999 {
+                                reports.push(InstallEntryReport {
+                                    source: raw_source.clone(),
+                                    name: Some(base_name.clone()),
+                                    target: None,
+                                    status: "error",
+                                    error: Some(format!(
+                                        "no available name for '{base_name}' after 999 attempts"
+                                    )),
+                                });
+                                break;
+                            }
+                            candidate = format!("{base_name}-{idx}");
+                        }
+                        if idx > 999 {
+                            continue;
+                        }
+                        candidate
+                    }
+                }
+            } else {
+                base_name.clone()
+            }
+        };
+
+        let target_dir = root.join(&final_name);
+        let target_existed = target_dir.exists();
+        let did_overwrite = target_existed && matches!(mode, InstallMode::Overwrite);
+
+        if is_dir {
+            if let Err(err) = measure_dir(&src_path) {
+                reports.push(InstallEntryReport {
+                    source: raw_source,
+                    name: Some(final_name.clone()),
+                    target: Some(target_dir.display().to_string()),
+                    status: "error",
+                    error: Some(err),
+                });
+                continue;
+            }
+        } else if let Ok(meta) = std::fs::metadata(&src_path) {
+            if meta.len() > USER_SKILL_INSTALL_MAX_BYTES {
+                reports.push(InstallEntryReport {
+                    source: raw_source,
+                    name: Some(final_name.clone()),
+                    target: Some(target_dir.display().to_string()),
+                    status: "error",
+                    error: Some(format!(
+                        "SKILL.md exceeds {}MB size limit",
+                        USER_SKILL_INSTALL_MAX_BYTES / (1024 * 1024)
+                    )),
+                });
+                continue;
+            }
+        }
+
+        if let Err(err) = install_skill_atomic(&src_path, &target_dir, is_dir, did_overwrite) {
+            reports.push(InstallEntryReport {
+                source: raw_source,
+                name: Some(final_name.clone()),
+                target: Some(target_dir.display().to_string()),
+                status: "error",
+                error: Some(err),
+            });
+            continue;
+        }
+
+        planned_names.insert(final_name.clone());
+        let renamed_from_base = final_name != base_name;
+        reports.push(InstallEntryReport {
+            source: raw_source,
+            name: Some(final_name),
+            target: Some(target_dir.display().to_string()),
+            status: if did_overwrite {
+                "overwritten"
+            } else if renamed_from_base {
+                "renamed"
+            } else {
+                "installed"
+            },
+            error: None,
+        });
+    }
+
+    Json(serde_json::json!({ "results": reports })).into_response()
+}
+
+pub async fn handle_user_skill_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UserSkillNameQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let (_, dir, _) = match resolve_user_skill_paths(&q.name) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if !dir.is_dir() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "user skill folder not found" })),
+        )
+            .into_response();
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("delete failed: {err}") })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3403,15 +4346,17 @@ pub async fn handle_coding_modes_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let modes: Vec<serde_json::Value> = crate::agent::coding_mode::CodingMode::all()
+    let modes: Vec<serde_json::Value> = crate::agent::coding_mode::CodingMode::visible()
         .iter()
         .map(|m| {
+            let allowed = build_allowed_tools_for_mode(m);
             serde_json::json!({
                 "id": m.display_name(),
                 "label": m.label(),
                 "description": m.description(),
                 "icon": m.icon(),
                 "permissionMode": derive_permission_from_coding(m),
+                "allowedTools": allowed,
             })
         })
         .collect();
@@ -3435,6 +4380,7 @@ pub async fn handle_coding_mode_get(
         "description": mode.description(),
         "icon": mode.icon(),
         "permissionMode": derive_permission_from_coding(&mode),
+        "allowedTools": build_allowed_tools_for_mode(&mode),
     }))
     .into_response()
 }
@@ -3470,6 +4416,7 @@ pub async fn handle_coding_mode_put(
         "ok": true,
         "mode": parsed.display_name(),
         "permissionMode": permission,
+        "allowedTools": build_allowed_tools_for_mode(&parsed),
     }))
     .into_response()
 }
@@ -3480,6 +4427,19 @@ pub fn derive_permission_from_coding(mode: &crate::agent::coding_mode::CodingMod
         CodingMode::Plan | CodingMode::Ask => "plan",
         CodingMode::Agent | CodingMode::Harness => "bypassPermissions",
         _ => "acceptEdits",
+    }
+}
+
+fn build_allowed_tools_for_mode(
+    mode: &crate::agent::coding_mode::CodingMode,
+) -> Vec<String> {
+    if let Some(allow) = mode.allowed_tools() {
+        let mut list: Vec<String> = allow.iter().map(|s| (*s).to_string()).collect();
+        list.sort();
+        list.dedup();
+        list
+    } else {
+        Vec::new()
     }
 }
 
@@ -5503,8 +6463,31 @@ pub async fn handle_lsp_list(
         return e.into_response();
     }
     let cfg = state.config.lock().clone();
-    let servers: Vec<serde_json::Value> =
-        cfg.lsp.servers.iter().map(lsp_entry_to_record).collect();
+    let live_servers = state.lsp.service().list_servers().await;
+    let live_languages: std::collections::HashSet<String> = live_servers
+        .into_iter()
+        .map(|info| info.language_id)
+        .collect();
+    let servers: Vec<serde_json::Value> = cfg
+        .lsp
+        .servers
+        .iter()
+        .map(|entry| {
+            let mut record = lsp_entry_to_record(entry);
+            let lifecycle = if live_languages.contains(&entry.language_id) {
+                "ready"
+            } else {
+                "stopped"
+            };
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert(
+                    "lifecycleStatus".to_string(),
+                    serde_json::Value::String(lifecycle.into()),
+                );
+            }
+            record
+        })
+        .collect();
     Json(serde_json::json!({
         "enabled": cfg.lsp.enabled,
         "servers": servers,

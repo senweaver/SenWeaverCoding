@@ -26,6 +26,20 @@ export type CodingModeInfo = {
   icon: string
 
   permissionMode: PermissionMode
+
+  allowedTools?: string[]
 }
 
-export const DEFAULT_CODING_MODE: CodingModeId = 'vibe'
+export const DEFAULT_CODING_MODE: CodingModeId = 'agent'
+
+export const VISIBLE_CODING_MODES: CodingModeId[] = [
+  'agent',
+  'spec',
+  'plan',
+  'ask',
+  'debug',
+  'harness',
+]
+
+export const isVisibleCodingMode = (id: string): id is CodingModeId =>
+  (VISIBLE_CODING_MODES as readonly string[]).includes(id)

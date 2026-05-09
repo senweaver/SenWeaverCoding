@@ -57,6 +57,7 @@ impl SystemPromptBuilder {
                 Box::new(TaskPlanningSection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
+                Box::new(UserRulesSection),
                 Box::new(WorkspaceSection),
                 Box::new(RuntimeSection),
                 Box::new(ChannelMediaSection),
@@ -89,6 +90,7 @@ pub struct ToolsSection;
 pub struct TaskPlanningSection;
 pub struct SafetySection;
 pub struct SkillsSection;
+pub struct UserRulesSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
 pub struct DateTimeSection;
@@ -321,6 +323,17 @@ impl PromptSection for SkillsSection {
             ctx.workspace_dir,
             ctx.skills_prompt_mode,
         ))
+    }
+}
+
+impl PromptSection for UserRulesSection {
+    fn name(&self) -> &str {
+        "user_rules"
+    }
+
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        let rules = crate::user_rules::list_user_rules();
+        Ok(crate::user_rules::user_rules_to_prompt(&rules))
     }
 }
 

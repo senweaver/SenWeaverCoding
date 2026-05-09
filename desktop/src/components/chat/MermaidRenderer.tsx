@@ -34,11 +34,47 @@ function initMermaid() {
     securityLevel: 'strict',
     suppressErrorRendering: true,
     fontFamily: 'var(--font-sans)',
+    flowchart: { htmlLabels: false, useMaxWidth: true, curve: 'basis' },
+    class: { htmlLabels: false, useMaxWidth: true },
+    sequence: { useMaxWidth: true },
+    state: { useMaxWidth: true },
   })
   mermaidInitialized = true
 }
 
 let mermaidIdCounter = 0
+
+const MERMAID_FOREIGN_OBJECT_TAGS = [
+  'foreignObject',
+  'div',
+  'span',
+  'p',
+  'br',
+  'em',
+  'strong',
+  'i',
+  'b',
+  'code',
+  'sub',
+  'sup',
+]
+
+const MERMAID_SAFE_ATTRS = [
+  'xmlns',
+  'xmlns:xhtml',
+  'class',
+  'style',
+  'requiredFeatures',
+  'requiredExtensions',
+]
+
+function sanitizeMermaidSvg(svg: string): string {
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { svg: true, svgFilters: true },
+    ADD_TAGS: MERMAID_FOREIGN_OBJECT_TAGS,
+    ADD_ATTR: MERMAID_SAFE_ATTRS,
+  })
+}
 
 function clampZoom(value: number) {
   return Math.min(MAX_PREVIEW_ZOOM, Math.max(MIN_PREVIEW_ZOOM, value))
@@ -338,7 +374,7 @@ export function MermaidRenderer({ code }: Props) {
           className="flex items-center justify-center overflow-auto bg-white p-4 cursor-pointer"
           style={{ maxHeight: 400 }}
           onClick={handlePreview}
-          dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } }) }}
+          dangerouslySetInnerHTML={{ __html: sanitizeMermaidSvg(svg) }}
         />
       </div>
 
@@ -404,7 +440,7 @@ export function MermaidRenderer({ code }: Props) {
                 style={previewCanvasStyle}
                 data-dragging={isDraggingPreview ? 'true' : 'false'}
                 aria-label="Mermaid preview canvas"
-                dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } }) }}
+                dangerouslySetInnerHTML={{ __html: sanitizeMermaidSvg(svg) }}
               />
             </div>
           </div>

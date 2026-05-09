@@ -388,7 +388,9 @@ impl RpcCtx {
                     )
                     .await;
                 }
-                TurnEvent::ToolResult { name, output } => {
+                TurnEvent::ToolResult { name, output, success } => {
+                    let is_error = !success
+                        || crate::agent::tool_event_status::output_indicates_error(&output);
                     self.write_notification(
                         "session/event",
                         serde_json::json!({
@@ -396,6 +398,8 @@ impl RpcCtx {
                             "type": "tool_result",
                             "name": name,
                             "output": output,
+                            "success": success,
+                            "isError": is_error,
                         }),
                     )
                     .await;

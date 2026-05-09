@@ -148,6 +148,7 @@ pub mod proxy_config;
 pub mod pushover;
 pub mod reaction;
 pub mod read_skill;
+pub mod read_user_rule;
 #[cfg(feature = "tool-search-social")]
 pub mod reddit_search;
 pub mod registry;
@@ -338,6 +339,7 @@ pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
 pub use reaction::ReactionTool;
 pub use read_skill::ReadSkillTool;
+pub use read_user_rule::ReadUserRuleTool;
 #[cfg(feature = "tool-search-social")]
 pub use reddit_search::RedditSearchTool;
 pub use registry::ToolRegistry;
@@ -767,6 +769,7 @@ pub fn all_tools_with_runtime(
                 .unwrap_or_else(|| Arc::new(RwLock::new(Vec::new()))),
         )),
         Arc::new(NowTool::new()),
+        Arc::new(ReadUserRuleTool::new()),
         Arc::new(CopyPathTool::new(security.clone())),
         Arc::new(MovePathTool::new(security.clone())),
         Arc::new(DeletePathTool::new(security.clone())),

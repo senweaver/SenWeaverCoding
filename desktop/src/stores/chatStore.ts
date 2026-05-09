@@ -93,6 +93,8 @@ export type PerSessionState = {
   subagentTimelines: Record<string, SubagentTimelineBucket>
 
   activeTaskToolUseId: string | null
+
+  stopRequested: boolean
 }
 
 const DEFAULT_SESSION_STATE: PerSessionState = {
@@ -120,6 +122,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   pendingEdits: [],
   subagentTimelines: {},
   activeTaskToolUseId: null,
+  stopRequested: false,
 }
 
 function createDefaultSessionState(): PerSessionState {
@@ -567,16 +570,42 @@ function extractTextFromRawContent(content: unknown): string {
   return ''
 }
 
+function normalizeAnswerValue(value: unknown): string | string[] {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    const labels = value
+      .map((entry) => {
+        if (typeof entry === 'string') return entry.trim()
+        if (entry && typeof entry === 'object') {
+          const o = entry as Record<string, unknown>
+          const candidate =
+            (typeof o.label === 'string' && o.label) ||
+            (typeof o.text === 'string' && o.text) ||
+            (typeof o.id === 'string' && o.id) ||
+            ''
+          return typeof candidate === 'string' ? candidate.trim() : ''
+        }
+        return ''
+      })
+      .filter((s) => s.length > 0)
+    if (labels.length === 0) return ''
+    if (labels.length === 1) return labels[0] ?? ''
+    return labels
+  }
+  return ''
+}
+
 function collectPlanAnswerItems(
   rawInput: unknown,
   updatedInput: Record<string, unknown>,
-): Array<{ question: string; answer: string }> {
+): Array<{ question: string; answer: string | string[] }> {
   const skipped = updatedInput.skipped === true
   const answers =
     updatedInput.answers && typeof updatedInput.answers === 'object'
       ? (updatedInput.answers as Record<string, unknown>)
       : {}
-  const out: Array<{ question: string; answer: string }> = []
+  const out: Array<{ question: string; answer: string | string[] }> = []
   const obj =
     rawInput && typeof rawInput === 'object' ? (rawInput as Record<string, unknown>) : {}
   const rawQs = Array.isArray(obj.questions)
@@ -598,9 +627,19 @@ function collectPlanAnswerItems(
     const answer = (() => {
       if (skipped) return ''
       const direct = answers[qid]
-      if (typeof direct === 'string' && direct) return direct
+      if (direct !== undefined) {
+        const normalized = normalizeAnswerValue(direct)
+        if ((typeof normalized === 'string' && normalized) || Array.isArray(normalized)) {
+          return normalized
+        }
+      }
       const byPrompt = answers[prompt]
-      if (typeof byPrompt === 'string' && byPrompt) return byPrompt
+      if (byPrompt !== undefined) {
+        const normalized = normalizeAnswerValue(byPrompt)
+        if ((typeof normalized === 'string' && normalized) || Array.isArray(normalized)) {
+          return normalized
+        }
+      }
       return ''
     })()
     out.push({ question: prompt, answer })
@@ -1126,6 +1165,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...session,
             messages: newMessages,
             chatState: 'thinking',
+            stopRequested: false,
             elapsedSeconds: 0,
             streamingText: '',
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
@@ -1235,7 +1275,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setSessionCodingMode: (sessionId, mode) => {
     if (!get().sessions[sessionId]) return
-    wsManager.send(sessionId, { type: 'set_coding_mode', mode })
+    wsManager.send(sessionId, { type: 'set_coding_mode', mode, scope: 'session' })
   },
 
   stopGeneration: (sessionId) => {
@@ -1257,6 +1297,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           [sessionId]: {
             ...session,
             chatState: 'idle',
+            stopRequested: true,
             pendingPermission: null,
             pendingComputerUsePermission: null,
             elapsedTimer: null,
@@ -1480,7 +1521,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!card || card.status !== 'pending') return
 
     void useSettingsStore.getState().setCodingMode('agent')
-    wsManager.send(sessionId, { type: 'set_coding_mode', mode: 'agent' })
+    wsManager.send(sessionId, { type: 'set_coding_mode', mode: 'agent', scope: 'session' })
 
     wsManager.send(sessionId, {
       type: 'start_plan_execution',
@@ -1534,7 +1575,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!sessionId || !planPath) return
 
     void useSettingsStore.getState().setCodingMode('agent')
-    wsManager.send(sessionId, { type: 'set_coding_mode', mode: 'agent' })
+    wsManager.send(sessionId, { type: 'set_coding_mode', mode: 'agent', scope: 'session' })
     wsManager.send(sessionId, {
       type: 'start_plan_execution',
       planPath,
@@ -1586,6 +1627,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   handleServerMessage: (sessionId, msg) => {
     const update = (updater: (session: PerSessionState) => Partial<PerSessionState>) => {
       set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, updater) }))
+    }
+
+    {
+      const guardSession = get().sessions[sessionId]
+      if (guardSession?.stopRequested) {
+        const isStatusIdle = msg.type === 'status' && msg.state === 'idle'
+        const isTurnEnd =
+          isStatusIdle || msg.type === 'message_complete' || msg.type === 'error'
+        const passThrough =
+          isTurnEnd ||
+          msg.type === 'connected' ||
+          msg.type === 'pong' ||
+          msg.type === 'session_title_updated' ||
+          msg.type === 'task_update' ||
+          msg.type === 'lsp_diagnostics' ||
+          msg.type === 'system_notification'
+        if (!passThrough) {
+          return
+        }
+        if (isStatusIdle || msg.type === 'message_complete' || msg.type === 'error') {
+          set((s) => ({
+            sessions: updateSessionIn(s.sessions, sessionId, () => ({
+              stopRequested: false,
+            })),
+          }))
+        }
+      }
     }
 
     switch (msg.type) {

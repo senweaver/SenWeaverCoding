@@ -10,6 +10,43 @@ import { isTauriRuntime } from './desktopRuntime'
 
 export type BrowserDockRect = { x: number; y: number; w: number; h: number }
 
+export type BrowserHostBounds = {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+export function clampRectToHost(
+  rect: BrowserDockRect,
+  host: BrowserHostBounds | null | undefined,
+): BrowserDockRect {
+  if (!host) {
+    return {
+      x: Math.max(0, Math.round(rect.x)),
+      y: Math.max(0, Math.round(rect.y)),
+      w: Math.max(1, Math.round(rect.w)),
+      h: Math.max(1, Math.round(rect.h)),
+    }
+  }
+  const hostLeft = Math.max(0, host.left)
+  const hostTop = Math.max(0, host.top)
+  const hostRight = Math.max(hostLeft + 1, host.right)
+  const hostBottom = Math.max(hostTop + 1, host.bottom)
+  const left = Math.min(Math.max(rect.x, hostLeft), hostRight - 1)
+  const top = Math.min(Math.max(rect.y, hostTop), hostBottom - 1)
+  const rectRight = rect.x + rect.w
+  const rectBottom = rect.y + rect.h
+  const right = Math.min(rectRight, hostRight)
+  const bottom = Math.min(rectBottom, hostBottom)
+  return {
+    x: Math.round(left),
+    y: Math.round(top),
+    w: Math.max(1, Math.round(right - left)),
+    h: Math.max(1, Math.round(bottom - top)),
+  }
+}
+
 export type BrowserDockTabInfo = {
   id: number
   url: string | null
@@ -76,8 +113,16 @@ export async function dockSetRect(rect: BrowserDockRect): Promise<void> {
   await invokeIfTauri('browser_dock_set_rect', { rect })
 }
 
+export async function dockResync(rect: BrowserDockRect): Promise<void> {
+  await invokeIfTauri('browser_dock_resync', { rect })
+}
+
 export async function dockHide(): Promise<void> {
   await invokeIfTauri('browser_dock_hide')
+}
+
+export async function dockPark(): Promise<void> {
+  await invokeIfTauri('browser_dock_park')
 }
 
 export async function dockClose(): Promise<void> {

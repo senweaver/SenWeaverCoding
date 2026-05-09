@@ -1241,6 +1241,25 @@ async fn run_gateway_inner(
         )
         .route("/api/skills/detail", get(desktop_routes::handle_skills_detail))
         .route(
+            "/api/skills/file",
+            get(desktop_routes::handle_user_skill_get)
+                .post(desktop_routes::handle_user_skill_upsert)
+                .put(desktop_routes::handle_user_skill_upsert)
+                .delete(desktop_routes::handle_user_skill_delete),
+        )
+        .route(
+            "/api/skills/install",
+            post(desktop_routes::handle_user_skill_install),
+        )
+        .route("/api/rules", get(desktop_routes::handle_user_rules_list))
+        .route(
+            "/api/rules/file",
+            get(desktop_routes::handle_user_rule_get)
+                .post(desktop_routes::handle_user_rule_upsert)
+                .put(desktop_routes::handle_user_rule_upsert)
+                .delete(desktop_routes::handle_user_rule_delete),
+        )
+        .route(
             "/api/hooks",
             get(desktop_routes::handle_hooks_get).put(desktop_routes::handle_hooks_put),
         )

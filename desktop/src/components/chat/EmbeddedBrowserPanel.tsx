@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 //
-// Embedded Browser dock chrome for the React shell.
+// Embedded Browser column for the React shell.
 //
-// The panel is purely the UI chrome around a Tauri child WebView; the
-// actual page rendering happens in the child webview owned by the Rust
-// shell at `desktop/src-tauri/src/browser_dock.rs`.  A `ResizeObserver`
-// watches the placeholder `<div ref={viewportRef}>` and forwards the
-// viewport rect (in DPI-corrected logical pixels) to
-// `browserPanelStore.setAnchorRect`, which calls
-// `browser_dock_set_rect` so the OS-level webview tracks the React
-// layout.
+// The panel renders as a real flex column between the home content
+// area and the right sidebar, never overlapping chat or settings.
+// The actual page rendering happens in the child webview owned by the
+// Rust shell at `desktop/src-tauri/src/browser_dock.rs`. A
+// `ResizeObserver` watches the inner viewport and forwards its rect
+// (defensively clamped) to `browserPanelStore.setAnchorRect`, which
+// drives `browser_dock_set_rect` so the OS-level webview tracks the
+// React layout precisely.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -18,24 +18,48 @@ import {
   type BrowserAgentActionEntry,
   type BrowserConsoleEntry,
   type BrowserInspectorSnapshot,
+  type BrowserUserActionEntry,
+  BROWSER_COLUMN_WIDTH_BOUNDS,
   useBrowserPanelStore,
 } from '../../stores/browserPanelStore'
 import { useTeamStore } from '../../stores/teamStore'
 import { useUIStore } from '../../stores/uiStore'
-import { dockHide, dockOpen, dockScreenshot, listenDockEvents } from '../../lib/browserDock'
+import {
+  clampRectToHost,
+  dockHide,
+  dockOpen,
+  dockPark,
+  dockResync,
+  dockScreenshot,
+  listenDockEvents,
+} from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { useTranslation } from '../../i18n'
+import { BrowserPanelSplitter } from './BrowserPanelSplitter'
 
-const PANEL_HEIGHT_PX = 360
-const PANEL_HEIGHT_COLLAPSED_PX = 38
-const CONSOLE_DRAWER_HEIGHT_PX = 140
-const INSPECTOR_DRAWER_HEIGHT_PX = 160
-const DRIVER_DRAWER_HEIGHT_PX = 160
-const AGENT_LIVE_WINDOW_MS = 5_000
+const AGENT_LIVE_WINDOW_MS = 1500
+const AGENT_BUBBLE_WINDOW_MS = 2200
+const VIEWPORT_MIN_PX = 200
+const HEADER_PX = 32
+const TOOLBAR_PX = 38
+const TABBAR_PX = 34
 
 function clampZoom(z: number): number {
   if (!Number.isFinite(z) || z <= 0) return 1
   return Math.min(3, Math.max(0.25, z))
+}
+
+type AgentBubble = { id: number; kind: string; ts: number }
+
+function summarizeAgentArgs(args: unknown): string {
+  if (args == null) return ''
+  if (typeof args === 'string') return args.length > 80 ? `${args.slice(0, 80)}…` : args
+  try {
+    const text = JSON.stringify(args)
+    return text.length > 80 ? `${text.slice(0, 80)}…` : text
+  } catch {
+    return String(args)
+  }
 }
 
 export function EmbeddedBrowserPanel() {
@@ -52,7 +76,6 @@ export function EmbeddedBrowserPanel() {
   const ingestEvent = useBrowserPanelStore((s) => s.ingestEvent)
 
   const visible = panel?.visible ?? false
-  const expanded = panel?.expanded ?? false
   const url = panel?.url ?? ''
   const liveUrl = panel?.liveUrl ?? ''
   const title = panel?.title ?? ''
@@ -64,23 +87,26 @@ export function EmbeddedBrowserPanel() {
   const inspector = panel?.inspector ?? null
   const driverOpen = panel?.driverOpen ?? false
   const agentLog = panel?.agentLog ?? []
+  const userLog = panel?.userLog ?? []
   const lastAgentActionAt = panel?.lastAgentActionAt ?? 0
+  const drawerHeightRatio = panel?.drawerHeightRatio ?? 0.35
+  const columnWidthAuto = panel?.columnWidthAuto ?? true
   const ownsDock = sessionId !== null && activeSessionId === sessionId
+  const hasContent = Boolean((liveUrl && liveUrl.trim()) || (url && url.trim()))
 
   const [liveTick, setLiveTick] = useState(0)
   useEffect(() => {
     if (!lastAgentActionAt) return
     const elapsed = Date.now() - lastAgentActionAt
     if (elapsed >= AGENT_LIVE_WINDOW_MS) return
-    setLiveTick((t) => t + 1)
+    setLiveTick((tick) => tick + 1)
     const timeout = setTimeout(
-      () => setLiveTick((t) => t + 1),
+      () => setLiveTick((tick) => tick + 1),
       AGENT_LIVE_WINDOW_MS - elapsed,
     )
     return () => clearTimeout(timeout)
   }, [lastAgentActionAt])
   const isLive = lastAgentActionAt > 0 && Date.now() - lastAgentActionAt < AGENT_LIVE_WINDOW_MS
-
   void liveTick
 
   useEffect(() => {
@@ -89,6 +115,38 @@ export function EmbeddedBrowserPanel() {
     ensure(sessionId)
   }, [sessionId, ensure])
 
+  const lastObservedSessionRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    const prev = lastObservedSessionRef.current
+    lastObservedSessionRef.current = sessionId
+    if (!sessionId) {
+      if (prev !== null) {
+        dockHide().catch((err) => {
+          console.warn('[browserDock] dockHide on tab leave failed', err)
+        })
+      }
+      return
+    }
+    if (prev === sessionId) return
+    const store = useBrowserPanelStore.getState()
+    const newPanel = store.panels[sessionId]
+    if (!newPanel?.visible) {
+      dockHide().catch((err) => {
+        console.warn('[browserDock] dockHide on session switch failed', err)
+      })
+      return
+    }
+    if (store.activeSessionId !== sessionId) {
+      useBrowserPanelStore.setState({ activeSessionId: sessionId })
+    }
+    const rect = newPanel.anchorRect ?? { x: 0, y: 0, w: 1, h: 1 }
+    dockOpen(rect, newPanel.url ?? null).catch((err) => {
+      console.warn('[browserDock] dockOpen on session switch failed', err)
+    })
+  }, [sessionId])
+
+  const [agentBubbles, setAgentBubbles] = useState<AgentBubble[]>([])
   const unsubRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -96,6 +154,19 @@ export function EmbeddedBrowserPanel() {
     listenDockEvents((event) => {
       if (cancelled) return
       ingestEvent(event)
+      if (event.kind === 'agent_action') {
+        const data = event.data as { kind?: string; ts?: number }
+        const ts = typeof data.ts === 'number' ? data.ts : Date.now()
+        const id = ts + Math.random()
+        const kind = typeof data.kind === 'string' ? data.kind : 'unknown'
+        setAgentBubbles((prev) => [
+          ...prev.slice(-3),
+          { id, kind, ts },
+        ])
+        setTimeout(() => {
+          setAgentBubbles((prev) => prev.filter((b) => b.id !== id))
+        }, AGENT_BUBBLE_WINDOW_MS)
+      }
     })
       .then((unlisten) => {
         if (cancelled) {
@@ -124,8 +195,32 @@ export function EmbeddedBrowserPanel() {
     }
   }, [ingestEvent])
 
+  const setDrawerHeightRatio = useBrowserPanelStore((s) => s.setDrawerHeightRatio)
+
   const viewportRef = useRef<HTMLDivElement>(null)
   const panelShellRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<() => void>(() => {})
+  const dragModeRef = useRef(false)
+  const lateIdsRef = useRef<number[]>([])
+  const [dragSnapshot, setDragSnapshot] = useState<string | null>(null)
+  const [shellHeightPx, setShellHeightPx] = useState(0)
+  useEffect(() => {
+    const el = panelShellRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      setShellHeightPx(el.clientHeight)
+    })
+    ro.observe(el)
+    setShellHeightPx(el.clientHeight)
+    return () => ro.disconnect()
+  }, [visible])
+
+  const sidebarOpen = useUIStore((s) => s.sidebarOpen)
+  const rightSidebarOpen = useUIStore((s) => s.rightSidebarOpen)
+  const rightSidebarWidth = useUIStore((s) => s.rightSidebarWidth)
+  const columnWidth = panel?.columnWidth ?? BROWSER_COLUMN_WIDTH_BOUNDS.default
+
   useEffect(() => {
     if (!sessionId) return
     if (!isTauriRuntime()) return
@@ -133,35 +228,184 @@ export function EmbeddedBrowserPanel() {
     if (!el) return
 
     let rafId = 0
+    let lastRectSig = ''
+    let lastSafeRect: { x: number; y: number; w: number; h: number } | null = null
     const measure = () => {
-
       cancelAnimationFrame(rafId)
       rafId = requestAnimationFrame(() => {
         const rect = el.getBoundingClientRect()
         if (rect.width <= 0 || rect.height <= 0) return
-        setAnchorRect(sessionId, {
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          w: Math.round(rect.width),
-          h: Math.round(rect.height),
-        })
+        const host = el.parentElement?.getBoundingClientRect() ?? null
+        const clamped = clampRectToHost(
+          { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
+          host
+            ? {
+                left: host.left,
+                top: host.top,
+                right: host.right,
+                bottom: host.bottom,
+              }
+            : null,
+        )
+        const safe = {
+          x: clamped.x,
+          y: clamped.y,
+          w: Math.max(1, clamped.w - 1),
+          h: Math.max(1, clamped.h - 1),
+        }
+        lastSafeRect = safe
+        if (dragModeRef.current) return
+        const sig = `${Math.round(safe.x)}|${Math.round(safe.y)}|${Math.round(safe.w)}|${Math.round(safe.h)}`
+        if (sig === lastRectSig) return
+        lastRectSig = sig
+        setAnchorRect(sessionId, safe)
       })
     }
+    const resync = () => {
+      measure()
+      window.requestAnimationFrame(() => {
+        if (lastSafeRect) {
+          dockResync(lastSafeRect).catch((err) => {
+            console.warn('[browserDock] resync failed', err)
+          })
+        }
+      })
+    }
+    measureRef.current = measure
     measure()
 
     const ro = new ResizeObserver(() => measure())
     ro.observe(el)
-
     if (panelShellRef.current) ro.observe(panelShellRef.current)
+    if (containerRef.current) ro.observe(containerRef.current)
     window.addEventListener('resize', measure)
-    window.addEventListener('scroll', measure, true)
+
+    const remeasureHandler = () => measure()
+    const resyncHandler = () => resync()
+    document.addEventListener('browser-panel-remeasure', remeasureHandler)
+    document.addEventListener('browser-panel-resync', resyncHandler)
+
     return () => {
       cancelAnimationFrame(rafId)
       ro.disconnect()
       window.removeEventListener('resize', measure)
-      window.removeEventListener('scroll', measure, true)
+      document.removeEventListener('browser-panel-remeasure', remeasureHandler)
+      document.removeEventListener('browser-panel-resync', resyncHandler)
+      measureRef.current = () => {}
     }
-  }, [sessionId, setAnchorRect, expanded, consoleOpen, inspectorOpen, driverOpen])
+  }, [sessionId, setAnchorRect, visible])
+
+  useEffect(() => {
+    measureRef.current()
+  }, [
+    consoleOpen,
+    inspectorOpen,
+    driverOpen,
+    drawerHeightRatio,
+    rightSidebarOpen,
+    rightSidebarWidth,
+    columnWidth,
+    columnWidthAuto,
+  ])
+
+  useEffect(() => {
+    measureRef.current()
+    const ids = [60, 180, 360, 560].map((ms) =>
+      window.setTimeout(() => measureRef.current(), ms),
+    )
+    return () => {
+      for (const id of ids) window.clearTimeout(id)
+    }
+  }, [sidebarOpen])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    if (!sessionId) return
+
+    let snapshotToken = 0
+    let restoreTimer: number | null = null
+
+    const onStart = () => {
+      const stateNow = useBrowserPanelStore.getState()
+      const panelNow = stateNow.panels[sessionId]
+      const owns = stateNow.activeSessionId === sessionId
+      const visibleNow = panelNow?.visible ?? false
+      const hasContentNow = Boolean(
+        (panelNow?.liveUrl && panelNow.liveUrl.trim()) ||
+          (panelNow?.url && panelNow.url.trim()),
+      )
+      dragModeRef.current = true
+      if (!owns || !visibleNow || !hasContentNow) return
+      const myToken = ++snapshotToken
+      if (restoreTimer !== null) {
+        window.clearTimeout(restoreTimer)
+        restoreTimer = null
+      }
+      void (async () => {
+        try {
+          const result = await dockScreenshot(false)
+          if (myToken !== snapshotToken) return
+          if (result?.png_base64) {
+            setDragSnapshot(`data:image/png;base64,${result.png_base64}`)
+          }
+        } catch (err) {
+          console.warn('[browserDock] drag snapshot failed', err)
+        } finally {
+          if (myToken === snapshotToken) {
+            dockPark().catch((err) => {
+              console.warn('[browserDock] dockPark failed', err)
+            })
+          }
+        }
+      })()
+    }
+
+    const onEnd = () => {
+      const stateNow = useBrowserPanelStore.getState()
+      const panelNow = stateNow.panels[sessionId]
+      const owns = stateNow.activeSessionId === sessionId
+      const visibleNow = panelNow?.visible ?? false
+      const hasContentNow = Boolean(
+        (panelNow?.liveUrl && panelNow.liveUrl.trim()) ||
+          (panelNow?.url && panelNow.url.trim()),
+      )
+      dragModeRef.current = false
+      snapshotToken += 1
+      for (const id of lateIdsRef.current) window.clearTimeout(id)
+      lateIdsRef.current = []
+      measureRef.current()
+      window.requestAnimationFrame(() => {
+        measureRef.current()
+        document.dispatchEvent(new CustomEvent('browser-panel-resync'))
+      })
+      lateIdsRef.current = [80, 200].map((ms) =>
+        window.setTimeout(() => {
+          measureRef.current()
+          document.dispatchEvent(new CustomEvent('browser-panel-resync'))
+        }, ms),
+      )
+      if (owns && visibleNow && hasContentNow) {
+        if (restoreTimer !== null) window.clearTimeout(restoreTimer)
+        restoreTimer = window.setTimeout(() => {
+          setDragSnapshot(null)
+          restoreTimer = null
+        }, 220)
+      } else {
+        setDragSnapshot(null)
+      }
+    }
+
+    document.addEventListener('browser-panel-drag-start', onStart)
+    document.addEventListener('browser-panel-drag-end', onEnd)
+    return () => {
+      document.removeEventListener('browser-panel-drag-start', onStart)
+      document.removeEventListener('browser-panel-drag-end', onEnd)
+      if (restoreTimer !== null) window.clearTimeout(restoreTimer)
+      for (const id of lateIdsRef.current) window.clearTimeout(id)
+      lateIdsRef.current = []
+      dragModeRef.current = false
+    }
+  }, [sessionId])
 
   const tabs = panel?.tabs ?? []
   const activeBrowserTabId = panel?.activeTabId ?? null
@@ -176,10 +420,10 @@ export function EmbeddedBrowserPanel() {
   const toggleInspector = useBrowserPanelStore((s) => s.toggleInspector)
   const clearStorage = useBrowserPanelStore((s) => s.clearStorage)
   const closeForSession = useBrowserPanelStore((s) => s.closeForSession)
-  const togglePanel = useBrowserPanelStore((s) => s.toggle)
   const clearConsole = useBrowserPanelStore((s) => s.clearConsole)
   const toggleDriver = useBrowserPanelStore((s) => s.toggleDriver)
   const clearAgentLog = useBrowserPanelStore((s) => s.clearAgentLog)
+  const clearUserLog = useBrowserPanelStore((s) => s.clearUserLog)
   const newTabAction = useBrowserPanelStore((s) => s.newTab)
   const closeTabAction = useBrowserPanelStore((s) => s.closeTab)
   const activateTabAction = useBrowserPanelStore((s) => s.activateTab)
@@ -190,34 +434,34 @@ export function EmbeddedBrowserPanel() {
     void refreshTabs(sessionId)
   }, [sessionId, visible, refreshTabs])
 
-  const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
-  const prevSettingsOpenRef = useRef(settingsOverlayOpen)
   useEffect(() => {
-    if (!isTauriRuntime()) {
-      prevSettingsOpenRef.current = settingsOverlayOpen
-      return
-    }
-    const wasOpen = prevSettingsOpenRef.current
-    prevSettingsOpenRef.current = settingsOverlayOpen
-    if (!visible || !expanded) return
-    if (settingsOverlayOpen && !wasOpen) {
+    if (!isTauriRuntime()) return
+    if (!sessionId) return
+    if (!visible) return
+    if (!ownsDock) return
+    if (!hasContent) {
       dockHide().catch((err) => {
-        console.warn('[browserDock] hide on settings open failed', err)
+        console.warn('[browserDock] dockHide on empty content failed', err)
       })
       return
     }
-    if (!settingsOverlayOpen && wasOpen) {
-      if (!ownsDock) return
-      const rect = panel?.anchorRect
-      if (!rect) return
-      dockOpen(rect, panel?.url ?? null).catch((err) => {
-        console.warn('[browserDock] re-open after settings close failed', err)
-      })
-    }
-  }, [settingsOverlayOpen, visible, expanded, ownsDock, panel?.anchorRect, panel?.url])
+    const current = useBrowserPanelStore.getState().panels[sessionId]
+    const rect = current?.anchorRect
+    if (!rect) return
+    dockOpen(rect, current?.url ?? null).catch((err) => {
+      console.warn('[browserDock] dockOpen on visibility change failed', err)
+    })
+  }, [sessionId, visible, ownsDock, hasContent])
 
   const [draftUrl, setDraftUrl] = useState(url)
+  const urlInputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
+    if (
+      urlInputRef.current &&
+      document.activeElement === urlInputRef.current
+    ) {
+      return
+    }
     setDraftUrl(url)
   }, [url])
 
@@ -233,6 +477,20 @@ export function EmbeddedBrowserPanel() {
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [menuOpen])
+
+  useEffect(() => {
+    if (!sessionId) return
+    if (!pickMode) return
+    const handler = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null
+      if (!target) return
+      if (target.closest('[data-browser-viewport="true"]')) return
+      if (target.closest('[data-browser-pick-toggle="true"]')) return
+      void togglePick(sessionId)
+    }
+    document.addEventListener('pointerdown', handler, true)
+    return () => document.removeEventListener('pointerdown', handler, true)
+  }, [pickMode, sessionId, togglePick])
 
   const handleNavigate = useCallback(() => {
     if (!sessionId) return
@@ -317,32 +575,64 @@ export function EmbeddedBrowserPanel() {
     void triggerScreenshot(true)
   }, [triggerScreenshot])
 
+  const splitterDrawerHandler = useCallback(
+    (deltaPx: number) => {
+      if (!sessionId) return
+      const totalH = shellHeightPx > 0 ? shellHeightPx : panelShellRef.current?.clientHeight ?? 480
+      if (totalH <= 0) return
+      const next = drawerHeightRatio - deltaPx / totalH
+      setDrawerHeightRatio(sessionId, next)
+    },
+    [sessionId, drawerHeightRatio, setDrawerHeightRatio, shellHeightPx],
+  )
+
   if (!sessionId) return null
   if (isMemberSession) return null
   if (!isTauriRuntime()) return null
   if (!visible) return null
 
   const headerLabel = title || liveUrl || url || t('browser.panel.title')
-
   const onSubmitUrl = (e: React.FormEvent) => {
     e.preventDefault()
     handleNavigate()
   }
 
+  const drawerVisible = consoleOpen || inspectorOpen || driverOpen
+  const drawerCount = (consoleOpen ? 1 : 0) + (inspectorOpen ? 1 : 0) + (driverOpen ? 1 : 0)
+
   return (
-    <div
+    <aside
+      ref={containerRef}
       data-testid="embedded-browser-panel"
-      className="pointer-events-none absolute inset-x-0 z-40 px-4 pb-2"
-      style={{ paddingTop: 6, bottom: 'var(--composer-height, 0px)' }}
+      data-width-mode={columnWidthAuto ? 'auto' : 'manual'}
+      className={
+        columnWidthAuto
+          ? 'flex h-full min-h-0 min-w-[240px] flex-1 flex-col overflow-hidden border-l border-[var(--color-border)] bg-[var(--color-surface-container-low)]'
+          : 'flex h-full min-h-0 min-w-[240px] flex-col overflow-hidden border-l border-[var(--color-border)] bg-[var(--color-surface-container-low)]'
+      }
+      style={
+        columnWidthAuto
+          ? undefined
+          : {
+              flex: `0 1 ${panel?.columnWidth ?? BROWSER_COLUMN_WIDTH_BOUNDS.default}px`,
+              maxWidth: '100%',
+            }
+      }
     >
-      <div className="pointer-events-auto mx-auto w-full max-w-[860px]">
-        <div
-          ref={panelShellRef}
-          className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-[var(--shadow-dropdown)]"
+      <div
+        ref={panelShellRef}
+        className={`flex h-full min-h-0 flex-col overflow-hidden ${
+          isLive ? 'animate-browser-dock-pulse' : ''
+        }`}
+      >
+        <div className="relative flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5"
+          style={{ minHeight: HEADER_PX }}
         >
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="material-symbols-outlined text-[16px] text-[var(--color-brand)]" aria-hidden="true">
+            <span
+              className="material-symbols-outlined text-[16px] text-[var(--color-brand)]"
+              aria-hidden="true"
+            >
               public
             </span>
             {isLive && (
@@ -351,8 +641,7 @@ export function EmbeddedBrowserPanel() {
                 className="inline-flex items-center gap-1 rounded-full bg-[var(--color-brand)]/12 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-brand)]"
               >
                 <span
-                  className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-brand)]"
-                  style={{ animation: 'pulse 1.4s ease-in-out infinite' }}
+                  className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-brand)] animate-pulse-dot"
                 />
                 {t('browser.panel.driver.live')}
               </span>
@@ -362,17 +651,6 @@ export function EmbeddedBrowserPanel() {
             </span>
           </div>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => sessionId && void togglePanel(sessionId, { source: 'manual' })}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-              title={expanded ? t('browser.panel.collapse') : t('browser.panel.expand')}
-              aria-label={expanded ? t('browser.panel.collapse') : t('browser.panel.expand')}
-            >
-              <span className="material-symbols-outlined text-[14px]">
-                {expanded ? 'expand_more' : 'expand_less'}
-              </span>
-            </button>
             <button
               type="button"
               onClick={() => sessionId && void closeForSession(sessionId)}
@@ -385,33 +663,50 @@ export function EmbeddedBrowserPanel() {
           </div>
         </div>
 
-        {expanded && (
-          <>
-            {}
+        <>
             {tabs.length > 0 && (
-              <div className="flex items-end gap-1 overflow-x-auto border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 pt-1.5">
+              <div
+                className="flex shrink-0 items-end gap-1 overflow-x-auto border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 pt-1.5"
+                style={{ minHeight: TABBAR_PX }}
+              >
                 {tabs.map((tab) => {
                   const isActive = tab.id === activeBrowserTabId
                   const label = tab.title || tab.url || t('browser.panel.tabs.untitled')
+                  const tabAgentTs = panel?.tabActivity?.[tab.id] ?? 0
+                  const tabIsLive =
+                    tabAgentTs > 0 && Date.now() - tabAgentTs < AGENT_LIVE_WINDOW_MS
+                  void liveTick
                   return (
                     <div
                       key={tab.id}
                       role="tab"
                       aria-selected={isActive}
                       onClick={() => sessionId && void activateTabAction(sessionId, tab.id)}
-                      title={t('browser.panel.tabs.activate')}
+                      title={
+                        tabIsLive
+                          ? t('browser.panel.tabs.agentActive')
+                          : t('browser.panel.tabs.activate')
+                      }
                       className={`group flex h-7 max-w-[200px] cursor-pointer items-center gap-1 rounded-t-md border border-b-0 px-2 text-[12px] transition-colors ${
                         isActive
                           ? 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-primary)]'
                           : 'border-transparent bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                       }`}
                     >
-                      <span
-                        className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]"
-                        aria-hidden="true"
-                      >
-                        public
-                      </span>
+                      {tabIsLive ? (
+                        <span
+                          aria-hidden="true"
+                          className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-brand)]"
+                          style={{ animation: 'browser-dock-pulse 1.5s ease-in-out infinite' }}
+                        />
+                      ) : (
+                        <span
+                          className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]"
+                          aria-hidden="true"
+                        >
+                          public
+                        </span>
+                      )}
                       <span className="truncate">{label}</span>
                       <button
                         type="button"
@@ -440,7 +735,10 @@ export function EmbeddedBrowserPanel() {
               </div>
             )}
 
-            <div className="flex items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1.5">
+            <div
+              className="flex w-full min-w-0 shrink-0 items-center gap-1 overflow-hidden border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1.5"
+              style={{ minHeight: TOOLBAR_PX }}
+            >
               <NavBtn icon="arrow_back" title={t('browser.panel.back')} onClick={() => sessionId && void back(sessionId)} />
               <NavBtn icon="arrow_forward" title={t('browser.panel.forward')} onClick={() => sessionId && void forward(sessionId)} />
               <NavBtn
@@ -448,24 +746,29 @@ export function EmbeddedBrowserPanel() {
                 title={t('browser.panel.reload')}
                 onClick={() => sessionId && void reload(sessionId, false)}
               />
-              <form onSubmit={onSubmitUrl} className="flex flex-1 items-center">
+              <form onSubmit={onSubmitUrl} className="flex min-w-0 flex-1 items-center">
                 <input
+                  ref={urlInputRef}
                   type="text"
                   value={draftUrl}
                   onChange={(e) => setDraftUrl(e.target.value)}
+                  onBlur={() => {
+                    if (draftUrl !== url) setDraftUrl(url)
+                  }}
                   placeholder={t('browser.panel.urlPlaceholder')}
-                  className="h-7 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+                  className="h-7 w-full min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
                 />
               </form>
-              <div className="ml-1 flex items-center gap-1">
+              <div className="ml-1 flex shrink-0 items-center gap-1">
                 <ToolbarToggleBtn
                   icon="ads_click"
                   title={t('browser.panel.pickElement')}
                   active={pickMode}
                   onClick={() => sessionId && void togglePick(sessionId)}
+                  dataAttrs={{ 'data-browser-pick-toggle': 'true' }}
                 />
                 <ToolbarToggleBtn
                   icon="terminal"
@@ -581,48 +884,145 @@ export function EmbeddedBrowserPanel() {
                 </div>
               </div>
             </div>
-            <div
-              ref={viewportRef}
-              data-testid="embedded-browser-viewport"
-              className="relative w-full bg-[var(--color-surface)]"
-              style={{ height: PANEL_HEIGHT_PX }}
-            >
-              {!ownsDock && (
-                <div className="absolute inset-0 flex items-center justify-center text-[12px] text-[var(--color-text-tertiary)]">
-                  {t('browser.panel.empty')}
-                </div>
+
+            <div className="relative flex min-h-0 flex-1 flex-col">
+              <div
+                ref={viewportRef}
+                data-testid="embedded-browser-viewport"
+                data-browser-viewport="true"
+                className="relative w-full overflow-hidden bg-[var(--color-surface)]"
+                style={{
+                  flex: '1 1 0',
+                  minHeight: VIEWPORT_MIN_PX,
+                }}
+              >
+                {dragSnapshot && (
+                  <img
+                    src={dragSnapshot}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    className="pointer-events-none absolute inset-0 h-full w-full select-none"
+                    style={{ objectFit: 'fill', imageRendering: 'auto' }}
+                  />
+                )}
+                {!hasContent && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center select-none">
+                    <span
+                      className="material-symbols-outlined text-[48px] text-[var(--color-text-tertiary)]"
+                      aria-hidden="true"
+                    >
+                      public
+                    </span>
+                    <div className="text-[14px] font-medium text-[var(--color-text-primary)]">
+                      {t('browser.panel.empty.title')}
+                    </div>
+                    <div className="max-w-[320px] text-[12px] leading-relaxed text-[var(--color-text-tertiary)]">
+                      {t('browser.panel.empty.hint')}
+                    </div>
+                  </div>
+                )}
+                {hasContent && !ownsDock && (
+                  <div className="absolute inset-0 flex items-center justify-center text-[12px] text-[var(--color-text-tertiary)]">
+                    {t('browser.panel.empty')}
+                  </div>
+                )}
+                {agentBubbles.length > 0 && (
+                  <div className="pointer-events-none absolute right-2 top-2 flex max-w-[60%] flex-col items-end gap-1">
+                    {agentBubbles.map((b) => (
+                      <span
+                        key={b.id}
+                        className="animate-browser-dock-bubble rounded-full bg-[var(--color-brand)]/95 px-2 py-0.5 text-[10px] font-medium text-white shadow"
+                      >
+                        {t('browser.panel.cooperate.agentBubble', { kind: b.kind })}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {drawerVisible && (
+                <>
+                  <BrowserPanelSplitter
+                    orientation="horizontal"
+                    onDrag={splitterDrawerHandler}
+                    ariaLabel={t('browser.panel.splitter.dragHorizontal')}
+                  />
+                  <div
+                    className="flex flex-col overflow-hidden border-t border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]"
+                    style={{
+                      flex: '0 0 auto',
+                      minHeight: 80,
+                      height: `${Math.max(
+                        80,
+                        Math.min(
+                          (shellHeightPx > 0 ? shellHeightPx : 480) * 0.6,
+                          drawerHeightRatio * (shellHeightPx > 0 ? shellHeightPx : 480),
+                        ),
+                      )}px`,
+                      maxHeight: '60%',
+                    }}
+                  >
+                    <div className="flex min-h-0 flex-1">
+                      {consoleOpen && (
+                        <div
+                          className="flex min-w-0 flex-1 flex-col"
+                          style={{
+                            borderRightWidth: drawerCount > 1 ? 1 : 0,
+                            borderRightStyle: 'solid',
+                            borderRightColor: 'var(--color-border)',
+                          }}
+                        >
+                          <ConsoleDrawer
+                            entries={consoleLog}
+                            onClear={() => sessionId && clearConsole(sessionId)}
+                            title={t('browser.panel.consoleTitle')}
+                            emptyLabel={t('browser.panel.consoleEmpty')}
+                            clearLabel={t('browser.panel.consoleClear')}
+                          />
+                        </div>
+                      )}
+                      {inspectorOpen && (
+                        <div
+                          className="flex min-w-0 flex-1 flex-col"
+                          style={{
+                            borderRightWidth: driverOpen ? 1 : 0,
+                            borderRightStyle: 'solid',
+                            borderRightColor: 'var(--color-border)',
+                          }}
+                        >
+                          <InspectorDrawer
+                            snapshot={inspector}
+                            emptyLabel={t('browser.panel.inspectorEmpty')}
+                            title={t('browser.panel.inspectorTitle')}
+                          />
+                        </div>
+                      )}
+                      {driverOpen && (
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <CooperateTimeline
+                            agentEntries={agentLog}
+                            userEntries={userLog}
+                            onClear={() => {
+                              if (!sessionId) return
+                              clearAgentLog(sessionId)
+                              clearUserLog(sessionId)
+                            }}
+                            title={t('browser.panel.cooperate.title')}
+                            emptyLabel={t('browser.panel.cooperate.empty')}
+                            clearLabel={t('browser.panel.driver.clear')}
+                            agentLabel={t('browser.panel.actor.agent')}
+                            userLabel={t('browser.panel.actor.user')}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
               )}
             </div>
-            {consoleOpen && (
-              <ConsoleDrawer
-                entries={consoleLog}
-                onClear={() => sessionId && clearConsole(sessionId)}
-                title={t('browser.panel.consoleTitle')}
-                emptyLabel={t('browser.panel.consoleEmpty')}
-                clearLabel={t('browser.panel.consoleClear')}
-              />
-            )}
-            {inspectorOpen && (
-              <InspectorDrawer
-                snapshot={inspector}
-                emptyLabel={t('browser.panel.inspectorEmpty')}
-                title={t('browser.panel.inspectorTitle')}
-              />
-            )}
-            {driverOpen && (
-              <DriverDrawer
-                entries={agentLog}
-                onClear={() => sessionId && clearAgentLog(sessionId)}
-                title={t('browser.panel.driver.title')}
-                emptyLabel={t('browser.panel.driver.empty')}
-                clearLabel={t('browser.panel.driver.clear')}
-              />
-            )}
           </>
-        )}
-        </div>
       </div>
-    </div>
+    </aside>
   )
 }
 
@@ -633,7 +1033,7 @@ function NavBtn({ icon, title, onClick }: { icon: string; title: string; onClick
       onClick={onClick}
       title={title}
       aria-label={title}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
     >
       <span className="material-symbols-outlined text-[16px]">{icon}</span>
     </button>
@@ -645,11 +1045,13 @@ function ToolbarToggleBtn({
   title,
   active,
   onClick,
+  dataAttrs,
 }: {
   icon: string
   title: string
   active?: boolean
   onClick: () => void
+  dataAttrs?: Record<string, string>
 }) {
   return (
     <button
@@ -658,7 +1060,8 @@ function ToolbarToggleBtn({
       title={title}
       aria-label={title}
       aria-pressed={active}
-      className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+      {...(dataAttrs ?? {})}
+      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
         active
           ? 'bg-[var(--color-brand)]/12 text-[var(--color-brand)]'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
@@ -703,11 +1106,8 @@ function ConsoleDrawer({
   }, [entries.length])
 
   return (
-    <div
-      className="flex flex-col border-t border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]"
-      style={{ height: CONSOLE_DRAWER_HEIGHT_PX }}
-    >
-      <div className="flex items-center justify-between px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
         <span>{title}</span>
         <button
           type="button"
@@ -717,7 +1117,7 @@ function ConsoleDrawer({
           {clearLabel}
         </button>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 pb-1 font-mono text-[11px]">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 pb-1 font-mono text-[11px]">
         {entries.length === 0 ? (
           <div className="py-2 text-[var(--color-text-tertiary)]">{emptyLabel}</div>
         ) : (
@@ -767,17 +1167,14 @@ function InspectorDrawer({
   }, [snapshot])
 
   return (
-    <div
-      className="flex flex-col border-t border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]"
-      style={{ height: INSPECTOR_DRAWER_HEIGHT_PX }}
-    >
-      <div className="flex items-center justify-between px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
         <span>{title}</span>
         {snapshot ? (
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">{snapshot.selector}</span>
         ) : null}
       </div>
-      <div className="flex-1 overflow-y-auto px-3 pb-1 font-mono text-[11px]">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-1 font-mono text-[11px]">
         {!snapshot ? (
           <div className="py-2 text-[var(--color-text-tertiary)]">{emptyLabel}</div>
         ) : (
@@ -795,43 +1192,75 @@ function InspectorDrawer({
   )
 }
 
-function DriverDrawer({
-  entries,
+type TimelineRow =
+  | {
+      ts: number
+      key: string
+      actor: 'agent'
+      kind: string
+      detail: string
+    }
+  | {
+      ts: number
+      key: string
+      actor: 'user'
+      kind: string
+      detail: string
+    }
+
+function CooperateTimeline({
+  agentEntries,
+  userEntries,
   onClear,
   title,
   emptyLabel,
   clearLabel,
+  agentLabel,
+  userLabel,
 }: {
-  entries: BrowserAgentActionEntry[]
+  agentEntries: BrowserAgentActionEntry[]
+  userEntries: BrowserUserActionEntry[]
   onClear: () => void
   title: string
   emptyLabel: string
   clearLabel: string
+  agentLabel: string
+  userLabel: string
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const rows = useMemo<TimelineRow[]>(() => {
+    const merged: TimelineRow[] = []
+    for (const e of agentEntries) {
+      merged.push({
+        ts: e.ts,
+        key: `a-${e.id}`,
+        actor: 'agent',
+        kind: e.kind,
+        detail: summarizeAgentArgs(e.args),
+      })
+    }
+    for (const e of userEntries) {
+      merged.push({
+        ts: e.ts,
+        key: `u-${e.id}`,
+        actor: 'user',
+        kind: e.kind,
+        detail: e.detail,
+      })
+    }
+    merged.sort((a, b) => a.ts - b.ts)
+    return merged
+  }, [agentEntries, userEntries])
+
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
-  }, [entries.length])
-
-  const formatArgs = (raw: unknown): string => {
-    if (raw == null) return ''
-    if (typeof raw === 'string') return raw.length > 160 ? `${raw.slice(0, 160)}…` : raw
-    try {
-      const text = JSON.stringify(raw)
-      return text.length > 160 ? `${text.slice(0, 160)}…` : text
-    } catch {
-      return String(raw)
-    }
-  }
+  }, [rows.length])
 
   return (
-    <div
-      className="flex flex-col border-t border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]"
-      style={{ height: DRIVER_DRAWER_HEIGHT_PX }}
-    >
-      <div className="flex items-center justify-between px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
         <span>{title}</span>
         <button
           type="button"
@@ -841,17 +1270,24 @@ function DriverDrawer({
           {clearLabel}
         </button>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 pb-1 font-mono text-[11px]">
-        {entries.length === 0 ? (
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 pb-1 font-mono text-[11px]">
+        {rows.length === 0 ? (
           <div className="py-2 text-[var(--color-text-tertiary)]">{emptyLabel}</div>
         ) : (
-          entries.map((entry) => (
-            <div key={entry.id} className="flex items-baseline gap-2 py-0.5">
-              <span className="opacity-60">{new Date(entry.ts).toLocaleTimeString()}</span>
-              <span className="rounded bg-[var(--color-brand)]/10 px-1.5 text-[10px] font-semibold uppercase text-[var(--color-brand)]">
-                {entry.kind}
+          rows.map((row) => (
+            <div key={row.key} className="flex items-baseline gap-2 py-0.5">
+              <span className="opacity-60">{new Date(row.ts).toLocaleTimeString()}</span>
+              <span
+                className={`rounded px-1.5 text-[10px] font-semibold uppercase ${
+                  row.actor === 'agent'
+                    ? 'bg-[var(--color-brand)]/12 text-[var(--color-brand)]'
+                    : 'bg-[var(--color-info)]/12 text-[var(--color-info)]'
+                }`}
+              >
+                {row.actor === 'agent' ? agentLabel : userLabel}
               </span>
-              <span className="break-all text-[var(--color-text-primary)]">{formatArgs(entry.args)}</span>
+              <span className="opacity-80">{row.kind}</span>
+              <span className="break-all text-[var(--color-text-primary)]">{row.detail}</span>
             </div>
           ))
         )}
@@ -861,6 +1297,8 @@ function DriverDrawer({
 }
 
 export const BROWSER_PANEL_HEIGHTS = {
-  expanded: PANEL_HEIGHT_PX,
-  collapsed: PANEL_HEIGHT_COLLAPSED_PX,
+  collapsed: HEADER_PX,
+  toolbar: TOOLBAR_PX,
+  tabbar: TABBAR_PX,
+  viewportMin: VIEWPORT_MIN_PX,
 } as const

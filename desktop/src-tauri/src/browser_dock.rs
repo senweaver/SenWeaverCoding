@@ -1014,8 +1014,33 @@ fn ensure_tab_webview(
     Ok(())
 }
 
+fn clamp_rect_to_window(rect: DockRect, win: &Window) -> DockRect {
+    let physical = win.inner_size().ok();
+    let scale = win.scale_factor().unwrap_or(1.0).max(0.0001);
+    let (max_w, max_h) = match physical {
+        Some(size) => (
+            (size.width as f64 / scale).max(1.0),
+            (size.height as f64 / scale).max(1.0),
+        ),
+        None => (10_000.0, 10_000.0),
+    };
+    let x = rect.x.clamp(0.0, (max_w - 1.0).max(0.0));
+    let y = rect.y.clamp(0.0, (max_h - 1.0).max(0.0));
+    let max_w_avail = (max_w - x).max(1.0);
+    let max_h_avail = (max_h - y).max(1.0);
+    let w = rect.w.clamp(1.0, max_w_avail);
+    let h = rect.h.clamp(1.0, max_h_avail);
+    DockRect { x, y, w, h }
+}
+
 fn update_active_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), String> {
-    let rect = state.rect();
+    let raw_rect = state.rect();
+    let main = ensure_main_window(app).ok();
+    let rect = match (raw_rect, main.as_ref()) {
+        (Some(r), Some(win)) => Some(clamp_rect_to_window(r, win)),
+        (Some(r), None) => Some(r),
+        (None, _) => None,
+    };
     let active = state.active();
     for tab_id in state.order() {
         let label = tab_label(tab_id);
@@ -1086,6 +1111,22 @@ pub async fn browser_dock_set_rect(
 }
 
 #[tauri::command]
+pub async fn browser_dock_resync(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    rect: DockRect,
+) -> Result<(), String> {
+    state.set_rect(rect);
+    update_active_layout(&app, state.inner())?;
+    if let Ok(webview) = active_webview(&app, state.inner()) {
+        let _ = webview.eval(
+            "(function(){try{window.dispatchEvent(new Event('resize'));void document.body&&document.body.offsetHeight;}catch(_){}})();",
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn browser_dock_hide(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
@@ -1099,6 +1140,19 @@ pub async fn browser_dock_hide(
                 .set_size(PhysicalSize::new(1u32, 1u32))
                 .map_err(|e| format!("set_size failed: {e}"))?;
         }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_park(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    if let Ok(webview) = active_webview(&app, state.inner()) {
+        webview
+            .set_position(PhysicalPosition::new(OFFSCREEN.0, OFFSCREEN.1))
+            .map_err(|e| format!("set_position failed: {e}"))?;
     }
     Ok(())
 }
@@ -1972,4 +2026,18 @@ pub fn install_into(app: &AppHandle) {
     let controller = TauriDockController::new(app.clone());
     app.manage(controller.clone());
     senweavercoding::tools::browser::install_dock_controller(Arc::new(controller));
+
+    if let Some(window) = app.get_window("main") {
+        let app_for_resize = app.clone();
+        window.on_window_event(move |event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                if let Some(state) = app_for_resize.try_state::<DockSharedState>() {
+                    let _ = update_active_layout(&app_for_resize, state.inner());
+                }
+            }
+        });
+    }
 }

@@ -17,6 +17,7 @@ import { startAiWriteWatcher } from '../../lib/aiWriteWatcher'
 import { TabBar } from './TabBar'
 import { TitleBar } from './TitleBar'
 import { ResizeHandleRight } from './ResizeHandleRight'
+import { ResizeHandleBrowser } from './ResizeHandleBrowser'
 import { ResizeHandles } from './ResizeHandles'
 import { StatusBar } from './StatusBar'
 import { useTabStore } from '../../stores/tabStore'
@@ -28,6 +29,7 @@ import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
 import { TerminalPanel } from '../terminal/TerminalPanel'
 import { startBackgroundShellMirror } from '../../api/backgroundShell'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
+import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 
 export function AppShell() {
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
@@ -35,6 +37,10 @@ export function AppShell() {
   const rightSidebarOpen = useUIStore((s) => s.rightSidebarOpen)
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const terminalPanelOpen = useTerminalPanelStore((s) => s.open)
+  const activeChatTabId = useTabStore((s) => s.activeTabId)
+  const browserPanelVisible = useBrowserPanelStore((s) =>
+    activeChatTabId ? s.panels[activeChatTabId]?.visible ?? false : false,
+  )
   const [ready, setReady] = useState(false)
   const [settingsMounted, setSettingsMounted] = useState(false)
 
@@ -148,6 +154,25 @@ export function AppShell() {
     }
   }, [])
 
+  useEffect(() => {
+    const dispatchRemeasure = () => {
+      document.dispatchEvent(new CustomEvent('browser-panel-remeasure'))
+    }
+    const dispatchResync = () => {
+      document.dispatchEvent(new CustomEvent('browser-panel-resync'))
+    }
+    dispatchRemeasure()
+    const resyncTimers = [120, 320, 600, 950].map((ms) =>
+      window.setTimeout(() => {
+        dispatchRemeasure()
+        dispatchResync()
+      }, ms),
+    )
+    return () => {
+      for (const id of resyncTimers) window.clearTimeout(id)
+    }
+  }, [isMaximized])
+
   if (!ready) {
     return (
       <>
@@ -187,33 +212,43 @@ export function AppShell() {
           <Sidebar />
         </div>
         <div className="relative flex-1 flex min-w-0 overflow-hidden">
-          <main
-            id="content-area"
-            data-sidebar-state={sidebarOpen ? 'open' : 'closed'}
-            className="min-w-0 flex-1 flex flex-col overflow-hidden"
+          <div
+            className="relative flex flex-1 flex-col overflow-hidden"
+            style={{ minWidth: 240 }}
           >
-            <TabBar />
-            <ContentRouter />
-          </main>
+            <main
+              id="content-area"
+              data-sidebar-state={sidebarOpen ? 'open' : 'closed'}
+              className="min-w-0 flex-1 flex flex-col overflow-hidden"
+            >
+              <TabBar />
+              <ContentRouter />
+            </main>
+            {settingsMounted && (
+              <div
+                aria-hidden={!settingsOverlayOpen}
+                className={
+                  settingsOverlayOpen
+                    ? 'absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]'
+                    : 'hidden'
+                }
+              >
+                <Settings />
+              </div>
+            )}
+          </div>
+          {browserPanelVisible && (
+            <>
+              <ResizeHandleBrowser />
+              <EmbeddedBrowserPanel />
+            </>
+          )}
           <div
             className={rightSidebarOpen ? 'contents' : 'hidden'}
           >
             <ResizeHandleRight />
             <RightSidebar />
           </div>
-          {settingsMounted && (
-            <div
-              aria-hidden={!settingsOverlayOpen}
-              className={
-                settingsOverlayOpen
-                  ? 'absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]'
-                  : 'hidden'
-              }
-            >
-              <Settings />
-            </div>
-          )}
-          <EmbeddedBrowserPanel />
         </div>
       </div>
       {terminalPanelOpen && <TerminalPanel />}

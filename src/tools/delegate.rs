@@ -1133,7 +1133,7 @@ impl DelegateTool {
                                         delta: name,
                                     })
                                 }
-                                DraftEvent::ToolResult { name, output } => {
+                                DraftEvent::ToolResult { name, output, success: _ } => {
                                     let preview =
                                         output.chars().take(160).collect::<String>();
                                     Some(DraftEvent::Subagent {

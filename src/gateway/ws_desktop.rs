@@ -162,6 +162,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let inbound_tx_lsp = inbound_tx.clone();
     let inbound_tx_replay = inbound_tx.clone();
 
+    let cancel_signal_handle = agent.cancel_signal_handle();
+    let cancelled_atomic = agent.cancel_token();
+    let cancel_signal_for_reader = std::sync::Arc::clone(&cancel_signal_handle);
+    let cancelled_atomic_for_reader = std::sync::Arc::clone(&cancelled_atomic);
+
     let reader_handle = tokio::spawn(async move {
         while let Some(frame) = receiver.next().await {
             match frame {
@@ -186,6 +191,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+                    if msg_type.as_str() == "stop_generation" {
+                        cancelled_atomic_for_reader
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        cancel_signal_for_reader.load_full().cancel();
+                        tracing::info!(
+                            target: "agent.cancel",
+                            "stop_generation received: cancel signal fired (reader-side)"
+                        );
+                    }
                     match msg_type.as_str() {
 
                         "permission_response" | "computer_use_permission_response" => {
@@ -394,11 +408,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             }
             "set_coding_mode" => {
                 let mode_str = parsed.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                let scope = parsed
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("session");
                 if let Some(parsed_mode) =
                     crate::agent::coding_mode::CodingMode::from_str_loose(mode_str)
                 {
                     if let Some(svc) = crate::services::try_get_services() {
-                        *svc.coding_mode.write() = parsed_mode;
+                        svc.set_session_coding_mode(&session_key, parsed_mode);
+                        if scope == "global" {
+                            *svc.coding_mode.write() = parsed_mode;
+                        }
                     }
                     agent.set_coding_mode(parsed_mode);
                     let derived = super::desktop_routes::derive_permission_from_coding(&parsed_mode);
@@ -413,6 +434,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 "mode": parsed_mode.display_name(),
                                 "label": parsed_mode.label(),
                                 "permissionMode": derived,
+                                "scope": scope,
                             },
                         }),
                     )
@@ -513,8 +535,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 }
 
                 if let Some(svc) = crate::services::try_get_services() {
-                    let global_mode = *svc.coding_mode.read();
-                    agent.set_coding_mode(global_mode);
+                    let resolved = svc.resolve_coding_mode_for(Some(&session_key));
+                    agent.set_coding_mode(resolved);
                 }
 
                 {
@@ -522,6 +544,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     state.push_live_config(snap);
                 }
 
+                agent.reset_cancel();
                 run_turn(&state, &mut agent, &mut sender, &session_id, &session_key, &content).await;
             }
             "start_plan_execution" => {
@@ -548,6 +571,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
                 let agent_mode = crate::agent::coding_mode::CodingMode::Agent;
                 if let Some(svc) = crate::services::try_get_services() {
+                    svc.set_session_coding_mode(&session_key, agent_mode);
+
                     *svc.coding_mode.write() = agent_mode;
                 }
                 agent.set_coding_mode(agent_mode);
@@ -673,6 +698,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
                 agent.arm_plan_execution(plan_path.clone());
 
+                agent.reset_cancel();
                 run_turn(
                     &state,
                     &mut agent,
@@ -696,6 +722,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
     reader_handle.abort();
     lsp_forwarder.abort();
+
+    if let Some(svc) = crate::services::try_get_services() {
+        svc.clear_session_coding_mode(&session_key);
+    }
 
     state.hooks.fire_session_end(&session_id, "ws_desktop").await;
 }
@@ -1114,13 +1144,14 @@ async fn run_turn(
                     )
                     .await;
                 }
-                TurnEvent::ToolResult { name, output } => {
+                TurnEvent::ToolResult { name, output, success } => {
                     let id = tool_use_id_for_name
                         .remove(&name)
                         .or_else(|| current_tool_use_id.clone())
                         .unwrap_or_else(next_tool_use_id);
                     current_tool_use_id = None;
-                    let is_error = output.starts_with("Error:") || output.starts_with("error:");
+                    let is_error = !success
+                        || crate::agent::tool_event_status::output_indicates_error(&output);
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
                         pg.on_tool_result(&id, output.clone(), is_error);
                     }

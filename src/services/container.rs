@@ -29,7 +29,7 @@ use super::team_memory_sync::TeamMemorySyncService;
 use super::token_estimation::TokenEstimator;
 use super::tool_use_summary::ToolUseSummaryService;
 
-use crate::agent::coding_mode::CodingModeHandle;
+use crate::agent::coding_mode::{CodingMode, CodingModeHandle};
 use crate::commands::registry::CommandRegistry;
 use crate::tasks::runner::TaskRunner;
 use crate::tools::exit_plan_mode::PendingPlan;
@@ -117,6 +117,9 @@ pub struct ServiceContainer {
 
     pub coding_mode: CodingModeHandle,
 
+    pub session_coding_modes:
+        Arc<parking_lot::RwLock<std::collections::HashMap<String, CodingMode>>>,
+
     pub pending_plan: PendingPlan,
 
     pub todo_store: TodoStore,
@@ -187,6 +190,9 @@ impl ServiceContainer {
             command_registry,
             task_runner: TaskRunner::new(),
             coding_mode: crate::agent::coding_mode::new_coding_mode_handle(),
+            session_coding_modes: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             pending_plan: crate::tools::exit_plan_mode::new_pending_plan(),
             todo_store: Arc::new(parking_lot::RwLock::new(Vec::new())),
             max_context_tokens: AtomicUsize::new(128_000),
@@ -250,6 +256,29 @@ impl ServiceContainer {
         self.shared_config
             .clone()
             .subscribe_filtered(prefixes, callback)
+    }
+
+    pub fn session_coding_mode(&self, session_key: &str) -> Option<CodingMode> {
+        self.session_coding_modes.read().get(session_key).copied()
+    }
+
+    pub fn set_session_coding_mode(&self, session_key: &str, mode: CodingMode) {
+        self.session_coding_modes
+            .write()
+            .insert(session_key.to_string(), mode);
+    }
+
+    pub fn clear_session_coding_mode(&self, session_key: &str) {
+        self.session_coding_modes.write().remove(session_key);
+    }
+
+    pub fn resolve_coding_mode_for(&self, session_key: Option<&str>) -> CodingMode {
+        if let Some(key) = session_key {
+            if let Some(mode) = self.session_coding_modes.read().get(key).copied() {
+                return mode;
+            }
+        }
+        *self.coding_mode.read()
     }
 }
 

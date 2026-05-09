@@ -342,16 +342,22 @@ impl AcpServer {
                         "args": args,
                     }),
                 },
-                TurnEvent::ToolResult { name, output } => JsonRpcNotification {
-                    jsonrpc: "2.0",
-                    method: "session/event",
-                    params: serde_json::json!({
-                        "sessionId": session_id,
-                        "type": "tool_result",
-                        "name": name,
-                        "output": output,
-                    }),
-                },
+                TurnEvent::ToolResult { name, output, success } => {
+                    let is_error = !success
+                        || crate::agent::tool_event_status::output_indicates_error(&output);
+                    JsonRpcNotification {
+                        jsonrpc: "2.0",
+                        method: "session/event",
+                        params: serde_json::json!({
+                            "sessionId": session_id,
+                            "type": "tool_result",
+                            "name": name,
+                            "output": output,
+                            "success": success,
+                            "isError": is_error,
+                        }),
+                    }
+                }
                 TurnEvent::Thinking { delta } => JsonRpcNotification {
                     jsonrpc: "2.0",
                     method: "session/event",

@@ -14,6 +14,8 @@ import { ListHeader, ListDetail } from './ListToolView'
 import { EditHeader, EditDetail } from './EditToolView'
 import { ExecHeader, ExecDetail } from './ExecToolView'
 import { WebHeader, WebDetail } from './WebToolView'
+import { WebSearchHeader, WebSearchDetail } from './WebSearchToolView'
+import { isWebSearchTool } from '../../../utils/toolFormatters'
 import { MemoryRecallHeader, MemoryRecallDetail } from './MemoryRecallView'
 import { PlanHeader, PlanDetail } from './PlanToolView'
 import { TaskHeader, TaskDetail } from './TaskToolView'
@@ -49,7 +51,21 @@ const RENDERERS: Record<ToolCategory, Renderer> = {
     Detail: SearchDetail,
     getHoverContent: getSearchHoverContent,
   },
-  web: { Header: WebHeader, Detail: WebDetail },
+  web: {
+    Header: (props) =>
+      isWebSearchTool(props.toolName) ? (
+        <WebSearchHeader {...props} />
+      ) : (
+        <WebHeader {...props} />
+      ),
+    Detail: (props) =>
+      isWebSearchTool(props.toolName) ? (
+        <WebSearchDetail {...props} />
+      ) : (
+        <WebDetail {...props} />
+      ),
+    alwaysExpandable: true,
+  },
   edit: { Header: EditHeader, Detail: EditDetail, alwaysExpandable: true },
   exec: { Header: ExecHeader, Detail: ExecDetail, alwaysExpandable: true },
   memory_recall: { Header: MemoryRecallHeader, Detail: MemoryRecallDetail },

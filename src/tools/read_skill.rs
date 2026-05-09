@@ -102,9 +102,9 @@ impl Tool for ReadSkillTool {
         };
 
         match tokio::fs::read_to_string(location).await {
-            Ok(output) => Ok(ToolResult {
+            Ok(raw) => Ok(ToolResult {
                 success: true,
-                output,
+                output: format_skill_payload(&skill.name, location, &raw),
                 error: None,
             }),
             Err(err) => Ok(ToolResult {
@@ -118,4 +118,33 @@ impl Tool for ReadSkillTool {
             }),
         }
     }
+}
+
+fn format_skill_payload(name: &str, location: &std::path::Path, raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n");
+    let body = if let Some(rest) = normalized.strip_prefix("---\n") {
+        if let Some(idx) = rest.find("\n---\n") {
+            rest[idx + 5..].to_string()
+        } else if let Some(stripped) = rest.strip_suffix("\n---") {
+            let _ = stripped;
+            String::new()
+        } else {
+            normalized
+        }
+    } else {
+        normalized
+    };
+
+    let mut out = String::new();
+    out.push_str("# Skill: ");
+    out.push_str(name);
+    out.push('\n');
+    out.push_str("Source: ");
+    out.push_str(&location.display().to_string());
+    out.push_str("\n\n");
+    out.push_str(body.trim_start());
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }

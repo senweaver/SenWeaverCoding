@@ -99,7 +99,7 @@ export function QuestionStrip() {
   )
 
   const [activeIdx, setActiveIdx] = useState(0)
-  const [selections, setSelections] = useState<Record<string, string>>({})
+  const [selections, setSelections] = useState<Record<string, string[]>>({})
   const submittedRef = useRef(false)
 
   useEffect(() => {
@@ -136,8 +136,8 @@ export function QuestionStrip() {
   const activeQuestion = questions[Math.min(activeIdx, questions.length - 1)]
   if (!activeQuestion) return null
 
-  const allAnswered = questions.every((q) => !!selections[q.id])
-  const anyAnswered = questions.some((q) => !!selections[q.id])
+  const allAnswered = questions.every((q) => (selections[q.id]?.length ?? 0) > 0)
+  const anyAnswered = questions.some((q) => (selections[q.id]?.length ?? 0) > 0)
 
   const inputObject =
     pendingPermission.input && typeof pendingPermission.input === 'object'
@@ -161,14 +161,29 @@ export function QuestionStrip() {
     }
   }
 
+  function toggleOption(question: Question, optId: string) {
+    setSelections((prev) => {
+      const current = prev[question.id] ?? []
+      if (question.allowMultiple) {
+        const exists = current.includes(optId)
+        const next = exists ? current.filter((x) => x !== optId) : [...current, optId]
+        return { ...prev, [question.id]: next }
+      }
+      return { ...prev, [question.id]: [optId] }
+    })
+  }
+
   function buildAnswerPayload(skipped: boolean) {
-    const answers: Record<string, string> = {}
+    const answers: Record<string, string | string[]> = {}
     if (!skipped) {
       for (const q of questions) {
-        const optId = selections[q.id]
-        if (!optId) continue
-        const label = q.options.find((o) => o.id === optId)?.label ?? optId
-        answers[q.id] = label
+        const optIds = selections[q.id] ?? []
+        if (optIds.length === 0) continue
+        const labels = optIds
+          .map((id) => q.options.find((o) => o.id === id)?.label ?? id)
+          .filter((label): label is string => typeof label === 'string' && label.length > 0)
+        if (labels.length === 0) continue
+        answers[q.id] = q.allowMultiple ? labels : (labels[0] ?? '')
       }
     }
     const details = readDetailsFromComposer()
@@ -201,6 +216,8 @@ export function QuestionStrip() {
     })
     clearComposer()
   }
+
+  const activeSelections = selections[activeQuestion.id] ?? []
 
   return (
     <div className="shrink-0 px-8">
@@ -243,21 +260,37 @@ export function QuestionStrip() {
         </div>
 
         <div className="px-3 py-2.5">
-          <div className="text-[12px] font-semibold text-[var(--color-text-primary)] mb-2">
-            <span className="text-[var(--color-text-tertiary)] mr-1.5">{activeIdx + 1}.</span>
-            {activeQuestion.prompt}
+          <div className="text-[12px] font-semibold text-[var(--color-text-primary)] mb-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+            <span className="text-[var(--color-text-tertiary)]">{activeIdx + 1}.</span>
+            <span>{activeQuestion.prompt}</span>
+            {activeQuestion.allowMultiple && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[var(--color-plan-accent-container)] text-[var(--color-on-plan-accent-container)] uppercase tracking-wide">
+                {t('plan.multiSelectHint')}
+              </span>
+            )}
           </div>
           <div className="flex flex-col gap-1">
             {activeQuestion.options.map((opt, idx) => {
-              const isSelected = selections[activeQuestion.id] === opt.id
+              const isSelected = activeSelections.includes(opt.id)
               const letter = LETTERS[idx] ?? String(idx + 1)
+              const indicator = activeQuestion.allowMultiple ? (
+                <span
+                  className={`material-symbols-outlined text-[14px] ${
+                    isSelected
+                      ? 'text-[var(--color-on-plan-accent-container)]'
+                      : 'text-[var(--color-text-secondary)]'
+                  }`}
+                >
+                  {isSelected ? 'check_box' : 'check_box_outline_blank'}
+                </span>
+              ) : (
+                <span className="text-[10px] font-bold uppercase">{letter}</span>
+              )
               return (
                 <button
                   key={opt.id}
                   type="button"
-                  onClick={() =>
-                    setSelections((prev) => ({ ...prev, [activeQuestion.id]: opt.id }))
-                  }
+                  onClick={() => toggleOption(activeQuestion, opt.id)}
                   className={`flex items-start gap-2 rounded-[var(--radius-md)] px-2 py-1.5 text-left transition-colors ${
                     isSelected
                       ? 'bg-[var(--color-plan-accent-container)] text-[var(--color-on-plan-accent-container)]'
@@ -265,13 +298,13 @@ export function QuestionStrip() {
                   }`}
                 >
                   <span
-                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-bold uppercase ${
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded ${
                       isSelected
                         ? 'bg-[var(--color-plan-accent)] text-[var(--color-on-plan-accent-container)]'
                         : 'bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]'
                     }`}
                   >
-                    {letter}
+                    {indicator}
                   </span>
                   <span className="text-[12px] leading-snug">
                     <span className="font-semibold mr-1">{letter}.</span>

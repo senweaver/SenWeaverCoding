@@ -4,6 +4,7 @@ export const en = {
   'common.save': 'Save',
   'common.saving': 'Saving...',
   'common.delete': 'Delete',
+  'common.edit': 'Edit',
   'common.add': 'Add',
   'common.run': 'Run',
   'common.send': 'Send',
@@ -49,11 +50,12 @@ export const en = {
   'sidebar.browserPanel': 'Embedded browser',
 
   'browser.panel.title': 'Embedded browser',
-  'browser.panel.expand': 'Expand browser',
   'browser.panel.collapse': 'Collapse browser',
   'browser.panel.close': 'Close',
   'browser.panel.empty': 'Loading browser…',
-  'browser.panel.urlPlaceholder': 'Enter URL and press Enter',
+  'browser.panel.empty.title': 'Browser',
+  'browser.panel.empty.hint': 'Enter a URL above, or instruct the Agent to navigate and use the browser',
+  'browser.panel.urlPlaceholder': 'Enter URL or search…',
   'browser.panel.back': 'Back',
   'browser.panel.forward': 'Forward',
   'browser.panel.reload': 'Reload',
@@ -89,9 +91,16 @@ export const en = {
   'browser.panel.tabs.close': 'Close tab',
   'browser.panel.tabs.untitled': 'New tab',
   'browser.panel.tabs.activate': 'Switch to this tab',
+  'browser.panel.tabs.agentActive': 'Agent is working in this tab',
   'browser.panel.toast.screenshotSaved': 'Screenshot saved',
   'browser.panel.toast.screenshotCopied': 'Screenshot copied to clipboard',
   'browser.panel.toast.screenshotFailed': 'Screenshot failed',
+  'browser.panel.actor.user': 'USER',
+  'browser.panel.actor.agent': 'AGENT',
+  'browser.panel.cooperate.title': 'Co-driving timeline',
+  'browser.panel.cooperate.empty': 'No actions yet from you or the agent.',
+  'browser.panel.cooperate.agentBubble': 'Agent {kind}',
+  'browser.panel.splitter.dragHorizontal': 'Drag to resize console / inspector area',
 
   'rightSidebar.title': 'Workspace',
   'rightSidebar.toggleOpen': 'Open file explorer',
@@ -790,6 +799,40 @@ export const en = {
   'settings.skills.browserDescription': 'Inspect bundled, project, and user skills, compare their scope, and open each skill folder to read its docs and source files.',
   'settings.skills.entryEyebrow': 'Skill Entry',
   'settings.skills.slashCommand': '/slash',
+  'settings.skills.alwaysApplyBadge': 'Always Applied',
+  'settings.skills.alwaysApplyHint':
+    'This skill declares alwaysApply: true and is fully injected into the system prompt every turn, even in compact mode.',
+  'settings.skills.newButton': 'New Skill',
+  'settings.skills.newDialogTitle': 'New User Skill',
+  'settings.skills.fieldName': 'Skill name (folder name)',
+  'settings.skills.namePlaceholder': 'e.g. code-review',
+  'settings.skills.nameHint':
+    'Letters, digits, dash and underscore only. Becomes ~/.senweavercoding/skills/<name>/SKILL.md.',
+  'settings.skills.nameInvalid':
+    'Invalid name. Use ASCII letters, digits, "-" or "_" only (no spaces or path characters).',
+  'settings.skills.fieldContent': 'SKILL.md content',
+  'settings.skills.createButton': 'Create',
+  'settings.skills.createdToast': 'Skill created.',
+  'settings.skills.deletedToast': 'Skill deleted.',
+  'settings.skills.deleteFailed': 'Failed to delete skill',
+  'settings.skills.dropHint':
+    'Tip: drag a skill folder (containing SKILL.md) or a single .md file here to install it.',
+  'settings.skills.dropOverlayTitle': 'Drop to install skill',
+  'settings.skills.dropOverlayHint':
+    'Drop a skill folder (with SKILL.md) or a single .md file',
+  'settings.skills.installing': 'Installing…',
+  'settings.skills.installSummary': 'Installed {count} skill(s).',
+  'settings.skills.installFailed': 'Failed to install skill',
+  'settings.skills.conflictTitle': 'Replace existing skill?',
+  'settings.skills.conflictTitlePlural': 'Replace existing skills?',
+  'settings.skills.conflictBody':
+    'The following name(s) already exist in your user skills directory and will be overwritten:',
+  'settings.skills.conflictOverwrite': 'Overwrite',
+  'settings.skills.conflictKeepBoth': 'Keep both',
+  'settings.skills.renamedToast': 'Installed as "{name}" to avoid name collision.',
+  'settings.skills.deleteConfirmTitle': 'Delete this skill?',
+  'settings.skills.deleteConfirmBody':
+    'The folder for "{name}" will be permanently removed from ~/.senweavercoding/skills. This cannot be undone.',
   'settings.skills.tokenEstimate': '~{count} tokens',
   'settings.skills.tokenEstimateShort': '~{count}',
   'settings.skills.summary.totalSkills': 'Total skills',
@@ -802,7 +845,9 @@ export const en = {
   'settings.skills.ready': 'Ready',
   'settings.skills.unavailable': 'Unavailable',
   'settings.skills.empty': 'No skills installed',
-  'settings.skills.emptyHint': 'Add skills to ~/.sen/skills/ to get started',
+  'settings.skills.emptyHint': 'Add skills to ~/.senweavercoding/skills/ to get started',
+  'settings.skills.openDirectory': 'Open Skills Folder',
+  'settings.skills.openFailed': 'Failed to open skills folder',
   'settings.skills.back': 'Back to list',
   'settings.skills.files': 'files',
   'settings.skills.entryFile': 'entry file',
@@ -935,6 +980,7 @@ export const en = {
   'chat.select': 'select',
   'chat.dismiss': 'dismiss',
   'chat.stopTitle': 'Stop generation (Cmd+.)',
+  'chat.stopping': 'Stopping...',
   'chat.tokenRing.tooltip': '{pct}% · {used} / {total} context used',
   'chat.tokenRing.tooltipCycled': '{pct}% · {used} / {total} context used · cycle {cycle}',
   'chat.rewindAction': 'Rewind to here',
@@ -1028,6 +1074,7 @@ export const en = {
   'plan.continue': 'Continue',
   'plan.skipKey': 'Esc',
   'plan.continueKey': '\u23CE',
+  'plan.multiSelectHint': 'Select multiple',
   'composer.askDetailsPlaceholder': 'Add more optional details',
 
   'plan.answersTitle': 'Answers',
@@ -1098,6 +1145,13 @@ export const en = {
   'tool.success': 'SUCCESS',
   'tool.showLess': 'Show less',
   'tool.showMore': 'Show {count} more characters',
+
+  'tool.web.searchInProgress': 'Searching the web…',
+  'tool.web.searchDone': 'Web search complete',
+  'tool.web.searchFailed': 'Web search failed',
+  'tool.web.readPages': 'Read {count} pages',
+  'tool.web.noResults': 'No results found',
+  'tool.web.providerLabel': 'Provider:',
 
   'tool.verb.read': 'Read',
   'tool.verb.listed': 'Listed',
@@ -1437,6 +1491,10 @@ export const en = {
   'codingMode.confirmAutonomousBody':
     'In Agent / Harness mode the assistant decomposes tasks and executes file edits, shell commands, and tool calls automatically. Use this only on a workspace you trust and back up.',
   'codingMode.confirmAutonomousBtn': 'Enable autonomous mode',
+  'codingMode.webSearchStatus': 'Web search',
+  'codingMode.webFetchStatus': 'Web fetch',
+  'codingMode.webStatusOn': 'Enabled',
+  'codingMode.webStatusOff': 'Disabled',
   'codingMode.vibe.label': 'Vibe',
   'codingMode.vibe.description':
     'Full tool access with minimal prompting — for fast prototyping and free-form coding when you trust the agent to move quickly.',
@@ -1823,7 +1881,71 @@ export const en = {
   'settings.toolsAndMcps.description':
     'Manage user-defined script-wrapped tools and external MCP server connections.',
   'settings.toolsAndMcps.subtabTools': 'Custom Tools',
+  'settings.toolsAndMcps.subtabGuardrails': 'Guardrails',
+  'settings.toolsAndMcps.subtabWeb': 'Web Research',
   'settings.toolsAndMcps.subtabMcps': 'MCP Servers',
+
+  'settings.web.title': 'Web Research',
+  'settings.web.description':
+    'Let the assistant gather external evidence (docs, specs, vendor pages) via web search and fetch. Both are on by default; disable here to keep the agent fully local.',
+  'settings.web.loading': 'Loading web research settings…',
+  'settings.web.disabledHint':
+    'Currently OFF. The model will not call this tool and will be told via system reminder to answer from local context only.',
+  'settings.web.providerHintNoKey':
+    'No API key is configured for this provider — the runtime will fall back to DuckDuckGo until you add one.',
+  'settings.web.search.title': 'Web Search',
+  'settings.web.search.description':
+    'Issue queries to a search provider and stream back ranked results so the agent can cite sources.',
+  'settings.web.search.provider': 'Provider',
+  'settings.web.search.maxResults': 'Max Results (1-10)',
+  'settings.web.search.timeout': 'Timeout (seconds)',
+  'settings.web.fetch.title': 'Web Fetch',
+  'settings.web.fetch.description':
+    'Allow the agent to read primary sources by fetching specific URLs (paired with web search for citations).',
+  'settings.web.fetch.allowedDomains': 'Allowed Domains',
+  'settings.web.fetch.allowedDomainsHint':
+    'Comma-separated list. Use "*" to allow any host. Block lists override allow lists.',
+  'settings.web.fetch.maxSize': 'Max Response Size (bytes)',
+  'settings.web.fetch.timeout': 'Timeout (seconds)',
+
+  'settings.userRules.title': 'Instruction Rules',
+  'settings.userRules.description':
+    'Markdown files placed in this directory are appended to the assistant system prompt as project-wide instructions.',
+  'settings.userRules.openDirectory': 'Open Directory',
+  'settings.userRules.empty': 'No rule files yet.',
+  'settings.userRules.emptyHint':
+    'Click Open Directory to create the folder, then drop in any *.md or *.mdc rule file.',
+  'settings.userRules.createdHint': 'Directory created. Add rule files inside, then refresh.',
+  'settings.userRules.openFailed': 'Failed to open directory',
+  'settings.userRules.tierExplanation':
+    'Tip: add a YAML frontmatter `alwaysApply: false` to make a rule on-demand (loaded only when the assistant needs it). Files without frontmatter (or `alwaysApply: true`) are always applied as binding constraints — the safe default.',
+  'settings.userRules.alwaysApplyBadge': 'Always Applied',
+  'settings.userRules.alwaysApplyHint':
+    'Full rule body is injected into every system prompt as a binding constraint.',
+  'settings.userRules.onDemandBadge': 'On Demand',
+  'settings.userRules.onDemandHint':
+    'Only metadata is preloaded; the assistant calls read_user_rule(name) to load the full body when relevant.',
+  'settings.userRules.newButton': 'New',
+  'settings.userRules.newDialogTitle': 'New Instruction Rule',
+  'settings.userRules.fieldName': 'File name',
+  'settings.userRules.namePlaceholder': 'e.g. typescript-style.md',
+  'settings.userRules.nameHint': 'Saved as: {computed}',
+  'settings.userRules.nameInvalid':
+    'Invalid name. Use a simple filename without slashes, leading dot, or "..".',
+  'settings.userRules.nameConflict': 'A rule with this name already exists.',
+  'settings.userRules.fieldContent': 'Rule content (Markdown + optional YAML frontmatter)',
+  'settings.userRules.createButton': 'Create',
+  'settings.userRules.createdToast': 'Rule file created.',
+  'settings.userRules.savedToast': 'Rule file saved.',
+  'settings.userRules.saveFailed': 'Failed to save rule',
+  'settings.userRules.deletedToast': 'Rule file deleted.',
+  'settings.userRules.deleteFailed': 'Failed to delete rule',
+  'settings.userRules.deleteConfirmTitle': 'Delete this rule?',
+  'settings.userRules.deleteConfirmBody':
+    'The file "{name}" will be permanently removed from your rules directory. This cannot be undone.',
+  'settings.userRules.editingHint':
+    'Tip: keep YAML frontmatter at the top to control alwaysApply, description, and name.',
+  'settings.userRules.revealFile': 'Reveal in Explorer',
 
   'settings.tools.listDescription':
     'Tools are registered as custom_<name> in the agent runtime. Disabled entries are skipped.',

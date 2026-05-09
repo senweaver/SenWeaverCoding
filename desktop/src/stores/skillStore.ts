@@ -6,6 +6,8 @@ export type SkillDetailReturnTab = 'skills' | 'plugins'
 
 type SkillStore = {
   skills: SkillMeta[]
+  workspaceSkillsDir: string | null
+  userSkillsDir: string | null
   selectedSkill: SkillDetail | null
   selectedSkillReturnTab: SkillDetailReturnTab
   isLoading: boolean
@@ -21,10 +23,15 @@ type SkillStore = {
   ) => Promise<void>
   clearSelection: () => void
   setDisabledSkills: (disabledSkills: string[]) => Promise<void>
+  fetchUserSkillContent: (name: string) => Promise<string | null>
+  upsertUserSkill: (name: string, content: string) => Promise<void>
+  deleteUserSkill: (name: string) => Promise<void>
 }
 
-export const useSkillStore = create<SkillStore>((set) => ({
+export const useSkillStore = create<SkillStore>((set, get) => ({
   skills: [],
+  workspaceSkillsDir: null,
+  userSkillsDir: null,
   selectedSkill: null,
   selectedSkillReturnTab: 'skills',
   isLoading: false,
@@ -34,8 +41,13 @@ export const useSkillStore = create<SkillStore>((set) => ({
   fetchSkills: async (cwd) => {
     set({ isLoading: true, error: null })
     try {
-      const { skills } = await skillsApi.list(cwd)
-      set({ skills, isLoading: false })
+      const response = await skillsApi.list(cwd)
+      set({
+        skills: response.skills,
+        workspaceSkillsDir: response.workspace_skills_dir ?? null,
+        userSkillsDir: response.user_skills_dir ?? null,
+        isLoading: false,
+      })
     } catch (err) {
       set({
         error: err instanceof Error ? err.message : String(err),
@@ -65,5 +77,25 @@ export const useSkillStore = create<SkillStore>((set) => ({
 
   setDisabledSkills: async (disabledSkills) => {
     await skillsApi.setDisabledSkills(disabledSkills)
+  },
+
+  fetchUserSkillContent: async (name) => {
+    try {
+      const res = await skillsApi.getUserSkill(name)
+      return res.content
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) })
+      return null
+    }
+  },
+
+  upsertUserSkill: async (name, content) => {
+    await skillsApi.upsertUserSkill(name, content)
+    await get().fetchSkills(undefined)
+  },
+
+  deleteUserSkill: async (name) => {
+    await skillsApi.deleteUserSkill(name)
+    await get().fetchSkills(undefined)
   },
 }))

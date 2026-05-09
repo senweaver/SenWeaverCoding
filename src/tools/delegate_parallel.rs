@@ -839,7 +839,7 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
                                 delta: name,
                             })
                         }
-                        DraftEvent::ToolResult { name, output } => {
+                        DraftEvent::ToolResult { name, output, success: _ } => {
                             let preview = output.chars().take(160).collect::<String>();
                             Some(DraftEvent::Subagent {
                                 task_id: task_id_for_bridge.clone(),

@@ -8,6 +8,7 @@ export function RightSidebar() {
   const t = useTranslation()
   const open = useUIStore((s) => s.rightSidebarOpen)
   const width = useUIStore((s) => s.rightSidebarWidth)
+  const widthAuto = useUIStore((s) => s.rightSidebarWidthAuto)
   const setOpen = useUIStore((s) => s.setRightSidebarOpen)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessions = useSessionStore((s) => s.sessions)
@@ -20,8 +21,13 @@ export function RightSidebar() {
   return (
     <aside
       data-testid="right-sidebar"
-      style={{ width }}
-      className="flex flex-col flex-shrink-0 border-l border-[var(--color-border)] bg-[var(--color-surface)] min-h-0 h-full overflow-hidden"
+      data-width-mode={widthAuto ? 'auto' : 'manual'}
+      style={widthAuto ? undefined : { flex: `0 1 ${width}px`, maxWidth: '100%' }}
+      className={
+        widthAuto
+          ? 'flex flex-col flex-1 min-w-[240px] border-l border-[var(--color-border)] bg-[var(--color-surface)] min-h-0 h-full overflow-hidden'
+          : 'flex flex-col min-w-[240px] border-l border-[var(--color-border)] bg-[var(--color-surface)] min-h-0 h-full overflow-hidden'
+      }
     >
       <RightSidebarShell
         sessionId={activeTabId ?? null}

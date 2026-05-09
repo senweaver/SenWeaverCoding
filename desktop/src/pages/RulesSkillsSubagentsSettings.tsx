@@ -5,7 +5,7 @@ import { useSkillStore } from '../stores/skillStore'
 import { useUIStore } from '../stores/uiStore'
 import { SkillList } from '../components/skills/SkillList'
 import { SkillDetail } from '../components/skills/SkillDetail'
-import { RuleList } from '../components/rules/RuleList'
+import { UserRulesList } from '../components/rules/UserRulesList'
 import { SubagentList } from '../components/subagents/SubagentList'
 import { skillsApi } from '../api/skills'
 
@@ -47,7 +47,7 @@ export function RulesSkillsSubagentsSettings() {
         />
       </div>
 
-      {tab === 'rules' && <RuleList />}
+      {tab === 'rules' && <UserRulesList />}
       {tab === 'skills' && <SkillsTab />}
       {tab === 'subagents' && <SubagentList />}
     </div>

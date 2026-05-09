@@ -194,6 +194,26 @@ pub fn build_context_budget_message(
     ))
 }
 
+pub fn is_file_mutation_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "file_write"
+            | "file_edit"
+            | "multi_edit"
+            | "notebook_edit"
+            | "patch_apply"
+            | "glob_edit"
+            | "code_xfile_refactor"
+            | "lsp_rename"
+            | "lsp_format"
+            | "restore_file"
+            | "copy_path"
+            | "move_path"
+            | "delete_path"
+            | "create_directory"
+    )
+}
+
 pub fn file_mod_auto_verify_nudge(mode: CodingMode) -> Option<&'static str> {
     if !mode.auto_verify_on_edit() {
         return None;
@@ -342,7 +362,82 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              irreversible architectural decisions instead of guessing; (3) never silently \
              skip a failing test or check.",
         ),
-        _ => None,
+        CodingMode::Debug => Some(
+            "[Debug Reminder] STRICT four-stage protocol — do NOT skip steps: \
+             (1) Reproduce: run the failing command/test FIRST and quote its output \
+                 verbatim BEFORE editing anything. \
+             (2) Hypothesize: list at most 3 ranked hypotheses with rationale tied to \
+                 the captured evidence. \
+             (3) Isolate: add diagnostics (logging / asserts / `diagnostics` tool) for \
+                 the top hypothesis BEFORE patching code; gather more evidence. \
+             (4) Fix & Verify: apply ONE minimal change, re-run the original failing \
+                 command, then run the project's full check / test command. \
+             For web-facing bugs, drive the embedded `browser` dock (open → snapshot → \
+             action → screenshot) before AND after the fix and quote the comparison. \
+             Forbidden in this turn: calling `file_edit` / `file_write` / `multi_edit` / \
+             `patch_apply` / `glob_edit` / `code_xfile_refactor` BEFORE Stage-1 evidence \
+             has been produced and quoted in the assistant message.",
+        ),
+        CodingMode::Ask => Some(
+            "[Ask Reminder] Pure read-only Q&A — your single deliverable this turn is \
+             a clear answer with citations. \
+             (1) Cite real `path:line-range` references when explaining code; never \
+                 paraphrase without locating the source. \
+             (2) Prefer narrow lookups over reading whole files: `code_search`, \
+                 `grep` / `content_search`, `code_outline`, `code_graph_query`, \
+                 `lsp_symbols`, `glob_search`. \
+             (3) If the user's intent is genuinely ambiguous, call `ask_question` \
+                 (you DO have it in this mode) — bundle related clarifications into \
+                 ONE call. \
+             (4) Forbidden: any mutation tool (`file_write` / `file_edit` / \
+                 `multi_edit` / `patch_apply` / `glob_edit` / `shell` / \
+                 `git_operations`), and writing or saving any plan document. \
+             (5) Stay in answering voice; do NOT propose execution steps as if they \
+                 will run — Ask mode never executes. If the user clearly wants edits, \
+                 explain what would change and suggest switching to Agent / Harness, \
+                 but do not perform it.",
+        ),
+    }
+}
+
+pub fn web_research_disabled_reminder(
+    mode: CodingMode,
+    web_search_enabled: bool,
+    web_fetch_enabled: bool,
+) -> Option<&'static str> {
+    if web_search_enabled && web_fetch_enabled {
+        return None;
+    }
+    let inject = matches!(
+        mode,
+        CodingMode::Agent
+            | CodingMode::Plan
+            | CodingMode::Spec
+            | CodingMode::Ask
+            | CodingMode::Debug
+            | CodingMode::Harness
+    );
+    if !inject {
+        return None;
+    }
+    match (web_search_enabled, web_fetch_enabled) {
+        (false, false) => Some(
+            "[Web Research] DISABLED — both `web_search` and `web_fetch` are turned OFF in \
+             Settings -> Tools & MCPs -> Web Research. Do NOT call those tools or pretend to \
+             fetch URLs. Answer using only local context, and if external facts are required, \
+             tell the user that web research is currently disabled and ask them to enable it.",
+        ),
+        (false, true) => Some(
+            "[Web Research] `web_search` is DISABLED in Settings -> Tools & MCPs -> Web Research. \
+             Do NOT call `web_search`. You may still use `web_fetch` on URLs the user supplied or \
+             you already have, but you cannot discover new URLs this turn.",
+        ),
+        (true, false) => Some(
+            "[Web Research] `web_fetch` is DISABLED in Settings -> Tools & MCPs -> Web Research. \
+             You may run `web_search` to find candidate URLs, but you CANNOT call `web_fetch` to \
+             read their content this turn — quote the snippet that came back from search instead.",
+        ),
+        (true, true) => None,
     }
 }
 
@@ -369,6 +464,21 @@ pub fn post_tool_batch_message(mode: CodingMode) -> Option<&'static str> {
              off-plan work.\n\
              3. Persist the latest plan with `update_plan(action=\"save\", plan_name=\"<task>\")` \
              so the user sees the live progress.",
+        ),
+        PostToolBehavior::HarnessGate => Some(
+            "[Harness Gate] Tools executed. Before the next layer:\n\
+             1. State which Harness layer just completed (Spec / Skill / Session / \
+             Multi-Agent / Capability / Trellis).\n\
+             2. Quote the verification command output (cargo check / clippy / test / \
+             tsc / lint) verbatim — no \"looks fine\" claims.\n\
+             3. If a phase boundary was crossed, update STATE.md / ROADMAP.md / \
+             TASKS.md (or `.opencode/plans/*.md`) so the structured artifacts stay \
+             in sync with reality.\n\
+             4. Persist key decisions via `memory_store` and synthesize via \
+             `incremental_optimize(action=\"report\", description=\"…\")` before \
+             advancing.\n\
+             5. If verification failed, debug it now — never advance with a broken \
+             check.",
         ),
         _ => None,
     }

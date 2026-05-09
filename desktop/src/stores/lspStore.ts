@@ -147,11 +147,18 @@ export const useLspStore = create<LspStore>((set, get) => ({
     set({ isLoading: true, error: null })
     try {
       const response = await lspApi.list()
-      set({
+      const snapshot: ServerStatusMap = {}
+      for (const entry of response.servers) {
+        if (entry.lifecycleStatus) {
+          snapshot[entry.id] = { status: entry.lifecycleStatus, reason: null }
+        }
+      }
+      set((state) => ({
         enabled: response.enabled,
         servers: response.servers,
         isLoading: false,
-      })
+        serverStatus: { ...state.serverStatus, ...snapshot },
+      }))
     } catch (error) {
       set({
         isLoading: false,

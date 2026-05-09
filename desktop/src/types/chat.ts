@@ -18,7 +18,7 @@ export type ClientMessage =
       response: ComputerUsePermissionResponse
     }
   | { type: 'set_permission_mode'; mode: PermissionMode }
-  | { type: 'set_coding_mode'; mode: CodingModeId }
+  | { type: 'set_coding_mode'; mode: CodingModeId; scope?: 'session' | 'global' }
   | ({ type: 'set_runtime_config' } & RuntimeSelection)
   | { type: 'stop_generation' }
 
@@ -237,7 +237,7 @@ export type UIMessage =
       id: string
       type: 'plan_question_answers'
       timestamp: number
-      items: Array<{ question: string; answer: string }>
+      items: Array<{ question: string; answer: string | string[] }>
       details?: string
     })
 

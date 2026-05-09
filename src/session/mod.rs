@@ -316,11 +316,15 @@ fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
             tool_call_id: format!("{}_call", name),
             arguments: args,
         },
-        TurnEvent::ToolResult { name, output } => SessionEventKind::ToolResult {
-            tool_call_id: format!("{}_call", name),
-            output,
-            is_error: false,
-        },
+        TurnEvent::ToolResult { name, output, success } => {
+            let is_error = !success
+                || crate::agent::tool_event_status::output_indicates_error(&output);
+            SessionEventKind::ToolResult {
+                tool_call_id: format!("{}_call", name),
+                output,
+                is_error,
+            }
+        }
         TurnEvent::Error { message } => SessionEventKind::Error { message },
 
         TurnEvent::FileEdit {

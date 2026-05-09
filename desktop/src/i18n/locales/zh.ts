@@ -6,6 +6,7 @@ export const zh: Record<TranslationKey, string> = {
   'common.save': '保存',
   'common.saving': '保存中...',
   'common.delete': '删除',
+  'common.edit': '编辑',
   'common.add': '添加',
   'common.run': '运行',
   'common.send': '发送',
@@ -51,11 +52,12 @@ export const zh: Record<TranslationKey, string> = {
   'sidebar.browserPanel': '内置浏览器',
 
   'browser.panel.title': '内置浏览器',
-  'browser.panel.expand': '展开浏览器',
   'browser.panel.collapse': '收起浏览器',
   'browser.panel.close': '关闭',
   'browser.panel.empty': '正在加载浏览器…',
-  'browser.panel.urlPlaceholder': '输入网址后按回车',
+  'browser.panel.empty.title': '内置浏览器',
+  'browser.panel.empty.hint': '在上方输入网址，或让助手通过浏览器进行操作',
+  'browser.panel.urlPlaceholder': '输入网址或搜索…',
   'browser.panel.back': '后退',
   'browser.panel.forward': '前进',
   'browser.panel.reload': '刷新',
@@ -91,9 +93,16 @@ export const zh: Record<TranslationKey, string> = {
   'browser.panel.tabs.close': '关闭标签页',
   'browser.panel.tabs.untitled': '新标签页',
   'browser.panel.tabs.activate': '切换到此标签页',
+  'browser.panel.tabs.agentActive': '助手正在此标签页操作',
   'browser.panel.toast.screenshotSaved': '截图已保存',
   'browser.panel.toast.screenshotCopied': '截图已复制到剪贴板',
   'browser.panel.toast.screenshotFailed': '截图失败',
+  'browser.panel.actor.user': '用户',
+  'browser.panel.actor.agent': '助手',
+  'browser.panel.cooperate.title': '共驾时间线',
+  'browser.panel.cooperate.empty': '尚无用户或助手动作。',
+  'browser.panel.cooperate.agentBubble': '助手 {kind}',
+  'browser.panel.splitter.dragHorizontal': '拖动调整 控制台 / 检查器 高度',
 
   'rightSidebar.title': '工作区',
   'rightSidebar.toggleOpen': '打开文件浏览器',
@@ -786,6 +795,39 @@ export const zh: Record<TranslationKey, string> = {
   'settings.skills.browserDescription': '查看内置、项目和用户技能，比较它们的来源与规模，并打开技能目录阅读文档和源码文件。',
   'settings.skills.entryEyebrow': '技能入口',
   'settings.skills.slashCommand': '/斜杠命令',
+  'settings.skills.alwaysApplyBadge': '始终应用',
+  'settings.skills.alwaysApplyHint':
+    '该 skill 声明了 alwaysApply: true，即使在 compact 模式下也会被完整注入系统提示。',
+  'settings.skills.newButton': '新建技能',
+  'settings.skills.newDialogTitle': '新建用户技能',
+  'settings.skills.fieldName': '技能名称（目录名）',
+  'settings.skills.namePlaceholder': '例如 code-review',
+  'settings.skills.nameHint':
+    '仅支持字母、数字、横线和下划线。将创建为 ~/.senweavercoding/skills/<name>/SKILL.md。',
+  'settings.skills.nameInvalid': '名称非法。仅支持 ASCII 字母、数字、"-" 或 "_"（不能包含空格或路径符号）。',
+  'settings.skills.fieldContent': 'SKILL.md 内容',
+  'settings.skills.createButton': '创建',
+  'settings.skills.createdToast': '技能已创建。',
+  'settings.skills.deletedToast': '技能已删除。',
+  'settings.skills.deleteFailed': '删除技能失败',
+  'settings.skills.dropHint':
+    '提示：将一个 skill 目录（内含 SKILL.md）或单个 .md 文件拖到此处即可安装。',
+  'settings.skills.dropOverlayTitle': '松开以安装技能',
+  'settings.skills.dropOverlayHint':
+    '可拖入完整 skill 目录（包含 SKILL.md）或单个 .md 文件',
+  'settings.skills.installing': '安装中…',
+  'settings.skills.installSummary': '已安装 {count} 个技能。',
+  'settings.skills.installFailed': '技能安装失败',
+  'settings.skills.conflictTitle': '同名技能已存在，是否覆盖？',
+  'settings.skills.conflictTitlePlural': '存在多个同名技能，是否全部覆盖？',
+  'settings.skills.conflictBody':
+    '以下技能名称已存在于用户技能目录中，安装将覆盖原有内容：',
+  'settings.skills.conflictOverwrite': '覆盖',
+  'settings.skills.conflictKeepBoth': '保留双方',
+  'settings.skills.renamedToast': '已重命名为 “{name}” 以避免与同名技能冲突。',
+  'settings.skills.deleteConfirmTitle': '确定要删除该技能？',
+  'settings.skills.deleteConfirmBody':
+    '"{name}" 对应的目录将从 ~/.senweavercoding/skills 永久删除，此操作不可撤销。',
   'settings.skills.tokenEstimate': '约 {count} tokens',
   'settings.skills.tokenEstimateShort': '约 {count}',
   'settings.skills.summary.totalSkills': '技能总数',
@@ -798,7 +840,9 @@ export const zh: Record<TranslationKey, string> = {
   'settings.skills.ready': '可查看',
   'settings.skills.unavailable': '不可用',
   'settings.skills.empty': '暂无已安装技能',
-  'settings.skills.emptyHint': '在 ~/.sen/skills/ 中添加技能即可开始',
+  'settings.skills.emptyHint': '在 ~/.senweavercoding/skills/ 中添加技能即可开始',
+  'settings.skills.openDirectory': '打开 Skills 目录',
+  'settings.skills.openFailed': '打开 Skills 目录失败',
   'settings.skills.back': '返回列表',
   'settings.skills.files': '个文件',
   'settings.skills.entryFile': '入口文件',
@@ -931,6 +975,7 @@ export const zh: Record<TranslationKey, string> = {
   'chat.select': '选择',
   'chat.dismiss': '关闭',
   'chat.stopTitle': '停止生成 (Cmd+.)',
+  'chat.stopping': '正在停止...',
   'chat.tokenRing.tooltip': '{pct}% · 已使用 {used} / {total} 上下文',
   'chat.tokenRing.tooltipCycled': '{pct}% · 已使用 {used} / {total} 上下文 · 第 {cycle} 轮',
   'chat.rewindAction': '回滚到这里',
@@ -1024,6 +1069,7 @@ export const zh: Record<TranslationKey, string> = {
   'plan.continue': '继续',
   'plan.skipKey': 'Esc',
   'plan.continueKey': '\u23CE',
+  'plan.multiSelectHint': '可多选',
   'composer.askDetailsPlaceholder': '补充更多可选信息',
 
   'plan.answersTitle': '回答',
@@ -1092,6 +1138,13 @@ export const zh: Record<TranslationKey, string> = {
   'tool.success': '成功',
   'tool.showLess': '收起',
   'tool.showMore': '展开 {count} 个字符',
+
+  'tool.web.searchInProgress': '联网搜索中…',
+  'tool.web.searchDone': '联网搜索完成',
+  'tool.web.searchFailed': '联网搜索失败',
+  'tool.web.readPages': '已阅读 {count} 个网页',
+  'tool.web.noResults': '未找到结果',
+  'tool.web.providerLabel': '搜索源：',
 
   'tool.verb.read': 'Read',
   'tool.verb.listed': 'Listed',
@@ -1430,6 +1483,10 @@ export const zh: Record<TranslationKey, string> = {
   'codingMode.confirmAutonomousBody':
     'Agent / Harness 模式下，助手会自动拆分任务并执行文件编辑、Shell 命令和工具调用。请只在你信任并已备份的工作区使用。',
   'codingMode.confirmAutonomousBtn': '启用自主模式',
+  'codingMode.webSearchStatus': '联网搜索',
+  'codingMode.webFetchStatus': '联网抓取',
+  'codingMode.webStatusOn': '已开启',
+  'codingMode.webStatusOff': '已关闭',
   'codingMode.vibe.label': 'Vibe 自由',
   'codingMode.vibe.description':
     '完整工具权限、极简提示——适合快速原型与自由编码，让智能体放手快跑。',
@@ -1784,7 +1841,69 @@ export const zh: Record<TranslationKey, string> = {
   'settings.toolsAndMcps.description':
     '管理自定义脚本工具与外部 MCP Server 接入。',
   'settings.toolsAndMcps.subtabTools': '自定义工具',
+  'settings.toolsAndMcps.subtabGuardrails': '工具策略',
+  'settings.toolsAndMcps.subtabWeb': '联网研究',
   'settings.toolsAndMcps.subtabMcps': 'MCP Servers',
+
+  'settings.web.title': '联网研究',
+  'settings.web.description':
+    '允许助手在解题前通过联网搜索 / 联网抓取来核实第三方文档、API 版本、规范、错误信息等本地仓库无法回答的问题。两个开关默认都为开启，关闭后 agent 将仅使用本地上下文回答。',
+  'settings.web.loading': '正在加载联网研究设置…',
+  'settings.web.disabledHint':
+    '当前为关闭状态。模型不会调用对应工具，运行期会通过系统提醒告知它仅用本地上下文作答。',
+  'settings.web.providerHintNoKey':
+    '当前提供商需要 API Key 但尚未配置 — 运行期会自动回退到 DuckDuckGo，直到你补齐密钥。',
+  'settings.web.search.title': '联网搜索',
+  'settings.web.search.description':
+    '把查询发给搜索提供商，返回带排名的链接列表给 agent 作引证。',
+  'settings.web.search.provider': '搜索提供商',
+  'settings.web.search.maxResults': '结果数（1-10）',
+  'settings.web.search.timeout': '超时（秒）',
+  'settings.web.fetch.title': '联网抓取',
+  'settings.web.fetch.description':
+    '允许 agent 抓取并阅读指定 URL 的内容，与联网搜索配合使用以获得一手资料。',
+  'settings.web.fetch.allowedDomains': '允许的域名',
+  'settings.web.fetch.allowedDomainsHint':
+    '使用英文逗号分隔；填入 "*" 表示放行任意 host。黑名单优先级高于白名单。',
+  'settings.web.fetch.maxSize': '最大响应大小（字节）',
+  'settings.web.fetch.timeout': '超时（秒）',
+
+  'settings.userRules.title': '指令规则',
+  'settings.userRules.description':
+    '该目录中的 Markdown 文件会作为项目级指令追加到助手的系统提示中。',
+  'settings.userRules.openDirectory': '打开目录',
+  'settings.userRules.empty': '尚无规则文件',
+  'settings.userRules.emptyHint':
+    '点击「打开目录」可自动创建该文件夹，然后放入任意 *.md 或 *.mdc 规则文件。',
+  'settings.userRules.createdHint': '目录已创建，请在其中添加规则文件后刷新。',
+  'settings.userRules.openFailed': '打开目录失败',
+  'settings.userRules.tierExplanation':
+    '提示：在文件顶部添加 YAML frontmatter `alwaysApply: false` 可让该规则改为按需加载（助手判断相关时再载入完整内容）。无 frontmatter 或 `alwaysApply: true` 的文件会作为强制约束始终注入系统提示——这是最安全的默认值。',
+  'settings.userRules.alwaysApplyBadge': '始终应用',
+  'settings.userRules.alwaysApplyHint': '该规则全文每轮都会注入系统提示，作为强制约束。',
+  'settings.userRules.onDemandBadge': '按需加载',
+  'settings.userRules.onDemandHint':
+    '系统提示中只保留元数据；助手判断相关时会调用 read_user_rule(name) 载入完整内容。',
+  'settings.userRules.newButton': '新建',
+  'settings.userRules.newDialogTitle': '新建指令规则',
+  'settings.userRules.fieldName': '文件名',
+  'settings.userRules.namePlaceholder': '例如 typescript-style.md',
+  'settings.userRules.nameHint': '将保存为：{computed}',
+  'settings.userRules.nameInvalid': '名称非法。请使用普通文件名，不要包含 / \\ 开头点号 或 ".."。',
+  'settings.userRules.nameConflict': '已存在同名规则。',
+  'settings.userRules.fieldContent': '规则正文（Markdown，可选 YAML frontmatter）',
+  'settings.userRules.createButton': '创建',
+  'settings.userRules.createdToast': '规则文件已创建。',
+  'settings.userRules.savedToast': '规则文件已保存。',
+  'settings.userRules.saveFailed': '保存规则失败',
+  'settings.userRules.deletedToast': '规则文件已删除。',
+  'settings.userRules.deleteFailed': '删除规则失败',
+  'settings.userRules.deleteConfirmTitle': '确定要删除该规则？',
+  'settings.userRules.deleteConfirmBody':
+    '文件 “{name}” 将从规则目录中永久删除，此操作不可撤销。',
+  'settings.userRules.editingHint':
+    '提示：保留顶部 YAML frontmatter 可继续控制 alwaysApply、description、name。',
+  'settings.userRules.revealFile': '在文件管理器中打开',
 
   'settings.tools.listDescription':
     '工具会以 custom_<name> 名称注册到运行时，禁用项不会注册。',

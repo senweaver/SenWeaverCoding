@@ -24,6 +24,7 @@ export type LspServerRecord = {
   fileExtensions: string[]
   initializationOptions: unknown | null
   installState: LspInstallState
+  lifecycleStatus?: LspServerLifecycleStatus
 }
 
 export type LspListResponse = {

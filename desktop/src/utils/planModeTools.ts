@@ -1,5 +1,6 @@
+import { useSettingsStore } from '../stores/settingsStore'
 
-export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+const FALLBACK_PLAN_MODE_TOOLS: ReadonlySet<string> = new Set([
 
   'file_read',
   'glob_search',
@@ -56,6 +57,26 @@ export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'now',
 ])
 
+export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = FALLBACK_PLAN_MODE_TOOLS
+
+function readBackendPlanTools(): readonly string[] | null {
+  try {
+    const modes = useSettingsStore.getState().codingModes
+    const planEntry = modes.find((m) => m.id === 'plan')
+    if (planEntry?.allowedTools && planEntry.allowedTools.length > 0) {
+      return planEntry.allowedTools
+    }
+  } catch {
+
+  }
+  return null
+}
+
 export function isPlanModeAllowedTool(name: string): boolean {
-  return PLAN_MODE_ALLOWED_TOOLS.has(name)
+  if (!name) return false
+  const fromBackend = readBackendPlanTools()
+  if (fromBackend) {
+    return fromBackend.includes(name) || (name === 'AskQuestion' && fromBackend.includes('ask_question'))
+  }
+  return FALLBACK_PLAN_MODE_TOOLS.has(name)
 }

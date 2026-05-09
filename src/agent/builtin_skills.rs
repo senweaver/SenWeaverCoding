@@ -433,3 +433,61 @@ pub fn harness_rules() -> &'static str {
         "8. **Context budget awareness** — if context is below 30%, summarize/drop stale history before continuing.\n"
     )
 }
+
+pub fn web_research_rules() -> &'static str {
+    "\
+## Web Research Discipline
+
+When the question involves facts that the local repo cannot answer — external API/library \
+versions, the latest specs, CVEs, third-party documentation, vendor product pages, raw error \
+messages, news, release notes — proactively gather evidence with `web_search` (and follow \
+up with `web_fetch` to read primary sources) BEFORE drawing a conclusion.
+
+### Tool priority (strict order)
+1. **`web_search`** — ALWAYS the first choice for any question that needs external information. \
+   The tool already has built-in failover across providers (DuckDuckGo → Baidu → SearXNG when \
+   configured), so a single failure usually just means the keywords were poor, not that the \
+   network is dead. You MUST try `web_search` BEFORE attempting any other web-facing tool.
+2. **`web_fetch`** — use only AFTER `web_search` returned candidate URLs, in order to read the \
+   primary source for the title/snippet you found. Pick a real result URL; do not pass a \
+   search-engine results URL.
+3. **`browser`** — RESERVED for genuine UI/visual tasks: rendering a page, clicking through a \
+   web app, taking a screenshot, exercising auth flows, or scraping a JS-rendered SPA that \
+   `web_fetch` cannot read. As a **last-resort fallback** you may also use `browser` to open a \
+   search-engine results page (e.g. `https://www.baidu.com/s?wd=...`) — but ONLY after \
+   `web_search` itself has actually failed (returned `All web search providers failed: ...` \
+   or a similar error) in the current session. Never use `browser` as the FIRST search tool.
+
+### Failure handling
+- If `web_search` errors once, **rephrase** the query (different keywords, drop punctuation, \
+  add a year/version) and retry up to 2 more times before giving up.
+- Once `web_search` has been attempted and returned a hard failure, the runtime allows you to \
+  fall back to `browser` / `web_fetch` against a search-engine URL. State plainly to the user \
+  that `web_search` is unreachable before doing so.
+- If web_search is currently disabled in settings (the system reminder will say so), do NOT \
+  browser-scrape a search engine as a workaround — tell the user the feature is off.
+
+### Runtime enforcement (you cannot bypass this)
+The runtime gates `browser({action:\"open\"|\"open_tab\"|\"navigate\"|\"goto\", url})` and \
+`web_fetch({url})` whenever the URL host is a known search-engine results page \
+(`baidu.com`, `google.com`, `bing.com`, `duckduckgo.com`, `yandex.*`, `sogou.com`, etc.) \
+AND the URL carries a search query parameter (`q=`, `wd=`, `query=`, ...). \
+- If `web_search` has NOT been tried in the current session, such a call returns a \
+  `[Refused]` tool result and never actually runs. The fix is to call `web_search(query=...)` \
+  with the same intent FIRST. \
+- If `web_search` has already been tried and failed within the last 10 minutes, the gate \
+  relaxes automatically and your `browser` / `web_fetch` fallback proceeds normally. \
+- Once `web_search` succeeds again, the gate re-engages — so always try `web_search` first \
+  for the next question, even if you fell back to `browser` previously.
+
+### Quality bar
+- Budget 1-3 searches per question; if the same query yields no useful results twice, \
+  rephrase the keywords instead of retrying blindly.
+- Prefer official documentation / release notes / RFCs over secondary blogs. When citing, \
+  include the URL and the publication date if visible.
+- Combine `web_search` (find candidates) with `web_fetch` (read the primary page) when a \
+  result snippet is not enough to be sure.
+- If the tool call comes back saying the feature is disabled, tell the user that web \
+  research is currently turned off in Settings → Tools & MCPs → Web Research, then continue \
+  the answer using only local context. NEVER fabricate web results."
+}

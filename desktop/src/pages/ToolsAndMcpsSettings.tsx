@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { useTranslation } from '../i18n'
 import { McpSettings } from './McpSettings'
 import { CustomToolList } from '../components/tools/CustomToolList'
+import { RuleList } from '../components/rules/RuleList'
+import { WebResearchSettings } from './WebResearchSettings'
 
-type SubTab = 'tools' | 'mcps'
+type SubTab = 'tools' | 'guardrails' | 'web' | 'mcps'
 
 export function ToolsAndMcpsSettings() {
   const t = useTranslation()
@@ -28,6 +30,18 @@ export function ToolsAndMcpsSettings() {
           label={t('settings.toolsAndMcps.subtabTools')}
         />
         <SubTabButton
+          active={tab === 'guardrails'}
+          onClick={() => setTab('guardrails')}
+          icon="shield"
+          label={t('settings.toolsAndMcps.subtabGuardrails')}
+        />
+        <SubTabButton
+          active={tab === 'web'}
+          onClick={() => setTab('web')}
+          icon="public"
+          label={t('settings.toolsAndMcps.subtabWeb')}
+        />
+        <SubTabButton
           active={tab === 'mcps'}
           onClick={() => setTab('mcps')}
           icon="hub"
@@ -36,6 +50,8 @@ export function ToolsAndMcpsSettings() {
       </div>
 
       {tab === 'tools' && <CustomToolList />}
+      {tab === 'guardrails' && <RuleList />}
+      {tab === 'web' && <WebResearchSettings />}
       {tab === 'mcps' && <McpSettings />}
     </div>
   )

@@ -10,6 +10,8 @@ export type SkillMeta = {
   contentLength: number
   hasDirectory: boolean
   pluginName?: string
+  always_apply?: boolean
+  tier?: 'always' | 'on_demand'
 }
 
 export type FileTreeNode = {

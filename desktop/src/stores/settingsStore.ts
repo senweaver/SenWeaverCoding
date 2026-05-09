@@ -4,7 +4,7 @@ import { modelsApi } from '../api/models'
 import { codingModesApi } from '../api/codingModes'
 import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode } from '../types/settings'
 import type { CodingModeId, CodingModeInfo } from '../types/codingMode'
-import { DEFAULT_CODING_MODE } from '../types/codingMode'
+import { DEFAULT_CODING_MODE, isVisibleCodingMode } from '../types/codingMode'
 import type { Locale } from '../i18n'
 import { useUIStore } from './uiStore'
 import { useAutonomyStore } from './autonomyStore'
@@ -93,8 +93,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       ])
       const theme = userSettings.theme === 'dark' ? 'dark' : 'light'
       useUIStore.getState().setTheme(theme)
+      const initialMode: CodingModeId = isVisibleCodingMode(codingCurrent.mode)
+        ? codingCurrent.mode
+        : DEFAULT_CODING_MODE
       set({
-        codingMode: codingCurrent.mode,
+        codingMode: initialMode,
         codingModes: codingCatalog.modes,
         permissionMode: legacyPermMode,
         availableModels: modelsRes.models,
@@ -105,6 +108,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         isLoading: false,
         error: null,
       })
+      if (initialMode !== codingCurrent.mode) {
+        codingModesApi
+          .setCurrent(initialMode)
+          .then((res) => {
+            const derived =
+              (res.permissionMode as PermissionMode) || get().permissionMode
+            set({ permissionMode: derived })
+          })
+          .catch((err) => {
+            console.warn('[settings] normalize hidden coding mode failed', err)
+          })
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to load desktop settings'
@@ -114,6 +129,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setCodingMode: async (mode) => {
+    if (!isVisibleCodingMode(mode)) {
+      console.warn('[settings] setCodingMode rejected hidden mode', mode)
+      return
+    }
     const prev = get().codingMode
     set({ codingMode: mode })
     try {
@@ -127,6 +146,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   requestSetCodingMode: async (mode) => {
+    if (!isVisibleCodingMode(mode)) {
+      console.warn('[settings] requestSetCodingMode rejected hidden mode', mode)
+      return
+    }
     if (get().codingMode === mode) return
 
     const autonomy = useAutonomyStore.getState().data
@@ -178,7 +201,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   applyCodingMode: (mode, derivedPermission) => {
-    set({ codingMode: mode, permissionMode: derivedPermission })
+    const safeMode: CodingModeId = isVisibleCodingMode(mode) ? mode : DEFAULT_CODING_MODE
+    set({ codingMode: safeMode, permissionMode: derivedPermission })
   },
 
   applyPermissionMode: (mode) => {

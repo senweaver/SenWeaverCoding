@@ -233,6 +233,7 @@ pub mod services;
 pub mod skillforge;
 pub(crate) mod skills;
 pub mod sop;
+pub mod user_rules;
 pub mod token_saver;
 pub mod tools;
 pub mod trust;
