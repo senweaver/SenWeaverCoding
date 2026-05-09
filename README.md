@@ -19,7 +19,7 @@ installer gives you the full IDE.
 | --- | --- |
 | **Desktop-first** | Tauri 2 shell with native menus, multi-tab sessions, in-app terminal, file browser, embedded browser. |
 | **Rust agent runtime** | Same crate that ships in headless deployments, embedded via `crate-type = ["cdylib", "staticlib", "rlib"]`. Zero IPC overhead. |
-| **12 coding modes** | Plan, Build, Debug, TDD, Spec, Vibe, Architect, Pair, Ask, ContextEng, MVAI, Harness — switch mid-session, each mode rewires system prompt + tool allowlist + auto-verify policy. |
+| **5 coding modes** | Agent, Plan, Ask, Debug, Harness — switch mid-session; each mode rewires system prompt + tool allowlist + auto-verify policy. Agent is the default and exposes the full tool surface. |
 | **130+ tools** | File ops, shell with PTY mirroring, Git, ripgrep search, glob/multi-edit, web search/fetch, headless browser, memory store/recall, todo write, image gen, MCPs, Skills, Subagents. |
 | **Multi-provider** | OpenAI / Anthropic / DeepSeek / Gemini / Copilot / OpenRouter / any OpenAI-compatible. Provider settings live inside the app. |
 | **Persistent memory** | SQLite + Markdown backends with vector embeddings, per-session work-dir isolation, rewind/restore checkpoints. |
@@ -145,7 +145,7 @@ SenWeaverCoding/
 │   └── ...
 │
 ├── desktop/                 # Tauri 2 + React + Vite front-end
-│   ├── src/                 # React app (12 modes, terminal panel,
+│   ├── src/                 # React app (5 modes, terminal panel,
 │   │                        #   plan card, tool result blocks, …)
 │   ├── src-tauri/           # Tauri shell — embeds `src/` as a Rust
 │   │                        #   library, no sidecar process
