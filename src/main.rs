@@ -113,6 +113,7 @@ mod tools;
 mod token_saver;
 mod trust;
 mod tunnel;
+mod user_rules;
 mod util;
 mod verifiable_intent;
 mod workflows;
