@@ -7,6 +7,7 @@ import { Button } from '../shared/Button'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useUserRulesStore } from '../../stores/userRulesStore'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 import { revealInExplorer } from '../../lib/revealInExplorer'
 import type { UserRuleFile } from '../../api/userRules'
 import { CreateRuleDialog } from './CreateRuleDialog'
@@ -370,6 +371,7 @@ function DeleteConfirmModal({
   onConfirm: () => void
 }) {
   const t = useTranslation()
+  useDockSuspend(true)
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
       <div className="w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4 shadow-xl">

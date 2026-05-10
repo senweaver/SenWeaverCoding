@@ -1,4 +1,5 @@
 import { useUIStore, type Toast as ToastType } from '../../stores/uiStore'
+import { useDockEdgeOffset } from '../../hooks/useDockEdgeOffset'
 
 const typeStyles: Record<ToastType['type'], string> = {
   success: 'border-l-4 border-l-[var(--color-success)]',
@@ -34,11 +35,15 @@ function ToastItem({ toast }: { toast: ToastType }) {
 
 export function ToastContainer() {
   const toasts = useUIStore((s) => s.toasts)
+  const rightInset = useDockEdgeOffset()
 
   if (toasts.length === 0) return null
 
   return (
-    <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-sm">
+    <div
+      className="fixed bottom-4 z-[100] flex flex-col gap-2 max-w-sm"
+      style={{ right: `${rightInset + 16}px` }}
+    >
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} />
       ))}

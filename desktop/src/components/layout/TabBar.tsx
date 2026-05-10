@@ -2,6 +2,7 @@ import { forwardRef, useRef, useState, useEffect, useCallback } from 'react'
 import { useTabStore, type Tab } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTranslation } from '../../i18n'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 import { resolveSessionTitle } from '../../utils/sessionTitle'
 import { RightSidebarToggle } from './RightSidebarToggle'
 
@@ -22,6 +23,7 @@ export function TabBar() {
   const [canScrollRight, setCanScrollRight] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null)
   const [closingTabId, setClosingTabId] = useState<string | null>(null)
+  useDockSuspend(closingTabId !== null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [draggingSessionId, setDraggingSessionId] = useState<string | null>(null)
   const [dragOffsetX, setDragOffsetX] = useState(0)

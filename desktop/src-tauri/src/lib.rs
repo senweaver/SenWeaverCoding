@@ -292,6 +292,7 @@ pub fn run() {
         .manage(ServerState::default())
         .manage(TerminalState::default())
         .manage(DockSharedState::new())
+        .register_uri_scheme_protocol("senbridge", browser_dock::senbridge_protocol_handler)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -310,6 +311,7 @@ pub fn run() {
             browser_dock::browser_dock_resync,
             browser_dock::browser_dock_hide,
             browser_dock::browser_dock_park,
+            browser_dock::browser_dock_focus_active,
             browser_dock::browser_dock_close,
             browser_dock::browser_dock_navigate,
             browser_dock::browser_dock_back,

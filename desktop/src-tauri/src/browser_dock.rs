@@ -65,8 +65,8 @@ use senweavercoding::tools::browser::{
 use serde::Deserialize;
 use serde_json::Value;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
-    Url, WebviewUrl, Window, webview::WebviewBuilder,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl, Window,
+    webview::WebviewBuilder,
 };
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
@@ -74,23 +74,51 @@ const ABOUT_BLANK: &str = "about:blank";
 
 const BRIDGE_SCHEME: &str = "senbridge";
 
+const BRIDGE_HOST: &str = "senbridge.localhost";
+
+fn bridge_base_url() -> &'static str {
+    if cfg!(any(target_os = "windows", target_os = "android")) {
+        "http://senbridge.localhost"
+    } else {
+        "senbridge://localhost"
+    }
+}
+
+fn build_bridge_js() -> String {
+    let header = format!(
+        "window.__SEN_BRIDGE_BASE = {base:?};",
+        base = bridge_base_url(),
+    );
+    format!("{header}\n{BRIDGE_JS}")
+}
+
 const BRIDGE_JS: &str = r#"
 (() => {
   if (window.__senDockBridge) return;
 
-  const SCHEME = 'senbridge:';
+  const BRIDGE_BASE = window.__SEN_BRIDGE_BASE || 'http://senbridge.localhost';
 
   function send(kind, data) {
     try {
       const params = new URLSearchParams();
       params.set('kind', kind);
       params.set('data', JSON.stringify(data ?? null));
-      const a = document.createElement('a');
-      a.href = `${SCHEME}//event?${params.toString()}`;
-      a.style.display = 'none';
-      document.documentElement.appendChild(a);
-      a.click();
-      setTimeout(() => { try { a.remove(); } catch (_) {} }, 0);
+      const url = `${BRIDGE_BASE}/event?${params.toString()}`;
+      try {
+        fetch(url, {
+          method: 'GET',
+          mode: 'no-cors',
+          cache: 'no-store',
+          credentials: 'omit',
+          keepalive: true,
+        }).catch(() => {});
+      } catch (_) {
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', url, true);
+          xhr.send();
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 
@@ -125,6 +153,91 @@ const BRIDGE_JS: &str = r#"
       send('console', { level: 'error', message: `[unhandledrejection] ${reason}`, ts: Date.now() });
     } catch (_) {}
   });
+
+  function isOpenableHttpUrl(absolute) {
+    if (typeof absolute !== 'string') return false;
+    const lower = absolute.toLowerCase();
+    return lower.startsWith('http:') || lower.startsWith('https:')
+      || lower.startsWith('ftp:') || lower.startsWith('file:');
+  }
+  function resolveAbsoluteUrl(href) {
+    if (href == null) return '';
+    const raw = String(href).trim();
+    if (!raw) return '';
+    try { return new URL(raw, window.location.href).toString(); } catch (_) { return ''; }
+  }
+  function findAnchorAncestor(start) {
+    let el = start;
+    while (el && el.nodeType === 1) {
+      if (el.tagName === 'A' && (el.getAttribute('href') || el.href)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  function shouldOpenInNewTab(anchor, ev) {
+    if (!anchor) return false;
+    const target = (anchor.getAttribute('target') || '').toLowerCase();
+    if (target === '_blank' || target === 'blank' || target === 'new') return true;
+    if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return true;
+    if (ev && (ev.button === 1 || ev.type === 'auxclick')) return true;
+    return false;
+  }
+  function interceptAnchorClick(ev) {
+    try {
+      if (pickMode) return;
+      if (!ev || ev.defaultPrevented) return;
+      if (ev.button !== undefined && ev.button !== 0 && ev.button !== 1) return;
+      const anchor = findAnchorAncestor(ev.target);
+      if (!anchor) return;
+      if (!shouldOpenInNewTab(anchor, ev)) return;
+      const href = anchor.getAttribute('href') || anchor.href || '';
+      const absolute = resolveAbsoluteUrl(href);
+      if (!isOpenableHttpUrl(absolute)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      send('openNewTab', { url: absolute, source: 'anchor' });
+    } catch (_) {}
+  }
+  document.addEventListener('click', interceptAnchorClick, true);
+  document.addEventListener('auxclick', interceptAnchorClick, true);
+
+  try {
+    const nativeOpen = (typeof window.open === 'function') ? window.open.bind(window) : null;
+    const stubWindow = (absolute) => ({
+      closed: false,
+      location: { href: absolute || 'about:blank' },
+      focus() {},
+      blur() {},
+      close() { this.closed = true; },
+      postMessage() {},
+      opener: null,
+      document: null,
+      addEventListener() {},
+      removeEventListener() {},
+    });
+    const shimmedOpen = function (url, target, features) {
+      try {
+        const absolute = resolveAbsoluteUrl(url);
+        if (isOpenableHttpUrl(absolute)) {
+          send('openNewTab', { url: absolute, source: 'window.open' });
+          return stubWindow(absolute);
+        }
+      } catch (_) {}
+      if (nativeOpen) {
+        try { return nativeOpen(url, target, features); } catch (_) {}
+      }
+      return stubWindow('about:blank');
+    };
+    try { window.open = shimmedOpen; } catch (_) {}
+    try {
+      Object.defineProperty(window, 'open', {
+        configurable: true,
+        writable: true,
+        value: shimmedOpen,
+      });
+    } catch (_) {}
+  } catch (_) {}
 
   let pickMode = false;
   let lastHover = null;
@@ -418,13 +531,19 @@ const BRIDGE_JS: &str = r#"
     click(args) {
       const el = findOne(args && args.selector);
       try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-      el.click();
-      try {
-        const r = el.getBoundingClientRect();
-        const opts = { bubbles: true, cancelable: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2 };
-        el.dispatchEvent(new MouseEvent('mousedown', opts));
-        el.dispatchEvent(new MouseEvent('mouseup', opts));
-      } catch (_) {}
+      const r = el.getBoundingClientRect();
+      const opts = {
+        bubbles: true,
+        cancelable: true,
+        clientX: r.left + r.width / 2,
+        clientY: r.top + r.height / 2,
+        button: 0,
+      };
+      try { el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerType: 'mouse', isPrimary: true })); } catch (_) {}
+      try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch (_) {}
+      try { el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerType: 'mouse', isPrimary: true })); } catch (_) {}
+      try { el.dispatchEvent(new MouseEvent('mouseup', opts)); } catch (_) {}
+      try { el.click(); } catch (_) {}
       return { clicked: args.selector, rect: rectOf(el) };
     },
     set_value(args) {
@@ -651,6 +770,37 @@ const BRIDGE_JS: &str = r#"
   window.addEventListener('hashchange', snapshot);
   window.addEventListener('pushstate', snapshot);
   setTimeout(snapshot, 50);
+
+  let lastSaneW = 0;
+  let lastSaneH = 0;
+  function ensureViewportSane() {
+    try {
+      const docEl = document.documentElement;
+      const innerW = window.innerWidth || 0;
+      const innerH = window.innerHeight || 0;
+      const clientW = (docEl && docEl.clientWidth) || 0;
+      const clientH = (docEl && docEl.clientHeight) || 0;
+      const minDim = 100;
+      const tooSmall = innerW < minDim || innerH < minDim || clientW < minDim || clientH < minDim;
+      const mismatch = Math.abs(innerW - clientW) > 2 || Math.abs(innerH - clientH) > 2;
+      const grew = innerW > lastSaneW + 2 || innerH > lastSaneH + 2;
+      if (tooSmall || mismatch || grew) {
+        window.dispatchEvent(new Event('resize'));
+        if (docEl) { void docEl.offsetHeight; void docEl.offsetWidth; }
+        if (document.body) { void document.body.offsetHeight; void document.body.offsetWidth; }
+      }
+      lastSaneW = innerW;
+      lastSaneH = innerH;
+    } catch (_) {}
+  }
+  window.addEventListener('load', ensureViewportSane);
+  window.addEventListener('DOMContentLoaded', ensureViewportSane);
+  window.addEventListener('popstate', ensureViewportSane);
+  window.addEventListener('hashchange', ensureViewportSane);
+  window.addEventListener('pageshow', ensureViewportSane);
+  window.addEventListener('focus', ensureViewportSane);
+  document.addEventListener('readystatechange', ensureViewportSane);
+  [50, 150, 300, 600, 1200, 2400, 4800].forEach((ms) => setTimeout(ensureViewportSane, ms));
 })();
 "#;
 
@@ -673,12 +823,6 @@ impl DockRect {
 
 pub type TabId = u32;
 
-const TAB_LABEL_PREFIX: &str = "browser_dock_tab_";
-
-fn tab_label(id: TabId) -> String {
-    format!("{TAB_LABEL_PREFIX}{id}")
-}
-
 #[derive(Default, Debug, Clone)]
 struct TabRecord {
     last_url: Option<String>,
@@ -692,6 +836,8 @@ struct TabsState {
     order: Vec<TabId>,
     active: Option<TabId>,
     next_id: TabId,
+    parked: bool,
+    dock_visible: bool,
 }
 
 #[derive(Default, Clone)]
@@ -719,6 +865,22 @@ impl DockSharedState {
 
     fn reset(&self) {
         *self.0.lock() = TabsState::default();
+    }
+
+    fn parked(&self) -> bool {
+        self.0.lock().parked
+    }
+
+    fn set_parked(&self, parked: bool) {
+        self.0.lock().parked = parked;
+    }
+
+    fn dock_visible(&self) -> bool {
+        self.0.lock().dock_visible
+    }
+
+    fn set_dock_visible(&self, visible: bool) {
+        self.0.lock().dock_visible = visible;
     }
 
     fn alloc_id(&self) -> TabId {
@@ -765,15 +927,6 @@ impl DockSharedState {
         (id, true)
     }
 
-    fn discard_reserved(&self, id: TabId) {
-        let mut g = self.0.lock();
-        g.tabs.remove(&id);
-        g.order.retain(|x| *x != id);
-        if g.active == Some(id) {
-            g.active = g.order.last().copied();
-        }
-    }
-
     fn remove_tab(&self, id: TabId) -> Option<TabId> {
         let mut g = self.0.lock();
         g.tabs.remove(&id);
@@ -795,10 +948,6 @@ impl DockSharedState {
 
     fn active(&self) -> Option<TabId> {
         self.0.lock().active
-    }
-
-    fn order(&self) -> Vec<TabId> {
-        self.0.lock().order.clone()
     }
 
     fn list(&self) -> Vec<TabSummary> {
@@ -855,24 +1004,17 @@ fn parse_target_url(input: Option<String>) -> Result<Url, String> {
     Url::parse(&raw).map_err(|err| format!("invalid url '{raw}': {err}"))
 }
 
-fn dispatch_bridge_event(app: &AppHandle, state: &DockSharedState, tab_id: TabId, raw: &Url) {
-    let mut kind: Option<String> = None;
-    let mut data_raw: Option<String> = None;
-    for (k, v) in raw.query_pairs() {
-        if k == "kind" {
-            kind = Some(v.into_owned());
-        } else if k == "data" {
-            data_raw = Some(v.into_owned());
-        }
+fn dispatch_bridge_event(
+    app: &AppHandle,
+    state: &DockSharedState,
+    kind: &str,
+    data_raw: Option<&str>,
+) {
+    if kind.is_empty() {
+        return;
     }
 
-    let kind = match kind {
-        Some(k) if !k.is_empty() => k,
-        _ => return,
-    };
-
     let parsed_data: Value = data_raw
-        .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(Value::Null);
 
@@ -914,36 +1056,109 @@ fn dispatch_bridge_event(app: &AppHandle, state: &DockSharedState, tab_id: TabId
         }
     }
 
-    if kind == "state" {
+    if kind == "openNewTab" {
         if let Some(url) = parsed_data.get("url").and_then(|v| v.as_str()) {
-
-            let prev = state.snapshot_tab(tab_id).0;
-            if prev.as_deref() != Some(url) {
-                if let Some(controller) = app.try_state::<TauriDockController>() {
-                    controller.drain_pending_for_tab(
-                        tab_id,
-                        "dock navigated to a new page",
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                let url_owned = trimmed.to_string();
+                let app_clone = app.clone();
+                if let Err(err) = app.run_on_main_thread(move || {
+                    if let Err(err) = open_url_in_new_tab(&app_clone, url_owned) {
+                        tracing::warn!(
+                            "[browser_dock] openNewTab open_url_in_new_tab failed: {err}"
+                        );
+                    }
+                }) {
+                    tracing::warn!(
+                        "[browser_dock] openNewTab run_on_main_thread failed: {err}"
                     );
                 }
             }
-            state.set_url(tab_id, url);
         }
-        if let Some(title) = parsed_data.get("title").and_then(|v| v.as_str()) {
-            state.set_title(tab_id, title);
-        }
+        return;
+    }
 
-        emit_tabs_event(app, state);
+    let active_tab = state.active();
+
+    if kind == "state" {
+        if let Some(active) = active_tab {
+            if let Some(url) = parsed_data.get("url").and_then(|v| v.as_str()) {
+                let prev = state.snapshot_tab(active).0;
+                if prev.as_deref() != Some(url) {
+                    if let Some(controller) = app.try_state::<TauriDockController>() {
+                        controller.drain_pending_for_tab(
+                            active,
+                            "dock navigated to a new page",
+                        );
+                    }
+                }
+                state.set_url(active, url);
+            }
+            if let Some(title) = parsed_data.get("title").and_then(|v| v.as_str()) {
+                state.set_title(active, title);
+            }
+            emit_tabs_event(app, state);
+        }
     }
 
     let payload = serde_json::json!({
         "kind": kind,
-        "tabId": tab_id,
+        "tabId": active_tab,
         "data": parsed_data,
     });
 
     if let Err(err) = app.emit("browser_dock_event", payload) {
         tracing::warn!("[browser_dock] emit browser_dock_event failed: {err}");
     }
+}
+
+pub fn senbridge_protocol_handler(
+    ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<std::borrow::Cow<'static, [u8]>> {
+    use std::borrow::Cow;
+
+    let app = ctx.app_handle();
+    let uri = request.uri();
+
+    let path_ok = uri
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .map(|seg| seg.eq_ignore_ascii_case("event"))
+        .unwrap_or(false);
+
+    if path_ok {
+        let mut kind = String::new();
+        let mut data_raw: Option<String> = None;
+        if let Some(query) = uri.query() {
+            let stitched = format!("http://x/?{query}");
+            if let Ok(parsed) = Url::parse(&stitched) {
+                for (k, v) in parsed.query_pairs() {
+                    if k == "kind" {
+                        kind = v.into_owned();
+                    } else if k == "data" {
+                        data_raw = Some(v.into_owned());
+                    }
+                }
+            }
+        }
+        if !kind.is_empty() {
+            if let Some(state) = app.try_state::<DockSharedState>() {
+                dispatch_bridge_event(app, state.inner(), &kind, data_raw.as_deref());
+            }
+        }
+    }
+
+    tauri::http::Response::builder()
+        .status(204)
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Cache-Control", "no-store")
+        .body(Cow::Borrowed(&b""[..]))
+        .unwrap_or_else(|_| {
+            tauri::http::Response::new(Cow::Borrowed(&b""[..]))
+        })
 }
 
 fn emit_tabs_event(app: &AppHandle, state: &DockSharedState) {
@@ -965,53 +1180,113 @@ fn ensure_main_window(app: &AppHandle) -> Result<Window, String> {
         .ok_or_else(|| "main window not yet available".to_string())
 }
 
-const OFFSCREEN: (i32, i32) = (-10_000, -10_000);
+const DOCK_WEBVIEW_LABEL: &str = "browser_dock_main";
 
-fn ensure_tab_webview(
+const MIN_INITIAL_DIM: f64 = 320.0;
+const FALLBACK_INITIAL_W: f64 = 960.0;
+const FALLBACK_INITIAL_H: f64 = 720.0;
+
+fn dock_webview(app: &AppHandle) -> Option<tauri::Webview> {
+    app.get_webview(DOCK_WEBVIEW_LABEL)
+}
+
+fn dock_logical_size(rect: Option<DockRect>) -> LogicalSize<f64> {
+    match rect {
+        Some(r) => LogicalSize::new(
+            r.w.max(MIN_INITIAL_DIM),
+            r.h.max(MIN_INITIAL_DIM),
+        ),
+        None => LogicalSize::new(FALLBACK_INITIAL_W, FALLBACK_INITIAL_H),
+    }
+}
+
+fn dock_logical_position(rect: Option<DockRect>) -> LogicalPosition<f64> {
+    match rect {
+        Some(r) => LogicalPosition::new(r.x.max(0.0), r.y.max(0.0)),
+        None => LogicalPosition::new(0.0, 0.0),
+    }
+}
+
+fn ensure_dock_webview(
     app: &AppHandle,
     state: &DockSharedState,
-    tab_id: TabId,
-    url: Option<String>,
-) -> Result<(), String> {
-    let main = ensure_main_window(app)?;
-    let label = tab_label(tab_id);
-
-    if let Some(existing) = app.get_webview(&label) {
-        if let Some(target) = url.as_ref().filter(|s| !s.trim().is_empty()) {
-            let parsed = parse_target_url(Some(target.clone()))?;
-            existing
-                .navigate(parsed)
-                .map_err(|e| format!("navigate failed: {e}"))?;
-            state.set_url(tab_id, target);
-        }
-        return Ok(());
+) -> Result<tauri::Webview, String> {
+    if let Some(wv) = dock_webview(app) {
+        return Ok(wv);
     }
 
-    let parsed = parse_target_url(url.clone())?;
-    state.set_url(tab_id, parsed.as_str());
+    let main = ensure_main_window(app)?;
 
+    let initial_url = state
+        .active()
+        .and_then(|id| state.snapshot_tab(id).0)
+        .filter(|u| !u.trim().is_empty());
+    let parsed = parse_target_url(initial_url)?;
+
+    let app_for_new_window = app.clone();
+    let bridge_js = build_bridge_js();
     let app_for_nav = app.clone();
-    let state_for_nav = state.clone();
 
-    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
-        .initialization_script(BRIDGE_JS)
-        .accept_first_mouse(true)
-        .on_navigation(move |target: &Url| {
-            if target.scheme() == BRIDGE_SCHEME {
-                dispatch_bridge_event(&app_for_nav, &state_for_nav, tab_id, target);
-                false
-            } else {
+    let builder =
+        WebviewBuilder::new(DOCK_WEBVIEW_LABEL, WebviewUrl::External(parsed))
+            .initialization_script(bridge_js)
+            .accept_first_mouse(true)
+            .on_navigation(move |target: &Url| {
+                if target.scheme() == BRIDGE_SCHEME {
+                    return false;
+                }
+                if target.host_str() == Some(BRIDGE_HOST) {
+                    return false;
+                }
+                if let Some(state) = app_for_nav.try_state::<DockSharedState>() {
+                    if let Some(active) = state.active() {
+                        state.set_url(active, target.as_str());
+                    }
+                }
                 true
-            }
-        });
+            })
+            .on_new_window(move |url, _features| {
+                let scheme = url.scheme().to_ascii_lowercase();
+                let acceptable = matches!(
+                    scheme.as_str(),
+                    "http" | "https" | "ftp" | "file" | "data"
+                );
+                if !acceptable {
+                    return tauri::webview::NewWindowResponse::Deny;
+                }
+                if url.host_str() == Some(BRIDGE_HOST) || scheme == BRIDGE_SCHEME
+                {
+                    return tauri::webview::NewWindowResponse::Deny;
+                }
+                let url_string = url.to_string();
+                let app_for_task = app_for_new_window.clone();
+                if let Err(err) =
+                    app_for_new_window.run_on_main_thread(move || {
+                        if let Err(err) =
+                            open_url_in_new_tab(&app_for_task, url_string)
+                        {
+                            tracing::warn!(
+                                "[browser_dock] on_new_window open_url_in_new_tab failed: {err}"
+                            );
+                        }
+                    })
+                {
+                    tracing::warn!(
+                        "[browser_dock] on_new_window run_on_main_thread failed: {err}"
+                    );
+                }
+                tauri::webview::NewWindowResponse::Deny
+            });
 
-    main.add_child(
-        builder,
-        LogicalPosition::new(OFFSCREEN.0 as f64, OFFSCREEN.1 as f64),
-        LogicalSize::new(1.0_f64, 1.0_f64),
-    )
-    .map_err(|e| format!("add_child(browser_dock_tab_{tab_id}) failed: {e}"))?;
-    Ok(())
+    let raw_rect = state.rect();
+    let initial_size = dock_logical_size(raw_rect);
+    let initial_position = dock_logical_position(raw_rect);
+
+    main.add_child(builder, initial_position, initial_size)
+        .map_err(|e| format!("add_child({DOCK_WEBVIEW_LABEL}) failed: {e}"))?;
+
+    dock_webview(app)
+        .ok_or_else(|| "dock webview missing immediately after add_child".to_string())
 }
 
 fn clamp_rect_to_window(rect: DockRect, win: &Window) -> DockRect {
@@ -1033,7 +1308,7 @@ fn clamp_rect_to_window(rect: DockRect, win: &Window) -> DockRect {
     DockRect { x, y, w, h }
 }
 
-fn update_active_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), String> {
+fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), String> {
     let raw_rect = state.rect();
     let main = ensure_main_window(app).ok();
     let rect = match (raw_rect, main.as_ref()) {
@@ -1041,38 +1316,98 @@ fn update_active_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), 
         (Some(r), None) => Some(r),
         (None, _) => None,
     };
-    let active = state.active();
-    for tab_id in state.order() {
-        let label = tab_label(tab_id);
-        let Some(wv) = app.get_webview(&label) else {
-            continue;
-        };
-        if Some(tab_id) == active {
-            if let Some(rect) = rect {
-                wv.set_position(rect.position_logical())
-                    .map_err(|e| format!("set_position(active) failed: {e}"))?;
-                wv.set_size(rect.size_logical())
-                    .map_err(|e| format!("set_size(active) failed: {e}"))?;
-            }
+
+    let parked = state.parked();
+    let has_active = state.active().is_some();
+    let want_visible = has_active && rect.is_some() && !parked;
+
+    let Some(wv) = dock_webview(app) else {
+        return Ok(());
+    };
+
+    if let Some(rect) = rect {
+        let pos = rect.position_logical();
+        let size = rect.size_logical();
+        wv.set_position(pos)
+            .map_err(|e| format!("set_position(dock) failed: {e}"))?;
+        wv.set_size(size)
+            .map_err(|e| format!("set_size(dock) failed: {e}"))?;
+    }
+
+    let was_visible = state.dock_visible();
+    if want_visible != was_visible {
+        if want_visible {
+            wv.show().map_err(|e| format!("show(dock) failed: {e}"))?;
         } else {
-            wv.set_position(PhysicalPosition::new(OFFSCREEN.0, OFFSCREEN.1))
-                .map_err(|e| format!("set_position(off) failed: {e}"))?;
-            wv.set_size(PhysicalSize::new(1_u32, 1_u32))
-                .map_err(|e| format!("set_size(off) failed: {e}"))?;
+            wv.hide().map_err(|e| format!("hide(dock) failed: {e}"))?;
         }
+        state.set_dock_visible(want_visible);
     }
     Ok(())
 }
 
-fn active_webview(
-    app: &AppHandle,
-    state: &DockSharedState,
-) -> Result<tauri::Webview, String> {
-    let id = state
-        .active()
-        .ok_or_else(|| "no active dock tab".to_string())?;
-    app.get_webview(&tab_label(id))
-        .ok_or_else(|| "active tab webview is gone".to_string())
+fn dock_navigate_active(app: &AppHandle, state: &DockSharedState) -> Result<(), String> {
+    let Some(active) = state.active() else {
+        return Ok(());
+    };
+    let Some(target) = state.snapshot_tab(active).0 else {
+        return Ok(());
+    };
+    if target.trim().is_empty() {
+        return Ok(());
+    }
+    let Some(wv) = dock_webview(app) else {
+        return Ok(());
+    };
+    let parsed = parse_target_url(Some(target.clone()))?;
+    if let Ok(current) = wv.url() {
+        if current.as_str() == parsed.as_str() {
+            return Ok(());
+        }
+    }
+    wv.navigate(parsed)
+        .map_err(|e| format!("navigate failed: {e}"))?;
+    Ok(())
+}
+
+fn focus_dock_webview(app: &AppHandle) {
+    let Some(webview) = dock_webview(app) else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        let _ = webview.with_webview(focus_webview2_native);
+    }
+    let _ = webview.set_focus();
+}
+
+#[cfg(windows)]
+fn focus_webview2_native(platform: tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+
+    let controller = platform.controller();
+    let mut parent_hwnd: HWND = HWND(std::ptr::null_mut());
+    let parent_ok = unsafe { controller.ParentWindow(&mut parent_hwnd) }.is_ok();
+    if parent_ok && !parent_hwnd.0.is_null() {
+        unsafe {
+            let _ = SetWindowPos(
+                parent_hwnd,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+            let _ = SetFocus(Some(parent_hwnd));
+        }
+    }
+    let _ = unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
 }
 
 #[tauri::command]
@@ -1083,19 +1418,18 @@ pub async fn browser_dock_open(
     url: Option<String>,
 ) -> Result<(), String> {
     state.set_rect(rect);
+    state.set_parked(false);
     let s = state.inner().clone();
 
-    let (active, created) = s.acquire_active_or_reserve(url.clone());
-    if created {
-        if let Err(err) = ensure_tab_webview(&app, &s, active, url.clone()) {
-            s.discard_reserved(active);
-            return Err(err);
-        }
-    } else if let Some(target) = url.as_ref().filter(|t| !t.trim().is_empty()) {
-        ensure_tab_webview(&app, &s, active, Some(target.clone()))?;
+    let (active, _created) = s.acquire_active_or_reserve(url.clone());
+    if let Some(target) = url.as_ref().filter(|t| !t.trim().is_empty()) {
+        s.set_url(active, target.clone());
     }
 
-    update_active_layout(&app, &s)?;
+    ensure_dock_webview(&app, &s)?;
+    dock_navigate_active(&app, &s)?;
+    update_dock_layout(&app, &s)?;
+    focus_dock_webview(&app);
     emit_tabs_event(&app, &s);
     Ok(())
 }
@@ -1107,7 +1441,9 @@ pub async fn browser_dock_set_rect(
     rect: DockRect,
 ) -> Result<(), String> {
     state.set_rect(rect);
-    update_active_layout(&app, state.inner())
+    state.set_parked(false);
+    update_dock_layout(&app, state.inner())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1117,12 +1453,8 @@ pub async fn browser_dock_resync(
     rect: DockRect,
 ) -> Result<(), String> {
     state.set_rect(rect);
-    update_active_layout(&app, state.inner())?;
-    if let Ok(webview) = active_webview(&app, state.inner()) {
-        let _ = webview.eval(
-            "(function(){try{window.dispatchEvent(new Event('resize'));void document.body&&document.body.offsetHeight;}catch(_){}})();",
-        );
-    }
+    state.set_parked(false);
+    update_dock_layout(&app, state.inner())?;
     Ok(())
 }
 
@@ -1131,16 +1463,17 @@ pub async fn browser_dock_hide(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    for tab_id in state.order() {
-        if let Some(webview) = app.get_webview(&tab_label(tab_id)) {
-            webview
-                .set_position(PhysicalPosition::new(OFFSCREEN.0, OFFSCREEN.1))
-                .map_err(|e| format!("set_position failed: {e}"))?;
-            webview
-                .set_size(PhysicalSize::new(1u32, 1u32))
-                .map_err(|e| format!("set_size failed: {e}"))?;
-        }
-    }
+    state.set_parked(true);
+    update_dock_layout(&app, state.inner())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_focus_active(
+    app: AppHandle,
+    _state: tauri::State<'_, DockSharedState>,
+) -> Result<(), String> {
+    focus_dock_webview(&app);
     Ok(())
 }
 
@@ -1149,11 +1482,8 @@ pub async fn browser_dock_park(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    if let Ok(webview) = active_webview(&app, state.inner()) {
-        webview
-            .set_position(PhysicalPosition::new(OFFSCREEN.0, OFFSCREEN.1))
-            .map_err(|e| format!("set_position failed: {e}"))?;
-    }
+    state.set_parked(true);
+    update_dock_layout(&app, state.inner())?;
     Ok(())
 }
 
@@ -1162,10 +1492,8 @@ pub async fn browser_dock_close(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    for tab_id in state.order() {
-        if let Some(webview) = app.get_webview(&tab_label(tab_id)) {
-            let _ = webview.close();
-        }
+    if let Some(webview) = dock_webview(&app) {
+        let _ = webview.close();
     }
     state.reset();
     if let Some(controller) = app.try_state::<TauriDockController>() {
@@ -1184,14 +1512,10 @@ pub async fn browser_dock_navigate(
     let id = state
         .active()
         .ok_or_else(|| "no active dock tab".to_string())?;
-    let parsed = parse_target_url(Some(url.clone()))?;
-    let webview = app
-        .get_webview(&tab_label(id))
-        .ok_or_else(|| "active tab webview is gone".to_string())?;
-    webview
-        .navigate(parsed)
-        .map_err(|e| format!("navigate failed: {e}"))?;
     state.set_url(id, url);
+    ensure_dock_webview(&app, state.inner())?;
+    dock_navigate_active(&app, state.inner())?;
+    focus_dock_webview(&app);
     emit_tabs_event(&app, state.inner());
     Ok(())
 }
@@ -1204,13 +1528,34 @@ pub async fn browser_dock_new_tab(
     activate: Option<bool>,
 ) -> Result<TabId, String> {
     let id = state.alloc_id();
-    ensure_tab_webview(&app, state.inner(), id, url.clone())?;
     state.register_tab(id, url.clone());
-    if activate.unwrap_or(true) {
+    let want_activate = activate.unwrap_or(true);
+    if want_activate {
         let _ = state.set_active(id);
     }
-    update_active_layout(&app, state.inner())?;
+    if want_activate {
+        ensure_dock_webview(&app, state.inner())?;
+        dock_navigate_active(&app, state.inner())?;
+        update_dock_layout(&app, state.inner())?;
+        focus_dock_webview(&app);
+    }
     emit_tabs_event(&app, state.inner());
+    Ok(id)
+}
+
+fn open_url_in_new_tab(app: &AppHandle, url: String) -> Result<TabId, String> {
+    let state_handle = app
+        .try_state::<DockSharedState>()
+        .ok_or_else(|| "browser dock state not initialised".to_string())?;
+    let state = state_handle.inner();
+    let id = state.alloc_id();
+    state.register_tab(id, Some(url));
+    let _ = state.set_active(id);
+    ensure_dock_webview(app, state)?;
+    dock_navigate_active(app, state)?;
+    let _ = update_dock_layout(app, state);
+    focus_dock_webview(app);
+    emit_tabs_event(app, state);
     Ok(id)
 }
 
@@ -1220,14 +1565,20 @@ pub async fn browser_dock_close_tab(
     state: tauri::State<'_, DockSharedState>,
     tab_id: TabId,
 ) -> Result<Option<TabId>, String> {
-    if let Some(webview) = app.get_webview(&tab_label(tab_id)) {
-        let _ = webview.close();
-    }
     if let Some(controller) = app.try_state::<TauriDockController>() {
         controller.drain_pending_for_tab(tab_id, "tab closed");
     }
+    let was_active = state.active() == Some(tab_id);
     let new_active = state.remove_tab(tab_id);
-    update_active_layout(&app, state.inner())?;
+    if was_active && new_active.is_some() {
+        dock_navigate_active(&app, state.inner())?;
+    } else if new_active.is_none() {
+        if let Some(wv) = dock_webview(&app) {
+            let _ = wv.hide();
+        }
+        state.set_dock_visible(false);
+    }
+    update_dock_layout(&app, state.inner())?;
     emit_tabs_event(&app, state.inner());
     Ok(new_active)
 }
@@ -1239,7 +1590,10 @@ pub async fn browser_dock_activate_tab(
     tab_id: TabId,
 ) -> Result<(), String> {
     state.set_active(tab_id)?;
-    update_active_layout(&app, state.inner())?;
+    ensure_dock_webview(&app, state.inner())?;
+    dock_navigate_active(&app, state.inner())?;
+    update_dock_layout(&app, state.inner())?;
+    focus_dock_webview(&app);
     emit_tabs_event(&app, state.inner());
     Ok(())
 }
@@ -1251,8 +1605,9 @@ pub async fn browser_dock_list_tabs(
     Ok(state.list())
 }
 
-fn eval_dock(app: &AppHandle, state: &DockSharedState, source: &str) -> Result<(), String> {
-    let webview = active_webview(app, state)?;
+fn eval_dock(app: &AppHandle, _state: &DockSharedState, source: &str) -> Result<(), String> {
+    let webview = dock_webview(app)
+        .ok_or_else(|| "dock webview is not open".to_string())?;
     webview
         .eval(source)
         .map_err(|e| format!("eval failed: {e}"))?;
@@ -1388,12 +1743,8 @@ pub async fn browser_dock_screenshot(
     let _ = state;
     let full = full_page.unwrap_or(false);
     if full {
-        if let Some(active_id) = app
-            .try_state::<DockSharedState>()
-            .and_then(|s| s.inner().active())
-        {
-            if let Some(webview) = app.get_webview(&tab_label(active_id)) {
-                let warmup = r#"(async () => {
+        if let Some(webview) = dock_webview(&app) {
+            let warmup = r#"(async () => {
                   try {
                     const total = Math.max(
                       document.documentElement.scrollHeight,
@@ -1407,9 +1758,8 @@ pub async fn browser_dock_screenshot(
                     window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
                   } catch (_) {}
                 })();"#;
-                let _ = webview.eval(warmup);
-                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-            }
+            let _ = webview.eval(warmup);
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         }
     }
     let app_xcap = app.clone();
@@ -1440,9 +1790,10 @@ pub async fn browser_dock_get_state(
 #[tauri::command]
 pub async fn browser_dock_open_devtools(
     app: AppHandle,
-    state: tauri::State<'_, DockSharedState>,
+    _state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    let webview = active_webview(&app, state.inner())?;
+    let webview = dock_webview(&app)
+        .ok_or_else(|| "dock webview is not open".to_string())?;
     #[cfg(debug_assertions)]
     {
         webview.open_devtools();
@@ -1458,9 +1809,10 @@ pub async fn browser_dock_open_devtools(
 #[tauri::command]
 pub async fn browser_dock_close_devtools(
     app: AppHandle,
-    state: tauri::State<'_, DockSharedState>,
+    _state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    let webview = active_webview(&app, state.inner())?;
+    let webview = dock_webview(&app)
+        .ok_or_else(|| "dock webview is not open".to_string())?;
     #[cfg(debug_assertions)]
     {
         webview.close_devtools();
@@ -1660,23 +2012,25 @@ fn resolve_target_tab(req: &DockRequest, state: &DockSharedState) -> Result<TabI
 #[async_trait]
 impl DockController for TauriDockController {
     async fn ensure_visible(&self, session_hint: Option<String>) -> Result<()> {
-
         let state = self
             .0
             .app
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .unwrap_or_default();
-        let (active, created) = state.acquire_active_or_reserve(None);
+        let (_active, created) = state.acquire_active_or_reserve(None);
         if created {
-            if let Err(err) = ensure_tab_webview(&self.0.app, &state, active, None) {
-                tracing::warn!("[browser_dock] auto-create on ensure_visible failed: {err}");
-                state.discard_reserved(active);
+            if state.rect().is_none() {
+                state.set_rect(DockRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+            }
+            state.set_parked(false);
+            if let Err(err) = ensure_dock_webview(&self.0.app, &state) {
+                tracing::warn!(
+                    "[browser_dock] auto-create on ensure_visible failed: {err}"
+                );
             } else {
-                if state.rect().is_none() {
-                    state.set_rect(DockRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
-                }
-                let _ = update_active_layout(&self.0.app, &state);
+                let _ = dock_navigate_active(&self.0.app, &state);
+                let _ = update_dock_layout(&self.0.app, &state);
                 emit_tabs_event(&self.0.app, &state);
             }
         }
@@ -1699,6 +2053,23 @@ impl DockController for TauriDockController {
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
         let tab_id = resolve_target_tab(&req, &state)?;
+        let active = state
+            .active()
+            .ok_or_else(|| anyhow::anyhow!("no active dock tab to drive"))?;
+        if tab_id != active {
+            state
+                .set_active(tab_id)
+                .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
+            ensure_dock_webview(&self.0.app, &state)
+                .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+            let _ = dock_navigate_active(&self.0.app, &state);
+            let _ = update_dock_layout(&self.0.app, &state);
+            emit_tabs_event(&self.0.app, &state);
+        } else {
+            ensure_dock_webview(&self.0.app, &state)
+                .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+        }
+
         let lock = self.tab_lock(tab_id);
         let _drive = lock.lock().await;
 
@@ -1736,7 +2107,7 @@ impl DockController for TauriDockController {
         let _drive = lock.lock().await;
 
         if full_page {
-            if let Some(webview) = self.0.app.get_webview(&tab_label(tab_id)) {
+            if let Some(webview) = dock_webview(&self.0.app) {
                 let warmup = r#"(async () => {
                   try {
                     const total = Math.max(
@@ -1796,22 +2167,19 @@ impl DockController for TauriDockController {
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
         let id = state.alloc_id();
-        ensure_tab_webview(&self.0.app, &state, id, url.clone())
-            .map_err(|e| anyhow::anyhow!("ensure_tab_webview: {e}"))?;
         state.register_tab(id, url);
         if activate {
             let _ = state.set_active(id);
+            ensure_dock_webview(&self.0.app, &state)
+                .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+            let _ = dock_navigate_active(&self.0.app, &state);
+            let _ = update_dock_layout(&self.0.app, &state);
         }
-        update_active_layout(&self.0.app, &state)
-            .map_err(|e| anyhow::anyhow!("update_active_layout: {e}"))?;
         emit_tabs_event(&self.0.app, &state);
         Ok(id)
     }
 
     async fn close_tab(&self, tab_id: u32) -> Result<Option<u32>> {
-        if let Some(webview) = self.0.app.get_webview(&tab_label(tab_id)) {
-            let _ = webview.close();
-        }
         self.drain_pending_for_tab(tab_id, "tab closed");
         let state = self
             .0
@@ -1819,9 +2187,18 @@ impl DockController for TauriDockController {
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let was_active = state.active() == Some(tab_id);
         let new_active = state.remove_tab(tab_id);
-        update_active_layout(&self.0.app, &state)
-            .map_err(|e| anyhow::anyhow!("update_active_layout: {e}"))?;
+        if was_active && new_active.is_some() {
+            let _ = dock_navigate_active(&self.0.app, &state);
+        } else if new_active.is_none() {
+            if let Some(wv) = dock_webview(&self.0.app) {
+                let _ = wv.hide();
+            }
+            state.set_dock_visible(false);
+        }
+        update_dock_layout(&self.0.app, &state)
+            .map_err(|e| anyhow::anyhow!("update_dock_layout: {e}"))?;
         emit_tabs_event(&self.0.app, &state);
         Ok(new_active)
     }
@@ -1836,8 +2213,11 @@ impl DockController for TauriDockController {
         state
             .set_active(tab_id)
             .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
-        update_active_layout(&self.0.app, &state)
-            .map_err(|e| anyhow::anyhow!("update_active_layout: {e}"))?;
+        ensure_dock_webview(&self.0.app, &state)
+            .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+        let _ = dock_navigate_active(&self.0.app, &state);
+        update_dock_layout(&self.0.app, &state)
+            .map_err(|e| anyhow::anyhow!("update_dock_layout: {e}"))?;
         emit_tabs_event(&self.0.app, &state);
         Ok(())
     }
@@ -1864,13 +2244,8 @@ impl DockController for TauriDockController {
 
 impl TauriDockController {
     async fn exec_on_tab(&self, tab_id: TabId, req: DockRequest) -> Result<DockResponse> {
-        let webview = self
-            .0
-            .app
-            .get_webview(&tab_label(tab_id))
-            .ok_or_else(|| {
-                anyhow::anyhow!("dock tab {tab_id} webview is not open")
-            })?;
+        let webview = dock_webview(&self.0.app)
+            .ok_or_else(|| anyhow::anyhow!("dock webview is not open"))?;
 
         let req_id = self.0.next_req_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -2035,7 +2410,7 @@ pub fn install_into(app: &AppHandle) {
                 tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
             ) {
                 if let Some(state) = app_for_resize.try_state::<DockSharedState>() {
-                    let _ = update_active_layout(&app_for_resize, state.inner());
+                    let _ = update_dock_layout(&app_for_resize, state.inner());
                 }
             }
         });

@@ -3,6 +3,7 @@ import { useSkillStore } from '../../stores/skillStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 import { revealInExplorer } from '../../lib/revealInExplorer'
 import type { SkillMeta, SkillSource } from '../../types/skill'
 import { CreateSkillDialog } from './CreateSkillDialog'
@@ -48,9 +49,11 @@ export function SkillList() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<SkillMeta | null>(null)
+  useDockSuspend(pendingDelete !== null)
   const [isDragOver, setIsDragOver] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [conflictReports, setConflictReports] = useState<SkillInstallReport[]>([])
+  useDockSuspend(conflictReports.length > 0)
   const dropZoneRef = useRef<HTMLDivElement | null>(null)
   const installingRef = useRef(false)
   const conflictOpenRef = useRef(false)

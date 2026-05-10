@@ -125,6 +125,10 @@ export async function dockPark(): Promise<void> {
   await invokeIfTauri('browser_dock_park')
 }
 
+export async function dockFocusActive(): Promise<void> {
+  await invokeIfTauri('browser_dock_focus_active')
+}
+
 export async function dockClose(): Promise<void> {
   await invokeIfTauri('browser_dock_close')
 }

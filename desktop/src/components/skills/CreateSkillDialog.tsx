@@ -7,6 +7,7 @@ import { Button } from '../shared/Button'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useSkillStore } from '../../stores/skillStore'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 
 const SKILL_TEMPLATE = (name: string) => `---
 name: ${name || 'my-skill'}
@@ -37,6 +38,7 @@ export function CreateSkillDialog({ open, onClose, onCreated }: Props) {
   const t = useTranslation()
   const upsert = useSkillStore((s) => s.upsertUserSkill)
   const addToast = useUIStore((s) => s.addToast)
+  useDockSuspend(open)
 
   const [name, setName] = useState('')
   const [content, setContent] = useState(SKILL_TEMPLATE(''))

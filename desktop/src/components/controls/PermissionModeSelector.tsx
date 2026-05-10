@@ -2,6 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react'
 import DOMPurify from 'dompurify'
 import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 import type { PermissionMode } from '../../types/settings'
 
 const MODE_ICONS: Record<PermissionMode, string> = {
@@ -28,6 +29,7 @@ export function PermissionModeSelector({ value, onChange, workDir }: Props) {
   const t = useTranslation()
   const [open, setOpen] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState(false)
+  useDockSuspend(confirmDialog)
   const ref = useRef<HTMLDivElement>(null)
 
   const rowMeta = useMemo(

@@ -6,6 +6,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 import type { CodingModeId } from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
 
@@ -61,6 +62,7 @@ export function QuickModeSwitcher() {
   const activeTabId = useTabStore((s) => s.activeTabId)
 
   const open = activeModal === 'quick-mode-switcher'
+  useDockSuspend(open)
 
   const items = QUICK_MODE_ORDER.map((id) => {
     const backendLabel = codingModes.find((m) => m.id === id)?.label

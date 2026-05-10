@@ -5,6 +5,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useWebResearchStore } from '../../stores/webResearchStore'
 import { useTranslation } from '../../i18n'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 import type { CodingModeId } from '../../types/codingMode'
 import { isVisibleCodingMode } from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
@@ -57,6 +58,7 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const fetchWebResearch = useWebResearchStore((s) => s.fetch)
   const [open, setOpen] = useState(false)
   const [pendingAutonomous, setPendingAutonomous] = useState<CodingModeId | null>(null)
+  useDockSuspend(pendingAutonomous !== null)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {

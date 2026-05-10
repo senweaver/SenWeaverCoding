@@ -34,7 +34,6 @@ import {
   dockRequestState,
   dockReload,
   dockSetPickMode,
-  dockSetRect,
   dockSetZoom,
   type BrowserDockEvent,
   type BrowserDockRect,
@@ -392,18 +391,6 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
 
   setAnchorRect: (sessionId, rect) => {
     set((state) => ({ panels: patchPanel(state.panels, sessionId, { anchorRect: rect }) }))
-    const owns = get().activeSessionId === sessionId
-    const panelNow = get().panels[sessionId]
-    const visible = panelNow?.visible ?? false
-    const hasContent = Boolean(
-      (panelNow?.liveUrl && panelNow.liveUrl.trim()) ||
-        (panelNow?.url && panelNow.url.trim()),
-    )
-    if (owns && visible && hasContent) {
-      dockSetRect(rect).catch((err) => {
-        console.warn('[browserDock] dockSetRect failed', err)
-      })
-    }
   },
 
   setUrl: (sessionId, url) =>

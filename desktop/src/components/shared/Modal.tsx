@@ -1,5 +1,7 @@
 import { useEffect, type ReactNode } from 'react'
 
+import { useDockSuspend } from '../../hooks/useDockSuspend'
+
 type ModalProps = {
   open: boolean
   onClose: () => void
@@ -10,6 +12,8 @@ type ModalProps = {
 }
 
 export function Modal({ open, onClose, title, children, width = 560, footer }: ModalProps) {
+  useDockSuspend(open)
+
   useEffect(() => {
     if (!open) return
     const handleEsc = (e: KeyboardEvent) => {

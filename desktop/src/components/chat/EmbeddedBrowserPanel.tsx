@@ -26,11 +26,13 @@ import { useTeamStore } from '../../stores/teamStore'
 import { useUIStore } from '../../stores/uiStore'
 import {
   clampRectToHost,
+  dockFocusActive,
   dockHide,
   dockOpen,
   dockPark,
   dockResync,
   dockScreenshot,
+  dockSetRect,
   listenDockEvents,
 } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
@@ -140,7 +142,10 @@ export function EmbeddedBrowserPanel() {
     if (store.activeSessionId !== sessionId) {
       useBrowserPanelStore.setState({ activeSessionId: sessionId })
     }
-    const rect = newPanel.anchorRect ?? { x: 0, y: 0, w: 1, h: 1 }
+    const rect = newPanel.anchorRect
+    if (!rect || rect.w < 100 || rect.h < 100) {
+      return
+    }
     dockOpen(rect, newPanel.url ?? null).catch((err) => {
       console.warn('[browserDock] dockOpen on session switch failed', err)
     })
@@ -227,52 +232,75 @@ export function EmbeddedBrowserPanel() {
     const el = viewportRef.current
     if (!el) return
 
-    let rafId = 0
     let lastRectSig = ''
     let lastSafeRect: { x: number; y: number; w: number; h: number } | null = null
+    let scheduled = false
+    let debounceTimer: number | null = null
+
+    const computeRect = () => {
+      const rect = el.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return null
+      const host = el.parentElement?.getBoundingClientRect() ?? null
+      const clamped = clampRectToHost(
+        { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
+        host
+          ? {
+              left: host.left,
+              top: host.top,
+              right: host.right,
+              bottom: host.bottom,
+            }
+          : null,
+      )
+      return {
+        x: clamped.x,
+        y: clamped.y,
+        w: Math.max(1, clamped.w - 1),
+        h: Math.max(1, clamped.h - 1),
+      }
+    }
+
+    const measureNow = () => {
+      const safe = computeRect()
+      if (!safe) return
+      lastSafeRect = safe
+      if (dragModeRef.current) return
+      const sig = `${Math.round(safe.x)}|${Math.round(safe.y)}|${Math.round(safe.w)}|${Math.round(safe.h)}`
+      if (sig === lastRectSig) return
+      lastRectSig = sig
+      setAnchorRect(sessionId, safe)
+      dockSetRect(safe).catch((err) => {
+        console.warn('[browserDock] dockSetRect failed', err)
+      })
+    }
+
     const measure = () => {
-      cancelAnimationFrame(rafId)
-      rafId = requestAnimationFrame(() => {
-        const rect = el.getBoundingClientRect()
-        if (rect.width <= 0 || rect.height <= 0) return
-        const host = el.parentElement?.getBoundingClientRect() ?? null
-        const clamped = clampRectToHost(
-          { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
-          host
-            ? {
-                left: host.left,
-                top: host.top,
-                right: host.right,
-                bottom: host.bottom,
-              }
-            : null,
-        )
-        const safe = {
-          x: clamped.x,
-          y: clamped.y,
-          w: Math.max(1, clamped.w - 1),
-          h: Math.max(1, clamped.h - 1),
-        }
-        lastSafeRect = safe
-        if (dragModeRef.current) return
-        const sig = `${Math.round(safe.x)}|${Math.round(safe.y)}|${Math.round(safe.w)}|${Math.round(safe.h)}`
-        if (sig === lastRectSig) return
-        lastRectSig = sig
-        setAnchorRect(sessionId, safe)
+      if (scheduled) return
+      scheduled = true
+      requestAnimationFrame(() => {
+        scheduled = false
+        if (debounceTimer !== null) window.clearTimeout(debounceTimer)
+        debounceTimer = window.setTimeout(() => {
+          debounceTimer = null
+          measureNow()
+        }, 50)
       })
     }
+
     const resync = () => {
-      measure()
-      window.requestAnimationFrame(() => {
-        if (lastSafeRect) {
-          dockResync(lastSafeRect).catch((err) => {
-            console.warn('[browserDock] resync failed', err)
-          })
-        }
+      const safe = computeRect()
+      if (!safe) return
+      lastSafeRect = safe
+      const sig = `${Math.round(safe.x)}|${Math.round(safe.y)}|${Math.round(safe.w)}|${Math.round(safe.h)}`
+      lastRectSig = sig
+      setAnchorRect(sessionId, safe)
+      dockResync(safe).catch((err) => {
+        console.warn('[browserDock] resync failed', err)
       })
     }
-    measureRef.current = measure
-    measure()
+
+    measureRef.current = measureNow
+    measureNow()
 
     const ro = new ResizeObserver(() => measure())
     ro.observe(el)
@@ -286,12 +314,13 @@ export function EmbeddedBrowserPanel() {
     document.addEventListener('browser-panel-resync', resyncHandler)
 
     return () => {
-      cancelAnimationFrame(rafId)
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer)
       ro.disconnect()
       window.removeEventListener('resize', measure)
       document.removeEventListener('browser-panel-remeasure', remeasureHandler)
       document.removeEventListener('browser-panel-resync', resyncHandler)
       measureRef.current = () => {}
+      void lastSafeRect
     }
   }, [sessionId, setAnchorRect, visible])
 
@@ -447,7 +476,9 @@ export function EmbeddedBrowserPanel() {
     }
     const current = useBrowserPanelStore.getState().panels[sessionId]
     const rect = current?.anchorRect
-    if (!rect) return
+    if (!rect || rect.w < 100 || rect.h < 100) {
+      return
+    }
     dockOpen(rect, current?.url ?? null).catch((err) => {
       console.warn('[browserDock] dockOpen on visibility change failed', err)
     })
@@ -894,6 +925,14 @@ export function EmbeddedBrowserPanel() {
                 style={{
                   flex: '1 1 0',
                   minHeight: VIEWPORT_MIN_PX,
+                }}
+                onMouseEnter={() => {
+                  if (!isTauriRuntime() || !ownsDock || !hasContent) return
+                  dockFocusActive().catch(() => {})
+                }}
+                onPointerDown={() => {
+                  if (!isTauriRuntime() || !ownsDock || !hasContent) return
+                  dockFocusActive().catch(() => {})
                 }}
               >
                 {dragSnapshot && (

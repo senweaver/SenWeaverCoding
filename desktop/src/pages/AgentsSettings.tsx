@@ -8,6 +8,7 @@ import { useAgentSettingsStore } from '../stores/agentSettingsStore'
 import { useAutonomyStore } from '../stores/autonomyStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
+import { useDockSuspend } from '../hooks/useDockSuspend'
 import type { GlobalDirective, ThinkingLevel } from '../types/agentSettings'
 import type { AutonomySettings, PermissionMode } from '../types/settings'
 
@@ -318,6 +319,7 @@ function AutoRunSection() {
   const hasFetched = useAutonomyStore((s) => s.hasFetched)
 
   const [confirmBypass, setConfirmBypass] = useState(false)
+  useDockSuspend(confirmBypass)
 
   useEffect(() => {
     if (!hasFetched && !isLoading) {

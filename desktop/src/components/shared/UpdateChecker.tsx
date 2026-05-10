@@ -3,6 +3,7 @@ import { useTranslation } from '../../i18n'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { useUpdateStore } from '../../stores/updateStore'
+import { useDockEdgeOffset } from '../../hooks/useDockEdgeOffset'
 import { formatBytes } from '../../lib/formatBytes'
 
 const UP_TO_DATE_AUTO_DISMISS_MS = 4000
@@ -25,6 +26,15 @@ export function UpdateChecker() {
   const installUpdate = useUpdateStore((s) => s.installUpdate)
   const dismissPrompt = useUpdateStore((s) => s.dismissPrompt)
   const clearManualCheck = useUpdateStore((s) => s.clearManualCheck)
+  const dockEdgeOffset = useDockEdgeOffset()
+  const floaterStyle = {
+    top: '0.75rem',
+    left:
+      dockEdgeOffset > 0
+        ? `calc(50vw - ${dockEdgeOffset / 2}px)`
+        : '50vw',
+    transform: 'translateX(-50%)',
+  } as const
 
   useEffect(() => {
     void initialize()
@@ -61,8 +71,8 @@ export function UpdateChecker() {
 
   if (showCheckingToast) {
     return (
-      <div className="fixed top-4 right-4 z-[200] max-w-sm">
-        <div className="flex items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 shadow-[var(--shadow-dropdown)]">
+      <div className="fixed z-[200] max-w-sm" style={floaterStyle}>
+        <div className="flex items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-2 shadow-[var(--shadow-dropdown)]">
           <span
             className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--color-text-accent)] border-t-transparent"
             aria-hidden="true"
@@ -76,8 +86,8 @@ export function UpdateChecker() {
   if (showUpToDateToast) {
     const versionLabel = latestVersion ?? currentVersion ?? ''
     return (
-      <div className="fixed top-4 right-4 z-[200] max-w-sm">
-        <div className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 shadow-[var(--shadow-dropdown)]">
+      <div className="fixed z-[200] max-w-sm" style={floaterStyle}>
+        <div className="flex items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-2 shadow-[var(--shadow-dropdown)]">
           <p className="flex-1 text-sm text-[var(--color-text-primary)]">
             {t('update.toast.upToDate', { version: versionLabel })}
           </p>
@@ -95,8 +105,8 @@ export function UpdateChecker() {
 
   if (showErrorToast) {
     return (
-      <div className="fixed top-4 right-4 z-[200] max-w-sm">
-        <div className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-error)]/40 bg-[var(--color-surface-container-low)] px-4 py-3 shadow-[var(--shadow-dropdown)]">
+      <div className="fixed z-[200] max-w-sm" style={floaterStyle}>
+        <div className="flex items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-error)]/40 bg-[var(--color-surface-container-low)] px-4 py-2 shadow-[var(--shadow-dropdown)]">
           <p className="flex-1 text-sm text-[var(--color-error)]">
             {t('update.toast.error', { error: error ?? '' })}
           </p>
@@ -124,7 +134,7 @@ export function UpdateChecker() {
         : null
 
   return (
-    <div className="fixed top-4 right-4 z-[200] max-w-sm">
+    <div className="fixed z-[200] max-w-sm" style={floaterStyle}>
       <div className="bg-[var(--color-surface-container-low)] border border-[var(--color-border)] rounded-[var(--radius-lg)] shadow-[var(--shadow-dropdown)] p-4">
         <p className="text-sm font-medium text-[var(--color-text-primary)]">
           {t('update.available', { version: availableVersion ?? '' })}

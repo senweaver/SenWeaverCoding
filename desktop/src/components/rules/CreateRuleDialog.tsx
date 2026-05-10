@@ -7,6 +7,7 @@ import { Button } from '../shared/Button'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useUserRulesStore } from '../../stores/userRulesStore'
+import { useDockSuspend } from '../../hooks/useDockSuspend'
 
 const RULE_TEMPLATE = `---
 alwaysApply: true
@@ -34,6 +35,7 @@ export function CreateRuleDialog({ open, onClose, onCreated }: Props) {
   const upsert = useUserRulesStore((s) => s.upsert)
   const files = useUserRulesStore((s) => s.files)
   const addToast = useUIStore((s) => s.addToast)
+  useDockSuspend(open)
 
   const [name, setName] = useState('')
   const [content, setContent] = useState(RULE_TEMPLATE)
