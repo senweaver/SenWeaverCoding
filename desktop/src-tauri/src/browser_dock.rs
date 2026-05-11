@@ -838,6 +838,7 @@ struct TabsState {
     next_id: TabId,
     parked: bool,
     dock_visible: bool,
+    last_state_url: HashMap<TabId, String>,
 }
 
 #[derive(Default, Clone)]
@@ -881,6 +882,18 @@ impl DockSharedState {
 
     fn set_dock_visible(&self, visible: bool) {
         self.0.lock().dock_visible = visible;
+    }
+
+    fn record_state_url(&self, id: TabId, url: impl Into<String>) {
+        self.0.lock().last_state_url.insert(id, url.into());
+    }
+
+    fn last_state_url(&self, id: TabId) -> Option<String> {
+        self.0.lock().last_state_url.get(&id).cloned()
+    }
+
+    fn forget_state_url(&self, id: TabId) {
+        self.0.lock().last_state_url.remove(&id);
     }
 
     fn alloc_id(&self) -> TabId {
@@ -931,6 +944,7 @@ impl DockSharedState {
         let mut g = self.0.lock();
         g.tabs.remove(&id);
         g.order.retain(|x| *x != id);
+        g.last_state_url.remove(&id);
         if g.active == Some(id) {
             g.active = g.order.last().copied();
         }
@@ -1093,11 +1107,15 @@ fn dispatch_bridge_event(
                     }
                 }
                 state.set_url(active, url);
+                state.record_state_url(active, url);
             }
             if let Some(title) = parsed_data.get("title").and_then(|v| v.as_str()) {
                 state.set_title(active, title);
             }
             emit_tabs_event(app, state);
+            if let Some(controller) = app.try_state::<TauriDockController>() {
+                controller.signal_nav_ready(active);
+            }
         }
     }
 
@@ -1121,15 +1139,26 @@ pub fn senbridge_protocol_handler(
     let app = ctx.app_handle();
     let uri = request.uri();
 
-    let path_ok = uri
+    let first_seg = uri
         .path()
         .trim_start_matches('/')
         .split('/')
         .next()
-        .map(|seg| seg.eq_ignore_ascii_case("event"))
-        .unwrap_or(false);
+        .unwrap_or("")
+        .to_string();
 
-    if path_ok {
+    if crate::fetch_worker::handle_protocol_path(app, &first_seg, uri.query()) {
+        return tauri::http::Response::builder()
+            .status(204)
+            .header("Access-Control-Allow-Origin", "*")
+            .header("Cache-Control", "no-store")
+            .body(Cow::Borrowed(&b""[..]))
+            .unwrap_or_else(|_| {
+                tauri::http::Response::new(Cow::Borrowed(&b""[..]))
+            });
+    }
+
+    if first_seg.eq_ignore_ascii_case("event") {
         let mut kind = String::new();
         let mut data_raw: Option<String> = None;
         if let Some(query) = uri.query() {
@@ -1361,10 +1390,17 @@ fn dock_navigate_active(app: &AppHandle, state: &DockSharedState) -> Result<(), 
     };
     let parsed = parse_target_url(Some(target.clone()))?;
     if let Ok(current) = wv.url() {
-        if current.as_str() == parsed.as_str() {
+        let cur_str = current.as_str();
+        let tgt_str = parsed.as_str();
+        if cur_str == tgt_str || urls_logically_match(cur_str, tgt_str) {
+            state.record_state_url(active, cur_str);
+            if let Some(controller) = app.try_state::<TauriDockController>() {
+                controller.signal_nav_ready(active);
+            }
             return Ok(());
         }
     }
+    state.forget_state_url(active);
     wv.navigate(parsed)
         .map_err(|e| format!("navigate failed: {e}"))?;
     Ok(())
@@ -1838,6 +1874,8 @@ struct TauriDockControllerInner {
     chunks: Mutex<HashMap<u64, ChunkBuffer>>,
 
     drive_locks: Mutex<HashMap<TabId, Arc<AsyncMutex<()>>>>,
+
+    nav_waiters: Mutex<HashMap<TabId, Vec<oneshot::Sender<()>>>>,
     next_req_id: AtomicU64,
 }
 
@@ -1881,8 +1919,84 @@ impl TauriDockController {
             pending_tab: Mutex::new(HashMap::new()),
             chunks: Mutex::new(HashMap::new()),
             drive_locks: Mutex::new(HashMap::new()),
+            nav_waiters: Mutex::new(HashMap::new()),
             next_req_id: AtomicU64::new(1),
         }))
+    }
+
+    fn register_nav_waiter(&self, tab_id: TabId) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .nav_waiters
+            .lock()
+            .entry(tab_id)
+            .or_default()
+            .push(tx);
+        rx
+    }
+
+    pub fn signal_nav_ready(&self, tab_id: TabId) {
+        let waiters: Vec<oneshot::Sender<()>> = {
+            let mut g = self.0.nav_waiters.lock();
+            g.remove(&tab_id).unwrap_or_default()
+        };
+        for tx in waiters {
+            let _ = tx.send(());
+        }
+    }
+
+    async fn await_dock_ready(
+        &self,
+        tab_id: TabId,
+        timeout: Duration,
+    ) -> Result<()> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+
+        if dock_webview(&self.0.app).is_none() {
+            return Err(anyhow::anyhow!("dock webview is not open"));
+        }
+
+        let expected = state
+            .snapshot_tab(tab_id)
+            .0
+            .filter(|u| !u.trim().is_empty());
+
+        if expected.is_none() {
+            return Ok(());
+        }
+
+        let expected_url = expected.unwrap();
+        let last_seen = state.last_state_url(tab_id);
+        if let Some(seen) = &last_seen {
+            if urls_logically_match(seen, &expected_url) {
+                return Ok(());
+            }
+        }
+
+        let rx = self.register_nav_waiter(tab_id);
+
+        let last_seen = state.last_state_url(tab_id);
+        if let Some(seen) = &last_seen {
+            if urls_logically_match(seen, &expected_url) {
+                self.signal_nav_ready(tab_id);
+                return Ok(());
+            }
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => {
+                Err(anyhow::anyhow!("nav ready channel closed"))
+            }
+            Err(_) => Err(anyhow::anyhow!(
+                "timed out waiting for dock navigation to complete on tab {tab_id}"
+            )),
+        }
     }
 
     fn tab_lock(&self, tab_id: TabId) -> Arc<AsyncMutex<()>> {
@@ -1995,6 +2109,17 @@ impl TauriDockController {
     }
 }
 
+fn urls_logically_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let normalize = |s: &str| -> String {
+        let no_fragment = s.split('#').next().unwrap_or(s);
+        no_fragment.trim_end_matches('/').to_string()
+    };
+    normalize(a) == normalize(b)
+}
+
 fn resolve_target_tab(req: &DockRequest, state: &DockSharedState) -> Result<TabId> {
     if let Some(id) = req
         .args
@@ -2073,6 +2198,13 @@ impl DockController for TauriDockController {
         let lock = self.tab_lock(tab_id);
         let _drive = lock.lock().await;
 
+        const READY_TIMEOUT: Duration = Duration::from_millis(15_000);
+        if let Err(err) = self.await_dock_ready(tab_id, READY_TIMEOUT).await {
+            tracing::warn!(
+                "[browser_dock] await_dock_ready before exec failed: {err}"
+            );
+        }
+
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
         let _ = self.0.app.emit(
             "browser_dock_event",
@@ -2105,6 +2237,15 @@ impl DockController for TauriDockController {
 
         let lock = self.tab_lock(tab_id);
         let _drive = lock.lock().await;
+
+        if let Err(err) = self
+            .await_dock_ready(tab_id, Duration::from_millis(15_000))
+            .await
+        {
+            tracing::warn!(
+                "[browser_dock] await_dock_ready before screenshot failed: {err}"
+            );
+        }
 
         if full_page {
             if let Some(webview) = dock_webview(&self.0.app) {

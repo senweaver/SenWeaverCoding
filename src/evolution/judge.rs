@@ -60,8 +60,15 @@ pub async fn run_judge_worker(
     mut rx: mpsc::Receiver<JudgeRequest>,
 ) {
     while let Some(req) = rx.recv().await {
-        if let Err(error) = process_request(Arc::clone(&engine), req).await {
-            tracing::warn!(error = %error, "evolution judge worker iteration failed");
+        match process_request(Arc::clone(&engine), req).await {
+            Ok(()) => {
+                engine.note_judge_processed();
+            }
+            Err(error) => {
+                let message = error.to_string();
+                tracing::warn!(error = %message, "evolution judge worker iteration failed");
+                engine.note_judge_error(&message);
+            }
         }
     }
 }

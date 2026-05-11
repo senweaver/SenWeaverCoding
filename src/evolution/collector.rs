@@ -191,6 +191,29 @@ impl EvolutionCtx {
                 .engine
                 .enqueue_distill(super::distiller::DistillRequest { turn: record.clone() });
         }
+        let recycling_cfg = self.engine.config_snapshot().recycling.clone();
+        if recycling_cfg.enabled {
+            if let Some(rstore) = self.engine.recycling_store() {
+                match super::recycling::harvest_turn(
+                    &rstore,
+                    &record,
+                    &recycling_cfg,
+                    Some(self.engine.workspace_dir()),
+                ) {
+                    Ok(report) => {
+                        if report.stored > 0 {
+                            for _ in 0..report.stored {
+                                self.engine.note_recycling_harvested();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(error = %error, "evolution: recycling harvest failed");
+                    }
+                }
+            }
+        }
+        self.engine.record_turn_signal(&record);
         Some(record)
     }
 

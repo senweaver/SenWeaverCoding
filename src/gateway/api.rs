@@ -263,7 +263,8 @@ pub async fn handle_api_config_put(
             .into_response();
     }
 
-    *state.config.lock() = new_config;
+    *state.config.lock() = new_config.clone();
+    state.push_live_config(new_config);
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -514,7 +515,8 @@ pub async fn handle_api_channels_put(
             .into_response();
     }
 
-    *state.config.lock() = config;
+    *state.config.lock() = config.clone();
+    state.push_live_config(config);
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -578,7 +580,8 @@ pub async fn handle_api_provider_put(
             .into_response();
     }
 
-    *state.config.lock() = config;
+    *state.config.lock() = config.clone();
+    state.push_live_config(config);
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -1016,6 +1019,7 @@ pub async fn handle_api_cron_settings_patch(
     }
 
     *state.config.lock() = config.clone();
+    state.push_live_config(config.clone());
 
     Json(serde_json::json!({
         "status": "ok",

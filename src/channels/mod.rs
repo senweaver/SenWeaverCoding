@@ -791,10 +791,13 @@ fn resolved_default_provider(config: &Config) -> String {
 }
 
 fn resolved_default_model(config: &Config) -> String {
-    config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string())
+    match crate::providers::resolve_default_model(config) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(target = "config", "no_model_configured (channels runtime): {e}");
+            String::new()
+        }
+    }
 }
 
 fn runtime_defaults_from_config(config: &Config) -> ChannelRuntimeDefaults {
@@ -1845,10 +1848,12 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     let observer: Arc<dyn Observer> = Arc::from(observer);
 
     let default_provider_name = resolved_default_provider(&config);
+    let resolved_runtime_provider_name =
+        providers::resolve_runtime_provider_name(&default_provider_name, &config);
     let default_model = resolved_default_model(&config);
     let provider_opts = providers::provider_runtime_options_from_config(&config);
     let provider = providers::create_resilient_provider_with_options(
-        &default_provider_name,
+        &resolved_runtime_provider_name,
         config.api_key.as_deref(),
         config.api_url.as_deref(),
         &config.reliability,

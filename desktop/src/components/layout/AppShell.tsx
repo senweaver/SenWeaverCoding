@@ -43,9 +43,19 @@ export function AppShell() {
   )
   const [ready, setReady] = useState(false)
   const [settingsMounted, setSettingsMounted] = useState(false)
+  const [bootElapsedSecs, setBootElapsedSecs] = useState(0)
 
   const [isMaximized, setIsMaximized] = useState(false)
   const t = useTranslation()
+
+  useEffect(() => {
+    if (ready) return
+    const startedAt = Date.now()
+    const interval = window.setInterval(() => {
+      setBootElapsedSecs(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1_000)
+    return () => window.clearInterval(interval)
+  }, [ready])
 
   useEffect(() => {
     if (settingsOverlayOpen) setSettingsMounted(true)
@@ -174,6 +184,8 @@ export function AppShell() {
   }, [isMaximized])
 
   if (!ready) {
+    const showHint = bootElapsedSecs >= 8
+    const showLongHint = bootElapsedSecs >= 25
     return (
       <>
         <div
@@ -184,7 +196,22 @@ export function AppShell() {
           className="app-window-frame items-center justify-center text-[var(--color-text-secondary)]"
           data-maximized={isMaximized ? 'true' : 'false'}
         >
-          {t('app.launching')}
+          <div className="flex flex-col items-center gap-2 text-center px-6 max-w-[520px]">
+            <div>{t('app.launching')}</div>
+            {showHint && (
+              <div className="text-xs text-[var(--color-text-tertiary)]">
+                {t('app.launchingSlow').replace(
+                  '{{seconds}}',
+                  String(bootElapsedSecs),
+                )}
+              </div>
+            )}
+            {showLongHint && (
+              <div className="text-xs text-[var(--color-text-tertiary)] opacity-80">
+                {t('app.launchingTip')}
+              </div>
+            )}
+          </div>
         </div>
         <ResizeHandles disabled={isMaximized} />
       </>

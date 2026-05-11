@@ -272,6 +272,145 @@ export const en = {
   'settings.evolution.cloud.add': 'Add target',
   'settings.evolution.cloud.push': 'Push',
 
+  'settings.evolution.recycling.title': 'Experience Recycling',
+  'settings.evolution.recycling.description':
+    'Capture, clean and replay high-signal turns. Selected experiences are injected into the next turn prompt to bias the assistant toward proven patterns.',
+  'settings.evolution.recycling.toggle': 'Enable recycling',
+  'settings.evolution.recycling.sampleRate': 'Sample rate',
+  'settings.evolution.recycling.sampleRateHelp':
+    'Probability that an eligible turn is captured. 0 = off, 1 = always.',
+  'settings.evolution.recycling.minReward': 'Minimum reward',
+  'settings.evolution.recycling.minRewardHelp':
+    'Only keep turns whose final reward meets this floor (use negative values to also keep failures).',
+  'settings.evolution.recycling.maxRetained': 'Max stored experiences',
+  'settings.evolution.recycling.maxReplayInPrompt': 'Max replayed per turn',
+  'settings.evolution.recycling.replayTokenBudget': 'Replay token budget',
+  'settings.evolution.recycling.privacy': 'Privacy redaction',
+  'settings.evolution.recycling.redactPaths': 'Redact workspace paths',
+  'settings.evolution.recycling.redactSecrets': 'Redact secrets & env values',
+  'settings.evolution.recycling.redactUserText': 'Redact raw user text',
+  'settings.evolution.recycling.includeSuccesses': 'Capture successes',
+  'settings.evolution.recycling.includeFailures': 'Capture failures',
+  'settings.evolution.recycling.weights': 'Replay ranking weights',
+  'settings.evolution.recycling.weightQuality': 'Quality',
+  'settings.evolution.recycling.weightRecency': 'Recency',
+  'settings.evolution.recycling.weightDiversity': 'Diversity',
+  'settings.evolution.recycling.recent': 'Recent recycled experiences',
+  'settings.evolution.recycling.empty': 'No experiences recycled yet.',
+  'settings.evolution.recycling.purge': 'Purge all',
+  'settings.evolution.recycling.total': 'Stored: {count}',
+  'settings.evolution.recycling.outcome.success': 'success',
+  'settings.evolution.recycling.outcome.failure': 'failure',
+  'settings.evolution.recycling.outcome.neutral': 'neutral',
+
+  'settings.evolution.reflection.title': 'Self-Reflection',
+  'settings.evolution.reflection.description':
+    'Periodically inspect recent turns with an LLM, distil insights and write them back as lessons, skills, rules or memory entries.',
+  'settings.evolution.reflection.toggle': 'Enable self-reflection',
+  'settings.evolution.reflection.triggerMode': 'Trigger mode',
+  'settings.evolution.reflection.triggerMode.manual': 'Manual only',
+  'settings.evolution.reflection.triggerMode.auto': 'Auto (event driven)',
+  'settings.evolution.reflection.triggerMode.scheduled': 'Scheduled interval',
+  'settings.evolution.reflection.depth': 'Reflection depth',
+  'settings.evolution.reflection.depth.quick': 'Quick',
+  'settings.evolution.reflection.depth.deep': 'Deep',
+  'settings.evolution.reflection.model': 'Reflection model (optional)',
+  'settings.evolution.reflection.modelHelp': 'Leave blank to reuse the judge / primary model.',
+  'settings.evolution.reflection.provider': 'Reflection provider (optional)',
+  'settings.evolution.modelPicker.noModelsConfigured': 'No models added',
+  'settings.evolution.modelPicker.providerHasNoModels': 'The selected provider has no models',
+  'settings.evolution.modelPicker.addProviderFirst': 'Add a provider with models in Adapter Settings first',
+  'settings.evolution.modelPicker.useDefault': 'Use default (unspecified)',
+  'settings.evolution.modelPicker.unregisteredHint': '{model} (unregistered)',
+  'settings.evolution.modelPicker.goToAdapterSettings': 'Add and save models in Adapter Settings before selecting here.',
+  'settings.evolution.modelPicker.providerAuto': 'Follow judge default provider',
+  'settings.evolution.modelPicker.providerDefaultTag': 'default',
+  'settings.evolution.reflection.scheduleIntervalMinutes': 'Schedule interval (minutes)',
+  'settings.evolution.reflection.minTurnsForAuto': 'Min turns before auto reflect',
+  'settings.evolution.reflection.failureThreshold': 'Auto trigger after N failures',
+  'settings.evolution.reflection.includeUserThumbsDown': 'Treat thumbs-down as failure',
+  'settings.evolution.reflection.lookbackTurns': 'Lookback turns per run',
+  'settings.evolution.reflection.maxLessonsPerRun': 'Max lessons per run',
+  'settings.evolution.reflection.maxTotalLessons': 'Max total lessons retained',
+  'settings.evolution.reflection.writeback': 'Writeback targets',
+  'settings.evolution.reflection.writeback.lessons': 'Lessons (DB)',
+  'settings.evolution.reflection.writeback.skills': 'Skill notes',
+  'settings.evolution.reflection.writeback.rules': 'User rules',
+  'settings.evolution.reflection.writeback.memory': 'Memory file',
+  'settings.evolution.reflection.runNow': 'Reflect now',
+  'settings.evolution.reflection.runQueued': 'Reflection queued: {runId}',
+  'settings.evolution.reflection.runFailed': 'Failed to trigger reflection: {error}',
+  'settings.evolution.reflection.recent': 'Recent reflection runs',
+  'settings.evolution.reflection.empty': 'No reflection runs yet.',
+  'settings.evolution.reflection.summary.totalRuns': 'Total runs',
+  'settings.evolution.reflection.summary.completed': 'Completed',
+  'settings.evolution.reflection.summary.failed': 'Failed',
+  'settings.evolution.reflection.summary.lessons': 'Lessons produced',
+  'settings.evolution.reflection.summary.lastRunAt': 'Last run',
+  'settings.evolution.reflection.summary.lastStatus': 'Last status',
+  'settings.evolution.reflection.summary.avgLessonsPerRun': 'Avg lessons / run',
+
+  'settings.evolution.reflection.persistRequired.title':
+    'Persist training data is required',
+  'settings.evolution.reflection.persistRequired.body':
+    'Self-reflection needs persistence enabled so recent turns can be replayed for the reflector.',
+  'settings.evolution.reflection.persistRequired.enable': 'Enable now',
+  'settings.evolution.reflection.persistAutoEnabledToast':
+    'Persist training data was automatically enabled to support reflection / recycling.',
+
+  'settings.evolution.reflection.runError.persistence_required':
+    'Enable Persist training data first.',
+  'settings.evolution.reflection.runError.no_turns_available':
+    'No turn records yet. Have a chat first, then try again.',
+  'settings.evolution.reflection.runError.reflection_disabled':
+    'Self-reflection is disabled. Turn it on first.',
+  'settings.evolution.reflection.runError.reflection_queue_full':
+    'Reflection queue is full. Please retry in a moment.',
+  'settings.evolution.reflection.runError.reflection_store_unavailable':
+    'Reflection storage is not ready. Check application logs.',
+  'settings.evolution.reflection.runError.reflection_worker_unavailable':
+    'Reflection worker is not initialised yet.',
+  'settings.evolution.reflection.runError.model_not_registered':
+    'The selected reflection model is not configured in any provider.',
+  'settings.evolution.reflection.runError.provider_not_registered':
+    'The selected reflection provider is not configured.',
+
+  'settings.evolution.reflection.run.status.queued': 'Queued',
+  'settings.evolution.reflection.run.status.running': 'Running',
+  'settings.evolution.reflection.run.status.completed': 'Completed',
+  'settings.evolution.reflection.run.status.failed': 'Failed',
+  'settings.evolution.reflection.run.status.skipped': 'Skipped',
+
+  'settings.evolution.reflection.skipReason.no_provider':
+    'No reflection provider is configured.',
+  'settings.evolution.reflection.skipReason.no_provider_for_registered_model':
+    'No provider in the configured set could serve the reflection model.',
+  'settings.evolution.reflection.skipReason.model_not_registered':
+    'Reflection model is not registered in any provider.',
+  'settings.evolution.reflection.skipReason.writeback_skill_skipped':
+    'Skill writeback was skipped (e.g. missing home directory or empty slug).',
+  'settings.evolution.reflection.skipReason.writeback_rule_skipped':
+    'Rule writeback was skipped (e.g. missing home directory or empty slug).',
+
+  'settings.evolution.recycling.persistRequired.title':
+    'Persist training data is required',
+  'settings.evolution.recycling.persistRequired.body':
+    'Experience recycling stores harvested turns; enable persistence so the SQLite store is reachable.',
+  'settings.evolution.recycling.persistRequired.enable': 'Enable now',
+  'settings.evolution.recycling.runtime.todayHarvested': 'Today {count}',
+  'settings.evolution.recycling.runtime.totalHarvested': 'Total {count}',
+  'settings.evolution.recycling.runtime.lastHarvestAt': 'Last harvest {ts}',
+
+  'settings.evolution.overview.judgeWorker.running': 'Judge: running',
+  'settings.evolution.overview.judgeWorker.idle': 'Judge: idle',
+  'settings.evolution.overview.judgeWorker.error': 'Judge: error',
+  'settings.evolution.overview.reflectionScheduler.label': 'Reflection scheduler',
+  'settings.evolution.overview.reflectionScheduler.never': 'never',
+  'settings.evolution.overview.reflectionScheduler.intervalMinutes':
+    'every {minutes} min',
+
+  'settings.evolution.modelEmpty.gotoProviders': 'Go to provider settings',
+
   'terminal.panel.newTab': 'New terminal',
   'terminal.panel.closeTab': 'Close tab',
   'terminal.panel.clear': 'Clear',
@@ -321,6 +460,8 @@ export const en = {
   'settings.providers.preset': 'Preset',
   'settings.providers.name': 'Name',
   'settings.providers.namePlaceholder': 'Provider name',
+  'settings.providers.nameConflict': 'This name is already in use. Please enter a unique provider name.',
+  'settings.providers.nameConflictHint': 'A provider named "{{name}}" already exists. Use a unique name.',
   'settings.providers.notes': 'Notes',
   'settings.providers.notesPlaceholder': 'Optional notes...',
   'settings.providers.baseUrl': 'Base URL',
@@ -1152,6 +1293,7 @@ export const en = {
   'tool.web.readPages': 'Read {count} pages',
   'tool.web.noResults': 'No results found',
   'tool.web.providerLabel': 'Provider:',
+  'tool.web.enginesUsedLabel': 'Engines:',
 
   'tool.verb.read': 'Read',
   'tool.verb.listed': 'Listed',
@@ -1447,6 +1589,8 @@ export const en = {
   'app.copyDiagnostics': 'Copy diagnostics',
   'app.copiedDiagnostics': 'Copied',
   'app.launching': 'Launching local workspace...',
+  'app.launchingSlow': 'The local service is still warming up (waited {{seconds}}s). Cold launches can take a while.',
+  'app.launchingTip': 'If this stays for a long time, check if anti-virus / firewall is scanning the executable, or if any leftover MCP/LSP processes are blocking startup.',
 
   'error.CLI_NOT_RUNNING': 'CLI process is not running. The session may have ended or the process crashed.',
   'error.CLI_START_FAILED': 'Failed to start CLI process.',

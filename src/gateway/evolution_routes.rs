@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::evolution::{
     self, DistillRequest, EvolutionEngine, ExportFilter, ExportOptions, Lesson, PurgeScope,
-    ThumbVote, score_from_vote,
+    ReflectionDepth, ReflectionTriggerMode, ReflectionWritebackTarget, ThumbVote,
 };
 use crate::evolution::types::EvolutionExportFormat;
 
@@ -43,6 +43,80 @@ fn json_error(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Va
     (status, Json(serde_json::json!({"error": msg})))
 }
 
+fn json_error_with(
+    status: StatusCode,
+    msg: &str,
+    extras: serde_json::Value,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut body = serde_json::json!({"error": msg});
+    if let serde_json::Value::Object(map) = extras {
+        if let serde_json::Value::Object(target) = &mut body {
+            for (k, v) in map {
+                target.insert(k, v);
+            }
+        }
+    }
+    (status, Json(body))
+}
+
+fn collect_registered_model_names(
+    state: &AppState,
+) -> (Vec<String>, std::collections::HashSet<String>) {
+    let cfg = state.config.lock();
+    let mut ordered: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for profile in cfg.model_providers.values() {
+        for name in effective_model_names_for_profile(profile) {
+            if seen.insert(name.clone()) {
+                ordered.push(name);
+            }
+        }
+    }
+    (ordered, seen)
+}
+
+fn collect_registered_provider_ids(state: &AppState) -> std::collections::HashSet<String> {
+    let cfg = state.config.lock();
+    cfg.model_providers.keys().cloned().collect()
+}
+
+fn effective_model_names_for_profile(
+    profile: &crate::config::ModelProviderConfig,
+) -> Vec<String> {
+    if !profile.model_names.is_empty() {
+        return profile
+            .model_names
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for slot in ["main", "haiku", "sonnet", "opus"] {
+        if let Some(value) = profile.models.get(slot) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    for value in profile.models.values() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn registered_models_payload(names: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "registeredModels": names,
+        "providersConfigured": !names.is_empty(),
+    })
+}
+
 pub async fn handle_overview(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -61,6 +135,9 @@ pub async fn handle_overview(
     let active_lessons = lessons.iter().filter(|l| l.enabled).count();
     let total_hits: u64 = lessons.iter().map(|l| l.hits).sum();
     let exports = store.list_exports().unwrap_or_default();
+    let judge_metrics = engine.judge_worker_metrics();
+    let scheduler_metrics = engine.reflection_scheduler_metrics();
+    let recycling_metrics = engine.recycling_metrics();
     Json(serde_json::json!({
         "enabled": snapshot.enabled,
         "persistTrainingData": snapshot.persist_training_data,
@@ -82,6 +159,24 @@ pub async fn handle_overview(
             "sizeBytes": e.size_bytes,
             "createdAt": e.created_at,
         })).collect::<Vec<_>>(),
+        "judgeWorker": {
+            "running": judge_metrics.running,
+            "enqueuedTotal": judge_metrics.enqueued_total,
+            "processed": judge_metrics.processed_total,
+            "lastErrorAt": judge_metrics.last_error_at,
+            "lastErrorMessage": judge_metrics.last_error_message,
+        },
+        "reflectionScheduler": {
+            "running": scheduler_metrics.running,
+            "intervalMinutes": scheduler_metrics.interval_minutes,
+            "lastTickAt": scheduler_metrics.last_tick_at,
+            "nextTickAtEstimate": scheduler_metrics.next_tick_at_estimate,
+        },
+        "recycling": {
+            "totalHarvested": recycling_metrics.total_harvested,
+            "recent24hHarvested": recycling_metrics.recent_24h_harvested,
+            "lastHarvestAt": recycling_metrics.last_harvest_at,
+        },
     }))
     .into_response()
 }
@@ -247,25 +342,21 @@ pub async fn handle_thumbs(
         comment: body.comment,
         ts: Utc::now(),
     };
-    if let Err(error) = engine.store().record_thumb(&vote) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()).into_response();
-    }
-    let signal = score_from_vote(&vote);
-    let weights = engine.config_snapshot().signal_weights;
-    let merged = match engine.store().merge_turn_signal(&body.turn_id, &signal, &weights) {
-        Ok(reward) => reward,
+    let vote_id = vote.id.clone();
+    let audit_only = !engine.persist_training_data();
+    match engine.submit_thumb_vote(vote, None) {
+        Ok(merged) => Json(serde_json::json!({
+            "ok": true,
+            "voteId": vote_id,
+            "finalReward": merged.final_score,
+            "auditOnly": audit_only,
+        }))
+        .into_response(),
         Err(error) => {
-            tracing::warn!(error = %error, "failed to merge thumb signal into turn reward");
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                .into_response();
+            tracing::warn!(error = %error, "failed to submit thumb vote");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()).into_response()
         }
-    };
-    Json(serde_json::json!({
-        "ok": true,
-        "voteId": vote.id,
-        "finalReward": merged.final_score,
-    }))
-    .into_response()
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -472,14 +563,27 @@ pub async fn handle_config_put(
         Err(resp) => return resp.into_response(),
     };
     let mut snapshot = engine.config_snapshot();
+    let (registered_names, registered_set) = collect_registered_model_names(&state);
     if let Some(v) = body.enabled {
         snapshot.enabled = v;
     }
     if let Some(v) = body.next_state_judge_enabled {
         snapshot.next_state_judge_enabled = v;
     }
-    if let Some(v) = body.judge_model {
-        snapshot.judge_model = if v.is_empty() { None } else { Some(v) };
+    if let Some(raw) = body.judge_model {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            snapshot.judge_model = None;
+        } else if registered_set.contains(&trimmed) {
+            snapshot.judge_model = Some(trimmed);
+        } else {
+            return json_error_with(
+                StatusCode::BAD_REQUEST,
+                "model_not_registered",
+                registered_models_payload(&registered_names),
+            )
+            .into_response();
+        }
     }
     if let Some(weights) = body.signal_weights {
         if let Some(v) = weights.thumbs {
@@ -534,6 +638,22 @@ pub async fn handle_config_put(
             snapshot.export.redact_secrets = v;
         }
     }
+    let snapshot_full: crate::config::Config = {
+        let mut cfg = state.config.lock();
+        cfg.evolution = snapshot.clone();
+        cfg.clone()
+    };
+    if let Err(e) = snapshot_full.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+    state.push_live_config(snapshot_full);
     engine.set_config(snapshot);
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -582,6 +702,22 @@ pub async fn handle_persistence_put(
         Ok(e) => e,
         Err(resp) => return resp.into_response(),
     };
+    let snapshot_full: crate::config::Config = {
+        let mut cfg = state.config.lock();
+        cfg.evolution.persist_training_data = body.persist_training_data;
+        cfg.clone()
+    };
+    if let Err(e) = snapshot_full.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+    state.push_live_config(snapshot_full);
     engine.set_persist_training_data(body.persist_training_data);
     Json(serde_json::json!({
         "ok": true,
@@ -978,5 +1114,587 @@ pub async fn handle_push_history(
         })
         .collect();
     Json(serde_json::json!({"items": items})).into_response()
+}
+
+pub async fn handle_recycling_config_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let snapshot = engine.config_snapshot();
+    Json(recycling_config_to_json(&snapshot.recycling)).into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RecyclingConfigPutBody {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default, alias = "sample_rate")]
+    pub sample_rate: Option<f32>,
+    #[serde(default, alias = "min_reward")]
+    pub min_reward: Option<f32>,
+    #[serde(default, alias = "max_retained")]
+    pub max_retained: Option<usize>,
+    #[serde(default, alias = "max_replay_in_prompt")]
+    pub max_replay_in_prompt: Option<usize>,
+    #[serde(default, alias = "replay_token_budget")]
+    pub replay_token_budget: Option<usize>,
+    #[serde(default, alias = "redact_workspace_paths")]
+    pub redact_workspace_paths: Option<bool>,
+    #[serde(default, alias = "redact_secrets")]
+    pub redact_secrets: Option<bool>,
+    #[serde(default, alias = "redact_user_text")]
+    pub redact_user_text: Option<bool>,
+    #[serde(default, alias = "include_successes")]
+    pub include_successes: Option<bool>,
+    #[serde(default, alias = "include_failures")]
+    pub include_failures: Option<bool>,
+    #[serde(default, alias = "weight_quality")]
+    pub weight_quality: Option<f32>,
+    #[serde(default, alias = "weight_recency")]
+    pub weight_recency: Option<f32>,
+    #[serde(default, alias = "weight_diversity")]
+    pub weight_diversity: Option<f32>,
+}
+
+pub async fn handle_recycling_config_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RecyclingConfigPutBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let mut snapshot = engine.config_snapshot();
+    let cfg = &mut snapshot.recycling;
+    if let Some(v) = body.enabled {
+        cfg.enabled = v;
+    }
+    if let Some(v) = body.sample_rate {
+        cfg.sample_rate = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = body.min_reward {
+        cfg.min_reward = v.clamp(-1.0, 1.0);
+    }
+    if let Some(v) = body.max_retained {
+        cfg.max_retained = v.clamp(0, 100_000);
+    }
+    if let Some(v) = body.max_replay_in_prompt {
+        cfg.max_replay_in_prompt = v.clamp(0, 32);
+    }
+    if let Some(v) = body.replay_token_budget {
+        cfg.replay_token_budget = v.clamp(64, 16_000);
+    }
+    if let Some(v) = body.redact_workspace_paths {
+        cfg.redact_workspace_paths = v;
+    }
+    if let Some(v) = body.redact_secrets {
+        cfg.redact_secrets = v;
+    }
+    if let Some(v) = body.redact_user_text {
+        cfg.redact_user_text = v;
+    }
+    if let Some(v) = body.include_successes {
+        cfg.include_successes = v;
+    }
+    if let Some(v) = body.include_failures {
+        cfg.include_failures = v;
+    }
+    if let Some(v) = body.weight_quality {
+        cfg.weight_quality = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = body.weight_recency {
+        cfg.weight_recency = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = body.weight_diversity {
+        cfg.weight_diversity = v.clamp(0.0, 1.0);
+    }
+    let auto_enable_persist =
+        snapshot.recycling.enabled && !snapshot.persist_training_data;
+    if auto_enable_persist {
+        snapshot.persist_training_data = true;
+    }
+    let snapshot_full: crate::config::Config = {
+        let mut cfg = state.config.lock();
+        cfg.evolution = snapshot.clone();
+        cfg.clone()
+    };
+    if let Err(e) = snapshot_full.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+    state.push_live_config(snapshot_full);
+    engine.set_config(snapshot.clone());
+    let mut body = recycling_config_to_json(&snapshot.recycling);
+    if let serde_json::Value::Object(ref mut map) = body {
+        map.insert(
+            "persistTrainingDataAutoEnabled".to_string(),
+            serde_json::Value::Bool(auto_enable_persist),
+        );
+        map.insert(
+            "persistTrainingData".to_string(),
+            serde_json::Value::Bool(snapshot.persist_training_data),
+        );
+    }
+    Json(body).into_response()
+}
+
+pub async fn handle_recycling_recent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = engine.recycling_store() else {
+        return Json(serde_json::json!({"items": Vec::<serde_json::Value>::new()})).into_response();
+    };
+    let limit: usize = 25;
+    let items = store.list_recent(limit).unwrap_or_default();
+    let total = store.count().unwrap_or(0);
+    let payload: Vec<serde_json::Value> = items
+        .into_iter()
+        .map(|exp| {
+            serde_json::json!({
+                "id": exp.id,
+                "sessionId": exp.session_id,
+                "turnId": exp.turn_id,
+                "codingMode": exp.coding_mode,
+                "outcome": exp.outcome.as_str(),
+                "reward": exp.reward,
+                "headline": exp.headline,
+                "contextExcerpt": exp.context_excerpt,
+                "responseExcerpt": exp.response_excerpt,
+                "toolsSummary": exp.tools_summary,
+                "tags": exp.tags,
+                "hits": exp.hits,
+                "createdAt": exp.created_at,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({"items": payload, "total": total})).into_response()
+}
+
+pub async fn handle_recycling_purge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = engine.recycling_store() else {
+        return Json(serde_json::json!({"ok": true, "removed": 0})).into_response();
+    };
+    let removed = store.purge_all().unwrap_or(0);
+    Json(serde_json::json!({"ok": true, "removed": removed})).into_response()
+}
+
+fn recycling_config_to_json(
+    cfg: &crate::evolution::ExperienceRecyclingConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": cfg.enabled,
+        "sampleRate": cfg.sample_rate,
+        "minReward": cfg.min_reward,
+        "maxRetained": cfg.max_retained,
+        "maxReplayInPrompt": cfg.max_replay_in_prompt,
+        "replayTokenBudget": cfg.replay_token_budget,
+        "redactWorkspacePaths": cfg.redact_workspace_paths,
+        "redactSecrets": cfg.redact_secrets,
+        "redactUserText": cfg.redact_user_text,
+        "includeSuccesses": cfg.include_successes,
+        "includeFailures": cfg.include_failures,
+        "weightQuality": cfg.weight_quality,
+        "weightRecency": cfg.weight_recency,
+        "weightDiversity": cfg.weight_diversity,
+    })
+}
+
+pub async fn handle_reflection_config_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let snapshot = engine.config_snapshot();
+    Json(reflection_config_to_json(&snapshot.reflection)).into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionConfigPutBody {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default, alias = "trigger_mode")]
+    pub trigger_mode: Option<String>,
+    #[serde(default)]
+    pub depth: Option<String>,
+    #[serde(default, alias = "reflection_model")]
+    pub reflection_model: Option<String>,
+    #[serde(default, alias = "reflection_provider")]
+    pub reflection_provider: Option<String>,
+    #[serde(default, alias = "schedule_interval_minutes")]
+    pub schedule_interval_minutes: Option<u32>,
+    #[serde(default, alias = "min_turns_for_auto")]
+    pub min_turns_for_auto: Option<usize>,
+    #[serde(default, alias = "failure_threshold")]
+    pub failure_threshold: Option<u32>,
+    #[serde(default, alias = "writeback_targets")]
+    pub writeback_targets: Option<Vec<String>>,
+    #[serde(default, alias = "max_lessons_per_run")]
+    pub max_lessons_per_run: Option<usize>,
+    #[serde(default, alias = "max_total_lessons")]
+    pub max_total_lessons: Option<usize>,
+    #[serde(default, alias = "include_user_thumbs_down")]
+    pub include_user_thumbs_down: Option<bool>,
+    #[serde(default, alias = "lookback_turns")]
+    pub lookback_turns: Option<usize>,
+}
+
+pub async fn handle_reflection_config_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReflectionConfigPutBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let mut snapshot = engine.config_snapshot();
+    let (registered_names, registered_set) = collect_registered_model_names(&state);
+    let registered_provider_ids = collect_registered_provider_ids(&state);
+    let cfg = &mut snapshot.reflection;
+    if let Some(v) = body.enabled {
+        cfg.enabled = v;
+    }
+    if let Some(v) = body.trigger_mode {
+        if let Some(parsed) = ReflectionTriggerMode::parse(&v) {
+            cfg.trigger_mode = parsed;
+        }
+    }
+    if let Some(v) = body.depth {
+        if let Some(parsed) = ReflectionDepth::parse(&v) {
+            cfg.depth = parsed;
+        }
+    }
+    if let Some(raw) = body.reflection_model {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            cfg.reflection_model = None;
+        } else if registered_set.contains(&trimmed) {
+            cfg.reflection_model = Some(trimmed);
+        } else {
+            return json_error_with(
+                StatusCode::BAD_REQUEST,
+                "model_not_registered",
+                registered_models_payload(&registered_names),
+            )
+            .into_response();
+        }
+    }
+    if let Some(raw) = body.reflection_provider {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            cfg.reflection_provider = None;
+        } else if registered_provider_ids.contains(&trimmed) {
+            cfg.reflection_provider = Some(trimmed);
+        } else {
+            return json_error_with(
+                StatusCode::BAD_REQUEST,
+                "provider_not_registered",
+                serde_json::json!({
+                    "registeredProviderIds": registered_provider_ids.iter().cloned().collect::<Vec<_>>(),
+                }),
+            )
+            .into_response();
+        }
+    }
+    if let Some(v) = body.schedule_interval_minutes {
+        cfg.schedule_interval_minutes = v.clamp(5, 24 * 60);
+    }
+    if let Some(v) = body.min_turns_for_auto {
+        cfg.min_turns_for_auto = v.clamp(1, 64);
+    }
+    if let Some(v) = body.failure_threshold {
+        cfg.failure_threshold = v.clamp(1, 32);
+    }
+    if let Some(values) = body.writeback_targets {
+        let mut parsed: Vec<ReflectionWritebackTarget> = Vec::new();
+        for raw in values {
+            if let Some(target) = ReflectionWritebackTarget::parse(&raw) {
+                if !parsed.contains(&target) {
+                    parsed.push(target);
+                }
+            }
+        }
+        if parsed.is_empty() {
+            parsed.push(ReflectionWritebackTarget::Lessons);
+        }
+        cfg.writeback_targets = parsed;
+    }
+    if let Some(v) = body.max_lessons_per_run {
+        cfg.max_lessons_per_run = v.clamp(1, 16);
+    }
+    if let Some(v) = body.max_total_lessons {
+        cfg.max_total_lessons = v.clamp(1, 10_000);
+    }
+    if let Some(v) = body.include_user_thumbs_down {
+        cfg.include_user_thumbs_down = v;
+    }
+    if let Some(v) = body.lookback_turns {
+        cfg.lookback_turns = v.clamp(1, 64);
+    }
+    let auto_enable_persist =
+        snapshot.reflection.enabled && !snapshot.persist_training_data;
+    if auto_enable_persist {
+        snapshot.persist_training_data = true;
+    }
+    let snapshot_full: crate::config::Config = {
+        let mut cfg = state.config.lock();
+        cfg.evolution = snapshot.clone();
+        cfg.clone()
+    };
+    if let Err(e) = snapshot_full.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+    state.push_live_config(snapshot_full);
+    engine.set_config(snapshot.clone());
+    let mut body = reflection_config_to_json(&snapshot.reflection);
+    if let serde_json::Value::Object(ref mut map) = body {
+        map.insert(
+            "persistTrainingDataAutoEnabled".to_string(),
+            serde_json::Value::Bool(auto_enable_persist),
+        );
+        map.insert(
+            "persistTrainingData".to_string(),
+            serde_json::Value::Bool(snapshot.persist_training_data),
+        );
+    }
+    Json(body).into_response()
+}
+
+pub async fn handle_reflection_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    if let Some(detail) = engine.reflection_store_health() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "reflection_store_unavailable",
+                "detail": detail,
+            })),
+        )
+            .into_response();
+    }
+    let Some(store) = engine.reflection_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "reflection_store_unavailable",
+                "detail": "reflection_store_bind_failed",
+            })),
+        )
+            .into_response();
+    };
+    let runs = store.list_recent(20).unwrap_or_default();
+    let summary = store.summary().unwrap_or_default();
+    let avg_lessons = store.average_lessons_per_run();
+    let last_run = store.last_run_at_and_status();
+    let items: Vec<serde_json::Value> = runs
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "sessionId": r.session_id,
+                "trigger": r.trigger,
+                "depth": r.depth,
+                "status": r.status.as_str(),
+                "model": r.model,
+                "lessonsProduced": r.lessons_produced,
+                "turnsAnalyzed": r.turns_analyzed,
+                "summary": r.summary,
+                "error": r.error,
+                "startedAt": r.started_at,
+                "completedAt": r.completed_at,
+            })
+        })
+        .collect();
+    let (last_run_at_value, last_status_value) = match (last_run.clone(), summary.last_run_at) {
+        (Some((ts, status)), _) => (
+            serde_json::Value::String(ts.to_rfc3339()),
+            serde_json::Value::String(status),
+        ),
+        (None, Some(ts)) => (
+            serde_json::Value::String(ts.to_rfc3339()),
+            summary
+                .last_status
+                .clone()
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        _ => (serde_json::Value::Null, serde_json::Value::Null),
+    };
+    Json(serde_json::json!({
+        "items": items,
+        "summary": {
+            "totalRuns": summary.total_runs,
+            "completedRuns": summary.completed_runs,
+            "failedRuns": summary.failed_runs,
+            "lastRunAt": last_run_at_value,
+            "lastStatus": last_status_value,
+            "totalLessonsProduced": summary.total_lessons_produced,
+            "avgLessonsPerRun": avg_lessons,
+        }
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRunBody {
+    #[serde(default, alias = "session_id")]
+    pub session_id: Option<String>,
+}
+
+pub async fn handle_reflection_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReflectionRunBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let engine = match engine_initialized() {
+        Ok(e) => e,
+        Err(resp) => return resp.into_response(),
+    };
+    let session_id = body
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if !engine.persist_training_data() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "persistence_required",
+                "detail": "请先在『自我进化』总卡片开启『持久化训练数据』",
+            })),
+        )
+            .into_response();
+    }
+    match engine.trigger_manual_reflection(session_id) {
+        Ok(run_id) => Json(serde_json::json!({"ok": true, "runId": run_id})).into_response(),
+        Err(error) => {
+            let msg = error.to_string();
+            let (status, detail) = match msg.as_str() {
+                "reflection_disabled" => (
+                    StatusCode::CONFLICT,
+                    "请先开启『自我反思』并配置反思模型",
+                ),
+                "persistence_required" => (
+                    StatusCode::CONFLICT,
+                    "请先在『自我进化』总卡片开启『持久化训练数据』",
+                ),
+                "no_turns_available" => (
+                    StatusCode::BAD_REQUEST,
+                    "没有可用的回合记录，请先与模型对话再触发反思",
+                ),
+                "reflection_queue_full" => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "反思队列已满，请稍后再试",
+                ),
+                "reflection_worker_unavailable" => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "反思工作线程未就绪",
+                ),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, ""),
+            };
+            if detail.is_empty() {
+                json_error(status, &msg).into_response()
+            } else {
+                (
+                    status,
+                    Json(serde_json::json!({
+                        "error": msg,
+                        "detail": detail,
+                    })),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+fn reflection_config_to_json(
+    cfg: &crate::evolution::SelfReflectionConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": cfg.enabled,
+        "triggerMode": cfg.trigger_mode.as_str(),
+        "depth": cfg.depth.as_str(),
+        "reflectionModel": cfg.reflection_model,
+        "reflectionProvider": cfg.reflection_provider,
+        "scheduleIntervalMinutes": cfg.schedule_interval_minutes,
+        "minTurnsForAuto": cfg.min_turns_for_auto,
+        "failureThreshold": cfg.failure_threshold,
+        "writebackTargets": cfg
+            .writeback_targets
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect::<Vec<_>>(),
+        "maxLessonsPerRun": cfg.max_lessons_per_run,
+        "maxTotalLessons": cfg.max_total_lessons,
+        "includeUserThumbsDown": cfg.include_user_thumbs_down,
+        "lookbackTurns": cfg.lookback_turns,
+    })
 }
 

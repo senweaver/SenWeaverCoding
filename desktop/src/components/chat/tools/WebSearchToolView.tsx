@@ -10,6 +10,13 @@ import {
   type WebSearchHit,
   type WebSearchSummary,
 } from '../../../utils/toolFormatters'
+import {
+  engineIconFor,
+  engineIconForHost,
+  engineLabelFor,
+  isEngineId,
+  type EngineId,
+} from './engineIcons'
 
 type AvatarColor = { bg: string; fg: string }
 
@@ -25,6 +32,79 @@ const AVATAR_PALETTE: readonly AvatarColor[] = [
 ] as const
 
 const AVATAR_FALLBACK: AvatarColor = { bg: '#64748b', fg: '#ffffff' }
+
+const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set([
+  'duckduckgo',
+  'brave',
+  'bing',
+  'baidu',
+  'csdn',
+  'juejin',
+  'zhihu',
+  'jina',
+  'weixin',
+  'wechat',
+  'github',
+  'arxiv',
+  'semanticscholar',
+  'dblp',
+  'pubmed',
+  'googlescholar',
+  'searxng',
+  'sogou',
+  'people',
+  'xinhuanet',
+])
+
+function engineIdFromName(raw: string | null | undefined): EngineId | null {
+  if (!raw) return null
+  const norm = raw.toLowerCase().replace(/[\s_-]/g, '')
+  if (norm.includes('duckduckgo') || norm === 'ddg') return 'duckduckgo'
+  if (norm.includes('brave')) return 'brave'
+  if (norm.includes('bing')) return 'bing'
+  if (norm.includes('baidu')) return 'baidu'
+  if (norm.includes('searxng') || norm.includes('searx')) return 'searxng'
+  if (norm.includes('csdn')) return 'csdn'
+  if (norm.includes('jina')) return 'jina'
+  if (norm.includes('github')) return 'github'
+  if (norm.includes('zhihu')) return 'zhihu'
+  if (norm.includes('juejin')) return 'juejin'
+  if (norm.includes('weixin') || norm.includes('wechat')) return 'weixin'
+  if (norm.includes('arxiv')) return 'arxiv'
+  if (norm.includes('semanticscholar')) return 'semanticscholar'
+  if (norm.includes('dblp')) return 'dblp'
+  if (norm.includes('pubmed')) return 'pubmed'
+  if (norm.includes('googlescholar') || norm.includes('scholar')) return 'googlescholar'
+  if (norm.includes('sogou')) return 'sogou'
+  if (KNOWN_ENGINE_IDS.has(norm)) return norm as EngineId
+  return null
+}
+
+function collectEngineIds(summary: WebSearchSummary): EngineId[] {
+  const seen = new Set<EngineId>()
+  const order: EngineId[] = []
+  const push = (id: EngineId | null) => {
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    order.push(id)
+  }
+  push(engineIdFromName(summary.engine))
+  push(engineIdFromName(summary.provider))
+  if (summary.fallbackHeader) {
+    const m = summary.fallbackHeader.match(/Primary\s+([\w-]+)\s+failed[^;]*;\s*results from\s+([\w-]+)/i)
+    if (m) {
+      push(engineIdFromName(m[1]))
+      push(engineIdFromName(m[2]))
+    } else {
+      const tokens = summary.fallbackHeader
+        .split(/[^\w-]+/)
+        .map((t) => t.trim())
+        .filter(Boolean)
+      for (const t of tokens) push(engineIdFromName(t))
+    }
+  }
+  return order
+}
 
 function hashHost(host: string): number {
   let h = 0
@@ -65,16 +145,6 @@ function HostAvatar({ host, size = 14 }: { host: string; size?: number }) {
   )
 }
 
-function faviconSources(host: string, size: number): string[] {
-  if (!host) return []
-  const sz = Math.max(16, Math.min(128, Math.round(size * 2)))
-  const safe = encodeURIComponent(host)
-  return [
-    `https://www.google.com/s2/favicons?domain=${safe}&sz=${sz}`,
-    `https://icons.duckduckgo.com/ip3/${safe}.ico`,
-  ]
-}
-
 function HostFavicon({
   host,
   size = 16,
@@ -84,29 +154,56 @@ function HostFavicon({
   size?: number
   rounded?: 'full' | 'sm'
 }) {
-  const sources = useMemo(() => faviconSources(host, size), [host, size])
-  const [index, setIndex] = useState(0)
+  const localIcon = useMemo(() => engineIconForHost(host), [host])
+  const [errored, setErrored] = useState(false)
   const radiusClass = rounded === 'full' ? 'rounded-full' : 'rounded-sm'
 
-  if (!host) {
-    return <HostAvatar host={host} size={size} />
-  }
-
-  if (index >= sources.length) {
+  if (!host || !localIcon || errored) {
     return <HostAvatar host={host} size={size} />
   }
 
   return (
     <img
-      src={sources[index]}
+      src={localIcon}
       alt={host}
       title={host}
       width={size}
       height={size}
       loading="lazy"
       decoding="async"
-      referrerPolicy="no-referrer"
-      onError={() => setIndex((prev) => prev + 1)}
+      onError={() => setErrored(true)}
+      className={`${radiusClass} shrink-0 bg-[var(--color-surface-container-high)]/40 object-contain`}
+      style={{ width: size, height: size }}
+    />
+  )
+}
+
+function EngineIcon({
+  id,
+  size = 16,
+  rounded = 'sm',
+}: {
+  id: EngineId
+  size?: number
+  rounded?: 'full' | 'sm'
+}) {
+  const src = engineIconFor(id)
+  const label = engineLabelFor(id)
+  const radiusClass = rounded === 'full' ? 'rounded-full' : 'rounded-sm'
+  const [errored, setErrored] = useState(false)
+  if (!src || errored) {
+    return <HostAvatar host={label} size={size} />
+  }
+  return (
+    <img
+      src={src}
+      alt={label}
+      title={label}
+      width={size}
+      height={size}
+      loading="lazy"
+      decoding="async"
+      onError={() => setErrored(true)}
       className={`${radiusClass} shrink-0 bg-[var(--color-surface-container-high)]/40 object-contain`}
       style={{ width: size, height: size }}
     />
@@ -197,6 +294,7 @@ export function WebSearchHeader(props: ToolViewProps) {
 export function WebSearchDetail(props: ToolViewProps) {
   const t = useTranslation()
   const summary = useMemo(() => readSummary(props), [props])
+  const engineIds = useMemo(() => collectEngineIds(summary), [summary])
   const isStreaming = props.isStreaming === true
   const hasError = props.result?.isError === true || summary.looksLikeError
 
@@ -245,60 +343,86 @@ export function WebSearchDetail(props: ToolViewProps) {
 
   return (
     <div className="space-y-3">
-      {summary.fallbackHeader && (
-        <div className="rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-2 py-1.5 text-[11px] text-[var(--color-text-secondary)]">
-          {summary.fallbackHeader}
+      {(summary.fallbackHeader || engineIds.length > 0) && (
+        <div className="flex min-w-0 items-center gap-2 text-[11px]">
+          {engineIds.length > 0 && (
+            <span
+              className="flex shrink-0 items-center -space-x-1"
+              aria-label={t('tool.web.enginesUsedLabel')}
+              title={engineIds.map((id) => engineLabelFor(id)).join(' · ')}
+            >
+              {engineIds.map((id) => (
+                <span
+                  key={id}
+                  className="rounded-full ring-2 ring-[var(--color-surface-container-lowest)]"
+                >
+                  <EngineIcon id={id} size={14} rounded="full" />
+                </span>
+              ))}
+            </span>
+          )}
+          {summary.fallbackHeader && (
+            <span className="min-w-0 truncate text-[var(--color-text-tertiary)]">
+              {summary.fallbackHeader}
+            </span>
+          )}
+          {!summary.fallbackHeader &&
+            summary.provider &&
+            !isEngineId(summary.engine) && (
+              <span className="text-[var(--color-text-tertiary)]">
+                {t('tool.web.providerLabel')}
+                <span className="ml-1 font-medium text-[var(--color-text-secondary)]">
+                  {summary.provider}
+                </span>
+              </span>
+            )}
         </div>
       )}
-      {summary.provider && (
-        <div className="text-[11px] text-[var(--color-text-tertiary)]">
-          {t('tool.web.providerLabel')}
-          <span className="ml-1 font-medium text-[var(--color-text-secondary)]">
-            {summary.provider}
-          </span>
-        </div>
-      )}
-      <ol className="space-y-2.5">
+      <ol className="space-y-3.5">
         {summary.hits.map((hit, index) => (
-          <li key={`${hit.url || 'noref'}-${index}`} className="min-w-0">
-            <div className="flex min-w-0 items-start gap-2">
-              <span className="mt-0.5">
+          <li
+            key={`${hit.url || 'noref'}-${index}`}
+            className="group min-w-0 rounded-md px-1 py-0.5 hover:bg-[var(--color-surface-container-high)]/40"
+          >
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="mt-1 shrink-0">
                 <HostFavicon
                   host={hit.host || safeHost(hit.url)}
                   size={18}
                   rounded="sm"
                 />
               </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2 min-w-0">
-                  {hit.url ? (
-                    <a
-                      href={hit.url}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="min-w-0 truncate text-[13px] font-medium text-[var(--color-text-accent)] hover:underline"
-                      title={hit.title}
-                    >
-                      {hit.title || hit.url}
-                    </a>
-                  ) : (
-                    <span className="min-w-0 truncate text-[13px] font-medium text-[var(--color-text-primary)]">
-                      {hit.title || '(untitled)'}
-                    </span>
-                  )}
-                </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                {hit.url ? (
+                  <a
+                    href={hit.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="block truncate text-[14px] font-medium text-[var(--color-text-primary)] group-hover:text-[var(--color-text-accent)] hover:underline"
+                    title={hit.title}
+                  >
+                    {hit.title || hit.url}
+                  </a>
+                ) : (
+                  <span className="block truncate text-[14px] font-medium text-[var(--color-text-primary)]">
+                    {hit.title || '(untitled)'}
+                  </span>
+                )}
                 {hit.url && (
                   <div
-                    className="truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)]"
+                    className="truncate text-[11.5px] text-[var(--color-text-tertiary)]"
                     title={hit.url}
                   >
                     {hit.url}
                   </div>
                 )}
                 {hit.snippet && (
-                  <div className="mt-1 text-[12px] leading-relaxed text-[var(--color-text-secondary)] line-clamp-2">
+                  <p
+                    className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)] line-clamp-3"
+                    title={hit.snippet}
+                  >
                     {hit.snippet}
-                  </div>
+                  </p>
                 )}
               </div>
             </div>

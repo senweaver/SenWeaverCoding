@@ -728,6 +728,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     }
 
     state.hooks.fire_session_end(&session_id, "ws_desktop").await;
+    if let Some(engine) = crate::evolution::try_global() {
+        let snapshot = engine.config_snapshot();
+        if snapshot.reflection.enabled
+            && matches!(
+                snapshot.reflection.trigger_mode,
+                crate::evolution::ReflectionTriggerMode::Auto
+            )
+        {
+            engine.schedule_session_reflection(
+                &session_id,
+                crate::evolution::ReflectionTriggerCause::SessionEnd,
+            );
+        }
+        if snapshot.auto_distill_on_session_end {
+            let _ = snapshot;
+        }
+    }
 }
 
 pub struct DesktopRuntimeState {

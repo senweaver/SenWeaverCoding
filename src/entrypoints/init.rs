@@ -94,7 +94,7 @@ impl InitEntrypoint {
         "# SenWeaverCoding configuration\n\
          # See docs for full reference.\n\n\
          [agent]\n\
-         # model = \"claude-sonnet-4-20250514\"\n\n\
+         # model = \"<your-model-id>\"\n\n\
          [memory]\n\
          backend = \"markdown\"\n\n\
          [gateway]\n\

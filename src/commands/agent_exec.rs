@@ -91,13 +91,19 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
         None => {
 
             if name == "default" || name == "primary" {
+                let model = match crate::providers::resolve_default_model(&cfg) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return CommandResult::err(
+                            "未添加模型，请先在提供商设置页添加 / no_model_configured: please add at least one model in Provider settings",
+                        );
+                    }
+                };
                 (
                     cfg.default_provider
                         .clone()
                         .unwrap_or_else(|| "openrouter".into()),
-                    cfg.default_model
-                        .clone()
-                        .unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
+                    model,
                     None,
                     cfg.api_key.clone(),
                     cfg.default_temperature,
@@ -110,8 +116,10 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
         }
     };
 
+    let resolved_provider_name =
+        crate::providers::resolve_runtime_provider_name(&provider_name, &cfg);
     let provider = match crate::providers::create_provider_with_url(
-        &provider_name,
+        &resolved_provider_name,
         api_key.as_deref(),
         None,
     ) {

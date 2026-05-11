@@ -6255,7 +6255,7 @@ impl Default for Config {
             api_url: None,
             api_path: None,
             default_provider: Some("openrouter".to_string()),
-            default_model: Some("anthropic/claude-sonnet-4.6".to_string()),
+            default_model: None,
             model_providers: HashMap::new(),
             default_temperature: default_temperature(),
             provider_timeout_secs: default_provider_timeout_secs(),
@@ -7430,7 +7430,7 @@ impl Config {
             return;
         };
 
-        let Some((profile_key, profile)) = self.lookup_model_provider_profile(&current_provider)
+        let Some((_profile_key, profile)) = self.lookup_model_provider_profile(&current_provider)
         else {
             return;
         };
@@ -7501,28 +7501,6 @@ impl Config {
             }
         }
 
-        let normalized_wire_api = profile.wire_api.as_deref().and_then(normalize_wire_api);
-        let profile_name = profile
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        if normalized_wire_api == Some("responses") {
-            self.default_provider = Some("openai-codex".to_string());
-            return;
-        }
-
-        if let Some(profile_name) = profile_name {
-            if !profile_name.eq_ignore_ascii_case(&profile_key) {
-                self.default_provider = Some(profile_name.to_string());
-                return;
-            }
-        }
-
-        if let Some(base_url) = base_url {
-            self.default_provider = Some(format!("custom:{base_url}"));
-        }
     }
 
     fn migrate_legacy_low_caps(&mut self) -> bool {

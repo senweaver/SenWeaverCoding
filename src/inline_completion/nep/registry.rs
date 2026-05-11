@@ -87,13 +87,28 @@ impl NepRegistry {
 pub fn default_registry(config: &crate::config::Config) -> Arc<NepRegistry> {
     let heuristic: NepHandle = Arc::new(super::HeuristicNep::new());
     let mut providers: Vec<NepHandle> = vec![heuristic.clone()];
-    if let Some(provider_name) = config.default_provider.clone() {
-        let model = config
+    if let Some(provider_name_raw) = config.default_provider.clone() {
+        let provider_name =
+            crate::providers::resolve_runtime_provider_name(&provider_name_raw, config);
+        let model = match config
             .agent_runtime
             .fast_apply_model
             .clone()
-            .or_else(|| config.default_model.clone())
-            .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| config.default_model.clone().filter(|s| !s.trim().is_empty()))
+        {
+            Some(m) => m,
+            None => match crate::providers::resolve_default_model(config) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        target = "config",
+                        "no_model_configured: skipping nep default_registry: {e}"
+                    );
+                    return Arc::new(NepRegistry::new(providers).with_fallback(heuristic));
+                }
+            },
+        };
         let runtime_options = crate::providers::ProviderRuntimeOptions {
             auth_profile_override: None,
             provider_api_url: config.api_url.clone(),

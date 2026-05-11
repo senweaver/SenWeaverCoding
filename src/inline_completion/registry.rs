@@ -119,11 +119,18 @@ fn hash_cache_key(k: CacheKey) -> u64 {
 }
 
 pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle> {
-    let provider_name = config.default_provider.clone()?;
-    let model = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let provider_name_raw = config.default_provider.clone()?;
+    let provider_name = crate::providers::resolve_runtime_provider_name(&provider_name_raw, config);
+    let model = match crate::providers::resolve_default_model(config) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                target = "config",
+                "no_model_configured: skipping inline_completion default_provider: {e}"
+            );
+            return None;
+        }
+    };
     let api_key = config.api_key.clone();
     let api_url = config.api_url.clone();
     let provider_timeout_secs = config.provider_timeout_secs;

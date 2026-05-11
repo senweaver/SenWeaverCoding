@@ -1110,7 +1110,7 @@ pub fn create_provider_for_model(
 }
 
 #[allow(clippy::too_many_lines)]
-fn create_provider_with_url_and_options(
+pub fn create_provider_with_url_and_options(
     name: &str,
     api_key: Option<&str>,
     api_url: Option<&str>,
@@ -1334,8 +1334,14 @@ fn create_provider_with_url_and_options(
         "azure_openai" | "azure-openai" | "azure" => {
             let resource = std::env::var("AZURE_OPENAI_RESOURCE")
                 .unwrap_or_else(|_| "my-resource".to_string());
-            let deployment =
-                std::env::var("AZURE_OPENAI_DEPLOYMENT").unwrap_or_else(|_| "gpt-4o".to_string());
+            let deployment = match std::env::var("AZURE_OPENAI_DEPLOYMENT") {
+                Ok(v) if !v.trim().is_empty() => v,
+                _ => {
+                    anyhow::bail!(
+                        "no_model_configured: 未配置 AZURE_OPENAI_DEPLOYMENT 或 model_providers.*.azure_openai_deployment (please set AZURE_OPENAI_DEPLOYMENT env var or add azure_openai_deployment in Provider settings)"
+                    );
+                }
+            };
             let api_version = std::env::var("AZURE_OPENAI_API_VERSION").ok();
             Ok(Box::new(azure_openai::AzureOpenAiProvider::new(
                 key,
@@ -1751,6 +1757,182 @@ fn parse_provider_profile(s: &str) -> (&str, Option<&str>) {
         Some((provider, profile)) if !profile.is_empty() => (provider, Some(profile)),
         _ => (s, None),
     }
+}
+
+pub fn resolve_runtime_provider_name(
+    saved_id: &str,
+    cfg: &crate::config::Config,
+) -> String {
+    let trimmed = saved_id.trim();
+    if trimmed.is_empty() {
+        return saved_id.to_string();
+    }
+
+    if trimmed.starts_with("custom:") || trimmed.starts_with("anthropic-custom:") {
+        return trimmed.to_string();
+    }
+
+    let Some(profile) = cfg.model_providers.get(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    let preset = profile
+        .preset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let base_url = profile
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let wire_api_lower = profile
+        .wire_api
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    let wire_lower = wire_api_lower.as_deref();
+
+    let is_responses_wire = matches!(
+        wire_lower,
+        Some("responses") | Some("openai-responses") | Some("open-ai-responses")
+    );
+    let is_anthropic_wire = matches!(
+        wire_lower,
+        Some("anthropic") | Some("anthropic-messages") | Some("anthropic-chat")
+    );
+
+    if matches!(preset, Some("openai-codex") | Some("openai_codex") | Some("codex"))
+        || is_responses_wire
+    {
+        return "openai-codex".to_string();
+    }
+
+    if matches!(preset, Some("anthropic-custom")) {
+        if let Some(url) = base_url {
+            return format!("anthropic-custom:{url}");
+        }
+    }
+
+    if is_anthropic_wire {
+        if let Some(url) = base_url {
+            if !matches!(preset, Some("anthropic")) || !is_official_anthropic_base_url(url) {
+                return format!("anthropic-custom:{url}");
+            }
+        }
+    }
+
+    if matches!(preset, Some("custom")) {
+        if let Some(url) = base_url {
+            return format!("custom:{url}");
+        }
+    }
+
+    if let Some(preset) = preset {
+        if matches!(preset, "anthropic") {
+            return "anthropic".to_string();
+        }
+        return preset.to_string();
+    }
+
+    if let Some(url) = base_url {
+        return format!("custom:{url}");
+    }
+
+    trimmed.to_string()
+}
+
+fn is_official_anthropic_base_url(url: &str) -> bool {
+    let trimmed = url.trim().trim_end_matches('/').to_ascii_lowercase();
+    matches!(
+        trimmed.as_str(),
+        "https://api.anthropic.com"
+            | "http://api.anthropic.com"
+            | "https://api.anthropic.com/v1"
+            | "http://api.anthropic.com/v1"
+    )
+}
+
+pub fn profile_model_names(profile: &crate::config::ModelProviderConfig) -> Vec<String> {
+    if !profile.model_names.is_empty() {
+        return profile
+            .model_names
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for slot in ["main", "haiku", "sonnet", "opus"] {
+        if let Some(value) = profile.models.get(slot) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    let mut keys: Vec<&String> = profile.models.keys().collect();
+    keys.sort();
+    for k in keys {
+        if let Some(value) = profile.models.get(k) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
+pub fn first_configured_model(config: &crate::config::Config) -> Option<String> {
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Some(pid) = config
+        .default_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(profile) = config.model_providers.get(pid) {
+            for name in profile_model_names(profile) {
+                if seen.insert(name.clone()) {
+                    order.push(name);
+                }
+            }
+        }
+    }
+    let mut keys: Vec<&String> = config.model_providers.keys().collect();
+    keys.sort();
+    for k in keys {
+        if let Some(profile) = config.model_providers.get(k) {
+            for name in profile_model_names(profile) {
+                if seen.insert(name.clone()) {
+                    order.push(name);
+                }
+            }
+        }
+    }
+    order.into_iter().next()
+}
+
+pub fn resolve_default_model(config: &crate::config::Config) -> anyhow::Result<String> {
+    if let Some(m) = config
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(m.to_string());
+    }
+    if let Some(name) = first_configured_model(config) {
+        return Ok(name);
+    }
+    Err(anyhow::anyhow!(
+        "no_model_configured: 未添加模型，请先在提供商设置页添加至少一个模型 (no model configured; please add at least one model in Provider settings)"
+    ))
 }
 
 pub fn create_resilient_provider(

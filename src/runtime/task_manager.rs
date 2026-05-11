@@ -47,7 +47,7 @@ use std::time::Instant;
 
 use futures_util::FutureExt;
 use parking_lot::Mutex;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{Instrument, info_span};
 use uuid::Uuid;
 
@@ -59,6 +59,8 @@ pub struct TaskInfo {
     pub name: String,
 
     pub spawned_at: Instant,
+
+    pub abort_handle: AbortHandle,
 }
 
 static REGISTRY: std::sync::LazyLock<Mutex<Vec<TaskInfo>>> =
@@ -104,12 +106,6 @@ where
 {
     let name: String = name.into();
     let id = format!("task-{}", &Uuid::new_v4().to_string()[..8]);
-    let info = TaskInfo {
-        id: id.clone(),
-        name: name.clone(),
-        spawned_at: Instant::now(),
-    };
-    REGISTRY.lock().push(info);
 
     let span = info_span!("task", name = %name, task_id = %id);
     let registry_id = id.clone();
@@ -136,10 +132,28 @@ where
     };
 
     let inner = tokio::spawn(wrapped.instrument(span));
+    let abort_handle = inner.abort_handle();
+    let info = TaskInfo {
+        id: id.clone(),
+        name,
+        spawned_at: Instant::now(),
+        abort_handle,
+    };
+    REGISTRY.lock().push(info);
+
     TaskHandle {
         inner: Some(inner),
         id,
     }
+}
+
+pub fn abort_all() -> usize {
+    let infos: Vec<TaskInfo> = REGISTRY.lock().clone();
+    let count = infos.len();
+    for info in infos {
+        info.abort_handle.abort();
+    }
+    count
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {

@@ -32,6 +32,54 @@ pub mod ws_desktop;
 pub mod a2a;
 pub mod hardware_context;
 
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static GATEWAY_SHUTDOWN_SIGNAL: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
+static GATEWAY_RUNNING: AtomicBool = AtomicBool::new(false);
+static GATEWAY_FULLY_STOPPED: AtomicBool = AtomicBool::new(false);
+
+pub fn request_shutdown() -> bool {
+    if let Some(tx) = GATEWAY_SHUTDOWN_SIGNAL.get() {
+        let _ = tx.send(true);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn is_shutdown_requested() -> bool {
+    GATEWAY_SHUTDOWN_SIGNAL
+        .get()
+        .map(|tx| *tx.borrow())
+        .unwrap_or(false)
+}
+
+pub fn is_running() -> bool {
+    GATEWAY_RUNNING.load(Ordering::SeqCst)
+}
+
+pub fn is_fully_stopped() -> bool {
+    GATEWAY_FULLY_STOPPED.load(Ordering::SeqCst)
+}
+
+struct GatewayRunningGuard;
+
+impl GatewayRunningGuard {
+    fn install() -> Self {
+        GATEWAY_FULLY_STOPPED.store(false, Ordering::SeqCst);
+        GATEWAY_RUNNING.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for GatewayRunningGuard {
+    fn drop(&mut self) {
+        GATEWAY_RUNNING.store(false, Ordering::SeqCst);
+        GATEWAY_FULLY_STOPPED.store(true, Ordering::SeqCst);
+    }
+}
+
 use crate::channels::{
     Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
     WhatsAppChannel, session_backend::SessionBackend, session_sqlite::SqliteSessionBackend,
@@ -106,6 +154,109 @@ pub const IDEMPOTENCY_MAX_KEYS_DEFAULT: usize = 10_000;
 
 fn webhook_memory_key() -> String {
     format!("webhook_msg_{}", Uuid::new_v4())
+}
+
+fn effective_model_names_for_profile(profile: &crate::config::ModelProviderConfig) -> Vec<String> {
+    if !profile.model_names.is_empty() {
+        return profile
+            .model_names
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for slot in ["main", "haiku", "sonnet", "opus"] {
+        if let Some(value) = profile.models.get(slot) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    for value in profile.models.values() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn provider_runtime_options_for(
+    profile: &crate::config::ModelProviderConfig,
+    config: &crate::config::schema::Config,
+) -> providers::ProviderRuntimeOptions {
+    providers::ProviderRuntimeOptions {
+        auth_profile_override: None,
+        provider_api_url: profile.base_url.clone().or_else(|| config.api_url.clone()),
+        sen_dir: config.config_path.parent().map(std::path::PathBuf::from),
+        secrets_encrypt: config.secrets.encrypt,
+        reasoning_enabled: config.runtime.reasoning_enabled,
+        reasoning_effort: config.runtime.reasoning_effort.clone(),
+        provider_timeout_secs: Some(config.provider_timeout_secs),
+        extra_headers: config.extra_headers.clone(),
+        api_path: profile.api_path.clone().or_else(|| config.api_path.clone()),
+        provider_max_tokens: profile.max_tokens.or(config.provider_max_tokens),
+        model_context_windows: profile.model_context_windows.clone(),
+    }
+}
+
+fn collect_registered_models_for_engine(
+    config: &crate::config::schema::Config,
+) -> Vec<crate::evolution::RegisteredModel> {
+    let mut out: Vec<crate::evolution::RegisteredModel> = Vec::new();
+    for (pid, profile) in config.model_providers.iter() {
+        for name in effective_model_names_for_profile(profile) {
+            out.push(crate::evolution::RegisteredModel {
+                provider_id: pid.clone(),
+                model: name,
+            });
+        }
+    }
+    out
+}
+
+fn register_per_provider_reflection_factories(
+    engine: &std::sync::Arc<crate::evolution::EvolutionEngine>,
+    config: &crate::config::schema::Config,
+) {
+    for (pid, profile) in config.model_providers.iter() {
+        let names = effective_model_names_for_profile(profile);
+        if names.is_empty() {
+            continue;
+        }
+        let credential = profile.api_key.as_deref();
+        let runtime_options = provider_runtime_options_for(profile, config);
+        let provider_url = profile.base_url.as_deref();
+        match providers::create_provider_with_url_and_options(
+            pid,
+            credential,
+            provider_url,
+            &runtime_options,
+        ) {
+            Ok(boxed) => {
+                let default_model = names.first().cloned().unwrap_or_default();
+                let arc_provider: std::sync::Arc<dyn providers::Provider> =
+                    std::sync::Arc::from(boxed);
+                engine.register_reflection_provider(
+                    pid,
+                    crate::evolution::JudgeProviderRef {
+                        provider: arc_provider,
+                        model: default_model,
+                    },
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    provider_id = pid.as_str(),
+                    error = %error,
+                    "skip reflection provider construction"
+                );
+            }
+        }
+    }
 }
 
 fn whatsapp_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
@@ -559,8 +710,12 @@ async fn run_gateway_inner(
     };
     let display_addr = format!("{host}:{actual_port}");
 
-    let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
+    let resolved_default_provider = providers::resolve_runtime_provider_name(
         config.default_provider.as_deref().unwrap_or("openrouter"),
+        &config,
+    );
+    let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
+        &resolved_default_provider,
         config.api_key.as_deref(),
         config.api_url.as_deref(),
         &config.reliability,
@@ -578,10 +733,7 @@ async fn run_gateway_inner(
             model_context_windows: config.model_context_windows.clone(),
         },
     )?);
-    let model = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
+    let model = providers::resolve_default_model(&config)?;
     let temperature = config.default_temperature;
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
         &config.memory,
@@ -658,7 +810,25 @@ async fn run_gateway_inner(
             "Gateway: initializing MCP client  -  {} server(s) configured",
             config.mcp.servers.len()
         );
-        match tools::McpRegistry::connect_all(&config.mcp.servers).await {
+        let mcp_started = std::time::Instant::now();
+        let mcp_overall_deadline = std::time::Duration::from_secs(60);
+        let mcp_result = tokio::time::timeout(
+            mcp_overall_deadline,
+            tools::McpRegistry::connect_all(&config.mcp.servers),
+        )
+        .await;
+        let mcp_outcome = match mcp_result {
+            Ok(inner) => inner,
+            Err(_) => {
+                tracing::warn!(
+                    elapsed_ms = mcp_started.elapsed().as_millis() as u64,
+                    deadline_secs = mcp_overall_deadline.as_secs(),
+                    "Gateway MCP: connect_all exceeded overall deadline; continuing with no MCP tools"
+                );
+                Ok(tools::McpRegistry::empty())
+            }
+        };
+        match mcp_outcome {
             Ok(registry) => {
                 let registry = std::sync::Arc::new(registry);
                 if config.mcp.deferred_loading {
@@ -963,6 +1133,8 @@ async fn run_gateway_inner(
         ));
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let _ = GATEWAY_SHUTDOWN_SIGNAL.set(shutdown_tx.clone());
+    let _running_guard = GatewayRunningGuard::install();
 
     let node_registry = Arc::new(nodes::NodeRegistry::new(config.nodes.max_nodes));
 
@@ -995,11 +1167,19 @@ async fn run_gateway_inner(
                     provider: Arc::clone(&provider),
                     model: model.clone(),
                 });
+                let registered_models = collect_registered_models_for_engine(&config);
+                engine.clear_reflection_providers();
+                register_per_provider_reflection_factories(&engine, &config);
+                engine.set_registered_models(registered_models);
                 engine.ensure_judge_worker();
+                engine.ensure_reflection_scheduler();
                 tracing::info!(
                     workspace_dir = %config.workspace_dir.display(),
                     persist_training_data = config.evolution.persist_training_data,
                     judge_enabled = config.evolution.next_state_judge_enabled,
+                    recycling_enabled = config.evolution.recycling.enabled,
+                    reflection_enabled = config.evolution.reflection.enabled,
+                    registered_model_count = engine.registered_models().len(),
                     "Evolution engine initialised"
                 );
             }
@@ -1191,6 +1371,10 @@ async fn run_gateway_inner(
 
         .route("/api/models", get(desktop_routes::handle_models_list))
         .route(
+            "/api/models/available",
+            get(desktop_routes::handle_models_available),
+        )
+        .route(
             "/api/models/current",
             get(desktop_routes::handle_models_current).put(desktop_routes::handle_models_set_current),
         )
@@ -1376,6 +1560,32 @@ async fn run_gateway_inner(
         .route(
             "/api/evolution/cloud/history",
             get(evolution_routes::handle_push_history),
+        )
+        .route(
+            "/api/evolution/recycling/config",
+            get(evolution_routes::handle_recycling_config_get)
+                .put(evolution_routes::handle_recycling_config_put),
+        )
+        .route(
+            "/api/evolution/recycling/recent",
+            get(evolution_routes::handle_recycling_recent),
+        )
+        .route(
+            "/api/evolution/recycling/purge",
+            post(evolution_routes::handle_recycling_purge),
+        )
+        .route(
+            "/api/evolution/reflection/config",
+            get(evolution_routes::handle_reflection_config_get)
+                .put(evolution_routes::handle_reflection_config_put),
+        )
+        .route(
+            "/api/evolution/reflection/runs",
+            get(evolution_routes::handle_reflection_runs),
+        )
+        .route(
+            "/api/evolution/reflection/run",
+            post(evolution_routes::handle_reflection_run),
         )
         .route(
             "/api/mcp",
@@ -1755,18 +1965,68 @@ async fn run_gateway_inner(
         }
     } else {
 
-        axum::serve(
+        let mut shutdown_for_force = shutdown_rx.clone();
+        let serve_future = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.changed().await;
             tracing::info!("???? SenWeaverCoding Gateway shutting down...");
-        })
-        .await?;
+        });
+
+        let force_after = std::time::Duration::from_secs(6);
+        let force_abort = async move {
+            let _ = shutdown_for_force.changed().await;
+            tokio::time::sleep(force_after).await;
+        };
+
+        tokio::select! {
+            serve_result = serve_future => {
+                serve_result?;
+            }
+            _ = force_abort => {
+                tracing::warn!(
+                    "gateway shutdown: graceful drain exceeded {}s after shutdown signal; aborting remaining connections",
+                    force_after.as_secs()
+                );
+            }
+        }
     }
 
+    run_gateway_post_shutdown_cleanup().await;
+
+    drop(_running_guard);
+
     Ok(())
+}
+
+async fn run_gateway_post_shutdown_cleanup() {
+    let cleanup_started = std::time::Instant::now();
+    if let Some(svc) = crate::services::try_get_services() {
+        let lsp = svc.lsp.clone();
+        let lsp_done = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lsp.shutdown_all(),
+        )
+        .await;
+        if lsp_done.is_err() {
+            tracing::warn!("gateway shutdown: LSP shutdown_all exceeded 5s deadline");
+        }
+    }
+
+    let aborted = crate::runtime::task_manager::abort_all();
+    if aborted > 0 {
+        tracing::info!(
+            count = aborted,
+            "gateway shutdown: aborted supervised background tasks"
+        );
+    }
+
+    tracing::info!(
+        elapsed_ms = cleanup_started.elapsed().as_millis() as u64,
+        "gateway shutdown: post-shutdown cleanup complete"
+    );
 }
 
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {

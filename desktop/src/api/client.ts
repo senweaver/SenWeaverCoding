@@ -10,8 +10,26 @@ const DEFAULT_BASE_URL = ENV_BASE_URL || 'http://127.0.0.1:3456'
 let baseUrl = DEFAULT_BASE_URL
 
 function getErrorMessage(status: number, body: unknown) {
-  if (body && typeof body === 'object' && 'message' in body && typeof body.message === 'string') {
-    return body.message
+  if (body && typeof body === 'object') {
+    const obj = body as Record<string, unknown>
+    const code =
+      typeof obj.error === 'string' && obj.error.length > 0 ? obj.error : null
+    const detail =
+      typeof obj.detail === 'string' && obj.detail.length > 0
+        ? obj.detail
+        : null
+    if (code && detail) {
+      return `${code}: ${detail}`
+    }
+    if (typeof obj.message === 'string' && obj.message.length > 0) {
+      return obj.message
+    }
+    if (code) {
+      return code
+    }
+    if (detail) {
+      return detail
+    }
   }
 
   if (typeof body === 'string' && body.trim().length > 0) {

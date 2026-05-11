@@ -53,7 +53,7 @@ impl Tool for SetupAgentTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional model override for this agent (e.g. 'anthropic/claude-sonnet-4-6')"
+                    "description": "Optional model override for this agent (must be a model already added in Provider settings)"
                 },
                 "system_prompt": {
                     "type": "string",

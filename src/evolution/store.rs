@@ -179,6 +179,10 @@ impl Store {
         &self.exports_dir
     }
 
+    pub fn shared_connection(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.db)
+    }
+
     pub fn turns_path(&self) -> &Path {
         &self.turns_jsonl
     }
@@ -303,6 +307,64 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    pub fn find_turns_for_session(&self, session_id: &str, limit: usize) -> Result<Vec<TurnRecord>> {
+        if !self.turns_jsonl.is_file() {
+            return Ok(Vec::new());
+        }
+        let file = std::fs::File::open(&self.turns_jsonl)
+            .with_context(|| format!("open {}", self.turns_jsonl.display()))?;
+        let reader = std::io::BufReader::new(file);
+        use std::io::BufRead as _;
+        let mut matched: Vec<TurnRecord> = Vec::new();
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let candidate: TurnRecord = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if candidate.session_id == session_id {
+                matched.push(candidate);
+            }
+        }
+        matched.sort_by(|a, b| b.ts.cmp(&a.ts));
+        matched.truncate(limit);
+        Ok(matched)
+    }
+
+    pub fn find_recent_turns(&self, limit: usize) -> Result<Vec<TurnRecord>> {
+        if !self.turns_jsonl.is_file() {
+            return Ok(Vec::new());
+        }
+        let file = std::fs::File::open(&self.turns_jsonl)
+            .with_context(|| format!("open {}", self.turns_jsonl.display()))?;
+        let reader = std::io::BufReader::new(file);
+        use std::io::BufRead as _;
+        let mut all: Vec<TurnRecord> = Vec::new();
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(candidate) = serde_json::from_str::<TurnRecord>(trimmed) {
+                all.push(candidate);
+            }
+        }
+        all.sort_by(|a, b| b.ts.cmp(&a.ts));
+        all.truncate(limit);
+        Ok(all)
     }
 
     pub fn for_each_turn<F>(&self, mut on_turn: F) -> Result<u64>

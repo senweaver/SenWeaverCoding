@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::config::domain::evolution::{
     EvolutionConfig, EvolutionExportConfig, EvolutionExportFormat, EvolutionSignalWeights,
+    ExperienceRecyclingConfig, ReflectionDepth, ReflectionTriggerMode, ReflectionWritebackTarget,
+    SelfReflectionConfig,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

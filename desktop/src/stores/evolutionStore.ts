@@ -1,6 +1,10 @@
 import { create } from 'zustand'
 import { evolutionApi } from '../api/evolution'
+import { modelsApi } from '../api/models'
 import type {
+  AvailableModelEntry,
+  AvailableModelsResponse,
+  AvailableProviderEntry,
   CloudTarget,
   EvolutionConfigState,
   EvolutionExportFormatId,
@@ -8,8 +12,13 @@ import type {
   EvolutionLesson,
   EvolutionOverview,
   EvolutionPersistenceStatus,
+  ExperienceRecyclingConfig,
   PurgeScopeId,
   PushReceiptView,
+  RecycledExperienceItem,
+  ReflectionRunItem,
+  ReflectionSummary,
+  SelfReflectionConfig,
 } from '../types/evolution'
 
 type EvolutionStore = {
@@ -21,9 +30,22 @@ type EvolutionStore = {
   exports: EvolutionExportRecord[]
   cloudTargets: CloudTarget[]
   pushHistory: PushReceiptView[]
+  recyclingConfig: ExperienceRecyclingConfig | null
+  recyclingItems: RecycledExperienceItem[]
+  recyclingTotal: number
+  reflectionConfig: SelfReflectionConfig | null
+  reflectionRuns: ReflectionRunItem[]
+  reflectionSummary: ReflectionSummary | null
+  availableModels: AvailableModelEntry[]
+  availableProviders: AvailableProviderEntry[]
+  availableModelsTotal: number
+  availableModelsProvidersConfigured: number
+  reflectionStoreError: string | null
+  lastPersistAutoEnabledAt: number | null
   loading: boolean
   error: string | null
   fetchAll: () => Promise<void>
+  fetchAvailableModels: () => Promise<void>
   fetchOverview: () => Promise<void>
   fetchConfig: () => Promise<void>
   fetchLessons: () => Promise<void>
@@ -32,6 +54,10 @@ type EvolutionStore = {
   fetchExports: () => Promise<void>
   fetchCloudTargets: () => Promise<void>
   fetchPushHistory: () => Promise<void>
+  fetchRecyclingConfig: () => Promise<void>
+  fetchRecyclingRecent: () => Promise<void>
+  fetchReflectionConfig: () => Promise<void>
+  fetchReflectionRuns: () => Promise<void>
   updateConfig: (patch: Partial<EvolutionConfigState>) => Promise<void>
   updateLesson: (id: string, patch: Partial<EvolutionLesson>) => Promise<void>
   deleteLesson: (id: string) => Promise<void>
@@ -59,6 +85,10 @@ type EvolutionStore = {
   rescoreAll: () => Promise<
     { ok: boolean; rescored: number; errors: number; totalSeen: number } | null
   >
+  updateRecyclingConfig: (patch: Partial<ExperienceRecyclingConfig>) => Promise<void>
+  purgeRecycling: () => Promise<number>
+  updateReflectionConfig: (patch: Partial<SelfReflectionConfig>) => Promise<void>
+  triggerReflection: (sessionId?: string | null) => Promise<string | null>
 }
 
 export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
@@ -70,6 +100,18 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
   exports: [],
   cloudTargets: [],
   pushHistory: [],
+  recyclingConfig: null,
+  recyclingItems: [],
+  recyclingTotal: 0,
+  reflectionConfig: null,
+  reflectionRuns: [],
+  reflectionSummary: null,
+  availableModels: [],
+  availableProviders: [],
+  availableModelsTotal: 0,
+  availableModelsProvidersConfigured: 0,
+  reflectionStoreError: null,
+  lastPersistAutoEnabledAt: null,
   loading: false,
   error: null,
 
@@ -85,11 +127,30 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
         get().fetchExports(),
         get().fetchCloudTargets(),
         get().fetchPushHistory(),
+        get().fetchRecyclingConfig(),
+        get().fetchRecyclingRecent(),
+        get().fetchReflectionConfig(),
+        get().fetchReflectionRuns(),
+        get().fetchAvailableModels(),
       ])
     } catch (error) {
       set({ error: error instanceof Error ? error.message : 'failed' })
     } finally {
       set({ loading: false })
+    }
+  },
+
+  async fetchAvailableModels() {
+    try {
+      const result: AvailableModelsResponse = await modelsApi.listAvailable()
+      set({
+        availableModels: result.models,
+        availableProviders: result.providers,
+        availableModelsTotal: result.total,
+        availableModelsProvidersConfigured: result.providersConfigured,
+      })
+    } catch (error) {
+      console.warn('evolution available models failed', error)
     }
   },
 
@@ -261,6 +322,116 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
     } catch (error) {
       set({ error: error instanceof Error ? error.message : 'failed' })
       return null
+    }
+  },
+
+  async fetchRecyclingConfig() {
+    try {
+      const cfg = await evolutionApi.fetchRecyclingConfig()
+      set({ recyclingConfig: cfg })
+    } catch (error) {
+      console.warn('evolution recycling config failed', error)
+    }
+  },
+
+  async fetchRecyclingRecent() {
+    try {
+      const result = await evolutionApi.fetchRecyclingRecent()
+      set({ recyclingItems: result.items, recyclingTotal: result.total })
+    } catch (error) {
+      console.warn('evolution recycling recent failed', error)
+    }
+  },
+
+  async fetchReflectionConfig() {
+    try {
+      const cfg = await evolutionApi.fetchReflectionConfig()
+      set({ reflectionConfig: cfg })
+    } catch (error) {
+      console.warn('evolution reflection config failed', error)
+    }
+  },
+
+  async fetchReflectionRuns() {
+    try {
+      const result = await evolutionApi.fetchReflectionRuns()
+      set({
+        reflectionRuns: result.items,
+        reflectionSummary: result.summary,
+        reflectionStoreError: null,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown'
+      const isStoreError = message.includes('reflection_store_unavailable')
+      set({
+        reflectionStoreError: isStoreError ? message : null,
+      })
+      console.warn('evolution reflection runs failed', error)
+    }
+  },
+
+  async updateRecyclingConfig(patch) {
+    try {
+      const next = (await evolutionApi.updateRecyclingConfig(patch)) as
+        | (ExperienceRecyclingConfig & { persistTrainingDataAutoEnabled?: boolean })
+        | null
+      if (next) {
+        set({ recyclingConfig: next })
+        if (next.persistTrainingDataAutoEnabled === true) {
+          set({ lastPersistAutoEnabledAt: Date.now() })
+          await Promise.all([
+            get().fetchConfig(),
+            get().fetchPersistence(),
+            get().fetchOverview(),
+          ])
+        }
+      }
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'failed' })
+    }
+  },
+
+  async purgeRecycling() {
+    try {
+      const result = await evolutionApi.purgeRecycling()
+      await get().fetchRecyclingRecent()
+      return result.removed
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'failed' })
+      return 0
+    }
+  },
+
+  async updateReflectionConfig(patch) {
+    try {
+      const next = (await evolutionApi.updateReflectionConfig(patch)) as
+        | (SelfReflectionConfig & { persistTrainingDataAutoEnabled?: boolean })
+        | null
+      if (next) {
+        set({ reflectionConfig: next })
+        if (next.persistTrainingDataAutoEnabled === true) {
+          set({ lastPersistAutoEnabledAt: Date.now() })
+          await Promise.all([
+            get().fetchConfig(),
+            get().fetchPersistence(),
+            get().fetchOverview(),
+          ])
+        }
+      }
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'failed' })
+    }
+  },
+
+  async triggerReflection(sessionId) {
+    try {
+      const result = await evolutionApi.triggerReflection(sessionId ?? null)
+      await get().fetchReflectionRuns()
+      return result.runId
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'failed'
+      set({ error: message })
+      throw error instanceof Error ? error : new Error(message)
     }
   },
 }))

@@ -84,11 +84,18 @@ pub fn default_fast_refiner(config: &Config) -> Option<Arc<FastApplyRefiner>> {
     {
         return Some(existing.clone());
     }
-    let provider_name = config.default_provider.clone()?;
-    let model = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let provider_name_raw = config.default_provider.clone()?;
+    let provider_name = providers::resolve_runtime_provider_name(&provider_name_raw, config);
+    let model = match providers::resolve_default_model(config) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                target = "config",
+                "no_model_configured: skipping inline_edit default_fast_refiner: {e}"
+            );
+            return None;
+        }
+    };
     let runtime_options = ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
@@ -149,11 +156,18 @@ pub fn default_runner(config: &Config) -> Option<Arc<InlineEditRunner>> {
         return Some(existing.clone());
     }
 
-    let provider_name = config.default_provider.clone()?;
-    let model = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let provider_name_raw = config.default_provider.clone()?;
+    let provider_name = providers::resolve_runtime_provider_name(&provider_name_raw, config);
+    let model = match providers::resolve_default_model(config) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                target = "config",
+                "no_model_configured: skipping inline_edit default_runner: {e}"
+            );
+            return None;
+        }
+    };
 
     let runtime_options = ProviderRuntimeOptions {
         auth_profile_override: None,

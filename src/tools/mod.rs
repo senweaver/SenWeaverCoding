@@ -867,38 +867,48 @@ pub fn all_tools_with_runtime(
     }
 
     {
-        let llm_task_provider = root_config
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| "openrouter".to_string());
-        let llm_task_model = root_config
-            .default_model
-            .clone()
-            .unwrap_or_else(|| "openai/gpt-4o-mini".to_string());
-        let llm_task_runtime_options = crate::providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            provider_api_url: root_config.api_url.clone(),
-            sen_dir: root_config
-                .config_path
-                .parent()
-                .map(std::path::PathBuf::from),
-            secrets_encrypt: root_config.secrets.encrypt,
-            reasoning_enabled: root_config.runtime.reasoning_enabled,
-            reasoning_effort: root_config.runtime.reasoning_effort.clone(),
-            provider_timeout_secs: Some(root_config.provider_timeout_secs),
-            extra_headers: root_config.extra_headers.clone(),
-            api_path: root_config.api_path.clone(),
-            provider_max_tokens: root_config.provider_max_tokens,
-            model_context_windows: root_config.model_context_windows.clone(),
-        };
-        tool_arcs.push(Arc::new(LlmTaskTool::new(
-            security.clone(),
-            llm_task_provider,
-            llm_task_model,
-            root_config.default_temperature,
-            root_config.api_key.clone(),
-            llm_task_runtime_options,
-        )));
+        match crate::providers::resolve_default_model(root_config) {
+            Ok(llm_task_model) => {
+                let llm_task_provider_raw = root_config
+                    .default_provider
+                    .clone()
+                    .unwrap_or_else(|| "openrouter".to_string());
+                let llm_task_provider = crate::providers::resolve_runtime_provider_name(
+                    &llm_task_provider_raw,
+                    root_config,
+                );
+                let llm_task_runtime_options = crate::providers::ProviderRuntimeOptions {
+                    auth_profile_override: None,
+                    provider_api_url: root_config.api_url.clone(),
+                    sen_dir: root_config
+                        .config_path
+                        .parent()
+                        .map(std::path::PathBuf::from),
+                    secrets_encrypt: root_config.secrets.encrypt,
+                    reasoning_enabled: root_config.runtime.reasoning_enabled,
+                    reasoning_effort: root_config.runtime.reasoning_effort.clone(),
+                    provider_timeout_secs: Some(root_config.provider_timeout_secs),
+                    extra_headers: root_config.extra_headers.clone(),
+                    api_path: root_config.api_path.clone(),
+                    provider_max_tokens: root_config.provider_max_tokens,
+                    model_context_windows: root_config.model_context_windows.clone(),
+                };
+                tool_arcs.push(Arc::new(LlmTaskTool::new(
+                    security.clone(),
+                    llm_task_provider,
+                    llm_task_model,
+                    root_config.default_temperature,
+                    root_config.api_key.clone(),
+                    llm_task_runtime_options,
+                )));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = "config",
+                    "no_model_configured: skipping LlmTaskTool registration: {e}"
+                );
+            }
+        }
     }
 
     if matches!(

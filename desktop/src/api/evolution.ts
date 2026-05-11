@@ -7,9 +7,13 @@ import type {
   EvolutionLesson,
   EvolutionOverview,
   EvolutionPersistenceStatus,
+  ExperienceRecyclingConfig,
   PurgeReportView,
   PurgeScopeId,
   PushReceiptView,
+  RecyclingRecentResponse,
+  ReflectionRunsResponse,
+  SelfReflectionConfig,
 } from '../types/evolution'
 
 export const evolutionApi = {
@@ -88,4 +92,25 @@ export const evolutionApi = {
       export_id: exportId,
     }),
   fetchPushHistory: () => api.get<{ items: PushReceiptView[] }>('/api/evolution/cloud/history'),
+
+  fetchRecyclingConfig: () =>
+    api.get<ExperienceRecyclingConfig>('/api/evolution/recycling/config'),
+  updateRecyclingConfig: (patch: Partial<ExperienceRecyclingConfig>) =>
+    api.put<ExperienceRecyclingConfig>('/api/evolution/recycling/config', patch),
+  fetchRecyclingRecent: () =>
+    api.get<RecyclingRecentResponse>('/api/evolution/recycling/recent'),
+  purgeRecycling: () =>
+    api.post<{ ok: boolean; removed: number }>('/api/evolution/recycling/purge', {}),
+
+  fetchReflectionConfig: () =>
+    api.get<SelfReflectionConfig>('/api/evolution/reflection/config'),
+  updateReflectionConfig: (patch: Partial<SelfReflectionConfig>) =>
+    api.put<SelfReflectionConfig>('/api/evolution/reflection/config', patch),
+  fetchReflectionRuns: () =>
+    api.get<ReflectionRunsResponse>('/api/evolution/reflection/runs'),
+  triggerReflection: (sessionId?: string | null) =>
+    api.post<{ ok: boolean; runId: string }>(
+      '/api/evolution/reflection/run',
+      sessionId ? { sessionId } : {},
+    ),
 }

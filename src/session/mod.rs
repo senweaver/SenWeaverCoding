@@ -70,7 +70,7 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".into(),
+            model: String::new(),
             temperature: 0.7,
             max_turns: None,
             system_prompt_append: None,

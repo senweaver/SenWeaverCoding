@@ -357,14 +357,15 @@ impl CliEntrypoint {
             .clone()
             .or_else(|| config.default_provider.clone())
             .unwrap_or_else(|| "openrouter".into());
-        let model = options
-            .model
-            .clone()
-            .or_else(|| config.default_model.clone())
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
+        let resolved_provider_name =
+            crate::providers::resolve_runtime_provider_name(&provider_name, &config);
+        let model = match options.model.clone() {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => crate::providers::resolve_default_model(&config)?,
+        };
 
         let provider = crate::providers::create_provider_with_url(
-            &provider_name,
+            &resolved_provider_name,
             config.api_key.as_deref(),
             config.api_url.as_deref(),
         )?;

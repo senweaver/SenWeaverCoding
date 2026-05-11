@@ -69,6 +69,11 @@ base64 = "0.22"
 xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Unix-only: process-group / killpg primitives used by `process_lifetime`
+# to broadcast SIGTERM to every descendant when the desktop shell exits.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows-only: APIs to disable the 1px DWM focus border that gets
 # painted around `decorations: false` windows when they're active.
 # Both modern (Win11 22H2+: DWMWA_BORDER_COLOR) and legacy (Win10:
@@ -86,10 +91,19 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 webview2-com = "0.38"
+# JobObjects: bind the desktop process and every child it spawns to a
+# single Win32 Job; KILL_ON_JOB_CLOSE guarantees that when the desktop
+# EXE dies (clean exit, crash, or task-kill) all descendant processes
+# (gateway runtime, MCP stdio, LSP servers, browser helpers, etc.) are
+# torn down by the kernel — preventing the "second launch hangs because
+# the previous run still holds the workspace lock" class of failures.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
 
 [lints.rust]

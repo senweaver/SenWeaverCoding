@@ -149,10 +149,13 @@ impl WebSearchTool {
             .collect();
 
         if link_matches.is_empty() {
-            return Ok(format!("No results found for: {}", query));
+            anyhow::bail!("DuckDuckGo returned no parseable results for: {query}");
         }
 
-        let mut lines = vec![format!("Search results for: {} (via DuckDuckGo)", query)];
+        let mut lines = vec![
+            format!("Search results for: {} (via DuckDuckGo)", query),
+            "Engine: duckduckgo".to_string(),
+        ];
 
         let count = link_matches.len().min(self.max_results);
 
@@ -212,10 +215,13 @@ impl WebSearchTool {
             .ok_or_else(|| anyhow::anyhow!("Invalid Brave API response"))?;
 
         if results.is_empty() {
-            return Ok(format!("No results found for: {}", query));
+            anyhow::bail!("Brave returned no results for: {query}");
         }
 
-        let mut lines = vec![format!("Search results for: {} (via Brave)", query)];
+        let mut lines = vec![
+            format!("Search results for: {} (via Brave)", query),
+            "Engine: brave".to_string(),
+        ];
 
         for (i, result) in results.iter().take(self.max_results).enumerate() {
             let title = result
@@ -312,10 +318,13 @@ impl WebSearchTool {
             .ok_or_else(|| anyhow::anyhow!("Invalid SearXNG API response"))?;
 
         if results.is_empty() {
-            return Ok(format!("No results found for: {}", query));
+            anyhow::bail!("SearXNG returned no results for: {query}");
         }
 
-        let mut lines = vec![format!("Search results for: {} (via SearXNG)", query)];
+        let mut lines = vec![
+            format!("Search results for: {} (via SearXNG)", query),
+            "Engine: searxng".to_string(),
+        ];
 
         for (i, result) in results.iter().take(self.max_results).enumerate() {
             let title = result
@@ -378,44 +387,173 @@ impl WebSearchTool {
             r#"<h3[^>]*class="[^"]*c-title[^"]*"[^>]*>[\s\S]{0,800}?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#,
         )?;
         let abstract_re = Regex::new(
-            r#"<(?:span|div)[^>]*class="[^"]*(?:c-abstract|content-right_[^"]*)[^"]*"[^>]*>([\s\S]*?)</(?:span|div)>"#,
+            r#"<(?:span|div|p)[^>]*class="[^"]*(?:c-abstract|content-right_[\w-]*|c-span-last|c-color-text|c-gap-top-small|cu-line-clamp[\w-]*|line-clamp[\w-]*|c-row[\w-]*|cos[a-zA-Z0-9_-]*)[^"]*"[^>]*>([\s\S]*?)</(?:span|div|p)>"#,
+        )?;
+        let block_cleanup_re = Regex::new(
+            r#"<(?:script|style|a|button|input|select|noscript)\b[^>]*>[\s\S]*?</(?:script|style|a|button|input|select|noscript)>"#,
         )?;
 
-        let title_matches: Vec<_> = title_re
-            .captures_iter(html)
-            .take(self.max_results + 2)
-            .collect();
+        let mut entries: Vec<(String, String, String)> = Vec::new();
 
-        if title_matches.is_empty() {
-            return Ok(format!("No results found for: {}", query));
+        if let Some(blocks) = collect_baidu_blocks(html) {
+            for block_html in blocks {
+                if entries.len() >= self.max_results {
+                    break;
+                }
+                let Some(t_caps) = title_re.captures(block_html) else {
+                    continue;
+                };
+                let url_str = t_caps[1].trim().to_string();
+                let title = strip_tags(&t_caps[2]).trim().to_string();
+                if title.is_empty() || url_str.is_empty() {
+                    continue;
+                }
+                let snippet =
+                    extract_baidu_snippet(block_html, &title, &abstract_re, &block_cleanup_re);
+                entries.push((title, url_str, snippet));
+            }
         }
 
-        let abstract_matches: Vec<_> = abstract_re
-            .captures_iter(html)
-            .take(self.max_results + 4)
-            .collect();
-
-        let mut lines = vec![format!("Search results for: {} (via Baidu)", query)];
-
-        let count = title_matches.len().min(self.max_results);
-        for i in 0..count {
-            let caps = &title_matches[i];
-            let url_str = caps[1].to_string();
-            let title = strip_tags(&caps[2]);
-            lines.push(format!("{}. {}", i + 1, title.trim()));
-            lines.push(format!("   {}", url_str.trim()));
-
-            if i < abstract_matches.len() {
-                let snippet = strip_tags(&abstract_matches[i][1]);
-                let snippet = snippet.trim();
-                if !snippet.is_empty() {
-                    lines.push(format!("   {}", snippet));
+        if entries.is_empty() {
+            let title_matches: Vec<_> = title_re
+                .captures_iter(html)
+                .take(self.max_results + 2)
+                .collect();
+            let abstract_matches: Vec<_> = abstract_re
+                .captures_iter(html)
+                .take(self.max_results + 4)
+                .collect();
+            let count = title_matches.len().min(self.max_results);
+            for i in 0..count {
+                let caps = &title_matches[i];
+                let url_str = caps[1].trim().to_string();
+                let title = strip_tags(&caps[2]).trim().to_string();
+                if title.is_empty() || url_str.is_empty() {
+                    continue;
                 }
+                let snippet = abstract_matches
+                    .get(i)
+                    .map(|c| strip_tags(&c[1]).trim().to_string())
+                    .unwrap_or_default();
+                entries.push((title, url_str, snippet));
+            }
+        }
+
+        if entries.is_empty() {
+            anyhow::bail!("Baidu returned no parseable results for: {query}");
+        }
+
+        let mut lines = vec![
+            format!("Search results for: {} (via Baidu)", query),
+            "Engine: baidu".to_string(),
+        ];
+
+        for (i, (title, url_str, snippet)) in entries.iter().enumerate() {
+            lines.push(format!("{}. {}", i + 1, title));
+            lines.push(format!("   {}", url_str));
+            if !snippet.is_empty() {
+                lines.push(format!("   {}", snippet));
             }
         }
 
         Ok(lines.join("\n"))
     }
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_baidu_snippet(
+    block_html: &str,
+    title: &str,
+    abstract_re: &Regex,
+    cleanup_re: &Regex,
+) -> String {
+    if let Some(caps) = abstract_re.captures(block_html) {
+        let s = collapse_whitespace(&strip_tags(&caps[1]));
+        if s.chars().count() >= 8 {
+            return truncate_chars(&s, 320);
+        }
+    }
+
+    let cleaned = cleanup_re.replace_all(block_html, " ");
+    let stripped = strip_tags(&cleaned);
+    let collapsed = collapse_whitespace(&stripped);
+
+    let title_collapsed = collapse_whitespace(title);
+    let body = if !title_collapsed.is_empty() {
+        collapsed.replacen(&title_collapsed, " ", 1)
+    } else {
+        collapsed
+    };
+
+    let mut filtered = body;
+    for noise in [
+        "百度快照",
+        "查看更多",
+        "点击查看",
+        "更多 >",
+        "更多>",
+        "评论",
+        "分享",
+        "收藏",
+        "投诉",
+        "举报",
+    ] {
+        filtered = filtered.replace(noise, " ");
+    }
+    let filtered = collapse_whitespace(&filtered);
+    let trimmed = filtered.trim();
+    if trimmed.chars().count() < 12 {
+        return String::new();
+    }
+    truncate_chars(trimmed, 320)
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+fn collect_baidu_blocks(html: &str) -> Option<Vec<&str>> {
+    let block_start_re = Regex::new(
+        r#"<div[^>]+class="[^"]*\b(?:result|c-container)\b[^"]*""#,
+    )
+    .ok()?;
+    let end_marker_re = Regex::new(
+        r#"<div[^>]+id="(?:page|content_right|content_left_bottom)""#,
+    )
+    .ok()?;
+
+    let mut starts: Vec<usize> = block_start_re
+        .find_iter(html)
+        .map(|m| m.start())
+        .collect();
+    if starts.is_empty() {
+        return None;
+    }
+
+    let end_pos = end_marker_re
+        .find(html)
+        .map(|m| m.start())
+        .unwrap_or(html.len());
+    starts.push(end_pos);
+
+    let mut blocks = Vec::with_capacity(starts.len().saturating_sub(1));
+    for window in starts.windows(2) {
+        let s = window[0];
+        let e = window[1];
+        if e > s && e <= html.len() {
+            blocks.push(&html[s..e]);
+        }
+    }
+    Some(blocks)
 }
 
 fn decode_ddg_redirect_url(raw_url: &str) -> String {

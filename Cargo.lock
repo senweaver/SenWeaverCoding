@@ -28,6 +28,7 @@ dependencies = [
  "dialoguer",
  "directories",
  "dotenvy",
+ "encoding_rs",
  "extism",
  "fantoccini",
  "flate2",
@@ -1630,6 +1631,7 @@ version = "0.4.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb7b51a7d9c967fc26773061ba86150f19c50c0d65c887cb1fbe295fd16619b7"
 dependencies = [
+ "brotli",
  "compression-core",
  "flate2",
  "memchr",
@@ -1742,6 +1744,7 @@ dependencies = [
  "idna",
  "indexmap 2.14.0",
  "log",
+ "publicsuffix",
  "serde",
  "serde_derive",
  "serde_json",
@@ -8057,6 +8060,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
+name = "publicsuffix"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f42ea446cab60335f76979ec15e12619a2165b5ae2c12166bef27d283a9fadf"
+dependencies = [
+ "idna",
+ "psl-types",
+]
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8561,6 +8580,8 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "cookie 0.18.1",
+ "cookie_store",
  "futures-channel",
  "futures-core",
  "futures-util",
@@ -9342,6 +9363,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "image",
+ "libc",
  "parking_lot",
  "portable-pty",
  "serde",

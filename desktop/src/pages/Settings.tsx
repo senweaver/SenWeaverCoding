@@ -11,6 +11,7 @@ import type { EffortLevel, ThemeMode } from '../types/settings'
 import type { Locale } from '../i18n'
 import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ApiFormat } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
+import { ApiError } from '../api/client'
 import { AdapterSettings } from './AdapterSettings'
 import { ToolsAndMcpsSettings } from './ToolsAndMcpsSettings'
 import { HooksSettings } from './HooksSettings'
@@ -369,10 +370,29 @@ function buildFallbackPreset(provider?: SavedProvider): ProviderPreset {
   }
 }
 
+function normalizeDisplayNameKey(value: string | null | undefined): string {
+  if (!value) return ''
+  return value
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function readErrorCode(body: unknown): string | null {
+  if (body && typeof body === 'object' && 'code' in body) {
+    const code = (body as { code?: unknown }).code
+    if (typeof code === 'string' && code.length > 0) {
+      return code
+    }
+  }
+  return null
+}
+
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const createProvider = useProviderStore((s) => s.createProvider)
   const updateProvider = useProviderStore((s) => s.updateProvider)
   const testConfig = useProviderStore((s) => s.testConfig)
+  const allProviders = useProviderStore((s) => s.providers)
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
   const t = useTranslation()
 
@@ -409,8 +429,20 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   })
   const [newModelDraft, setNewModelDraft] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [isTesting, setIsTesting] = useState(false)
+
+  const normalizedName = useMemo(() => normalizeDisplayNameKey(name), [name])
+  const duplicateProvider = useMemo(() => {
+    if (!normalizedName) return null
+    return (
+      allProviders.find((existing) => {
+        if (mode === 'edit' && provider && existing.id === provider.id) return false
+        return normalizeDisplayNameKey(existing.name) === normalizedName
+      }) ?? null
+    )
+  }, [allProviders, normalizedName, mode, provider])
 
   const handlePresetChange = (preset: ProviderPreset) => {
     setSelectedPreset(preset)
@@ -440,7 +472,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     name.trim().length > 0 &&
     baseUrl.trim().length > 0 &&
     (mode === 'edit' || apiKey.trim().length > 0) &&
-    trimmedModels.length > 0
+    trimmedModels.length > 0 &&
+    !duplicateProvider
 
   const addModel = (raw?: string) => {
     const candidate = (raw ?? newModelDraft).trim()
@@ -512,6 +545,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
 
   const handleSubmit = async () => {
     if (!canSubmit) return
+    setSubmitError(null)
     setIsSubmitting(true)
     try {
       const overridesPayload = buildContextWindowsPayload()
@@ -542,6 +576,14 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       onClose()
     } catch (err) {
       console.error('Failed to save provider:', err)
+      const apiErr = err as ApiError | Error
+      const code = apiErr instanceof ApiError ? readErrorCode(apiErr.body) : null
+      if (code === 'name_conflict') {
+        setSubmitError(t('settings.providers.nameConflict'))
+      } else {
+        const fallback = apiErr instanceof Error ? apiErr.message : String(err)
+        setSubmitError(fallback || t('settings.providers.requestFailed'))
+      }
     } finally {
       setIsSubmitting(false)
     }
@@ -609,7 +651,32 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           </div>
         )}
 
-        <Input label={t('settings.providers.name')} required value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.providers.namePlaceholder')} />
+        <div>
+          <Input
+            label={t('settings.providers.name')}
+            required
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value)
+              setSubmitError(null)
+            }}
+            placeholder={t('settings.providers.namePlaceholder')}
+          />
+          {duplicateProvider ? (
+            <div className="mt-1 text-xs text-[var(--color-error)]">
+              {t('settings.providers.nameConflictHint').replace(
+                '{{name}}',
+                duplicateProvider.name,
+              )}
+            </div>
+          ) : null}
+        </div>
+
+        {submitError ? (
+          <div className="text-xs text-[var(--color-error)] px-3 py-2 rounded-[var(--radius-md)] bg-[color:rgba(239,68,68,0.08)] border border-[color:rgba(239,68,68,0.25)]">
+            {submitError}
+          </div>
+        ) : null}
 
         <Input label={t('settings.providers.notes')} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={t('settings.providers.notesPlaceholder')} />
 

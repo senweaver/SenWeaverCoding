@@ -469,8 +469,10 @@ impl ModelRoutingConfigTool {
             return Ok(());
         }
 
+        let resolved_provider_name =
+            providers::resolve_runtime_provider_name(provider_name, &self.config);
         let provider = match providers::create_provider_with_url(
-            provider_name,
+            &resolved_provider_name,
             api_key,
             self.config.api_url.as_deref(),
         ) {

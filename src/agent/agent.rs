@@ -481,7 +481,9 @@ impl AgentBuilder {
             config: self.config.unwrap_or_default(),
             model_name: self
                 .model_name
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into()),
+                .ok_or_else(|| anyhow::anyhow!(
+                    "no_model_configured: AgentBuilder.model_name is required; 请先在提供商设置页添加至少一个模型 (please add at least one model in Provider settings)"
+                ))?,
             temperature: self.temperature.unwrap_or(0.7),
             workspace_dir: self
                 .workspace_dir
@@ -1586,10 +1588,14 @@ impl Agent {
         let config = self.shared_config.load();
 
         self.temperature = config.default_temperature;
-        let new_model = config
-            .default_model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+        let resolved_model = providers::resolve_default_model(&config);
+        let new_model_opt: Option<String> = match resolved_model {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!(target = "config", "{}", e);
+                None
+            }
+        };
 
         self.config.max_history_messages = config.agent.max_history_messages;
 
@@ -1603,7 +1609,10 @@ impl Agent {
         let provider_changed = new_provider != self.cached_provider;
         let api_key_changed = !self.cached_api_key.constant_time_eq(&new_api_key);
         let api_url_changed = new_api_url != self.cached_api_url;
-        let model_changed = new_model != self.model_name;
+        let model_changed = match new_model_opt.as_ref() {
+            Some(m) => m != &self.model_name,
+            None => false,
+        };
 
         if provider_changed || api_key_changed || api_url_changed {
             tracing::info!(
@@ -1625,8 +1634,10 @@ impl Agent {
             self.cached_api_key = crate::security::secret_string::SecretString::new(new_api_key);
             self.cached_api_url = new_api_url.clone();
 
-            if model_changed {
-                self.model_name = new_model;
+            if let Some(new_model) = new_model_opt.clone() {
+                if model_changed {
+                    self.model_name = new_model;
+                }
             }
 
             tracing::debug!(
@@ -1637,7 +1648,9 @@ impl Agent {
             );
             ConfigChange::Hard
         } else if model_changed || self.temperature != config.default_temperature {
-            self.model_name = new_model;
+            if let Some(new_model) = new_model_opt {
+                self.model_name = new_model;
+            }
             tracing::debug!(
                 "Config synced (soft): model={}, temperature={}",
                 self.model_name,
@@ -1653,16 +1666,14 @@ impl Agent {
 
         let config = self.shared_config.load_ref();
 
-        let provider_name = config
+        let provider_name_raw = config
             .default_provider
             .clone()
             .unwrap_or_else(|| "openrouter".to_string());
+        let provider_name = providers::resolve_runtime_provider_name(&provider_name_raw, &config);
         let api_key = config.api_key.clone().unwrap_or_default();
         let api_url = config.api_url.clone().unwrap_or_default();
-        let model_name = config
-            .default_model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+        let model_name = providers::resolve_default_model(&config)?;
         let reliability = config.reliability.clone();
         let model_routes = config.model_routes.clone();
         let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
@@ -1689,7 +1700,7 @@ impl Agent {
         self.provider = new_provider;
         self.model_name = model_name;
 
-        self.cached_provider = provider_name;
+        self.cached_provider = provider_name_raw;
         self.cached_api_key = crate::security::secret_string::SecretString::new(api_key);
         self.cached_api_url = api_url;
 
@@ -2203,18 +2214,16 @@ impl Agent {
             }
         }
 
-        let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
+        let provider_name_raw = config.default_provider.as_deref().unwrap_or("openrouter");
+        let provider_name =
+            providers::resolve_runtime_provider_name(provider_name_raw, config);
 
-        let model_name = config
-            .default_model
-            .as_deref()
-            .unwrap_or("anthropic/claude-sonnet-4-20250514")
-            .to_string();
+        let model_name = providers::resolve_default_model(config)?;
 
         let provider_runtime_options = providers::provider_runtime_options_from_config(config);
 
         let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
-            provider_name,
+            &provider_name,
             config.api_key.as_deref(),
             config.api_url.as_deref(),
             &config.reliability,
@@ -2306,7 +2315,7 @@ impl Agent {
             .plan_mode_config(config.plan_mode.clone())
             .shared_config(shared_config.unwrap_or_else(crate::config::live::LiveConfig::default))
             .cached_provider_config(
-                provider_name.to_string(),
+                provider_name_raw.to_string(),
                 config.api_key.clone().unwrap_or_default(),
                 config.api_url.clone().unwrap_or_default(),
             )
@@ -3910,11 +3919,7 @@ pub async fn run(
         .as_deref()
         .unwrap_or("openrouter")
         .to_string();
-    let model_name = effective_config
-        .default_model
-        .as_deref()
-        .unwrap_or("anthropic/claude-sonnet-4-20250514")
-        .to_string();
+    let model_name = providers::resolve_default_model(&effective_config)?;
 
     agent.observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.clone(),

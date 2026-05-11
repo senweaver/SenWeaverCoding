@@ -35,6 +35,24 @@ export type EvolutionOverview = {
     sizeBytes: number
     createdAt: string
   }>
+  judgeWorker?: {
+    running: boolean
+    enqueuedTotal: number
+    processed: number
+    lastErrorAt: string | null
+    lastErrorMessage: string | null
+  }
+  reflectionScheduler?: {
+    running: boolean
+    intervalMinutes: number
+    lastTickAt: string | null
+    nextTickAtEstimate: string | null
+  }
+  recycling?: {
+    totalHarvested: number
+    recent24hHarvested: number
+    lastHarvestAt: string | null
+  }
 }
 
 export type EvolutionLesson = {
@@ -137,4 +155,124 @@ export type PurgeReportView = {
   removedPushHistory: number
   removedEvents: number
   freedBytes: number
+}
+
+export type ExperienceRecyclingConfig = {
+  enabled: boolean
+  sampleRate: number
+  minReward: number
+  maxRetained: number
+  maxReplayInPrompt: number
+  replayTokenBudget: number
+  redactWorkspacePaths: boolean
+  redactSecrets: boolean
+  redactUserText: boolean
+  includeSuccesses: boolean
+  includeFailures: boolean
+  weightQuality: number
+  weightRecency: number
+  weightDiversity: number
+}
+
+export type RecycledExperienceOutcomeId = 'success' | 'failure' | 'neutral'
+
+export type RecycledExperienceItem = {
+  id: string
+  sessionId: string
+  turnId: string
+  codingMode: string | null
+  outcome: RecycledExperienceOutcomeId
+  reward: number
+  headline: string
+  contextExcerpt: string
+  responseExcerpt: string
+  toolsSummary: string
+  tags: string[]
+  hits: number
+  createdAt: string
+}
+
+export type RecyclingRecentResponse = {
+  items: RecycledExperienceItem[]
+  total: number
+}
+
+export type ReflectionTriggerModeId = 'manual' | 'auto' | 'scheduled'
+export type ReflectionDepthId = 'quick' | 'deep'
+export type ReflectionWritebackTargetId = 'lessons' | 'skills' | 'rules' | 'memory'
+
+export type SelfReflectionConfig = {
+  enabled: boolean
+  triggerMode: ReflectionTriggerModeId
+  depth: ReflectionDepthId
+  reflectionModel: string | null
+  reflectionProvider: string | null
+  scheduleIntervalMinutes: number
+  minTurnsForAuto: number
+  failureThreshold: number
+  writebackTargets: ReflectionWritebackTargetId[]
+  maxLessonsPerRun: number
+  maxTotalLessons: number
+  includeUserThumbsDown: boolean
+  lookbackTurns: number
+}
+
+export type AvailableModelEntry = {
+  id: string
+  providerId: string
+  providerName: string
+  isDefaultProvider: boolean
+}
+
+export type AvailableProviderEntry = {
+  id: string
+  name: string
+  isDefault: boolean
+  models: Array<{ id: string; name: string }>
+}
+
+export type AvailableModelsResponse = {
+  models: AvailableModelEntry[]
+  providers: AvailableProviderEntry[]
+  total: number
+  providersConfigured: number
+  providersWithModels: number
+  defaultProviderId: string | null
+}
+
+export type ReflectionRunStatusId =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+
+export type ReflectionRunItem = {
+  id: string
+  sessionId: string | null
+  trigger: string
+  depth: string
+  status: ReflectionRunStatusId
+  model: string | null
+  lessonsProduced: number
+  turnsAnalyzed: number
+  summary: string | null
+  error: string | null
+  startedAt: string
+  completedAt: string | null
+}
+
+export type ReflectionSummary = {
+  totalRuns: number
+  completedRuns: number
+  failedRuns: number
+  lastRunAt: string | null
+  lastStatus: ReflectionRunStatusId | string | null
+  totalLessonsProduced: number
+  avgLessonsPerRun: number | null
+}
+
+export type ReflectionRunsResponse = {
+  items: ReflectionRunItem[]
+  summary: ReflectionSummary
 }

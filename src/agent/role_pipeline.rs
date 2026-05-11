@@ -149,7 +149,7 @@ impl Default for PipelineParams {
         Self {
             run_id: None,
             provider_name: "openrouter".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: String::new(),
             temperature: 0.2,
             stage_timeout: DEFAULT_STAGE_TIMEOUT,
         }

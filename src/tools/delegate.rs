@@ -410,8 +410,16 @@ impl DelegateTool {
         #[allow(clippy::option_as_ref_deref)]
         let provider_credential = provider_credential_owned.as_ref().map(String::as_str);
 
+        let runtime_provider_name = match crate::services::try_get_services() {
+            Some(services) => {
+                let cfg = services.config();
+                providers::resolve_runtime_provider_name(&agent_config.provider, &cfg)
+            }
+            None => agent_config.provider.clone(),
+        };
+
         let provider: Box<dyn Provider> = match providers::create_provider_with_options(
-            &agent_config.provider,
+            &runtime_provider_name,
             provider_credential,
             &self.provider_runtime_options,
         ) {

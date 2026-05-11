@@ -4,15 +4,84 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::schema::FirecrawlConfig;
 use crate::security::SecurityPolicy;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const FIRECRAWL_MIN_BODY_LEN: usize = 100;
 
 const JINA_READER_BASE: &str = "https://r.jina.ai/";
+
+#[derive(Debug, Clone, Default)]
+pub struct FetchedPage {
+    pub url: String,
+    pub title: String,
+    pub text: String,
+}
+
+#[async_trait]
+pub trait FetchController: Send + Sync {
+    async fn fetch(&self, url: &str, timeout: Duration) -> Result<FetchedPage>;
+}
+
+static FETCH_CONTROLLER: OnceLock<Arc<dyn FetchController>> = OnceLock::new();
+
+pub fn install_fetch_controller(controller: Arc<dyn FetchController>) {
+    let _ = FETCH_CONTROLLER.set(controller);
+}
+
+pub fn fetch_controller() -> Option<Arc<dyn FetchController>> {
+    FETCH_CONTROLLER.get().cloned()
+}
+
+pub fn looks_like_anti_bot_page(text: &str) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    if text.len() > 8_000 {
+        return false;
+    }
+    const NEEDLES: &[&str] = &[
+        "网络不给力",
+        "请稍后重试",
+        "请稍后再试",
+        "百度安全验证",
+        "请输入验证码",
+        "安全验证",
+        "人机验证",
+        "访问被拒绝",
+        "您的访问出错了",
+        "出错了",
+        "这里空空如也",
+        "没有更多信息",
+        "暂无数据",
+        "暂无内容",
+        "内容不存在",
+        "页面不存在",
+        "页面已删除",
+        "您要查找的页面",
+        "Page Not Found",
+        "Please verify",
+        "Just a moment",
+        "Checking your browser",
+        "Access denied",
+        "Access Denied",
+        "Cloudflare Ray ID",
+        "Bot detection",
+        "captcha",
+        "Captcha",
+        "CAPTCHA",
+        "Forbidden",
+    ];
+    let lower = text.to_lowercase();
+    NEEDLES.iter().any(|n| {
+        let needle = n.to_lowercase();
+        lower.contains(&needle)
+    })
+}
 
 pub struct WebFetchTool {
     security: Arc<SecurityPolicy>,
@@ -68,10 +137,16 @@ impl WebFetchTool {
         }
     }
 
-    async fn read_response_text_limited(
+    async fn read_response_bytes_limited(
         &self,
         response: reqwest::Response,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+        let charset_from_header = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_charset_from_content_type);
+
         let mut bytes_stream = response.bytes_stream();
         let hard_cap = self.max_response_size.saturating_add(1);
         let mut bytes = Vec::new();
@@ -83,7 +158,15 @@ impl WebFetchTool {
             }
         }
 
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok((bytes, charset_from_header))
+    }
+
+    async fn read_response_text_limited(
+        &self,
+        response: reqwest::Response,
+    ) -> anyhow::Result<String> {
+        let (bytes, charset_hint) = self.read_response_bytes_limited(response).await?;
+        Ok(decode_response_bytes(&bytes, charset_hint.as_deref()))
     }
 
     fn should_fallback_to_firecrawl(&self, result: &ToolResult) -> bool {
@@ -96,6 +179,9 @@ impl WebFetchTool {
         if result.output.trim().len() < FIRECRAWL_MIN_BODY_LEN {
             return true;
         }
+        if looks_like_anti_bot_page(&result.output) {
+            return true;
+        }
         false
     }
 
@@ -104,6 +190,9 @@ impl WebFetchTool {
             return true;
         }
         if result.output.trim().len() < FIRECRAWL_MIN_BODY_LEN {
+            return true;
+        }
+        if looks_like_anti_bot_page(&result.output) {
             return true;
         }
         false
@@ -225,7 +314,30 @@ impl WebFetchTool {
     }
 
     async fn standard_fetch(&self, client: &reqwest::Client, url: &str) -> ToolResult {
-        let response = match client.get(url).send().await {
+        let referer = referer_for(url);
+        let mut req = client
+            .get(url)
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            )
+            .header(
+                reqwest::header::ACCEPT_LANGUAGE,
+                "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            )
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, br")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .header(reqwest::header::PRAGMA, "no-cache")
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", "none")
+            .header("Sec-Fetch-User", "?1")
+            .header("Upgrade-Insecure-Requests", "1");
+        if let Some(referer) = referer {
+            req = req.header(reqwest::header::REFERER, referer);
+        }
+
+        let response = match req.send().await {
             Ok(r) => r,
             Err(e) => {
                 return ToolResult {
@@ -274,8 +386,11 @@ impl WebFetchTool {
             };
         };
 
-        let body = match self.read_response_text_limited(response).await {
-            Ok(t) => t,
+        let (raw_bytes, charset_hint) = match self
+            .read_response_bytes_limited(response)
+            .await
+        {
+            Ok(pair) => pair,
             Err(e) => {
                 return ToolResult {
                     success: false,
@@ -286,9 +401,10 @@ impl WebFetchTool {
         };
 
         let text = if body_mode == "html" {
+            let body = decode_html_bytes(&raw_bytes, charset_hint.as_deref());
             nanohtml2text::html2text(&body)
         } else {
-            body
+            decode_response_bytes(&raw_bytes, charset_hint.as_deref())
         };
 
         let output = self.truncate_response(&text);
@@ -299,6 +415,78 @@ impl WebFetchTool {
             error: None,
         }
     }
+}
+
+fn referer_for(url: &str) -> Option<&'static str> {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("baidu.com/link") || lower.contains("baidu.com/s?") {
+        return Some("https://www.baidu.com/");
+    }
+    if lower.contains("bing.com/") {
+        return Some("https://www.bing.com/");
+    }
+    if lower.contains("sogou.com/link") {
+        return Some("https://www.sogou.com/");
+    }
+    None
+}
+
+fn parse_charset_from_content_type(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let key = "charset=";
+    let idx = lower.find(key)?;
+    let rest = &value[idx + key.len()..];
+    let ended = rest
+        .split(|c: char| c == ';' || c.is_whitespace())
+        .next()?;
+    let trimmed = ended.trim_matches(|c: char| c == '"' || c == '\'').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_charset_from_html_meta(bytes: &[u8]) -> Option<String> {
+    let head_len = bytes.len().min(8 * 1024);
+    let head = String::from_utf8_lossy(&bytes[..head_len]);
+    let lower = head.to_ascii_lowercase();
+    if let Some(idx) = lower.find("charset=") {
+        let rest = &head[idx + "charset=".len()..];
+        let ended = rest
+            .split(|c: char| {
+                c == '"' || c == '\'' || c == ';' || c == '/' || c == '>' || c.is_whitespace()
+            })
+            .next()
+            .unwrap_or("");
+        let trimmed = ended.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn decode_html_bytes(bytes: &[u8], charset_hint: Option<&str>) -> String {
+    let from_meta = parse_charset_from_html_meta(bytes);
+    let charset = charset_hint
+        .map(|s| s.to_string())
+        .or(from_meta);
+    decode_response_bytes(bytes, charset.as_deref())
+}
+
+fn decode_response_bytes(bytes: &[u8], charset: Option<&str>) -> String {
+    let trimmed = charset
+        .map(|c| c.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if trimmed.is_empty() || trimmed == "utf-8" || trimmed == "utf8" {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    if let Some(enc) = encoding_rs::Encoding::for_label(trimmed.as_bytes()) {
+        let (cow, _, _) = enc.decode(bytes);
+        return cow.into_owned();
+    }
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[async_trait]
@@ -368,11 +556,37 @@ impl Tool for WebFetchTool {
         };
 
         let timeout_secs = if self.timeout_secs == 0 {
-            tracing::warn!("web_fetch: timeout_secs is 0, using safe default of 30s");
-            30
+            tracing::warn!("web_fetch: timeout_secs is 0, using safe default of 60s");
+            60
         } else {
             self.timeout_secs
         };
+
+        let mut webview_candidate: Option<ToolResult> = None;
+        if let Some(controller) = fetch_controller() {
+            let webview_timeout = Duration::from_secs(timeout_secs.max(30));
+            match controller.fetch(&url, webview_timeout).await {
+                Ok(page) => {
+                    let candidate = ToolResult {
+                        success: true,
+                        output: self.truncate_response(&page.text),
+                        error: None,
+                    };
+                    if !self.should_fallback_to_jina(&candidate) {
+                        return Ok(candidate);
+                    }
+                    tracing::info!(
+                        "web_fetch: webview fetch returned likely anti-bot or empty content for {url}, falling back"
+                    );
+                    webview_candidate = Some(candidate);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "web_fetch: webview fetch failed for {url}: {err}; falling back to HTTP path"
+                    );
+                }
+            }
+        }
 
         let allowed_domains = self.allowed_domains.clone();
         let blocked_domains = self.blocked_domains.clone();
@@ -402,7 +616,8 @@ impl Tool for WebFetchTool {
             .timeout(Duration::from_secs(timeout_secs))
             .connect_timeout(Duration::from_secs(10))
             .redirect(redirect_policy)
-            .user_agent("SenWeaverCoding/0.1 (web_fetch)");
+            .cookie_store(true)
+            .user_agent(BROWSER_USER_AGENT);
         let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.web_fetch");
         let client = match builder.build() {
             Ok(c) => c,
@@ -457,9 +672,69 @@ impl Tool for WebFetchTool {
             }
         }
 
-        Ok(standard_result)
+        let best = pick_best_result(webview_candidate, standard_result);
+        Ok(best)
     }
 }
+
+fn result_quality_score(result: &ToolResult) -> usize {
+    if !result.success {
+        return 0;
+    }
+    let len = result.output.trim().chars().count();
+    if len == 0 {
+        return 0;
+    }
+    if looks_like_anti_bot_page(&result.output) {
+        return len.min(50);
+    }
+    len.saturating_add(1_000_000)
+}
+
+fn pick_best_result(
+    webview: Option<ToolResult>,
+    standard: ToolResult,
+) -> ToolResult {
+    let standard_score = result_quality_score(&standard);
+    let webview_score = webview
+        .as_ref()
+        .map(result_quality_score)
+        .unwrap_or(0);
+
+    let best = if webview_score > standard_score {
+        webview.unwrap_or(standard)
+    } else {
+        standard
+    };
+
+    if best.success && looks_like_anti_bot_page(&best.output) {
+        let head: String = best.output.chars().take(120).collect();
+        return ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!(
+                "All fetch paths returned an anti-bot or empty page. \
+                 Snippet of last response: {head}"
+            )),
+        };
+    }
+    if best.success && best.output.trim().chars().count() < 16 {
+        return ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(
+                "All fetch paths returned an empty or near-empty page. \
+                 The target may be deleted, paywalled, or login-required."
+                    .into(),
+            ),
+        };
+    }
+    best
+}
+
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+                                  AppleWebKit/537.36 (KHTML, like Gecko) \
+                                  Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0";
 
 fn validate_target_url(
     raw_url: &str,

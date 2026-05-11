@@ -45,7 +45,7 @@ impl Tool for ModelSwitchTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model ID (e.g., 'gpt-4o', 'claude-sonnet-4-6'). Required for 'set' action."
+                    "description": "Model ID (must be a model already added in Provider settings). Required for 'set' action."
                 }
             },
             "required": ["action"]
@@ -144,6 +144,45 @@ impl ModelSwitchTool {
             });
         }
 
+        if let Some(svc) = crate::services::try_get_services() {
+            let cfg = svc.config();
+            let registered = configured_models_for_provider(&cfg, provider);
+            if registered.is_empty() {
+                return Ok(ToolResult {
+                    success: false,
+                    output: serde_json::to_string_pretty(&json!({
+                        "provider": provider,
+                        "model": model,
+                        "registered_models": Vec::<String>::new(),
+                    }))?,
+                    error: Some(format!(
+                        "未添加模型 / no_model_configured: provider '{provider}' has no models in Provider settings."
+                    )),
+                });
+            }
+            let model_registered = registered
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(model));
+            if !model_registered {
+                return Ok(ToolResult {
+                    success: false,
+                    output: serde_json::to_string_pretty(&json!({
+                        "provider": provider,
+                        "model": model,
+                        "registered_models": registered,
+                    }))?,
+                    error: Some(format!(
+                        "未添加模型 / model_not_registered: model '{model}' is not in Provider settings for '{provider}'. Add it first or pick from registered_models."
+                    )),
+                });
+            }
+        } else {
+            tracing::warn!(
+                target = "model_switch",
+                "services container not initialized; skipping registered-model validation"
+            );
+        }
+
         let switch_state = get_model_switch_state();
         *switch_state.lock() = Some((provider.to_string(), model.to_string()));
 
@@ -201,42 +240,12 @@ impl ModelSwitchTool {
             }
         };
 
-        let models = match provider.to_lowercase().as_str() {
-            "openai" => vec![
-                "gpt-4o",
-                "gpt-4o-mini",
-                "gpt-4-turbo",
-                "gpt-4",
-                "gpt-3.5-turbo",
-            ],
-            "anthropic" => vec![
-                "claude-sonnet-4-6",
-                "claude-sonnet-4-5",
-                "claude-3-5-sonnet",
-                "claude-3-opus",
-                "claude-3-haiku",
-            ],
-            "openrouter" => vec![
-                "anthropic/claude-sonnet-4-6",
-                "openai/gpt-4o",
-                "google/gemini-pro",
-                "meta-llama/llama-3-70b-instruct",
-            ],
-            "groq" => vec![
-                "llama-3.3-70b-versatile",
-                "mixtral-8x7b-32768",
-                "llama-3.1-70b-speculative",
-            ],
-            "ollama" => vec!["llama3", "llama3.1", "mistral", "codellama", "phi3"],
-            "deepseek" => vec!["deepseek-chat", "deepseek-coder"],
-            "mistral" => vec![
-                "mistral-large-latest",
-                "mistral-small-latest",
-                "mistral-nemo",
-            ],
-            "google" | "gemini" => vec!["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-            "xai" | "grok" => vec!["grok-2", "grok-2-vision", "grok-beta"],
-            _ => vec![],
+        let models = match crate::services::try_get_services() {
+            Some(svc) => {
+                let cfg = svc.config();
+                configured_models_for_provider(&cfg, provider)
+            }
+            None => Vec::new(),
         };
 
         if models.is_empty() {
@@ -244,8 +253,8 @@ impl ModelSwitchTool {
                 success: true,
                 output: serde_json::to_string_pretty(&json!({
                     "provider": provider,
-                    "models": [],
-                    "note": "No common models listed for this provider. Check provider documentation for available models."
+                    "models": Vec::<String>::new(),
+                    "note": "未添加模型 / no_model_configured: please add models in Provider settings"
                 }))?,
                 error: None,
             });
@@ -261,4 +270,29 @@ impl ModelSwitchTool {
             error: None,
         })
     }
+}
+
+fn configured_models_for_provider(
+    config: &crate::config::Config,
+    provider: &str,
+) -> Vec<String> {
+    let trimmed = provider.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Some(profile) = config.model_providers.get(trimmed) {
+        return providers::profile_model_names(profile);
+    }
+    for (pid, profile) in config.model_providers.iter() {
+        if pid.eq_ignore_ascii_case(trimmed)
+            || profile
+                .preset_id
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case(trimmed))
+                .unwrap_or(false)
+        {
+            return providers::profile_model_names(profile);
+        }
+    }
+    Vec::new()
 }

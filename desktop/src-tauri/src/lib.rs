@@ -1,9 +1,12 @@
 
 
 mod browser_dock;
+mod fetch_worker;
+mod process_lifetime;
 mod terminal;
 
 use std::{
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::Arc,
     thread,
@@ -17,6 +20,10 @@ use browser_dock::DockSharedState;
 use terminal::TerminalState;
 
 const EMBEDDED_GATEWAY_PENDING_MSG: &str = "desktop server is starting";
+const GATEWAY_HEALTH_DEADLINE_SECS: u64 = 600;
+const GATEWAY_HEALTH_PROBE_INTERVAL_MS: u64 = 250;
+const GATEWAY_HEALTH_PROBE_TIMEOUT_MS: u64 = 2_000;
+const RESTART_DEBOUNCE_SECS: u64 = 90;
 
 #[cfg(target_os = "windows")]
 fn disable_window_focus_border(window: &tauri::WebviewWindow) {
@@ -116,18 +123,17 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
     let chrome_style_mask: isize = (WS_CAPTION
         | WS_THICKFRAME
         | WS_BORDER
-        | WS_DLGFRAME
-        | WS_SYSMENU
-        | WS_MINIMIZEBOX
-        | WS_MAXIMIZEBOX) as isize;
+        | WS_DLGFRAME) as isize;
+    let required_style_bits: isize =
+        (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
     let prev_style = unsafe { GetWindowLongPtrW(raw, GWL_STYLE) };
-    let new_style = prev_style & !chrome_style_mask;
+    let new_style = (prev_style & !chrome_style_mask) | required_style_bits;
     if new_style != prev_style {
         unsafe {
             SetWindowLongPtrW(raw, GWL_STYLE, new_style);
         }
         tracing::debug!(
-            "[sen-desktop] stripped chrome styles: 0x{:08X} -> 0x{:08X}",
+            "[sen-desktop] rewrote chrome styles: 0x{:08X} -> 0x{:08X}",
             prev_style as u32,
             new_style as u32
         );
@@ -186,6 +192,10 @@ struct ServerStatus {
     url: Option<String>,
 
     bootstrap_generation: u64,
+
+    bootstrap_in_progress: bool,
+
+    last_bootstrap_started_at: Option<Instant>,
 }
 
 #[tauri::command]
@@ -198,13 +208,32 @@ fn get_server_url(state: State<'_, ServerState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn restart_embedded_gateway(handle: AppHandle, state: State<'_, ServerState>) -> Result<(), String> {
+fn restart_embedded_gateway(
+    handle: AppHandle,
+    state: State<'_, ServerState>,
+) -> Result<(), String> {
+    {
+        let guard = state.0.lock();
+        if guard.bootstrap_in_progress {
+            return Err(
+                "gateway bootstrap is already in progress; ignoring restart request".to_string(),
+            );
+        }
+        if let Some(started) = guard.last_bootstrap_started_at {
+            if started.elapsed() < Duration::from_secs(RESTART_DEBOUNCE_SECS) {
+                return Err(format!(
+                    "gateway was (re)started less than {}s ago; refusing duplicate restart",
+                    RESTART_DEBOUNCE_SECS
+                ));
+            }
+        }
+    }
     spawn_gateway_bootstrap_thread(handle, state.inner().clone())
 }
 
 #[tauri::command]
 fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
-    terminal::shutdown_all(&handle);
+    process_lifetime::run_full_shutdown(&handle, Duration::from_secs(8));
     Ok(())
 }
 
@@ -288,6 +317,8 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 }
 
 pub fn run() {
+    process_lifetime::install_kill_on_close_job();
+
     let builder = tauri::Builder::default()
         .manage(ServerState::default())
         .manage(TerminalState::default())
@@ -340,6 +371,7 @@ pub fn run() {
             }
 
             browser_dock::install_into(app.handle());
+            fetch_worker::install_into(app.handle());
 
             let handle = app.handle().clone();
 
@@ -372,10 +404,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-            terminal::shutdown_all(app_handle);
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { .. } => {
+
+            process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(8));
         }
+        RunEvent::Exit => {
+
+            process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(2));
+        }
+        _ => {}
     });
 }
 
@@ -385,46 +423,63 @@ fn spawn_gateway_bootstrap_thread(
 ) -> Result<(), String> {
     let generation = {
         let mut g = server_state.0.lock();
+        if g.bootstrap_in_progress {
+            return Err("gateway bootstrap already in progress; skipping duplicate spawn".into());
+        }
         g.url = None;
         g.bootstrap_generation = g.bootstrap_generation.saturating_add(1);
+        g.bootstrap_in_progress = true;
+        g.last_bootstrap_started_at = Some(Instant::now());
         g.bootstrap_generation
     };
     let ss = server_state.clone();
     let h = handle.clone();
-    thread::Builder::new()
+    let spawn_result = thread::Builder::new()
         .name("sen-gateway-bootstrap".into())
         .spawn(move || {
             run_bootstrap_until_success(ss, generation, h);
-        })
-        .map_err(|err| format!("spawn gateway bootstrap thread: {err}"))?;
-    Ok(())
+        });
+    match spawn_result {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let mut g = server_state.0.lock();
+            if g.bootstrap_generation == generation {
+                g.bootstrap_in_progress = false;
+            }
+            Err(format!("spawn gateway bootstrap thread: {err}"))
+        }
+    }
 }
 
 fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handle: AppHandle) {
-    let mut attempt: u32 = 0;
-    loop {
-        match start_embedded_gateway_once(handle.clone()) {
-            Ok(url) => {
-                let mut g = server_state.0.lock();
-                if g.bootstrap_generation != generation {
-                    return;
-                }
-                g.url = Some(url);
+    let started_at = Instant::now();
+    {
+        let g = server_state.0.lock();
+        if g.bootstrap_generation != generation {
+            return;
+        }
+    }
+    match start_embedded_gateway_once(handle.clone(), &server_state, generation) {
+        Ok(url) => {
+            let mut g = server_state.0.lock();
+            if g.bootstrap_generation != generation {
                 return;
             }
-            Err(err) => {
-                attempt = attempt.wrapping_add(1);
-                tracing::warn!(
-                    "[sen-desktop] embedded gateway bootstrap attempt {} failed (will retry inside this generation): {}",
-                    attempt,
-                    err,
-                );
-                thread::sleep(Duration::from_secs(1));
-                let g = server_state.0.lock();
-                if g.bootstrap_generation != generation {
-                    return;
-                }
-                drop(g);
+            g.url = Some(url);
+            g.bootstrap_in_progress = false;
+            tracing::info!(
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "[sen-desktop] embedded gateway is HTTP-ready"
+            );
+        }
+        Err(err) => {
+            tracing::error!(
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "[sen-desktop] embedded gateway bootstrap failed; user can request restart via UI: {err}"
+            );
+            let mut g = server_state.0.lock();
+            if g.bootstrap_generation == generation {
+                g.bootstrap_in_progress = false;
             }
         }
     }
@@ -448,23 +503,88 @@ fn reserve_local_port() -> Result<(u16, TcpListener), String> {
     Err(last_err.unwrap_or_else(|| "could not reserve a local port".to_string()))
 }
 
-fn wait_for_server(host: &str, port: u16) -> Result<(), String> {
+fn probe_health_once(addr: SocketAddr, timeout_ms: u64) -> bool {
+    let connect_timeout = Duration::from_millis(timeout_ms.min(5_000));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, connect_timeout) else {
+        return false;
+    };
+    let read_timeout = Duration::from_millis(timeout_ms.max(250));
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let _ = stream.set_write_timeout(Some(read_timeout));
+
+    let host = format!("{}:{}", addr.ip(), addr.port());
+    let request = format!(
+        "GET /health HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         User-Agent: sen-desktop-bootstrap\r\n\
+         Connection: close\r\n\
+         Accept: */*\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    if stream.flush().is_err() {
+        return false;
+    }
+
+    let mut buf = [0u8; 256];
+    match stream.read(&mut buf) {
+        Ok(n) if n >= 12 => {
+            let head = std::str::from_utf8(&buf[..n.min(64)]).unwrap_or("");
+            head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")
+        }
+        _ => false,
+    }
+}
+
+fn wait_for_server_until_ready(
+    server_state: &ServerState,
+    generation: u64,
+    host: &str,
+    port: u16,
+) -> Result<(), String> {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|err| format!("parse server address: {err}"))?;
-    let deadline = Instant::now() + Duration::from_secs(45);
-    while Instant::now() < deadline {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+    let started = Instant::now();
+    let mut last_log = Instant::now();
+    let hard_deadline = started + Duration::from_secs(GATEWAY_HEALTH_DEADLINE_SECS);
+    loop {
+        {
+            let g = server_state.0.lock();
+            if g.bootstrap_generation != generation {
+                return Err("bootstrap generation invalidated; abandoning wait".into());
+            }
+        }
+        if probe_health_once(addr, GATEWAY_HEALTH_PROBE_TIMEOUT_MS) {
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "[sen-desktop] /health responded OK on {host}:{port}"
+            );
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(150));
+        if last_log.elapsed() >= Duration::from_secs(15) {
+            tracing::info!(
+                "[sen-desktop] still waiting for embedded gateway /health on {host}:{port} ({}s elapsed)",
+                started.elapsed().as_secs()
+            );
+            last_log = Instant::now();
+        }
+        if Instant::now() >= hard_deadline {
+            return Err(format!(
+                "embedded gateway did not respond to /health on {host}:{port} within {}s",
+                GATEWAY_HEALTH_DEADLINE_SECS
+            ));
+        }
+        thread::sleep(Duration::from_millis(GATEWAY_HEALTH_PROBE_INTERVAL_MS));
     }
-    Err(format!(
-        "embedded gateway did not start listening on {host}:{port} within 45 seconds"
-    ))
 }
 
-fn start_embedded_gateway_once(_handle: AppHandle) -> Result<String, String> {
+fn start_embedded_gateway_once(
+    _handle: AppHandle,
+    server_state: &ServerState,
+    generation: u64,
+) -> Result<String, String> {
     let host = "127.0.0.1";
     let (port, std_listener) = reserve_local_port()?;
     std_listener
@@ -486,12 +606,17 @@ fn start_embedded_gateway_once(_handle: AppHandle) -> Result<String, String> {
                 }
             };
             runtime.block_on(async move {
+                let load_started = Instant::now();
                 let mut config = senweavercoding::Config::load_or_init().await.unwrap_or_else(|err| {
                     tracing::warn!(
                         "[sen-desktop] config load failed ({err}); falling back to defaults"
                     );
                     senweavercoding::Config::default()
                 });
+                tracing::info!(
+                    elapsed_ms = load_started.elapsed().as_millis() as u64,
+                    "[sen-desktop] gateway: config loaded"
+                );
                 apply_embedded_gateway_overrides(&mut config, host, port);
                 let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
                     Ok(l) => l,
@@ -500,16 +625,20 @@ fn start_embedded_gateway_once(_handle: AppHandle) -> Result<String, String> {
                         return;
                     }
                 };
+                let serve_started = Instant::now();
                 if let Err(err) =
                     senweavercoding::gateway::run_gateway_with_supervisors(host, port, config, Some(tokio_listener)).await
                 {
-                    tracing::error!("[sen-desktop] run_gateway exited: {err:#}");
+                    tracing::error!(
+                        elapsed_ms = serve_started.elapsed().as_millis() as u64,
+                        "[sen-desktop] run_gateway exited: {err:#}"
+                    );
                 }
             });
         })
         .map_err(|err| format!("spawn gateway thread: {err}"))?;
 
-    wait_for_server(host, port)?;
+    wait_for_server_until_ready(server_state, generation, host, port)?;
     Ok(url)
 }
 

@@ -107,6 +107,71 @@ fn pretty_provider_name(id: &str) -> String {
     }
 }
 
+pub async fn handle_models_available(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let default_provider_id = config
+        .default_provider
+        .as_deref()
+        .filter(|id| config.model_providers.contains_key(*id))
+        .map(str::to_string);
+    let mut provider_ids: Vec<&String> = config.model_providers.keys().collect();
+    provider_ids.sort();
+    let mut total: u32 = 0;
+    let mut providers_with_models: u32 = 0;
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut providers_payload: Vec<serde_json::Value> = Vec::new();
+    for pid in provider_ids {
+        let Some(profile) = config.model_providers.get(pid) else {
+            continue;
+        };
+        let names = effective_model_names(profile);
+        if !names.is_empty() {
+            providers_with_models = providers_with_models.saturating_add(1);
+        }
+        let display_name = profile
+            .name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| pretty_provider_name(pid));
+        let is_default = default_provider_id.as_deref() == Some(pid.as_str());
+        let mut models_for_provider: Vec<serde_json::Value> = Vec::new();
+        for name in &names {
+            total = total.saturating_add(1);
+            entries.push(serde_json::json!({
+                "id": name,
+                "providerId": pid,
+                "providerName": display_name,
+                "isDefaultProvider": is_default,
+            }));
+            models_for_provider.push(serde_json::json!({
+                "id": name,
+                "name": name,
+            }));
+        }
+        providers_payload.push(serde_json::json!({
+            "id": pid,
+            "name": display_name,
+            "isDefault": is_default,
+            "models": models_for_provider,
+        }));
+    }
+    Json(serde_json::json!({
+        "models": entries,
+        "providers": providers_payload,
+        "total": total,
+        "providersConfigured": config.model_providers.len(),
+        "providersWithModels": providers_with_models,
+        "defaultProviderId": default_provider_id,
+    }))
+    .into_response()
+}
+
 pub async fn handle_models_current(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -165,10 +230,22 @@ pub async fn handle_models_set_current(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    {
+    let snapshot = {
         let mut cfg = state.config.lock();
         cfg.default_model = Some(body.model_id.clone());
+        cfg.clone()
+    };
+    if let Err(e) = snapshot.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
     }
+    state.push_live_config(snapshot);
     Json(serde_json::json!({ "ok": true, "model": body.model_id })).into_response()
 }
 
@@ -205,10 +282,22 @@ pub async fn handle_effort_set(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    {
+    let snapshot = {
         let mut cfg = state.config.lock();
         cfg.runtime.reasoning_effort = Some(body.level.clone());
+        cfg.clone()
+    };
+    if let Err(e) = snapshot.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
     }
+    state.push_live_config(snapshot);
     Json(serde_json::json!({ "ok": true, "level": body.level })).into_response()
 }
 
@@ -292,6 +381,47 @@ fn wire_to_api_format(wire: Option<&str>) -> &'static str {
         Some("responses") => "openai_responses",
         _ => "openai_chat",
     }
+}
+
+fn normalize_display_name_key(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut prev_space = false;
+    for ch in value.trim().chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+            prev_space = false;
+        }
+    }
+    out
+}
+
+pub(crate) fn find_provider_id_by_display_name(
+    cfg: &crate::config::Config,
+    name: &str,
+    skip_id: Option<&str>,
+) -> Option<String> {
+    let needle = normalize_display_name_key(name);
+    if needle.is_empty() {
+        return None;
+    }
+    cfg.model_providers
+        .iter()
+        .filter(|(id, _)| skip_id.map(|skip| skip != id.as_str()).unwrap_or(true))
+        .find_map(|(id, profile)| {
+            let candidate = profile
+                .name
+                .as_deref()
+                .map(normalize_display_name_key)
+                .unwrap_or_else(|| normalize_display_name_key(id));
+            (candidate == needle).then(|| id.clone())
+        })
 }
 
 fn slugify_provider_id(name: &str) -> String {
@@ -723,7 +853,8 @@ pub async fn handle_providers_create(
         return e.into_response();
     }
 
-    if body.name.trim().is_empty() {
+    let trimmed_name = body.name.trim().to_string();
+    if trimmed_name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "name is required"})),
@@ -735,13 +866,26 @@ pub async fn handle_providers_create(
         .preset_id_camel
         .clone()
         .or(body.preset_id.clone())
-        .unwrap_or_else(|| slugify_provider_id(&body.name));
+        .unwrap_or_else(|| slugify_provider_id(&trimmed_name));
     let mut id = body
         .id
         .clone()
-        .unwrap_or_else(|| slugify_provider_id(&body.name));
+        .unwrap_or_else(|| slugify_provider_id(&trimmed_name));
     {
         let cfg = state.config.lock();
+        if let Some(existing_id) = find_provider_id_by_display_name(&cfg, &trimmed_name, None) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "provider name already in use by '{existing_id}': pick a unique display name"
+                    ),
+                    "code": "name_conflict",
+                    "conflictingId": existing_id,
+                })),
+            )
+                .into_response();
+        }
         if cfg.model_providers.contains_key(&id) {
             for n in 2..1000 {
                 let candidate = format!("{id}-{n}");
@@ -757,7 +901,7 @@ pub async fn handle_providers_create(
     let wire_api = api_format_to_wire(api_format).to_string();
 
     let mut profile = crate::config::ModelProviderConfig::default();
-    profile.name = Some(body.name.trim().to_string());
+    profile.name = Some(trimmed_name.clone());
     profile.base_url = body
         .base_url
         .as_deref()
@@ -817,6 +961,27 @@ pub async fn handle_providers_update(
 ) -> impl IntoResponse {
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
+    }
+
+    if let Some(name) = body.name.as_deref().map(str::trim) {
+        if !name.is_empty() {
+            let cfg = state.config.lock();
+            if let Some(existing_id) =
+                find_provider_id_by_display_name(&cfg, name, Some(id.as_str()))
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "provider name already in use by '{existing_id}': pick a unique display name"
+                        ),
+                        "code": "name_conflict",
+                        "conflictingId": existing_id,
+                    })),
+                )
+                    .into_response();
+            }
+        }
     }
 
     let snapshot = {
@@ -1034,36 +1199,28 @@ pub(crate) fn apply_active_profile_to_top_level(
 ) {
     cfg.default_provider = Some(id.to_string());
 
-    if let Some(key) = profile
+    cfg.api_key = profile
         .api_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        cfg.api_key = Some(key.to_string());
-    }
+        .map(str::to_string);
 
-    if let Some(url) = profile
+    cfg.api_url = profile
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        cfg.api_url = Some(url.to_string());
-    }
+        .map(str::to_string);
 
-    if let Some(path) = profile
+    cfg.api_path = profile
         .api_path
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        cfg.api_path = Some(path.to_string());
-    }
+        .map(str::to_string);
 
-    if let Some(max_tokens) = profile.max_tokens {
-        cfg.provider_max_tokens = Some(max_tokens);
-    }
+    cfg.provider_max_tokens = profile.max_tokens;
 
     cfg.model_context_windows = profile.model_context_windows.clone();
 
@@ -1076,6 +1233,8 @@ pub(crate) fn apply_active_profile_to_top_level(
     if !current_model_belongs {
         if let Some(first) = models.into_iter().next() {
             cfg.default_model = Some(first);
+        } else {
+            cfg.default_model = None;
         }
     }
 }
@@ -4328,13 +4487,23 @@ pub async fn handle_permissions_autonomy_put(
     }
 
     if let Err(e) = next_cfg.save().await {
-        tracing::warn!(
+        tracing::error!(
             target: "gateway.permissions",
             error = %e,
-            "autonomy config persisted to memory only; disk save failed"
+            "autonomy config save failed"
         );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
     }
     svc.update_config(next_cfg.clone());
+    *state.config.lock() = next_cfg.clone();
+    state.push_live_config(next_cfg.clone());
 
     Json(autonomy_view_json(&next_cfg)).into_response()
 }

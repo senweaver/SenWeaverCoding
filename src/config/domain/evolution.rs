@@ -151,6 +151,289 @@ impl Default for EvolutionExportConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectionTriggerMode {
+    Manual,
+    Auto,
+    Scheduled,
+}
+
+impl Default for ReflectionTriggerMode {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
+
+impl ReflectionTriggerMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+            Self::Scheduled => "scheduled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "manual" => Some(Self::Manual),
+            "auto" => Some(Self::Auto),
+            "scheduled" => Some(Self::Scheduled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectionDepth {
+    Quick,
+    Deep,
+}
+
+impl Default for ReflectionDepth {
+    fn default() -> Self {
+        Self::Quick
+    }
+}
+
+impl ReflectionDepth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Deep => "deep",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "quick" => Some(Self::Quick),
+            "deep" => Some(Self::Deep),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectionWritebackTarget {
+    Lessons,
+    Skills,
+    Rules,
+    Memory,
+}
+
+impl ReflectionWritebackTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lessons => "lessons",
+            Self::Skills => "skills",
+            Self::Rules => "rules",
+            Self::Memory => "memory",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "lessons" => Some(Self::Lessons),
+            "skills" => Some(Self::Skills),
+            "rules" => Some(Self::Rules),
+            "memory" => Some(Self::Memory),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExperienceRecyclingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_recycling_sample_rate")]
+    pub sample_rate: f32,
+
+    #[serde(default = "default_recycling_min_reward")]
+    pub min_reward: f32,
+
+    #[serde(default = "default_recycling_max_retained")]
+    pub max_retained: usize,
+
+    #[serde(default = "default_recycling_max_replay")]
+    pub max_replay_in_prompt: usize,
+
+    #[serde(default = "default_recycling_replay_budget")]
+    pub replay_token_budget: usize,
+
+    #[serde(default = "default_recycling_redact_paths")]
+    pub redact_workspace_paths: bool,
+
+    #[serde(default = "default_recycling_redact_secrets")]
+    pub redact_secrets: bool,
+
+    #[serde(default)]
+    pub redact_user_text: bool,
+
+    #[serde(default = "default_recycling_include_successes")]
+    pub include_successes: bool,
+
+    #[serde(default = "default_recycling_include_failures")]
+    pub include_failures: bool,
+
+    #[serde(default = "default_recycling_weight_quality")]
+    pub weight_quality: f32,
+
+    #[serde(default = "default_recycling_weight_recency")]
+    pub weight_recency: f32,
+
+    #[serde(default = "default_recycling_weight_diversity")]
+    pub weight_diversity: f32,
+}
+
+fn default_recycling_sample_rate() -> f32 {
+    1.0
+}
+fn default_recycling_min_reward() -> f32 {
+    -0.2
+}
+fn default_recycling_max_retained() -> usize {
+    500
+}
+fn default_recycling_max_replay() -> usize {
+    3
+}
+fn default_recycling_replay_budget() -> usize {
+    800
+}
+fn default_recycling_redact_paths() -> bool {
+    true
+}
+fn default_recycling_redact_secrets() -> bool {
+    true
+}
+fn default_recycling_include_successes() -> bool {
+    true
+}
+fn default_recycling_include_failures() -> bool {
+    true
+}
+fn default_recycling_weight_quality() -> f32 {
+    0.5
+}
+fn default_recycling_weight_recency() -> f32 {
+    0.3
+}
+fn default_recycling_weight_diversity() -> f32 {
+    0.2
+}
+
+impl Default for ExperienceRecyclingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sample_rate: default_recycling_sample_rate(),
+            min_reward: default_recycling_min_reward(),
+            max_retained: default_recycling_max_retained(),
+            max_replay_in_prompt: default_recycling_max_replay(),
+            replay_token_budget: default_recycling_replay_budget(),
+            redact_workspace_paths: default_recycling_redact_paths(),
+            redact_secrets: default_recycling_redact_secrets(),
+            redact_user_text: false,
+            include_successes: default_recycling_include_successes(),
+            include_failures: default_recycling_include_failures(),
+            weight_quality: default_recycling_weight_quality(),
+            weight_recency: default_recycling_weight_recency(),
+            weight_diversity: default_recycling_weight_diversity(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SelfReflectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub trigger_mode: ReflectionTriggerMode,
+
+    #[serde(default)]
+    pub depth: ReflectionDepth,
+
+    #[serde(default)]
+    pub reflection_model: Option<String>,
+
+    #[serde(default)]
+    pub reflection_provider: Option<String>,
+
+    #[serde(default = "default_reflection_schedule_minutes")]
+    pub schedule_interval_minutes: u32,
+
+    #[serde(default = "default_reflection_min_turns_for_auto")]
+    pub min_turns_for_auto: usize,
+
+    #[serde(default = "default_reflection_failure_threshold")]
+    pub failure_threshold: u32,
+
+    #[serde(default = "default_reflection_writeback_targets")]
+    pub writeback_targets: Vec<ReflectionWritebackTarget>,
+
+    #[serde(default = "default_reflection_max_lessons_per_run")]
+    pub max_lessons_per_run: usize,
+
+    #[serde(default = "default_reflection_max_total_lessons")]
+    pub max_total_lessons: usize,
+
+    #[serde(default = "default_reflection_include_thumbs_down")]
+    pub include_user_thumbs_down: bool,
+
+    #[serde(default = "default_reflection_lookback_turns")]
+    pub lookback_turns: usize,
+}
+
+fn default_reflection_schedule_minutes() -> u32 {
+    60
+}
+fn default_reflection_min_turns_for_auto() -> usize {
+    4
+}
+fn default_reflection_failure_threshold() -> u32 {
+    2
+}
+fn default_reflection_writeback_targets() -> Vec<ReflectionWritebackTarget> {
+    vec![ReflectionWritebackTarget::Lessons]
+}
+fn default_reflection_max_lessons_per_run() -> usize {
+    3
+}
+fn default_reflection_max_total_lessons() -> usize {
+    100
+}
+fn default_reflection_include_thumbs_down() -> bool {
+    true
+}
+fn default_reflection_lookback_turns() -> usize {
+    12
+}
+
+impl Default for SelfReflectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_mode: ReflectionTriggerMode::default(),
+            depth: ReflectionDepth::default(),
+            reflection_model: None,
+            reflection_provider: None,
+            schedule_interval_minutes: default_reflection_schedule_minutes(),
+            min_turns_for_auto: default_reflection_min_turns_for_auto(),
+            failure_threshold: default_reflection_failure_threshold(),
+            writeback_targets: default_reflection_writeback_targets(),
+            max_lessons_per_run: default_reflection_max_lessons_per_run(),
+            max_total_lessons: default_reflection_max_total_lessons(),
+            include_user_thumbs_down: default_reflection_include_thumbs_down(),
+            lookback_turns: default_reflection_lookback_turns(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvolutionConfig {
     #[serde(default = "default_enabled")]
@@ -179,6 +462,12 @@ pub struct EvolutionConfig {
 
     #[serde(default)]
     pub export: EvolutionExportConfig,
+
+    #[serde(default)]
+    pub recycling: ExperienceRecyclingConfig,
+
+    #[serde(default)]
+    pub reflection: SelfReflectionConfig,
 }
 
 fn default_enabled() -> bool {
@@ -203,6 +492,8 @@ impl Default for EvolutionConfig {
             lesson_token_budget: default_lesson_token_budget(),
             auto_distill_on_session_end: default_enabled(),
             export: EvolutionExportConfig::default(),
+            recycling: ExperienceRecyclingConfig::default(),
+            reflection: SelfReflectionConfig::default(),
         }
     }
 }

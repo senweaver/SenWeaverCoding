@@ -304,6 +304,7 @@ export type WebSearchHit = {
 export type WebSearchSummary = {
   query: string
   provider?: string
+  engine?: string
   hits: WebSearchHit[]
   raw: string
   looksLikeError: boolean
@@ -408,6 +409,20 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
       if (m && m[1]) summary.query = m[1].trim()
       return summary
     }
+  }
+  while (cursor < lines.length) {
+    const probe = (lines[cursor] ?? '').trim()
+    if (!probe) {
+      cursor += 1
+      continue
+    }
+    const engineMatch = probe.match(/^Engine:\s*(.+)$/i)
+    if (engineMatch && engineMatch[1]) {
+      summary.engine = engineMatch[1].trim().toLowerCase()
+      cursor += 1
+      continue
+    }
+    break
   }
 
   let i = cursor

@@ -5031,18 +5031,22 @@ pub async fn run(
         .or(config.default_provider.as_deref())
         .unwrap_or("openrouter")
         .to_string();
+    let resolved_provider_name = providers::resolve_runtime_provider_name(&provider_name, &config);
 
-    let mut model_name = model_override
+    let mut model_name = match model_override
         .as_deref()
-        .or(config.default_model.as_deref())
-        .unwrap_or("anthropic/claude-sonnet-4")
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(m) => m.to_string(),
+        None => providers::resolve_default_model(&config)?,
+    };
 
     let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
 
     let mut provider: std::sync::Arc<dyn Provider> =
         std::sync::Arc::from(providers::create_routed_provider_with_options(
-            &provider_name,
+            &resolved_provider_name,
             config.api_key.as_deref(),
             config.api_url.as_deref(),
             &config.reliability,
@@ -5428,8 +5432,13 @@ pub async fn run(
                                 new_provider_name,
                                 new_model_name
                             );
+                            let resolved_new_provider =
+                                providers::resolve_runtime_provider_name(
+                                    &new_provider_name,
+                                    &config,
+                                );
                             match providers::create_routed_provider_with_options(
-                                &new_provider_name,
+                                &resolved_new_provider,
                                 config.api_key.as_deref(),
                                 config.api_url.as_deref(),
                                 &config.reliability,
@@ -5736,9 +5745,11 @@ pub async fn run(
                                 new_provider,
                                 new_model
                             );
+                            let resolved_new_provider =
+                                providers::resolve_runtime_provider_name(&new_provider, &config);
                             provider = std::sync::Arc::from(
                                 providers::create_routed_provider_with_options(
-                                    &new_provider,
+                                    &resolved_new_provider,
                                     config.api_key.as_deref(),
                                     config.api_url.as_deref(),
                                     &config.reliability,
@@ -5965,14 +5976,13 @@ pub async fn process_message(
     }
 
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
-    let model_name = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
+    let resolved_provider_name =
+        providers::resolve_runtime_provider_name(provider_name, &config);
+    let model_name = providers::resolve_default_model(&config)?;
     let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
     let provider: std::sync::Arc<dyn Provider> =
         std::sync::Arc::from(providers::create_routed_provider_with_options(
-            provider_name,
+            &resolved_provider_name,
             config.api_key.as_deref(),
             config.api_url.as_deref(),
             &config.reliability,

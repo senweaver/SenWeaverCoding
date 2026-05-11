@@ -49,8 +49,16 @@ impl SwarmTool {
             .clone()
             .or_else(|| self.fallback_credential.clone());
 
+        let runtime_provider_name = match crate::services::try_get_services() {
+            Some(services) => {
+                let cfg = services.config();
+                providers::resolve_runtime_provider_name(&agent_config.provider, &cfg)
+            }
+            None => agent_config.provider.clone(),
+        };
+
         providers::create_provider_with_options(
-            &agent_config.provider,
+            &runtime_provider_name,
             credential.as_deref(),
             &self.provider_runtime_options,
         )
@@ -199,8 +207,16 @@ impl SwarmTool {
                 .clone()
                 .or_else(|| self.fallback_credential.clone());
 
+            let runtime_provider_name = match crate::services::try_get_services() {
+                Some(services) => {
+                    let cfg = services.config();
+                    providers::resolve_runtime_provider_name(&agent_config.provider, &cfg)
+                }
+                None => agent_config.provider.clone(),
+            };
+
             let provider = match providers::create_provider_with_options(
-                &agent_config.provider,
+                &runtime_provider_name,
                 credential.as_deref(),
                 &self.provider_runtime_options,
             ) {

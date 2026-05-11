@@ -302,35 +302,74 @@ impl McpRegistry {
     }
 
     pub async fn connect_all(configs: &[McpServerConfig]) -> Result<Self> {
-        let mut servers = Vec::new();
-        let mut tool_index = HashMap::new();
+        let enabled: Vec<&McpServerConfig> = configs
+            .iter()
+            .filter(|c| {
+                if !c.enabled {
+                    tracing::info!(
+                        server = %c.name,
+                        "MCP server marked disabled in config; skipping connect_all"
+                    );
+                }
+                c.enabled
+            })
+            .collect();
 
-        for config in configs {
-            if !config.enabled {
-                tracing::info!(
-                    server = %config.name,
-                    "MCP server marked disabled in config; skipping connect_all"
-                );
-                continue;
-            }
-            match McpServer::connect(config.clone()).await {
+        if enabled.is_empty() {
+            return Ok(Self::empty());
+        }
+
+        let started = std::time::Instant::now();
+        let attempts: Vec<_> = enabled
+            .iter()
+            .map(|cfg| {
+                let cfg = (*cfg).clone();
+                let name = cfg.name.clone();
+                async move {
+                    let started_one = std::time::Instant::now();
+                    let outcome = McpServer::connect(cfg).await;
+                    (name, started_one.elapsed(), outcome)
+                }
+            })
+            .collect();
+
+        let results = futures_util::future::join_all(attempts).await;
+
+        let mut servers = Vec::with_capacity(results.len());
+        let mut tool_index = HashMap::new();
+        for (name, elapsed, outcome) in results {
+            match outcome {
                 Ok(server) => {
                     let server_idx = servers.len();
-
                     let tools = server.tools().await;
                     for tool in &tools {
-
-                        let prefixed = format!("{}__{}", config.name, tool.name);
+                        let prefixed = format!("{}__{}", name, tool.name);
                         tool_index.insert(prefixed, (server_idx, tool.name.clone()));
                     }
+                    tracing::info!(
+                        server = %name,
+                        tool_count = tools.len(),
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "MCP server connected"
+                    );
                     servers.push(server);
                 }
-
                 Err(e) => {
-                    tracing::error!("Failed to connect to MCP server `{}`: {:#}", config.name, e);
+                    tracing::error!(
+                        server = %name,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "Failed to connect to MCP server `{name}`: {e:#}"
+                    );
                 }
             }
         }
+
+        tracing::info!(
+            total_elapsed_ms = started.elapsed().as_millis() as u64,
+            connected = servers.len(),
+            attempted = enabled.len(),
+            "MCP connect_all completed"
+        );
 
         Ok(Self {
             servers,

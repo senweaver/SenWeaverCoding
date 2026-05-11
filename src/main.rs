@@ -250,7 +250,7 @@ Use --message for single-shot queries without entering interactive mode.
 Examples:
   sen agent                              # interactive session
   sen agent -m \"Summarize today's logs\"  # single message
-  sen agent -p anthropic --model claude-sonnet-4-20250514
+  sen agent -p anthropic --model <model-id>
   sen agent --peripheral nucleo-f401re:/dev/ttyACM0")]
     Agent {
 
@@ -739,7 +739,7 @@ Exit codes:
 
 Examples:
   sen eval --instruction 'Fix all linter errors' --workdir ./project
-  sen eval -i 'Add tests for auth module' --model claude-sonnet-4-20250514
+  sen eval -i 'Add tests for auth module' --model <model-id>
   sen eval --instruction - --timeout 300  # read instruction from stdin
   cat task.txt | sen eval -i - --output-dir ./results")]
     Eval {
@@ -4093,10 +4093,10 @@ async fn run_team_command(config: &Config, action: TeamAction) -> Result<()> {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use senweavercoding::agent::role_pipeline::{
+    use crate::agent::role_pipeline::{
         self, PipelineParams, RolePipeline,
     };
-    use senweavercoding::memory::blackboard::Blackboard;
+    use crate::memory::blackboard::Blackboard;
 
     let pick_pipeline = |name: &str| -> Result<RolePipeline> {
         match name {
@@ -4150,12 +4150,11 @@ async fn run_team_command(config: &Config, action: TeamAction) -> Result<()> {
                 .default_provider
                 .clone()
                 .unwrap_or_else(|| "openrouter".to_string());
-            let model = config
-                .default_model
-                .clone()
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            let provider = senweavercoding::providers::create_provider_with_url(
-                &provider_name,
+            let resolved_provider_name =
+                crate::providers::resolve_runtime_provider_name(&provider_name, config);
+            let model = crate::providers::resolve_default_model(config)?;
+            let provider = crate::providers::create_provider_with_url(
+                &resolved_provider_name,
                 config.api_key.as_deref(),
                 config.api_url.as_deref(),
             )

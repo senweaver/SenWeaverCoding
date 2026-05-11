@@ -415,13 +415,28 @@ impl Tool for DelegateParallelTool {
                                 dcfg.agentic_timeout_secs,
                             )
                         } else {
+                            let resolved_model = match crate::providers::resolve_default_model(&cfg) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    notes.lock().unwrap().insert(
+                                        id.clone(),
+                                        (
+                                            true,
+                                            Some(format!(
+                                                "no_model_configured: {e}"
+                                            )),
+                                        ),
+                                    );
+                                    return Err(format!(
+                                        "delegate_parallel: no_model_configured for task '{id}': {e}"
+                                    ));
+                                }
+                            };
                             (
                                 cfg.default_provider
                                     .clone()
                                     .unwrap_or_else(|| "openrouter".into()),
-                                cfg.default_model
-                                    .clone()
-                                    .unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
+                                resolved_model,
                                 None,
                                 cfg.api_key.clone(),
                                 cfg.api_url.clone(),
@@ -467,8 +482,15 @@ impl Tool for DelegateParallelTool {
                     "delegations",
                 );
 
+                let resolved_provider_name = match crate::services::try_get_services() {
+                    Some(svc) => {
+                        let cfg = svc.shared_config.load();
+                        crate::providers::resolve_runtime_provider_name(&provider_name, &cfg)
+                    }
+                    None => provider_name.clone(),
+                };
                 let provider = match crate::providers::create_provider_with_url(
-                    &provider_name,
+                    &resolved_provider_name,
                     api_key.as_deref(),
                     api_url.as_deref(),
                 ) {
@@ -629,19 +651,28 @@ impl Tool for DelegateParallelTool {
                         .default_provider
                         .clone()
                         .unwrap_or_else(|| "openrouter".into());
-                    let model = cfg
-                        .default_model
-                        .clone()
-                        .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
-                    let temperature = cfg.default_temperature;
-                    let provider = crate::providers::create_provider_with_url(
-                        &provider_name,
-                        cfg.api_key.as_deref(),
-                        cfg.api_url.as_deref(),
-                    )
-                    .ok()
-                    .map(|p| Arc::from(p));
-                    (provider, model, temperature)
+                    let resolved_provider_name =
+                        crate::providers::resolve_runtime_provider_name(&provider_name, &cfg);
+                    match crate::providers::resolve_default_model(&cfg) {
+                        Ok(model) => {
+                            let temperature = cfg.default_temperature;
+                            let provider = crate::providers::create_provider_with_url(
+                                &resolved_provider_name,
+                                cfg.api_key.as_deref(),
+                                cfg.api_url.as_deref(),
+                            )
+                            .ok()
+                            .map(|p| Arc::from(p));
+                            (provider, model, temperature)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target = "delegate_parallel",
+                                "no_model_configured for llm-judge merge: {e}"
+                            );
+                            (None, String::new(), 0.0)
+                        }
+                    }
                 }
                 None => (None, String::new(), 0.0),
             };
@@ -688,13 +719,23 @@ async fn single_agent_fallback(
         match crate::services::try_get_services() {
             Some(svc) => {
                 let cfg = svc.shared_config.load();
+                let raw_provider_name = cfg
+                    .default_provider
+                    .clone()
+                    .unwrap_or_else(|| "openrouter".into());
+                let resolved_provider_name =
+                    crate::providers::resolve_runtime_provider_name(&raw_provider_name, &cfg);
+                let resolved_model = match crate::providers::resolve_default_model(&cfg) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Err(format!(
+                            "single-agent fallback: no_model_configured: {e}"
+                        ));
+                    }
+                };
                 (
-                    cfg.default_provider
-                        .clone()
-                        .unwrap_or_else(|| "openrouter".into()),
-                    cfg.default_model
-                        .clone()
-                        .unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
+                    resolved_provider_name,
+                    resolved_model,
                     cfg.api_key.clone(),
                     cfg.api_url.clone(),
                     cfg.default_temperature,

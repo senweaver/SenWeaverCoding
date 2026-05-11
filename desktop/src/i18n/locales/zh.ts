@@ -268,6 +268,143 @@ export const zh: Record<TranslationKey, string> = {
   'settings.evolution.cloud.add': '新增目标',
   'settings.evolution.cloud.push': '推送',
 
+  'settings.evolution.recycling.title': '经验回收',
+  'settings.evolution.recycling.description':
+    '采集、清洗并回放高价值的对话轮次。被选中的经验会注入下一轮 prompt，引导助手沿用已被验证有效的解题模式。',
+  'settings.evolution.recycling.toggle': '启用经验回收',
+  'settings.evolution.recycling.sampleRate': '采样率',
+  'settings.evolution.recycling.sampleRateHelp': '一个合格轮次被采集的概率：0 表示关闭，1 表示全采。',
+  'settings.evolution.recycling.minReward': '最低奖励阈值',
+  'settings.evolution.recycling.minRewardHelp': '只保留最终奖励高于该阈值的轮次（设为负值可同时保留失败案例）。',
+  'settings.evolution.recycling.maxRetained': '最多保留条数',
+  'settings.evolution.recycling.maxReplayInPrompt': '单轮最多回放数',
+  'settings.evolution.recycling.replayTokenBudget': '回放 token 预算',
+  'settings.evolution.recycling.privacy': '隐私脱敏',
+  'settings.evolution.recycling.redactPaths': '脱敏 workspace 绝对路径',
+  'settings.evolution.recycling.redactSecrets': '脱敏密钥与环境变量',
+  'settings.evolution.recycling.redactUserText': '脱敏用户原始文本',
+  'settings.evolution.recycling.includeSuccesses': '采集成功轮次',
+  'settings.evolution.recycling.includeFailures': '采集失败轮次',
+  'settings.evolution.recycling.weights': '回放排序权重',
+  'settings.evolution.recycling.weightQuality': '质量',
+  'settings.evolution.recycling.weightRecency': '时效',
+  'settings.evolution.recycling.weightDiversity': '多样性',
+  'settings.evolution.recycling.recent': '最近回收经验',
+  'settings.evolution.recycling.empty': '尚未回收到任何经验。',
+  'settings.evolution.recycling.purge': '清空全部',
+  'settings.evolution.recycling.total': '已存储：{count}',
+  'settings.evolution.recycling.outcome.success': '成功',
+  'settings.evolution.recycling.outcome.failure': '失败',
+  'settings.evolution.recycling.outcome.neutral': '中性',
+
+  'settings.evolution.reflection.title': '自我反思',
+  'settings.evolution.reflection.description':
+    '周期性或事件触发地调用 LLM 复盘最近的轮次，提炼可执行洞察，并写回到 Lessons、Skills、Rules 或 Memory。',
+  'settings.evolution.reflection.toggle': '启用自我反思',
+  'settings.evolution.reflection.triggerMode': '触发方式',
+  'settings.evolution.reflection.triggerMode.manual': '仅手动触发',
+  'settings.evolution.reflection.triggerMode.auto': '自动（事件驱动）',
+  'settings.evolution.reflection.triggerMode.scheduled': '定时反思',
+  'settings.evolution.reflection.depth': '反思深度',
+  'settings.evolution.reflection.depth.quick': '快速',
+  'settings.evolution.reflection.depth.deep': '深度',
+  'settings.evolution.reflection.model': '反思模型（可选）',
+  'settings.evolution.reflection.modelHelp': '留空则复用 judge / 主模型。',
+  'settings.evolution.reflection.provider': '反思提供商（可选）',
+  'settings.evolution.modelPicker.noModelsConfigured': '未添加模型',
+  'settings.evolution.modelPicker.providerHasNoModels': '所选提供商尚未添加模型',
+  'settings.evolution.modelPicker.addProviderFirst': '请先在适配器设置中添加提供商与模型',
+  'settings.evolution.modelPicker.useDefault': '使用默认（不指定）',
+  'settings.evolution.modelPicker.unregisteredHint': '{model}（未注册）',
+  'settings.evolution.modelPicker.goToAdapterSettings': '请到「适配器设置」中添加并保存模型，才能在此选择。',
+  'settings.evolution.modelPicker.providerAuto': '跟随 judge 默认提供商',
+  'settings.evolution.modelPicker.providerDefaultTag': '默认',
+  'settings.evolution.reflection.scheduleIntervalMinutes': '反思间隔（分钟）',
+  'settings.evolution.reflection.minTurnsForAuto': '自动反思最少轮数',
+  'settings.evolution.reflection.failureThreshold': '失败 N 次自动反思',
+  'settings.evolution.reflection.includeUserThumbsDown': '将差评视为失败',
+  'settings.evolution.reflection.lookbackTurns': '每次回看轮数',
+  'settings.evolution.reflection.maxLessonsPerRun': '单次最多产出 lesson 数',
+  'settings.evolution.reflection.maxTotalLessons': '总 lesson 上限',
+  'settings.evolution.reflection.writeback': '写回目标',
+  'settings.evolution.reflection.writeback.lessons': 'Lessons（数据库）',
+  'settings.evolution.reflection.writeback.skills': 'Skill 知识库',
+  'settings.evolution.reflection.writeback.rules': 'User Rules',
+  'settings.evolution.reflection.writeback.memory': 'Memory 文件',
+  'settings.evolution.reflection.runNow': '立即反思',
+  'settings.evolution.reflection.runQueued': '反思已入队：{runId}',
+  'settings.evolution.reflection.runFailed': '触发反思失败：{error}',
+  'settings.evolution.reflection.recent': '最近反思记录',
+  'settings.evolution.reflection.empty': '尚未运行过反思。',
+  'settings.evolution.reflection.summary.totalRuns': '总运行次数',
+  'settings.evolution.reflection.summary.completed': '已完成',
+  'settings.evolution.reflection.summary.failed': '失败',
+  'settings.evolution.reflection.summary.lessons': '产出 lesson 数',
+  'settings.evolution.reflection.summary.lastRunAt': '上次运行',
+  'settings.evolution.reflection.summary.lastStatus': '上次状态',
+  'settings.evolution.reflection.summary.avgLessonsPerRun': '平均每次 lessons',
+
+  'settings.evolution.reflection.persistRequired.title':
+    '需要先开启持久化训练数据',
+  'settings.evolution.reflection.persistRequired.body':
+    '自我反思需要从历史回合中读取数据。请先在『自我进化』总卡片中开启『持久化训练数据』。',
+  'settings.evolution.reflection.persistRequired.enable': '立即启用',
+  'settings.evolution.reflection.persistAutoEnabledToast':
+    '已为你自动开启『持久化训练数据』，以支持反思 / 经验回收。',
+
+  'settings.evolution.reflection.runError.persistence_required':
+    '请先开启『持久化训练数据』。',
+  'settings.evolution.reflection.runError.no_turns_available':
+    '尚无可用的回合记录，请先与模型对话后再触发反思。',
+  'settings.evolution.reflection.runError.reflection_disabled':
+    '自我反思尚未启用,请先打开开关。',
+  'settings.evolution.reflection.runError.reflection_queue_full':
+    '反思队列已满,请稍后再试。',
+  'settings.evolution.reflection.runError.reflection_store_unavailable':
+    '反思存储未就绪,请查看后端日志。',
+  'settings.evolution.reflection.runError.reflection_worker_unavailable':
+    '反思工作线程尚未就绪。',
+  'settings.evolution.reflection.runError.model_not_registered':
+    '选择的反思模型未在任何提供商中配置。',
+  'settings.evolution.reflection.runError.provider_not_registered':
+    '选择的反思提供商未配置。',
+
+  'settings.evolution.reflection.run.status.queued': '排队中',
+  'settings.evolution.reflection.run.status.running': '运行中',
+  'settings.evolution.reflection.run.status.completed': '已完成',
+  'settings.evolution.reflection.run.status.failed': '失败',
+  'settings.evolution.reflection.run.status.skipped': '已跳过',
+
+  'settings.evolution.reflection.skipReason.no_provider':
+    '没有可用的反思提供商。',
+  'settings.evolution.reflection.skipReason.no_provider_for_registered_model':
+    '已配置的提供商中没有能服务于该反思模型的实例。',
+  'settings.evolution.reflection.skipReason.model_not_registered':
+    '选择的模型未在提供商设置中添加。',
+  'settings.evolution.reflection.skipReason.writeback_skill_skipped':
+    '技能写回被跳过（例如缺少 home 目录或标题为空）。',
+  'settings.evolution.reflection.skipReason.writeback_rule_skipped':
+    '规则写回被跳过（例如缺少 home 目录或标题为空）。',
+
+  'settings.evolution.recycling.persistRequired.title':
+    '需要先开启持久化训练数据',
+  'settings.evolution.recycling.persistRequired.body':
+    '经验回收会把采样的回合写入 SQLite,请先开启『持久化训练数据』。',
+  'settings.evolution.recycling.persistRequired.enable': '立即启用',
+  'settings.evolution.recycling.runtime.todayHarvested': '今日 {count}',
+  'settings.evolution.recycling.runtime.totalHarvested': '累计 {count}',
+  'settings.evolution.recycling.runtime.lastHarvestAt': '最近采样 {ts}',
+
+  'settings.evolution.overview.judgeWorker.running': '裁判: 运行中',
+  'settings.evolution.overview.judgeWorker.idle': '裁判: 空闲',
+  'settings.evolution.overview.judgeWorker.error': '裁判: 异常',
+  'settings.evolution.overview.reflectionScheduler.label': '反思调度',
+  'settings.evolution.overview.reflectionScheduler.never': '尚未运行',
+  'settings.evolution.overview.reflectionScheduler.intervalMinutes':
+    '每 {minutes} 分钟',
+
+  'settings.evolution.modelEmpty.gotoProviders': '前往提供商设置',
+
   'terminal.panel.newTab': '新建终端',
   'terminal.panel.closeTab': '关闭标签',
   'terminal.panel.clear': '清屏',
@@ -317,6 +454,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.preset': '预设',
   'settings.providers.name': '名称',
   'settings.providers.namePlaceholder': '服务商名称',
+  'settings.providers.nameConflict': '该名称已被使用，请输入唯一的服务商名称。',
+  'settings.providers.nameConflictHint': '已存在同名服务商「{{name}}」。请改用唯一名称。',
   'settings.providers.notes': '备注',
   'settings.providers.notesPlaceholder': '可选备注...',
   'settings.providers.baseUrl': '接口地址',
@@ -1145,6 +1284,7 @@ export const zh: Record<TranslationKey, string> = {
   'tool.web.readPages': '已阅读 {count} 个网页',
   'tool.web.noResults': '未找到结果',
   'tool.web.providerLabel': '搜索源：',
+  'tool.web.enginesUsedLabel': '搜索引擎：',
 
   'tool.verb.read': 'Read',
   'tool.verb.listed': 'Listed',
@@ -1440,6 +1580,8 @@ export const zh: Record<TranslationKey, string> = {
   'app.copyDiagnostics': '复制诊断信息',
   'app.copiedDiagnostics': '已复制',
   'app.launching': '正在启动本地工作区...',
+  'app.launchingSlow': '本地服务正在初始化（已等待 {{seconds}} 秒）。首次启动或冷启动时可能需要更长时间。',
+  'app.launchingTip': '若长时间没有响应，请检查是否有杀毒软件或防火墙在扫描可执行文件，或者关闭可能阻塞 MCP/LSP 服务启动的进程。',
 
   'error.CLI_NOT_RUNNING': 'CLI 进程未运行。会话可能已结束或进程已崩溃。',
   'error.CLI_START_FAILED': 'CLI 进程启动失败。',

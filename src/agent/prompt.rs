@@ -52,6 +52,7 @@ impl SystemPromptBuilder {
                 Box::new(IdentitySection),
                 Box::new(GlobalDirectivesSection),
                 Box::new(EvolutionLessonsSection),
+                Box::new(ExperienceRecyclingSection),
                 Box::new(ToolHonestySection),
                 Box::new(ToolsSection),
                 Box::new(TaskPlanningSection),
@@ -97,6 +98,7 @@ pub struct DateTimeSection;
 pub struct ChannelMediaSection;
 pub struct GlobalDirectivesSection;
 pub struct EvolutionLessonsSection;
+pub struct ExperienceRecyclingSection;
 
 impl PromptSection for GlobalDirectivesSection {
     fn name(&self) -> &str {
@@ -418,5 +420,24 @@ impl PromptSection for EvolutionLessonsSection {
             return Ok(String::new());
         }
         Ok(crate::evolution::build_lesson_block(&engine, ctx.coding_mode_label).unwrap_or_default())
+    }
+}
+
+impl PromptSection for ExperienceRecyclingSection {
+    fn name(&self) -> &str {
+        "experience_recycling"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let Some(engine) = crate::evolution::try_global() else {
+            return Ok(String::new());
+        };
+        if !engine.enabled() {
+            return Ok(String::new());
+        }
+        Ok(
+            crate::evolution::build_recycled_block(&engine, ctx.coding_mode_label)
+                .unwrap_or_default(),
+        )
     }
 }

@@ -9,10 +9,10 @@ export function isTauriRuntime() {
   return '__TAURI_INTERNALS__' in window || '__TAURI__' in window
 }
 
-const HEALTH_FETCH_MS = 2_500
-
-const BROWSER_HEALTH_ATTEMPTS = 40
-const TAURI_HEALTH_ATTEMPTS = 256
+const HEALTH_FETCH_MS = 3_000
+const BROWSER_HEALTH_ATTEMPTS = 80
+const RESTART_AFTER_STREAK_FAILURES = 24
+const MIN_RESTART_INTERVAL_MS = 90_000
 
 function healthFetchSignal(ms: number): AbortSignal | undefined {
   try {
@@ -88,6 +88,10 @@ export async function initializeDesktopServerUrl(options?: { signal?: AbortSigna
 
   const { invoke } = await import(/* @vite-ignore */ '@tauri-apps/api/core')
 
+  let pendingTicks = 0
+  let healthFailureStreak = 0
+  let lastRestartAttemptAt = 0
+
   for (;;) {
     options?.signal?.throwIfAborted()
     let serverUrl: string | undefined
@@ -97,28 +101,48 @@ export async function initializeDesktopServerUrl(options?: { signal?: AbortSigna
         serverUrl = candidate
       }
     } catch {
-
-      await sleep(150)
+      pendingTicks += 1
+      if (pendingTicks % 80 === 0) {
+        console.info(
+          `[desktop] embedded gateway still warming up (${(pendingTicks * 250) / 1000}s elapsed)`,
+        )
+      }
+      await sleep(250)
       continue
     }
 
     if (!serverUrl) {
-      await sleep(150)
+      await sleep(250)
       continue
     }
 
     setBaseUrl(serverUrl)
     try {
-      await waitForHealth(serverUrl, TAURI_HEALTH_ATTEMPTS)
+      await waitForHealth(serverUrl, BROWSER_HEALTH_ATTEMPTS)
       return serverUrl
     } catch (error) {
-      console.warn('[desktop] /health failed with a known gateway URL — restarting gateway', error)
-      try {
-        await invoke<void>('restart_embedded_gateway')
-      } catch (restartErr) {
-        console.warn('[desktop] restart_embedded_gateway invoke failed', restartErr)
+      healthFailureStreak += 1
+      console.warn(
+        `[desktop] /health probe failed (streak=${healthFailureStreak}); will retry`,
+        error,
+      )
+      if (healthFailureStreak >= RESTART_AFTER_STREAK_FAILURES) {
+        const now = Date.now()
+        if (now - lastRestartAttemptAt >= MIN_RESTART_INTERVAL_MS) {
+          lastRestartAttemptAt = now
+          healthFailureStreak = 0
+          try {
+            await invoke<void>('restart_embedded_gateway')
+            console.info('[desktop] requested embedded gateway restart')
+          } catch (restartErr) {
+            console.info(
+              '[desktop] restart_embedded_gateway rejected (gateway likely still booting)',
+              restartErr,
+            )
+          }
+        }
       }
-      await sleep(600)
+      await sleep(800)
     }
   }
 }
