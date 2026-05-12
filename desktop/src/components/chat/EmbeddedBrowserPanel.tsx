@@ -152,6 +152,7 @@ export function EmbeddedBrowserPanel() {
   }, [sessionId])
 
   const [agentBubbles, setAgentBubbles] = useState<AgentBubble[]>([])
+  const [takeoverTabs, setTakeoverTabs] = useState<Record<number, number>>({})
   const unsubRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -171,6 +172,25 @@ export function EmbeddedBrowserPanel() {
         setTimeout(() => {
           setAgentBubbles((prev) => prev.filter((b) => b.id !== id))
         }, AGENT_BUBBLE_WINDOW_MS)
+      } else if (event.kind === 'dock_takeover') {
+        const data = event.data as { tab_id?: number; started_at?: number }
+        const tabId = typeof data.tab_id === 'number' ? data.tab_id : null
+        if (tabId !== null) {
+          const startedAt =
+            typeof data.started_at === 'number' ? data.started_at : Date.now()
+          setTakeoverTabs((prev) => ({ ...prev, [tabId]: startedAt }))
+        }
+      } else if (event.kind === 'dock_takeover_end') {
+        const data = event.data as { tab_id?: number }
+        const tabId = typeof data.tab_id === 'number' ? data.tab_id : null
+        if (tabId !== null) {
+          setTakeoverTabs((prev) => {
+            if (!(tabId in prev)) return prev
+            const next = { ...prev }
+            delete next[tabId]
+            return next
+          })
+        }
       }
     })
       .then((unlisten) => {
@@ -706,6 +726,8 @@ export function EmbeddedBrowserPanel() {
                   const tabAgentTs = panel?.tabActivity?.[tab.id] ?? 0
                   const tabIsLive =
                     tabAgentTs > 0 && Date.now() - tabAgentTs < AGENT_LIVE_WINDOW_MS
+                  const ownedByAgent = tab.owner === 'agent'
+                  const inTakeover = !!takeoverTabs[tab.id]
                   void liveTick
                   return (
                     <div
@@ -714,17 +736,33 @@ export function EmbeddedBrowserPanel() {
                       aria-selected={isActive}
                       onClick={() => sessionId && void activateTabAction(sessionId, tab.id)}
                       title={
-                        tabIsLive
-                          ? t('browser.panel.tabs.agentActive')
-                          : t('browser.panel.tabs.activate')
+                        inTakeover
+                          ? t('debug.qa.takeover')
+                          : tabIsLive
+                            ? t('browser.panel.tabs.agentActive')
+                            : t('browser.panel.tabs.activate')
                       }
                       className={`group flex h-7 max-w-[200px] cursor-pointer items-center gap-1 rounded-t-md border border-b-0 px-2 text-[12px] transition-colors ${
-                        isActive
-                          ? 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-primary)]'
-                          : 'border-transparent bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+                        inTakeover
+                          ? 'border-[var(--color-error)] bg-[var(--color-surface)] text-[var(--color-text-primary)] ring-1 ring-[var(--color-error)]'
+                          : isActive
+                            ? 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-primary)]'
+                            : 'border-transparent bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                       }`}
+                      style={
+                        inTakeover
+                          ? { animation: 'browser-dock-pulse 1.2s ease-in-out infinite' }
+                          : undefined
+                      }
                     >
-                      {tabIsLive ? (
+                      {inTakeover ? (
+                        <span
+                          aria-label={t('debug.qa.takeover')}
+                          className="material-symbols-outlined text-[14px] text-[var(--color-error)]"
+                        >
+                          radar
+                        </span>
+                      ) : tabIsLive ? (
                         <span
                           aria-hidden="true"
                           className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-brand)]"
@@ -735,7 +773,7 @@ export function EmbeddedBrowserPanel() {
                           className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]"
                           aria-hidden="true"
                         >
-                          public
+                          {ownedByAgent ? 'smart_toy' : 'public'}
                         </span>
                       )}
                       <span className="truncate">{label}</span>

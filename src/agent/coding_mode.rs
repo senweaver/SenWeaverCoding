@@ -523,8 +523,97 @@ impl CodingMode {
                  GitHub issue, and quote the URL in your hypothesis ranking.  Do \
                  NOT skip Stage 1 (Reproduce) — web research complements local \
                  evidence, it does not replace it.\n\n\
-                 {}\n\n{web_research}\n\n{verification}",
-                builtin_skills::debug_rules()
+                 ### QA Automation Track (professional web QA)\n\
+                 When the user asks for QA testing, regression sweeps, end-to-end browser tests, \
+                 or any structured \"please verify <flow> works\" task, run the following protocol \
+                 in addition to the four-stage debugging protocol above:\n\
+                 1. `debug_test_report` action=`start` with `title`, `target_urls`, optional `slug`. \
+                    Capture the returned `run_id` and reuse it for every subsequent action.\n\
+                 2. For each functional flow: `browser` action=`open_tab`/`open` → `wait until=network_idle` → \
+                    `snapshot` → drive the flow with `click`/`fill`/`type`/`press` → `screenshot path=auto://<run_id>/<step>.png` \
+                    after every key step. Use credential placeholders `${{cred.<name>}}` for any login \
+                    field — never inline a password or token.\n\
+                 3. After each user-visible step, call `browser` action=`assert` to encode the expected \
+                    state: `assert_kind=text|visible|not_visible|url|title|attribute|value|count|console_clean`. \
+                    Assertion failures do not throw — record them as evidence and decide whether to \
+                    keep going.\n\
+                 4. Call `browser` action=`console_logs` (and `assert_kind=console_clean`) at the end \
+                    of each case to capture runtime errors. Use `clear_storage` between cases when \
+                    state isolation matters; use `back`/`forward`/`reload` for history-driven checks.\n\
+                 5. Emit `debug_test_report` action=`add_case` after each flow, action=`add_finding` \
+                    for each bug, action=`attach_screenshot`/`attach_console_logs` for evidence. \
+                    Reference screenshot paths produced in step 2 via `src_path` if you did not pass \
+                    the `auto://` form to the report tool directly.\n\
+                 6. Finish with `debug_test_report` action=`finalize` — it renders `report.md` and \
+                    appends the finalize event to `run.jsonl`. Surface the resulting `report_path` \
+                    in your turn summary so the user can open it.\n\n\
+                 Credential hygiene is non-negotiable: only `${{cred.<name>}}` placeholders are valid \
+                 in any browser arg or report text. Raw passwords, tokens, or API keys must never \
+                 appear in tool args, transcripts, or reports. The vault resolves placeholders to \
+                 real values for the browser dock only; everything that touches disk or transcript \
+                 is automatically redacted.\n\n\
+                 ### User-Pre-Authenticated Track\n\
+                 Trigger: the user says \"I am already logged in / 已登录 / 已登入 / cookies are set\", \
+                 or supplies only a URL with no credential placeholders. In this case the user has \
+                 manually authenticated inside the embedded browser dock and you must take over their \
+                 existing tab instead of asking for credentials.\n\
+                 1. Call `browser action=list_tabs` to enumerate every tab. Each entry includes \
+                    `tab_id`, `url`, `title`, `is_active`, and `owner` (`user` or `agent`).\n\
+                 2. Pick the tab whose URL best matches the user's target (prefer same origin / path). \
+                    If multiple tabs match, prefer `owner=user` over `agent` and report the choice \
+                    explicitly in your turn summary.\n\
+                 3. Call `browser action=attach_tab tab_id=<id>`. Every subsequent browser call in \
+                    this session will default to that tab. The response carries `{{owner, takeover}}` — \
+                    if `takeover=true`, the UI is now showing a pulsing badge to the user.\n\
+                 4. Proceed with the QA Automation Track above, but SKIP credential injection \
+                    entirely. Do NOT ask the user for credentials, do NOT use `${{cred.*}}` placeholders \
+                    for login, and do NOT call `clear_storage` on a user-owned tab unless the user \
+                    explicitly asks for a logout.\n\
+                 5. For destructive workflows, never click buttons labelled `删除 | 注销账户 | 取消订阅 | \
+                    提交支付 | 转账 | 充值 | 退订 | 重置 | 删除账户 | Delete | Cancel subscription | Pay | \
+                    Transfer | Reset account`. Ask the user before triggering any of these on a logged-in tab.\n\n\
+                 ### Full-Site QA Coverage Protocol\n\
+                 When the user asks for site-wide / full-coverage testing (\"测一下整个站点 / cover the \
+                 whole app / hit every page\"), run a structured exploration in addition to the steps \
+                 above:\n\
+                 1. Treat the entry URL's origin as authoritative. Do **same-origin breadth-first** \
+                    expansion only. Cross-origin links are recorded but never visited.\n\
+                 2. Limits: max depth = 3, max pages = 20. State both limits in the report. The user \
+                    may explicitly request a higher cap; otherwise stop at these defaults.\n\
+                 3. For each page in the BFS queue:\n\
+                    a. `browser action=navigate` (or `attach_tab` for the entry) → \
+                       `wait until=network_idle` → `snapshot`.\n\
+                    b. `assert kind=console_clean` (record console errors but do not abort).\n\
+                    c. `assert kind=visible` on the critical anchors the page promises (e.g. \
+                       header / primary CTA) — pick from the snapshot, not from guesses.\n\
+                    d. `screenshot path=auto://<run_id>/<step>.png`.\n\
+                    e. `browser action=network_errors` to drain 4xx/5xx since the last page.\n\
+                    f. `debug_test_report action=add_coverage_entry` with \
+                       `{{url, title, depth, parent_url, http_status, console_errors, network_errors}}`.\n\
+                    g. `browser action=collect_links same_origin=true` and enqueue unseen URLs \
+                       (deduplicate by absolute URL).\n\
+                 4. Vulnerability checklist on every form (per page):\n\
+                    - Empty submit (all required fields blank).\n\
+                    - Oversized input: paste 10_000 chars into the first text input.\n\
+                    - Special chars: `<>'\"&\\` and unicode (RTL marker `‏`, emoji `🧪`, zero-width `\\u200B`).\n\
+                    - ONE XSS reflection probe per visible text input: `\"><img src=x onerror=alert(1)>`. \
+                      Check after submission whether the probe text appears unescaped in the rendered DOM.\n\
+                    - Record every distinct backend error / console error as a `add_finding` with \
+                      `category=security|console|network|functional|ui|access|performance` and an \
+                      `evidence={{url,screenshot,console_logs,network}}` bundle.\n\
+                 5. Forbidden destructive operations on every page: never click buttons whose \
+                    accessible label matches `删除 | 注销账户 | 取消订阅 | 提交支付 | 转账 | 充值 | 退订 | \
+                    重置 | 删除账户 | Delete | Cancel subscription | Pay | Transfer | Reset account | \
+                    Withdraw | DROP`. Skip them explicitly and record `add_finding category=access \
+                    title='destructive-button-skipped'` so the matrix shows you saw them.\n\
+                 6. After the BFS terminates (queue empty OR cap reached), call \
+                    `debug_test_report action=finalize`. The rendered `report.md` now contains a \
+                    \"覆盖率\" section with a `# | URL | Title | Depth | Status | Console err | Network err` \
+                    table plus a \"测试范围\" summary (已访问页面 N / 同源 / 平均深度 / 失败页面 K). \
+                    Surface the `report_path` in your turn summary.\n\n\
+                 {}\n\n{}\n\n{web_research}\n\n{verification}",
+                builtin_skills::debug_rules(),
+                builtin_skills::qa_browser_rules()
             ),
             Self::Agent => format!(
                 "\n\n## Mode: Agent (fully autonomous orchestrator with spec discipline)\n\n\

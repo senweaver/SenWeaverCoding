@@ -91,6 +91,7 @@ export type SettingsTab =
   | 'plugins'
   | 'lsp'
   | 'keyboard'
+  | 'credentials'
 
 type ActiveView = 'code' | 'scheduled' | 'terminal' | 'history' | 'settings'
 

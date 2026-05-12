@@ -1803,10 +1803,21 @@ pub fn resolve_runtime_provider_name(
         wire_lower,
         Some("anthropic") | Some("anthropic-messages") | Some("anthropic-chat")
     );
+    let is_chat_wire = matches!(
+        wire_lower,
+        Some("chat_completions")
+            | Some("chat-completions")
+            | Some("openai-chat")
+            | Some("openai_chat")
+    );
+    let wire_is_explicit = wire_lower.is_some();
+    let preset_is_codex = matches!(
+        preset,
+        Some("openai-codex") | Some("openai_codex") | Some("codex")
+    );
+    let preset_is_anthropic = matches!(preset, Some("anthropic"));
 
-    if matches!(preset, Some("openai-codex") | Some("openai_codex") | Some("codex"))
-        || is_responses_wire
-    {
+    if is_responses_wire || (!wire_is_explicit && preset_is_codex) {
         return "openai-codex".to_string();
     }
 
@@ -1830,8 +1841,19 @@ pub fn resolve_runtime_provider_name(
         }
     }
 
+    if is_chat_wire && (preset_is_codex || preset_is_anthropic) {
+        if let Some(url) = base_url {
+            return format!("custom:{url}");
+        }
+    }
+
     if let Some(preset) = preset {
         if matches!(preset, "anthropic") {
+            if wire_is_explicit && !is_anthropic_wire {
+                if let Some(url) = base_url {
+                    return format!("custom:{url}");
+                }
+            }
             return "anthropic".to_string();
         }
         return preset.to_string();

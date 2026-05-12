@@ -1009,6 +1009,7 @@ pub async fn handle_providers_update(
             }
             if let Some(api_format) = body.api_format.as_deref() {
                 profile.wire_api = Some(api_format_to_wire(api_format).to_string());
+                profile.requires_openai_auth = api_format == "openai_responses";
             }
             if let Some(notes) = body.notes.as_deref().map(str::trim) {
                 profile.notes = if notes.is_empty() {
@@ -6695,6 +6696,72 @@ pub async fn handle_lsp_global_put(
     Json(serde_json::json!({"ok": true, "enabled": snapshot.lsp.enabled})).into_response()
 }
 
+pub async fn handle_lsp_preferences_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let cfg = state.config.lock().clone();
+    Json(serde_json::json!({
+        "inlayHintsEnabled": cfg.lsp.inlay_hints_enabled,
+        "formatOnSave": cfg.lsp.format_on_save,
+        "hoverDelayMs": cfg.lsp.hover_delay_ms,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspPreferencesBody {
+    #[serde(default)]
+    pub inlay_hints_enabled: Option<bool>,
+    #[serde(default)]
+    pub format_on_save: Option<bool>,
+    #[serde(default)]
+    pub hover_delay_ms: Option<u32>,
+}
+
+pub async fn handle_lsp_preferences_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LspPreferencesBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let snapshot = {
+        let mut cfg = state.config.lock();
+        if let Some(v) = body.inlay_hints_enabled {
+            cfg.lsp.inlay_hints_enabled = v;
+        }
+        if let Some(v) = body.format_on_save {
+            cfg.lsp.format_on_save = v;
+        }
+        if let Some(v) = body.hover_delay_ms {
+            cfg.lsp.hover_delay_ms = v.clamp(0, 5_000);
+        }
+        cfg.clone()
+    };
+    if let Err(e) = snapshot.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("save config: {e}")})),
+        )
+            .into_response();
+    }
+    *state.config.lock() = snapshot.clone();
+    state.push_live_config(snapshot.clone());
+    Json(serde_json::json!({
+        "ok": true,
+        "inlayHintsEnabled": snapshot.lsp.inlay_hints_enabled,
+        "formatOnSave": snapshot.lsp.format_on_save,
+        "hoverDelayMs": snapshot.lsp.hover_delay_ms,
+    }))
+    .into_response()
+}
+
 pub async fn handle_lsp_create(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -7066,18 +7133,70 @@ pub async fn handle_lsp_notify(
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct LspPositionBody {
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LspRangeBody {
+    pub start: LspPositionBody,
+    pub end: LspPositionBody,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LspFormattingOptionsBody {
+    #[serde(default = "default_tab_size")]
+    pub tab_size: u32,
+    #[serde(default = "default_insert_spaces")]
+    pub insert_spaces: bool,
+}
+
+fn default_tab_size() -> u32 {
+    4
+}
+
+fn default_insert_spaces() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LspRequestBody {
 
     pub method: String,
+    #[serde(default)]
     pub uri: String,
     #[serde(default)]
     pub language_id: Option<String>,
+    #[serde(default)]
     pub line: u32,
+    #[serde(default)]
     pub character: u32,
 
     #[serde(default)]
     pub text: Option<String>,
+
+    #[serde(default)]
+    pub range: Option<LspRangeBody>,
+
+    #[serde(default)]
+    pub options: Option<LspFormattingOptionsBody>,
+
+    #[serde(default)]
+    pub trigger_character: Option<String>,
+
+    #[serde(default)]
+    pub diagnostics: Option<Vec<serde_json::Value>>,
+
+    #[serde(default)]
+    pub only: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub command: Option<String>,
+
+    #[serde(default)]
+    pub arguments: Option<Vec<serde_json::Value>>,
 }
 
 pub async fn handle_lsp_request(
@@ -7088,6 +7207,11 @@ pub async fn handle_lsp_request(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+
+    if body.method == "executeCommand" {
+        return handle_lsp_execute_command(&state, &body).await;
+    }
+
     let path = match uri_to_path(&body.uri) {
         Some(p) => p,
         None => {
@@ -7135,6 +7259,11 @@ pub async fn handle_lsp_request(
         "completion" => "textDocument/completion",
         "definition" => "textDocument/definition",
         "references" => "textDocument/references",
+        "inlayHint" => "textDocument/inlayHint",
+        "signatureHelp" => "textDocument/signatureHelp",
+        "documentSymbol" => "textDocument/documentSymbol",
+        "formatting" => "textDocument/formatting",
+        "codeAction" => "textDocument/codeAction",
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -7144,16 +7273,188 @@ pub async fn handle_lsp_request(
         }
     };
     let uri = crate::services::lsp::path_to_uri(&path);
-    let mut params = serde_json::json!({
-        "textDocument": { "uri": uri },
-        "position": { "line": body.line, "character": body.character },
-    });
-    if body.method == "references" {
-        params["context"] = serde_json::json!({ "includeDeclaration": true });
-    }
+    let params = match body.method.as_str() {
+        "hover" | "completion" | "definition" | "references" | "signatureHelp" => {
+            let mut p = serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": body.line, "character": body.character },
+            });
+            if body.method == "references" {
+                p["context"] = serde_json::json!({ "includeDeclaration": true });
+            }
+            if body.method == "signatureHelp" {
+                if let Some(tc) = body.trigger_character.as_deref() {
+                    p["context"] = serde_json::json!({
+                        "triggerKind": 2,
+                        "triggerCharacter": tc,
+                        "isRetrigger": false,
+                    });
+                }
+            }
+            p
+        }
+        "documentSymbol" => serde_json::json!({
+            "textDocument": { "uri": uri },
+        }),
+        "inlayHint" => {
+            let range = body.range.as_ref();
+            let start_line = range.map(|r| r.start.line).unwrap_or(0);
+            let start_char = range.map(|r| r.start.character).unwrap_or(0);
+            let end_line = range.map(|r| r.end.line).unwrap_or(u32::MAX / 2);
+            let end_char = range.map(|r| r.end.character).unwrap_or(0);
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": { "line": start_line, "character": start_char },
+                    "end": { "line": end_line, "character": end_char },
+                },
+            })
+        }
+        "formatting" => {
+            let opts = body.options.as_ref();
+            let tab_size = opts.map(|o| o.tab_size).unwrap_or(4);
+            let insert_spaces = opts.map(|o| o.insert_spaces).unwrap_or(true);
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "options": {
+                    "tabSize": tab_size,
+                    "insertSpaces": insert_spaces,
+                },
+            })
+        }
+        "codeAction" => {
+            let range = body.range.as_ref();
+            let start_line = range.map(|r| r.start.line).unwrap_or(body.line);
+            let start_char = range.map(|r| r.start.character).unwrap_or(body.character);
+            let end_line = range.map(|r| r.end.line).unwrap_or(body.line);
+            let end_char = range.map(|r| r.end.character).unwrap_or(body.character);
+            let mut context = serde_json::json!({
+                "diagnostics": body.diagnostics.clone().unwrap_or_default(),
+            });
+            if let Some(only) = body.only.as_ref() {
+                if !only.is_empty() {
+                    context["only"] = serde_json::json!(only);
+                }
+            }
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": { "line": start_line, "character": start_char },
+                    "end": { "line": end_line, "character": end_char },
+                },
+                "context": context,
+            })
+        }
+        _ => serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": body.line, "character": body.character },
+        }),
+    };
 
     match svc
         .request(&language, &workspace, Some(&path), lsp_method, params)
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({ "result": result })).into_response(),
+        Err(err) => Json(serde_json::json!({
+            "result": null,
+            "error": format!("{err:#}"),
+        }))
+        .into_response(),
+    }
+}
+
+async fn handle_lsp_execute_command(
+    state: &AppState,
+    body: &LspRequestBody,
+) -> axum::response::Response {
+    let Some(command) = body.command.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing command"})),
+        )
+            .into_response();
+    };
+    if command.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "empty command"})),
+        )
+            .into_response();
+    }
+
+    let (file_path, hint_language): (Option<std::path::PathBuf>, Option<String>) =
+        if body.uri.is_empty() {
+            (None, body.language_id.clone())
+        } else {
+            match uri_to_path(&body.uri) {
+                Some(p) => {
+                    let lang = body
+                        .language_id
+                        .clone()
+                        .or_else(|| crate::services::lsp::detect_language(&p).map(str::to_string));
+                    (Some(p), lang)
+                }
+                None => (None, body.language_id.clone()),
+            }
+        };
+
+    let snapshot = state.config.lock().clone();
+    let workspace = snapshot.workspace_dir.clone();
+    let lsp_enabled = snapshot.lsp.enabled;
+    let language = match hint_language {
+        Some(l) => l,
+        None => {
+            let candidates: Vec<String> = snapshot
+                .lsp
+                .servers
+                .iter()
+                .filter(|s| s.enabled && s.resolved_command().is_some())
+                .map(|s| s.language_id.clone())
+                .collect();
+            drop(snapshot);
+            if !lsp_enabled || candidates.is_empty() {
+                return Json(serde_json::json!({"result": null})).into_response();
+            }
+            if candidates.len() == 1 {
+                candidates.into_iter().next().unwrap()
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "executeCommand requires uri or languageId hint when multiple servers are enabled",
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let server_available = lsp_enabled
+        && state
+            .config
+            .lock()
+            .lsp
+            .servers
+            .iter()
+            .any(|s| s.enabled && s.language_id == language && s.resolved_command().is_some());
+    if !server_available {
+        return Json(serde_json::json!({"result": null})).into_response();
+    }
+
+    let svc = state.lsp.service();
+    let params = serde_json::json!({
+        "command": command,
+        "arguments": body.arguments.clone().unwrap_or_default(),
+    });
+
+    match svc
+        .request(
+            &language,
+            &workspace,
+            file_path.as_deref(),
+            "workspace/executeCommand",
+            params,
+        )
         .await
     {
         Ok(result) => Json(serde_json::json!({ "result": result })).into_response(),

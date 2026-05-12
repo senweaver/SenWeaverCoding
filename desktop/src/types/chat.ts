@@ -67,6 +67,11 @@ export type ServerMessage =
   | { type: 'thinking'; text: string }
   | { type: 'status'; state: ChatState; verb?: string; elapsed?: number; tokens?: number }
   | { type: 'error'; message: string; code: string; retryable?: boolean }
+  | {
+      type: 'workspace_busy'
+      workspaceKey: string
+      currentSessionId?: string | null
+    }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
   | { type: 'pong' }
   | { type: 'task_update'; taskId: string; status: string; progress?: string }

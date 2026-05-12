@@ -406,8 +406,17 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
                  the top hypothesis BEFORE patching code; gather more evidence. \
              (4) Fix & Verify: apply ONE minimal change, re-run the original failing \
                  command, then run the project's full check / test command. \
-             For web-facing bugs, drive the embedded `browser` dock (open → snapshot → \
-             action → screenshot) before AND after the fix and quote the comparison. \
+             For web-facing bugs or QA automation, drive the embedded `browser` dock (open → \
+             snapshot → action → screenshot) before AND after the fix and quote the \
+             comparison. For structured QA runs, bootstrap with `debug_test_report` \
+             action=start, record cases/findings, and finalize into report.md. \
+             凭据仅可使用 ${cred.*} 占位符；密码与 token 绝不写入任何文本或报告。 \
+             若用户已在内置浏览器中登录（提到「已登录 / cookies are set / I am already logged in」或直接给出 URL 无凭据），\
+             先 `browser action=list_tabs` 枚举所有标签（含 owner=user 的用户标签），按 URL 选中目标后 \
+             `browser action=attach_tab tab_id=<id>` 绑定为本轮默认目标；不要再索取凭据，也不要在用户标签上 \
+             clear_storage。对全站覆盖请求，按同源 BFS（max depth=3, max pages=20），每页执行 snapshot → \
+             assert console_clean → screenshot → network_errors → debug_test_report add_coverage_entry → \
+             collect_links 入队后继 URL，最后 finalize 渲染「覆盖率」表。 \
              Forbidden in this turn: calling `file_edit` / `file_write` / `multi_edit` / \
              `patch_apply` / `glob_edit` / `code_xfile_refactor` BEFORE Stage-1 evidence \
              has been produced and quoted in the assistant message.",

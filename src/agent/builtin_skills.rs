@@ -65,6 +65,100 @@ Rules:
 - Remove diagnostic code after the bug is fixed."
 }
 
+pub fn qa_browser_rules() -> &'static str {
+    "\
+## QA Browser Automation Track
+
+When the user requests professional QA / regression testing or any structured \
+\"please verify <flow> works\" task, run this track end-to-end:
+
+### 1. Bootstrap the report
+- Call `debug_test_report` action=`start` with `title`, `target_urls`, optional `slug`.
+- Keep the returned `run_id` — every subsequent action references it.
+
+### 2. Drive the browser dock
+- Use the `browser` tool with the embedded dock (`backend=tauri_dock`).
+- For each flow: `open_tab`/`open` → `wait until=network_idle` → `snapshot` → \
+  drive (`click`/`fill`/`type`/`press`/`select`/`scroll`) → \
+  `screenshot path=auto://<run_id>/<step>.png` after each meaningful step.
+- For login or authenticated flows, ONLY use credential placeholders `${cred.<name>}` \
+  in `value`/`text` fields. Never type a raw password.
+
+### 3. Assert expectations
+- Use `browser` action=`assert` with `assert_kind` ∈ \
+  `text|visible|not_visible|url|title|attribute|value|count|console_clean`. \
+  Failures do NOT throw — record `{passed, actual, expected, kind, selector, elapsed_ms}` as evidence.
+- Capture runtime errors with `console_logs` + `assert_kind=console_clean` after each case.
+- Use `clear_storage` between independent cases; use `back`/`forward`/`reload` for history-driven checks.
+
+### 4. Persist evidence
+- `debug_test_report` action=`add_case` after each flow (`status`, `steps`, `assertions`, `screenshots`).
+- `debug_test_report` action=`add_finding` for every bug (`severity`, `repro_steps`, `root_cause`, `fix_suggestion`).
+- `debug_test_report` action=`attach_screenshot` (prefer `src_path` to avoid base64 bloat) and \
+  `attach_console_logs` for ambient diagnostics.
+
+### 5. Finalize
+- Call `debug_test_report` action=`finalize` with an optional `summary_note`. \
+  Surface the returned `report_path` to the user.
+
+### Selector priority
+When choosing a selector for `click`/`fill`/`assert`, follow this order:
+1. `aria-*` / `role` attributes (semantic, stable across redesigns).
+2. `data-testid` / `data-qa` / `data-cy` attributes added by the team for tests.
+3. `<label for=...>` + input pairing, or visible accessible name (`get_text`).
+4. The snapshot `@e<N>` refs returned by `browser action=snapshot` — they are stable inside a single page.
+5. Last resort: text content (`button:has-text(...)`) — fragile, prefer the above.
+Forbidden: relying on auto-generated class names (`.css-1abc234`), brittle nth-child, or absolute XPath.
+
+### User-Pre-Authenticated Track (no credentials)
+If the user states they are already logged in (\"已登录 / cookies set / I just signed in\") OR they \
+hand you a URL with no `${cred.*}` placeholders, do NOT ask for credentials. Instead:
+1. `browser action=list_tabs` — every tab carries `tab_id`, `owner` (`user`|`agent`), `is_active`, `url`, `title`.
+2. Pick the tab matching the user target. Prefer `owner=user` over `agent` when both match.
+3. `browser action=attach_tab tab_id=<id>` — subsequent calls default to that tab. The response \
+   contains `takeover=true` when you have grabbed a user-owned tab; the UI shows a pulsing badge so \
+   the user can see you driving.
+4. Proceed with QA without credential injection. Do NOT call `clear_storage` on a user-owned tab \
+   without explicit user permission — it would log them out.
+
+### Full-Site QA Coverage (BFS)
+For \"cover the whole site / 测一下整个站点 / full regression sweep\":
+1. **Same-origin BFS** from the entry URL. Cross-origin links are recorded only, never visited.
+2. **Limits**: max depth = 3, max pages = 20. State both limits when starting and stop at them \
+   unless the user raises the cap explicitly.
+3. **Per page**: navigate → `wait until=network_idle` → `snapshot` → `assert kind=console_clean` → \
+   `assert kind=visible` on critical anchors → `screenshot path=auto://<run_id>/<step>.png` → \
+   `browser action=network_errors` → `debug_test_report action=add_coverage_entry` (with \
+   `url, title, depth, parent_url, http_status, console_errors, network_errors`) → \
+   `browser action=collect_links same_origin=true` to enqueue successors (deduplicate by absolute URL).
+4. **Backend checks**: `network_errors` after each navigation AND after each form submit. Anything \
+   with `status >= 400` becomes an `add_finding category=network`.
+
+### Vulnerability checklist (every form on every page)
+- Empty submit (all required fields blank). Expect inline validation, not a 500.
+- Oversized input: paste 10_000 chars into the first text input. Expect graceful truncation, not a crash.
+- Special chars: `<>'\"&\\` plus unicode (RTL `\\u200F`, emoji `🧪`, zero-width `\\u200B`).
+- ONE XSS reflection probe per visible text input: `\"><img src=x onerror=alert(1)>`. After submit, \
+  inspect the rendered DOM — if the literal `<img src=x onerror=alert(1)>` is parsed as a real \
+  element (not text), emit `add_finding category=security severity=high evidence={{url,screenshot}}`.
+- Unauthorized access spot-check: if the site has admin-looking URLs, attempt one as the current \
+  user. A 200 where you expect 401/403 is a security finding.
+
+### Forbidden destructive operations
+Never click buttons whose accessible label matches any of:
+`删除 | 注销账户 | 取消订阅 | 提交支付 | 转账 | 充值 | 退订 | 重置 | 删除账户 | Delete | Cancel subscription | \
+Pay | Transfer | Reset account | Withdraw | DROP`.
+If a flow under test requires one of these, STOP and ask the user before proceeding. Record the \
+skipped button as `add_finding category=access title='destructive-button-skipped'` so the coverage \
+matrix shows you saw it.
+
+### Hard constraints
+- Never write raw credentials into args, transcript, or report text — placeholders only.
+- Never use `browser_open` (system browser) for QA work; the dock-based `browser` tool is the only \
+  surface that is observable, scriptable, and credential-aware.
+- A failed `assert` is data, not a crash — keep the run going and add a finding."
+}
+
 pub fn planning_rules() -> &'static str {
     "\
 ## Planning & Specification Discipline

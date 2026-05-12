@@ -308,8 +308,10 @@ static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub(crate) fn scrub_credentials(input: &str) -> String {
+    let after_vault =
+        crate::services::credential_vault::redact_for_audit_optional(input);
     SENSITIVE_KV_REGEX
-        .replace_all(input, |caps: &regex::Captures| {
+        .replace_all(&after_vault, |caps: &regex::Captures| {
             let full_match = &caps[0];
             let key = &caps[1];
             let val = caps
@@ -2124,11 +2126,87 @@ fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         }
     }
 
+    if calls.is_empty() {
+        let bare = scan_bare_json_tool_calls(remaining);
+        if !bare.is_empty() {
+            let mut cleaned_text = remaining.to_string();
+            for (call, raw) in &bare {
+                calls.push(call.clone());
+                cleaned_text = cleaned_text.replace(raw, "");
+            }
+            if !cleaned_text.trim().is_empty() {
+                text_parts.push(cleaned_text.trim().to_string());
+            }
+            remaining = "";
+        }
+    }
+
     if !remaining.trim().is_empty() {
         text_parts.push(remaining.trim().to_string());
     }
 
+    if calls.len() > 1 {
+        let mut deduped: Vec<ParsedToolCall> = Vec::with_capacity(calls.len());
+        for call in calls.into_iter() {
+            let is_duplicate = deduped.last().is_some_and(|prev| {
+                prev.name == call.name
+                    && prev.tool_call_id == call.tool_call_id
+                    && prev.arguments == call.arguments
+            });
+            if !is_duplicate {
+                deduped.push(call);
+            }
+        }
+        calls = deduped;
+    }
+
     (text_parts.join("\n"), calls)
+}
+
+fn scan_bare_json_tool_calls(input: &str) -> Vec<(ParsedToolCall, String)> {
+    let mut out: Vec<(ParsedToolCall, String)> = Vec::new();
+    if input.trim().is_empty() {
+        return out;
+    }
+
+    let bytes = input.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] != b'{' {
+            idx += 1;
+            continue;
+        }
+        let slice = &input[idx..];
+        let Some(end_rel) = find_json_end(slice) else {
+            idx += 1;
+            continue;
+        };
+        let raw = &slice[..end_rel];
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            let looks_like_call = value
+                .as_object()
+                .map(|obj| {
+                    let has_name = obj.contains_key("name");
+                    let has_function = obj.contains_key("function");
+                    let has_args =
+                        obj.contains_key("arguments") || obj.contains_key("parameters");
+                    let has_tool_calls = obj.contains_key("tool_calls");
+                    has_tool_calls || ((has_name || has_function) && has_args)
+                })
+                .unwrap_or(false);
+            if looks_like_call {
+                let parsed_calls = parse_tool_calls_from_json_value(&value);
+                for parsed in parsed_calls {
+                    out.push((parsed, raw.to_string()));
+                }
+            }
+            idx += end_rel;
+            continue;
+        }
+        idx += 1;
+    }
+
+    out
 }
 
 fn strip_think_tags(s: &str) -> String {
@@ -4500,11 +4578,13 @@ pub(crate) async fn run_tool_call_loop(
                 }
             }
 
-            individual_results.push((tool_call_id, outcome.output.clone()));
+            let safe_output =
+                crate::services::credential_vault::redact_for_audit_optional(&outcome.output);
+            individual_results.push((tool_call_id, safe_output.clone()));
             let _ = writeln!(
                 tool_results,
                 "<tool_result name=\"{}\">\n{}\n</tool_result>",
-                tool_name, outcome.output
+                tool_name, safe_output
             );
         }
 
@@ -4970,59 +5050,61 @@ pub async fn run(
         }
     }
 
-    let mut deferred_builtin_set = crate::tools::DeferredBuiltinToolSet::new();
-    if config.agent.builtin_tool_deferred_loading {
-        let core: HashSet<&str> = crate::tools::BUILTIN_CORE_TOOL_NAMES.iter().copied().collect();
-        for tool_box in tools_registry.iter() {
-            let name = tool_box.name();
-            if core.contains(name) {
-                continue;
-            }
-            if name == "tool_search" || name.contains("__") || name.starts_with("custom_") {
-                continue;
-            }
-            deferred_builtin_set.add_spec(tool_box.spec());
-        }
-        if !deferred_builtin_set.is_empty() {
-            tracing::info!(
-                "Builtin deferred: {} tool stub(s)",
-                deferred_builtin_set.len()
-            );
-            let builtin_section =
-                crate::tools::build_deferred_builtin_section(&deferred_builtin_set);
-            if !deferred_section.is_empty() {
-                deferred_section.push('\n');
-            }
-            deferred_section.push_str(&builtin_section);
-            if let Some(handle) = activated_handle.as_ref() {
-                tools_registry.retain(|t| t.name() != "tool_search");
-                tools_registry.push(Box::new(
-                    crate::tools::ToolSearchTool::new(
-                        crate::tools::DeferredMcpToolSet {
-                            stubs: Vec::new(),
-                            registry: std::sync::Arc::new(crate::tools::McpRegistry::empty()),
-                        },
-                        std::sync::Arc::clone(handle),
-                    )
-                    .with_builtin(deferred_builtin_set.clone()),
-                ));
-            } else {
-                let activated = std::sync::Arc::new(parking_lot::Mutex::new(
-                    crate::tools::ActivatedToolSet::new(),
-                ));
-                activated_handle = Some(std::sync::Arc::clone(&activated));
-                tools_registry.push(Box::new(crate::tools::ToolSearchTool::new_builtin_only(
-                    deferred_builtin_set.clone(),
-                    activated,
-                )));
-            }
-        }
-    }
+    let (builtin_deferred_enabled, _mcp_deferred_enabled) =
+        crate::tools::deferred_loading_effective(&config);
+    let deferred_builtin_set = if builtin_deferred_enabled {
+        let workspace_key = crate::session::workspace_key_from_path(
+            &config.workspace_dir,
+            "default",
+        );
+        let allowlist = config.permissions.tool_allowlist.clone();
+        let gate: Option<crate::security::permissions::ToolActivationGateHandle> = Some(
+            std::sync::Arc::new(crate::security::permissions::CliStdinGate)
+                as crate::security::permissions::ToolActivationGateHandle,
+        );
+        let options = crate::tools::BuiltinDeferredRegistrationOptions {
+            workspace_key,
+            allowlist,
+            gate,
+            config: Some(&config),
+        };
+        crate::tools::apply_builtin_deferred_registration_with_options(
+            &mut tools_registry,
+            &mut deferred_section,
+            crate::tools::ToolSurfaceBaseline::Cli,
+            &mut activated_handle,
+            options,
+        )
+    } else {
+        crate::tools::DeferredBuiltinToolSet::new()
+    };
     if let Some(svc) = crate::services::try_get_services() {
         let mut guard = svc.deferred_builtin_names.write();
         guard.clear();
         for stub in &deferred_builtin_set.stubs {
             guard.insert(stub.name.clone());
+        }
+    }
+    if let (Some(handle), Some(svc)) = (
+        activated_handle.as_ref(),
+        crate::services::try_get_services(),
+    ) {
+        let workspace_key = crate::session::workspace_key_from_path(
+            &config.workspace_dir,
+            "default",
+        );
+        if let Ok(names) = svc.tool_activation_store.load(&workspace_key).await {
+            if !names.is_empty() {
+                let mut guard = handle.lock();
+                for name in &names {
+                    if guard.is_activated(name) {
+                        continue;
+                    }
+                    if let Some(spec) = deferred_builtin_set.tool_spec(name) {
+                        guard.activate_spec(name.clone(), spec);
+                    }
+                }
+            }
         }
     }
 
@@ -5919,59 +6001,61 @@ pub async fn process_message(
         }
     }
 
-    let mut deferred_builtin_set_pm = crate::tools::DeferredBuiltinToolSet::new();
-    if config.agent.builtin_tool_deferred_loading {
-        let core: HashSet<&str> = crate::tools::BUILTIN_CORE_TOOL_NAMES.iter().copied().collect();
-        for tool_box in tools_registry.iter() {
-            let name = tool_box.name();
-            if core.contains(name) {
-                continue;
-            }
-            if name == "tool_search" || name.contains("__") || name.starts_with("custom_") {
-                continue;
-            }
-            deferred_builtin_set_pm.add_spec(tool_box.spec());
-        }
-        if !deferred_builtin_set_pm.is_empty() {
-            tracing::info!(
-                "Builtin deferred (process_message): {} tool stub(s)",
-                deferred_builtin_set_pm.len()
-            );
-            let builtin_section =
-                crate::tools::build_deferred_builtin_section(&deferred_builtin_set_pm);
-            if !deferred_section.is_empty() {
-                deferred_section.push('\n');
-            }
-            deferred_section.push_str(&builtin_section);
-            if let Some(handle) = activated_handle_pm.as_ref() {
-                tools_registry.retain(|t| t.name() != "tool_search");
-                tools_registry.push(Box::new(
-                    crate::tools::ToolSearchTool::new(
-                        crate::tools::DeferredMcpToolSet {
-                            stubs: Vec::new(),
-                            registry: std::sync::Arc::new(crate::tools::McpRegistry::empty()),
-                        },
-                        std::sync::Arc::clone(handle),
-                    )
-                    .with_builtin(deferred_builtin_set_pm.clone()),
-                ));
-            } else {
-                let activated = std::sync::Arc::new(parking_lot::Mutex::new(
-                    crate::tools::ActivatedToolSet::new(),
-                ));
-                activated_handle_pm = Some(std::sync::Arc::clone(&activated));
-                tools_registry.push(Box::new(crate::tools::ToolSearchTool::new_builtin_only(
-                    deferred_builtin_set_pm.clone(),
-                    activated,
-                )));
-            }
-        }
-    }
+    let (builtin_deferred_enabled_pm, _mcp_deferred_enabled_pm) =
+        crate::tools::deferred_loading_effective(&config);
+    let deferred_builtin_set_pm = if builtin_deferred_enabled_pm {
+        let workspace_key = crate::session::workspace_key_from_path(
+            &config.workspace_dir,
+            "default",
+        );
+        let allowlist = config.permissions.tool_allowlist.clone();
+        let gate: Option<crate::security::permissions::ToolActivationGateHandle> = Some(
+            std::sync::Arc::new(crate::security::permissions::CliStdinGate)
+                as crate::security::permissions::ToolActivationGateHandle,
+        );
+        let options = crate::tools::BuiltinDeferredRegistrationOptions {
+            workspace_key,
+            allowlist,
+            gate,
+            config: Some(&config),
+        };
+        crate::tools::apply_builtin_deferred_registration_with_options(
+            &mut tools_registry,
+            &mut deferred_section,
+            crate::tools::ToolSurfaceBaseline::Cli,
+            &mut activated_handle_pm,
+            options,
+        )
+    } else {
+        crate::tools::DeferredBuiltinToolSet::new()
+    };
     if let Some(svc) = crate::services::try_get_services() {
         let mut guard = svc.deferred_builtin_names.write();
         guard.clear();
         for stub in &deferred_builtin_set_pm.stubs {
             guard.insert(stub.name.clone());
+        }
+    }
+    if let (Some(handle), Some(svc)) = (
+        activated_handle_pm.as_ref(),
+        crate::services::try_get_services(),
+    ) {
+        let workspace_key = crate::session::workspace_key_from_path(
+            &config.workspace_dir,
+            "default",
+        );
+        if let Ok(names) = svc.tool_activation_store.load(&workspace_key).await {
+            if !names.is_empty() {
+                let mut guard = handle.lock();
+                for name in &names {
+                    if guard.is_activated(name) {
+                        continue;
+                    }
+                    if let Some(spec) = deferred_builtin_set_pm.tool_spec(name) {
+                        guard.activate_spec(name.clone(), spec);
+                    }
+                }
+            }
         }
     }
 

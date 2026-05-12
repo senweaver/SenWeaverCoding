@@ -133,7 +133,33 @@ export function LspSettings() {
   const installServer = useLspStore((s) => s.installServer)
   const restartServer = useLspStore((s) => s.restartServer)
   const selectServer = useLspStore((s) => s.selectServer)
+  const inlayHintsEnabled = useLspStore((s) => s.preferences.inlayHintsEnabled)
+  const formatOnSave = useLspStore((s) => s.preferences.formatOnSave)
+  const hoverDelayMs = useLspStore((s) => s.preferences.hoverDelayMs)
+  const preferencesLoaded = useLspStore((s) => s.preferencesLoaded)
+  const fetchPreferences = useLspStore((s) => s.fetchPreferences)
+  const setPreferences = useLspStore((s) => s.setPreferences)
   const addToast = useUIStore((s) => s.addToast)
+
+  const runPrefUpdate = async (payload: Partial<{ inlayHintsEnabled: boolean; formatOnSave: boolean; hoverDelayMs: number }>) => {
+    try {
+      await setPreferences(payload)
+      addToast({ type: 'success', message: t('lsp.preferences.saveSuccess') })
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('lsp.preferences.saveFailed', {
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      })
+    }
+  }
+
+  useEffect(() => {
+    if (!preferencesLoaded) {
+      void fetchPreferences()
+    }
+  }, [fetchPreferences, preferencesLoaded])
 
   const runWithToast = async (
     op: () => Promise<unknown>,
@@ -270,6 +296,68 @@ export function LspSettings() {
           {error}
         </div>
       )}
+
+      <div className="flex flex-col gap-3 border border-[var(--color-border)] rounded-xl p-4 bg-[var(--color-surface-container-low)]">
+        <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
+          {t('lsp.preferences.title')}
+        </div>
+        <label className="flex items-start gap-3 text-sm text-[var(--color-text-primary)]">
+          <input
+            type="checkbox"
+            checked={inlayHintsEnabled}
+            onChange={(e) =>
+              void runPrefUpdate({ inlayHintsEnabled: e.target.checked })
+            }
+            className="mt-0.5 h-4 w-4 rounded border-[var(--color-border)] text-[var(--color-brand)]"
+          />
+          <div className="flex flex-col gap-0.5">
+            <span>{t('lsp.preferences.inlayHints')}</span>
+            <span className="text-[11px] text-[var(--color-text-tertiary)]">
+              {t('lsp.preferences.inlayHintsDescription')}
+            </span>
+          </div>
+        </label>
+        <label className="flex items-start gap-3 text-sm text-[var(--color-text-primary)]">
+          <input
+            type="checkbox"
+            checked={formatOnSave}
+            onChange={(e) =>
+              void runPrefUpdate({ formatOnSave: e.target.checked })
+            }
+            className="mt-0.5 h-4 w-4 rounded border-[var(--color-border)] text-[var(--color-brand)]"
+          />
+          <div className="flex flex-col gap-0.5">
+            <span>{t('lsp.preferences.formatOnSave')}</span>
+            <span className="text-[11px] text-[var(--color-text-tertiary)]">
+              {t('lsp.preferences.formatOnSaveDescription')}
+            </span>
+          </div>
+        </label>
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between gap-3 text-sm text-[var(--color-text-primary)]">
+            <span>{t('lsp.preferences.hoverDelay')}</span>
+            <span className="text-xs tabular-nums text-[var(--color-text-secondary)]">
+              {hoverDelayMs} ms
+            </span>
+          </div>
+          <input
+            type="range"
+            min={100}
+            max={1000}
+            step={50}
+            value={hoverDelayMs}
+            onChange={(e) => {
+              const next = Number.parseInt(e.target.value, 10)
+              if (!Number.isFinite(next)) return
+              void runPrefUpdate({ hoverDelayMs: next })
+            }}
+            className="w-full accent-[var(--color-brand)]"
+          />
+          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+            {t('lsp.preferences.hoverDelayDescription')}
+          </span>
+        </div>
+      </div>
 
       <div className="flex gap-3 min-h-[420px]">
         {}

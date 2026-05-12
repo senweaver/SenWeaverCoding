@@ -3,12 +3,15 @@ import DOMPurify from 'dompurify'
 import mermaid from 'mermaid'
 import { Modal } from '../shared/Modal'
 import { CopyButton } from '../shared/CopyButton'
+import { useUIStore } from '../../stores/uiStore'
 
 type Props = {
   code: string
 }
 
-let mermaidInitialized = false
+type MermaidTheme = 'default' | 'dark'
+
+let currentMermaidTheme: MermaidTheme | null = null
 const MIN_PREVIEW_ZOOM = 0.5
 const MAX_PREVIEW_ZOOM = 3
 const PREVIEW_ZOOM_STEP = 0.25
@@ -26,11 +29,11 @@ type DragState = {
   scrollTop: number
 }
 
-function initMermaid() {
-  if (mermaidInitialized) return
+function initMermaid(theme: MermaidTheme) {
+  if (currentMermaidTheme === theme) return
   mermaid.initialize({
     startOnLoad: false,
-    theme: 'default',
+    theme,
     securityLevel: 'strict',
     suppressErrorRendering: true,
     fontFamily: 'var(--font-sans)',
@@ -39,7 +42,7 @@ function initMermaid() {
     sequence: { useMaxWidth: true },
     state: { useMaxWidth: true },
   })
-  mermaidInitialized = true
+  currentMermaidTheme = theme
 }
 
 let mermaidIdCounter = 0
@@ -169,11 +172,14 @@ export function MermaidRenderer({ code }: Props) {
     return () => io.disconnect()
   }, [shouldRender])
 
+  const themeMode = useUIStore((s) => s.theme)
+  const mermaidTheme: MermaidTheme = themeMode === 'dark' ? 'dark' : 'default'
+
   useEffect(() => {
     if (!shouldRender) return
     let cancelled = false
     let cancelIdle: (() => void) | null = null
-    initMermaid()
+    initMermaid(mermaidTheme)
 
     const runRender = () => {
       const id = `mermaid-${++mermaidIdCounter}`
@@ -215,7 +221,7 @@ export function MermaidRenderer({ code }: Props) {
       cancelled = true
       if (cancelIdle) cancelIdle()
     }
-  }, [code, shouldRender])
+  }, [code, shouldRender, mermaidTheme])
 
   const handlePreview = useCallback(() => setPreviewOpen(true), [])
   const handlePreviewClose = useCallback(() => setPreviewOpen(false), [])

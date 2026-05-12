@@ -10,6 +10,7 @@ type Props = {
   x: number
   y: number
   target: ContextMenuTarget
+  canReveal: boolean
   onClose: () => void
   onNewFile: (parent: FileTreeNode | null) => void
   onNewFolder: (parent: FileTreeNode | null) => void
@@ -17,12 +18,17 @@ type Props = {
   onDelete: (node: FileTreeNode) => void
   onRefresh: () => void
   onUpload: (parent: FileTreeNode | null) => void
+  onCopyAbsolutePath: (node: FileTreeNode) => void
+  onCopyRelativePath: (node: FileTreeNode) => void
+  onCopyAsMarkdown?: (node: FileTreeNode) => void
+  onReveal: (node: FileTreeNode) => void
 }
 
 export function FileTreeContextMenu({
   x,
   y,
   target,
+  canReveal,
   onClose,
   onNewFile,
   onNewFolder,
@@ -30,6 +36,10 @@ export function FileTreeContextMenu({
   onDelete,
   onRefresh,
   onUpload,
+  onCopyAbsolutePath,
+  onCopyRelativePath,
+  onCopyAsMarkdown,
+  onReveal,
 }: Props) {
   const t = useTranslation()
   const ref = useRef<HTMLDivElement | null>(null)
@@ -112,6 +122,43 @@ export function FileTreeContextMenu({
               onClose()
             }}
           />
+          <Separator />
+          <MenuItem
+            label={t('files.tree.copyPath')}
+            icon="content_copy"
+            onClick={() => {
+              onCopyAbsolutePath(node)
+              onClose()
+            }}
+          />
+          <MenuItem
+            label={t('files.tree.copyRelativePath')}
+            icon="link"
+            onClick={() => {
+              onCopyRelativePath(node)
+              onClose()
+            }}
+          />
+          {!isDir && onCopyAsMarkdown && (
+            <MenuItem
+              label={t('files.tree.copyMarkdown')}
+              icon="code_blocks"
+              onClick={() => {
+                onCopyAsMarkdown(node)
+                onClose()
+              }}
+            />
+          )}
+          {canReveal && (
+            <MenuItem
+              label={t('files.tree.reveal')}
+              icon="folder_open"
+              onClick={() => {
+                onReveal(node)
+                onClose()
+              }}
+            />
+          )}
           <Separator />
         </>
       )}

@@ -6,8 +6,29 @@ import {
   AI_FRESH_WINDOW_MS,
   useWorkspaceFilesStore,
 } from '../../stores/workspaceFilesStore'
+import {
+  classifyEntry,
+  statusBadgeChar,
+  useGitStatusStore,
+  type GitStatusSeverity,
+} from '../../stores/gitStatusStore'
 import { ensureVscodeIcons, getFileIconId, isVscodeIconsReady } from '../../lib/fileIcons'
+import { formatBytes } from '../../lib/formatBytes'
+import { formatAbsoluteTime, formatRelativeTime } from '../../lib/formatRelativeTime'
 import { InlineNamePrompt } from './InlineNamePrompt'
+
+const GIT_BADGE_COLORS: Record<GitStatusSeverity, string> = {
+  modified: 'bg-amber-500',
+  typeChanged: 'bg-amber-500',
+  added: 'bg-emerald-500',
+  deleted: 'bg-rose-500',
+  untracked: 'bg-zinc-400',
+  renamed: 'bg-sky-500',
+  copied: 'bg-sky-500',
+  conflicted: 'bg-orange-500',
+  ignored: 'bg-red-600',
+  unmodified: '',
+}
 
 export type RenameTargetState = {
   relPath: string
@@ -19,6 +40,13 @@ export type CreateTargetState = {
   kind: 'file' | 'folder'
 }
 
+export type FilterState = {
+  active: boolean
+  needle: string
+  matches: Set<string>
+  ancestors: Set<string>
+}
+
 type Props = {
   node: FileTreeNode
   depth: number
@@ -27,6 +55,7 @@ type Props = {
   renameTarget: RenameTargetState | null
 
   createTarget: CreateTargetState | null
+  filter?: FilterState
   onSelect: (node: FileTreeNode) => void
   onContextMenu: (event: React.MouseEvent, node: FileTreeNode) => void
   onDrop: (event: React.DragEvent, target: FileTreeNode) => void
@@ -35,6 +64,43 @@ type Props = {
   onRenameCancel: () => void
   onCreateSubmit: (value: string) => void
   onCreateCancel: () => void
+}
+
+function renderHighlight(text: string, needle: string) {
+  if (!needle) return text
+  const lower = text.toLowerCase()
+  const target = needle.toLowerCase()
+  if (!target) return text
+  const segments: Array<{ text: string; match: boolean }> = []
+  let cursor = 0
+  while (cursor < text.length) {
+    const idx = lower.indexOf(target, cursor)
+    if (idx === -1) {
+      segments.push({ text: text.slice(cursor), match: false })
+      break
+    }
+    if (idx > cursor) {
+      segments.push({ text: text.slice(cursor, idx), match: false })
+    }
+    segments.push({ text: text.slice(idx, idx + target.length), match: true })
+    cursor = idx + target.length
+  }
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.match ? (
+          <mark
+            key={i}
+            className="bg-[var(--color-accent)]/30 text-[var(--color-text-primary)] rounded-sm px-[1px]"
+          >
+            {seg.text}
+          </mark>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        ),
+      )}
+    </>
+  )
 }
 
 function useEnsureVscodeIcons(): boolean {
@@ -58,6 +124,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   selectedRelPath,
   renameTarget,
   createTarget,
+  filter,
   onSelect,
   onContextMenu,
   onDrop,
@@ -78,6 +145,19 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   const aiModifiedTs = useWorkspaceFilesStore(
     (s) => s.aiModifiedAt[node.relPath],
   )
+  const workspaceRoot = useWorkspaceFilesStore((s) => s.root)
+  const gitSeverity = useGitStatusStore((s): GitStatusSeverity => {
+    if (!workspaceRoot) return 'unmodified'
+    const bucket = s.byRoot[workspaceRoot]
+    if (!bucket) return 'unmodified'
+    if (node.isDir) {
+      return bucket.dirAggregate[node.relPath] ?? 'unmodified'
+    }
+    const entry = bucket.entries[node.relPath]
+    if (!entry) return 'unmodified'
+    return classifyEntry(entry)
+  })
+  const gitBadgeChar = useMemo(() => statusBadgeChar(gitSeverity), [gitSeverity])
 
   const [now, setNow] = useState(() => Date.now())
   const aiAge = aiModifiedTs !== undefined ? now - aiModifiedTs : Number.POSITIVE_INFINITY
@@ -92,16 +172,52 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     return () => window.clearInterval(interval)
   }, [aiFresh])
 
-  const expanded = node.isDir && (dirState?.expanded ?? false)
+  const filterActive = filter?.active ?? false
+  const isAncestorMatch = filterActive ? filter!.ancestors.has(node.relPath) : false
+  const isSelfMatch = filterActive ? filter!.matches.has(node.relPath) : false
+  const visibleByFilter = !filterActive || isSelfMatch || isAncestorMatch
+  const expanded = node.isDir && (
+    filterActive && isAncestorMatch
+      ? true
+      : (dirState?.expanded ?? false)
+  )
   const loading = node.isDir && (dirState?.loading ?? false)
   const error = node.isDir ? dirState?.error : undefined
   const children = useMemo<FileTreeNode[]>(() => {
     if (!node.isDir) return []
-    if (dirState?.loaded) return dirState.children ?? []
-    return node.children ?? []
-  }, [dirState, node.children, node.isDir, node.loaded])
+    const list = dirState?.loaded ? dirState.children ?? [] : node.children ?? []
+    if (!filterActive) return list
+    return list.filter(
+      (c) => filter!.matches.has(c.relPath) || filter!.ancestors.has(c.relPath),
+    )
+  }, [dirState, filter, filterActive, node.children, node.isDir, node.loaded])
 
   const isSelected = !node.isDir && selectedRelPath === node.relPath
+
+  const sizeLabel = useMemo(() => {
+    if (node.isDir) return ''
+    if (typeof node.sizeBytes !== 'number' || node.sizeBytes <= 0) return ''
+    return formatBytes(node.sizeBytes)
+  }, [node.isDir, node.sizeBytes])
+
+  const relativeTimeLabel = useMemo(
+    () => formatRelativeTime(node.modifiedAt),
+    [node.modifiedAt],
+  )
+
+  const tooltip = useMemo(() => {
+    const lines: string[] = [
+      `${t('files.tree.pathLabel')}: ${node.relPath}`,
+    ]
+    if (!node.isDir && sizeLabel) {
+      lines.push(`${t('files.tree.sizeLabel')}: ${sizeLabel}`)
+    }
+    const absTime = formatAbsoluteTime(node.modifiedAt)
+    if (absTime) {
+      lines.push(`${t('files.tree.modifiedLabel')}: ${absTime}`)
+    }
+    return lines.join('\n')
+  }, [node.isDir, node.modifiedAt, node.relPath, sizeLabel, t])
 
   const handleClick = useCallback(() => {
     if (node.isDir) {
@@ -148,6 +264,10 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     )
   }
 
+  if (!visibleByFilter) {
+    return null
+  }
+
   return (
     <>
       <div
@@ -166,7 +286,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
             : 'hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
         }`}
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
-        title={node.relPath}
+        title={tooltip}
       >
         {}
         {depth > 0 &&
@@ -206,24 +326,48 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
             {node.isDir ? (expanded ? 'folder_open' : 'folder') : 'description'}
           </span>
         )}
-        <span className="truncate">{node.name}</span>
-        {aiFresh && (
-          <span
-            aria-hidden="true"
-            style={{ opacity: aiOpacity, transition: 'opacity 250ms linear' }}
-            className="ml-auto flex h-3.5 min-w-[14px] items-center justify-center rounded-sm bg-[var(--color-warning)]/85 px-1 text-[9px] font-bold leading-none text-white"
-          >
-            M
-          </span>
-        )}
-        {loading && (
-          <span
-            aria-hidden="true"
-            className="material-symbols-outlined ml-auto text-[12px] animate-spin text-[var(--color-text-tertiary)]"
-          >
-            progress_activity
-          </span>
-        )}
+        <span className="truncate">
+          {filterActive && filter!.needle
+            ? renderHighlight(node.name, filter!.needle)
+            : node.name}
+        </span>
+        <div className="ml-auto flex flex-shrink-0 items-center gap-1.5">
+          {!aiFresh && !loading && (sizeLabel || relativeTimeLabel) && (
+            <span
+              aria-hidden="true"
+              className="hidden items-center gap-1.5 text-[10px] font-normal tabular-nums text-[var(--color-text-tertiary)]/70 group-hover:flex"
+            >
+              {relativeTimeLabel && <span>{relativeTimeLabel}</span>}
+              {sizeLabel && <span>{sizeLabel}</span>}
+            </span>
+          )}
+          {aiFresh && (
+            <span
+              aria-hidden="true"
+              style={{ opacity: aiOpacity, transition: 'opacity 250ms linear' }}
+              className="flex h-3.5 min-w-[14px] items-center justify-center rounded-sm bg-[var(--color-warning)]/85 px-1 text-[9px] font-bold leading-none text-white"
+            >
+              M
+            </span>
+          )}
+          {!aiFresh && gitBadgeChar && (
+            <span
+              aria-hidden="true"
+              title={`git: ${gitSeverity}`}
+              className={`flex h-3.5 min-w-[14px] items-center justify-center rounded-sm px-1 text-[9px] font-bold leading-none text-white ${GIT_BADGE_COLORS[gitSeverity]}`}
+            >
+              {gitBadgeChar}
+            </span>
+          )}
+          {loading && (
+            <span
+              aria-hidden="true"
+              className="material-symbols-outlined text-[12px] animate-spin text-[var(--color-text-tertiary)]"
+            >
+              progress_activity
+            </span>
+          )}
+        </div>
       </div>
       {node.isDir && expanded && (
         <>
@@ -267,6 +411,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
                 selectedRelPath={selectedRelPath}
                 renameTarget={renameTarget}
                 createTarget={createTarget}
+                filter={filter}
                 onSelect={onSelect}
                 onContextMenu={onContextMenu}
                 onDrop={onDrop}

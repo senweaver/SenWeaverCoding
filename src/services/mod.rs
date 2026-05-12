@@ -20,6 +20,8 @@ pub mod compact;
 #[allow(unused_imports)]
 pub mod container;
 #[allow(unused_imports)]
+pub mod credential_vault;
+#[allow(unused_imports)]
 pub mod diagnostics;
 #[allow(unused_imports)]
 pub mod lsp;
@@ -70,16 +72,27 @@ pub mod task_manager;
 #[allow(unused_imports)]
 pub mod team_memory_sync;
 #[allow(unused_imports)]
+pub mod tool_activation_store;
+#[allow(unused_imports)]
 pub mod tool_use_summary;
 
 #[allow(unused_imports)]
 pub use container::{
-    RuntimeFlags, ServiceContainer, ServiceContainerConfig, get_services, init_services,
-    try_get_services,
+    RuntimeFlags, ServiceContainer, ServiceContainerConfig, ToolSearchMetricsSnapshot,
+    get_services, init_services, try_get_services,
 };
 
 #[allow(unused_imports)]
+pub use tool_activation_store::{ToolActivationRecord, ToolActivationStore, ToolActivationStoreHandle};
+
+#[allow(unused_imports)]
 pub use compact::CompactService;
+
+#[allow(unused_imports)]
+pub use credential_vault::{
+    init_credential_vault, redact_args_optional, redact_for_audit_optional,
+    try_get_credential_vault, CredentialKind, CredentialMeta, CredentialVault,
+};
 
 #[allow(unused_imports)]
 pub use lsp::{ServerInfo, ServerKey};

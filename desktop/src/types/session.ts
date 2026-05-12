@@ -9,6 +9,7 @@ export type SessionListItem = {
   projectPath: string
   workDir: string | null
   workDirExists: boolean
+  running?: boolean
 }
 
 export type MessageEntry = {

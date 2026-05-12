@@ -3,6 +3,10 @@ import { wsManager } from '../api/websocket'
 import { sessionsApi } from '../api/sessions'
 import { useTeamStore } from './teamStore'
 import { useSessionStore } from './sessionStore'
+import {
+  useWorkspaceQueueStore,
+  workspaceKeyFor,
+} from './workspaceQueueStore'
 import { useCLITaskStore } from './cliTaskStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useSettingsStore } from './settingsStore'
@@ -10,6 +14,8 @@ import { useTabStore } from './tabStore'
 import { useUsageStore } from './usageStore'
 import { useBrowserPanelStore } from './browserPanelStore'
 import { useLspStore } from './lspStore'
+import { useUIStore } from './uiStore'
+import { t } from '../i18n'
 import type { LspBroadcastEvent } from '../types/lsp'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
@@ -188,7 +194,7 @@ type ChatStore = {
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
-    options?: { displayContent?: string },
+    options?: { displayContent?: string; __internalDrain?: boolean },
   ) => void
   respondToPermission: (
     sessionId: string,
@@ -1105,6 +1111,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const userFacingContent =
       options?.displayContent?.trim() || content.trim()
     const isMemberSession = !!useTeamStore.getState().getMemberBySessionId(sessionId)
+
+    if (!isMemberSession && !options?.__internalDrain) {
+      const sessionMeta =
+        useSessionStore.getState().sessions.find((s) => s.id === sessionId) ?? null
+      const wsKey = workspaceKeyFor(sessionMeta, sessionId)
+      const queueState = useWorkspaceQueueStore.getState()
+      const busy = !!queueState.getRunningSessionInWorkspace(wsKey)
+      const queueLen = queueState.queues[wsKey]?.length ?? 0
+      if (busy || queueLen > 0) {
+        const passthroughOptions = options
+          ? { displayContent: options.displayContent }
+          : undefined
+        queueState.enqueue(sessionId, content, attachments, passthroughOptions)
+        return
+      }
+    }
     const uiAttachments: UIAttachment[] | undefined =
       attachments && attachments.length > 0
         ? attachments.map((a) => ({
@@ -2447,6 +2469,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       case 'pong':
         break
+      case 'workspace_busy': {
+        useUIStore.getState().addToast({
+          type: 'warning',
+          message: t('wsManager.workspaceBusyToast'),
+          duration: 4000,
+        })
+        update(() => ({
+          chatState: 'idle',
+          stopRequested: false,
+          statusVerb: '',
+        }))
+        break
+      }
       case 'lsp_diagnostics':
       case 'lsp_install_progress':
       case 'lsp_server_status':

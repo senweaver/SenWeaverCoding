@@ -47,6 +47,8 @@ mod dock {
         pub title: Option<String>,
         #[serde(default)]
         pub active: bool,
+        #[serde(default)]
+        pub owner: Option<String>,
     }
 
     #[async_trait]
@@ -127,6 +129,7 @@ pub struct BrowserTool {
     computer_use: ComputerUseConfig,
     #[cfg(feature = "browser-native")]
     native_state: tokio::sync::Mutex<native_backend::NativeBrowserState>,
+    preferred_tab: tokio::sync::Mutex<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +234,8 @@ pub enum BrowserAction {
         ms: Option<u64>,
         #[serde(default)]
         text: Option<String>,
+        #[serde(default)]
+        until: Option<String>,
     },
 
     Press { key: String },
@@ -267,6 +272,69 @@ pub enum BrowserAction {
     ActivateTab { tab: u32 },
 
     ListTabs,
+
+    Assert {
+        kind: String,
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        expected: Option<String>,
+        #[serde(default)]
+        attribute: Option<String>,
+        #[serde(default)]
+        op: Option<String>,
+        #[serde(default)]
+        count: Option<i64>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+
+    ConsoleLogs {
+        #[serde(default)]
+        level: Option<String>,
+        #[serde(default)]
+        since_ms: Option<u64>,
+        #[serde(default)]
+        clear_after: bool,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
+
+    NetworkIdle {
+        #[serde(default)]
+        idle_ms: Option<u64>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+
+    ClearStorage {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+
+    Back,
+
+    Forward,
+
+    Reload,
+
+    AttachTab {
+        tab_id: u32,
+    },
+
+    CollectLinks {
+        #[serde(default)]
+        same_origin: Option<bool>,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
+
+    NetworkErrors {
+        #[serde(default)]
+        since_ms: Option<u64>,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
 }
 
 fn default_activate() -> bool {
@@ -313,6 +381,7 @@ impl BrowserTool {
             computer_use,
             #[cfg(feature = "browser-native")]
             native_state: tokio::sync::Mutex::new(native_backend::NativeBrowserState::default()),
+            preferred_tab: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -683,7 +752,12 @@ impl BrowserTool {
                 self.to_result(resp)
             }
 
-            BrowserAction::Wait { selector, ms, text } => {
+            BrowserAction::Wait {
+                selector,
+                ms,
+                text,
+                until: _,
+            } => {
                 let mut args = vec!["wait"];
                 let ms_str;
                 if let Some(sel) = selector.as_ref() {
@@ -747,13 +821,31 @@ impl BrowserTool {
             BrowserAction::OpenTab { .. }
             | BrowserAction::CloseTab { .. }
             | BrowserAction::ActivateTab { .. }
-            | BrowserAction::ListTabs => Ok(ToolResult {
+            | BrowserAction::ListTabs
+            | BrowserAction::AttachTab { .. } => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    "Multi-tab actions (open_tab/close_tab/activate_tab/list_tabs) are only \
+                    "Multi-tab actions (open_tab/close_tab/activate_tab/list_tabs/attach_tab) are only \
                      supported by the embedded dock backend (tauri_dock). Run inside the \
                      SenAgentOS desktop app or switch to backend='tauri_dock'."
+                        .to_string(),
+                ),
+            }),
+            BrowserAction::Assert { .. }
+            | BrowserAction::ConsoleLogs { .. }
+            | BrowserAction::NetworkIdle { .. }
+            | BrowserAction::ClearStorage { .. }
+            | BrowserAction::Back
+            | BrowserAction::Forward
+            | BrowserAction::Reload
+            | BrowserAction::CollectLinks { .. }
+            | BrowserAction::NetworkErrors { .. } => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload/collect_links/network_errors) require the \
+                     embedded dock backend (tauri_dock). Run inside the SenAgentOS desktop app."
                         .to_string(),
                 ),
             }),
@@ -995,11 +1087,14 @@ impl BrowserTool {
         &self,
         action: BrowserAction,
         backend: ResolvedBackend,
+        request_tab_id: Option<u32>,
     ) -> anyhow::Result<ToolResult> {
         match backend {
             ResolvedBackend::AgentBrowser => self.execute_agent_browser_action(action).await,
             ResolvedBackend::RustNative => self.execute_rust_native_action(action).await,
-            ResolvedBackend::TauriDock => self.execute_tauri_dock_action(action).await,
+            ResolvedBackend::TauriDock => {
+                self.execute_tauri_dock_action(action, request_tab_id).await
+            }
             ResolvedBackend::ComputerUse => anyhow::bail!(
                 "Internal error: computer_use backend must be handled before BrowserAction parsing"
             ),
@@ -1010,6 +1105,7 @@ impl BrowserTool {
     async fn execute_tauri_dock_action(
         &self,
         action: BrowserAction,
+        request_tab_id: Option<u32>,
     ) -> anyhow::Result<ToolResult> {
         let controller = dock_controller().ok_or_else(|| {
             anyhow::anyhow!("Internal error: tauri_dock backend selected but controller is gone")
@@ -1019,6 +1115,9 @@ impl BrowserTool {
             .await;
 
         const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+        let preferred = *self.preferred_tab.lock().await;
+        let effective_tab_id = request_tab_id.or(preferred);
 
         match &action {
             BrowserAction::OpenTab { url, activate } => {
@@ -1059,10 +1158,61 @@ impl BrowserTool {
                     .list_tabs()
                     .await
                     .with_context(|| "tauri_dock list_tabs failed")?;
+                let active_id = tabs.iter().find(|t| t.active).map(|t| t.id);
+                let tabs_json: Vec<Value> = tabs
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "tab_id": t.id,
+                            "id": t.id,
+                            "url": t.url,
+                            "title": t.title,
+                            "is_active": t.active,
+                            "active": t.active,
+                            "owner": t.owner.clone().unwrap_or_else(|| "agent".to_string()),
+                        })
+                    })
+                    .collect();
                 return Ok(dock_ok_result(
                     "list_tabs",
-                    json!({ "tabs": tabs }),
+                    json!({ "tabs": tabs_json, "active_tab_id": active_id }),
                 ));
+            }
+            BrowserAction::AttachTab { tab_id } => {
+                let tabs = controller
+                    .list_tabs()
+                    .await
+                    .with_context(|| "tauri_dock list_tabs failed")?;
+                let Some(info) = tabs.into_iter().find(|t| t.id == *tab_id) else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "attach_tab: tab_id {tab_id} not found. Run action=list_tabs to discover available tabs."
+                        )),
+                    });
+                };
+                controller
+                    .activate_tab(*tab_id)
+                    .await
+                    .with_context(|| "tauri_dock activate_tab failed")?;
+                {
+                    let mut guard = self.preferred_tab.lock().await;
+                    *guard = Some(*tab_id);
+                }
+                let owner = info.owner.clone();
+                let is_user_tab = owner.as_deref() == Some("user");
+                let mut payload = json!({
+                    "attached": tab_id,
+                    "tab_id": tab_id,
+                    "url": info.url,
+                    "title": info.title,
+                    "owner": owner.clone().unwrap_or_else(|| "agent".to_string()),
+                });
+                if is_user_tab {
+                    payload["takeover"] = Value::Bool(true);
+                }
+                return Ok(dock_ok_result("attach_tab", payload));
             }
             _ => {}
         }
@@ -1073,36 +1223,237 @@ impl BrowserTool {
                 .await
                 .with_context(|| "tauri_dock screenshot failed")?;
             if let Some(target) = path.as_ref() {
-                let target_path = std::path::PathBuf::from(target);
-                if let Some(parent) = target_path.parent() {
+                let (abs_path, relative_path) = resolve_screenshot_path(target)?;
+                if let Some(parent) = abs_path.parent() {
                     if !parent.as_os_str().is_empty() {
                         tokio::fs::create_dir_all(parent).await.with_context(|| {
                             format!("failed to create screenshot dir {}", parent.display())
                         })?;
                     }
                 }
-                tokio::fs::write(&target_path, &png).await.with_context(|| {
-                    format!("failed to write screenshot to {}", target_path.display())
+                tokio::fs::write(&abs_path, &png).await.with_context(|| {
+                    format!("failed to write screenshot to {}", abs_path.display())
                 })?;
-                return Ok(dock_ok_result(
-                    "screenshot",
-                    json!({
-                        "path": target,
-                        "bytes": png.len(),
-                        "full_page": full_page,
-                    }),
-                ));
+                let mut payload = json!({
+                    "path": relative_path,
+                    "saved_to": abs_path.to_string_lossy(),
+                    "bytes": png.len(),
+                    "full_page": full_page,
+                });
+                if target.starts_with("auto://") {
+                    payload["auto"] = Value::Bool(true);
+                }
+                let res = dock_ok_result("screenshot", payload);
+                return Ok(self
+                    .decorate_for_effective_tab(controller.as_ref(), res, effective_tab_id)
+                    .await);
             }
             use base64::Engine;
             let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
-            return Ok(dock_ok_result(
+            let res = dock_ok_result(
                 "screenshot",
                 json!({
                     "png_base64": encoded,
                     "bytes": png.len(),
                     "full_page": full_page,
                 }),
-            ));
+            );
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), res, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::Assert {
+            kind,
+            selector,
+            expected,
+            attribute,
+            op,
+            count,
+            timeout_ms,
+        } = action.clone()
+        {
+            let result = execute_assert(
+                controller.as_ref(),
+                kind,
+                selector,
+                expected,
+                attribute,
+                op,
+                count,
+                timeout_ms,
+                effective_tab_id,
+            )
+            .await?;
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::ConsoleLogs {
+            level,
+            since_ms,
+            clear_after,
+            limit,
+        } = action.clone()
+        {
+            let mut args_obj = serde_json::Map::new();
+            if let Some(level) = level {
+                args_obj.insert("level".into(), Value::String(level));
+            }
+            if let Some(since) = since_ms {
+                args_obj.insert("since_ms".into(), Value::from(since));
+            }
+            if clear_after {
+                args_obj.insert("clear_after".into(), Value::Bool(true));
+            }
+            if let Some(limit) = limit {
+                args_obj.insert("limit".into(), Value::from(limit));
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "console_logs".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("console_logs", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::CollectLinks { same_origin, limit } = action.clone() {
+            let mut args_obj = serde_json::Map::new();
+            if let Some(so) = same_origin {
+                args_obj.insert("same_origin".into(), Value::Bool(so));
+            }
+            if let Some(limit) = limit {
+                args_obj.insert("limit".into(), Value::from(limit));
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "collect_links".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("collect_links", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::NetworkErrors { since_ms, limit } = action.clone() {
+            let mut args_obj = serde_json::Map::new();
+            if let Some(since) = since_ms {
+                args_obj.insert("since_ms".into(), Value::from(since));
+            }
+            if let Some(limit) = limit {
+                args_obj.insert("limit".into(), Value::from(limit));
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "network_errors".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("network_errors", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::NetworkIdle {
+            idle_ms,
+            timeout_ms,
+        } = action.clone()
+        {
+            let idle_ms_val = idle_ms.unwrap_or(500);
+            let timeout_val = timeout_ms.unwrap_or(15_000);
+            let args_value = inject_tab_id_into_args(
+                json!({
+                    "idle_ms": idle_ms_val,
+                    "timeout_ms": timeout_val,
+                }),
+                effective_tab_id,
+            );
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "network_idle".to_string(),
+                    args: args_value,
+                    timeout_ms: timeout_val.saturating_add(2_000),
+                })
+                .await?;
+            let result = dock_response_to_result("network_idle", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::ClearStorage { scope } = action.clone() {
+            let args_value =
+                inject_tab_id_into_args(json!({ "scope": scope }), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "clear_storage".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("clear_storage", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if matches!(action, BrowserAction::Back) {
+            let args_value = inject_tab_id_into_args(json!({}), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "history_back".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("back", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if matches!(action, BrowserAction::Forward) {
+            let args_value = inject_tab_id_into_args(json!({}), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "history_forward".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("forward", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if matches!(action, BrowserAction::Reload) {
+            let args_value = inject_tab_id_into_args(json!({}), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "history_reload".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("reload", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
         }
 
         let (kind, args, timeout_ms, action_name): (&'static str, Value, u64, &'static str) =
@@ -1159,15 +1510,27 @@ impl BrowserTool {
                 }
                 BrowserAction::GetUrl => ("get_url", json!({}), DEFAULT_TIMEOUT_MS, "get_url"),
                 BrowserAction::Screenshot { .. } => unreachable!("screenshot handled earlier"),
-                BrowserAction::Wait { selector, ms, text } => {
+                BrowserAction::Wait {
+                    selector,
+                    ms,
+                    text,
+                    until,
+                } => {
                     let timeout_ms = ms.unwrap_or(15_000);
+                    let mut wait_args = serde_json::Map::new();
+                    if let Some(s) = selector {
+                        wait_args.insert("selector".into(), Value::String(s));
+                    }
+                    if let Some(t) = text {
+                        wait_args.insert("text".into(), Value::String(t));
+                    }
+                    if let Some(u) = until {
+                        wait_args.insert("until".into(), Value::String(u));
+                    }
+                    wait_args.insert("timeout_ms".into(), Value::from(timeout_ms));
                     (
                         "wait_for",
-                        json!({
-                            "selector": selector,
-                            "text": text,
-                            "timeout_ms": timeout_ms,
-                        }),
+                        Value::Object(wait_args),
                         timeout_ms.saturating_add(2_000),
                         "wait",
                     )
@@ -1222,8 +1585,24 @@ impl BrowserTool {
                 BrowserAction::OpenTab { .. }
                 | BrowserAction::CloseTab { .. }
                 | BrowserAction::ActivateTab { .. }
-                | BrowserAction::ListTabs => unreachable!("tab actions handled earlier"),
+                | BrowserAction::ListTabs
+                | BrowserAction::AttachTab { .. } => {
+                    unreachable!("tab actions handled earlier")
+                }
+                BrowserAction::Assert { .. }
+                | BrowserAction::ConsoleLogs { .. }
+                | BrowserAction::NetworkIdle { .. }
+                | BrowserAction::ClearStorage { .. }
+                | BrowserAction::Back
+                | BrowserAction::Forward
+                | BrowserAction::Reload
+                | BrowserAction::CollectLinks { .. }
+                | BrowserAction::NetworkErrors { .. } => {
+                    unreachable!("QA actions handled earlier")
+                }
             };
+
+        let args = inject_tab_id_into_args(args, effective_tab_id);
 
         let resp = controller
             .exec(DockRequest {
@@ -1245,21 +1624,49 @@ impl BrowserTool {
         }
 
         if kind == "navigate" {
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            const NAV_READY_TIMEOUT_MS: u64 = 12_000;
-            let _ = controller
-                .exec(DockRequest {
-                    kind: "wait_for".to_string(),
-                    args: json!({
+            let reused = resp
+                .value
+                .as_object()
+                .and_then(|m| m.get("reused"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !reused {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                const NAV_READY_TIMEOUT_MS: u64 = 12_000;
+                let wait_args = inject_tab_id_into_args(
+                    json!({
                         "ready_state": "interactive",
                         "timeout_ms": NAV_READY_TIMEOUT_MS,
                     }),
-                    timeout_ms: NAV_READY_TIMEOUT_MS.saturating_add(2_000),
-                })
-                .await;
+                    effective_tab_id,
+                );
+                let _ = controller
+                    .exec(DockRequest {
+                        kind: "wait_for".to_string(),
+                        args: wait_args,
+                        timeout_ms: NAV_READY_TIMEOUT_MS.saturating_add(2_000),
+                    })
+                    .await;
+            }
         }
 
-        Ok(dock_ok_result(action_name, resp.value))
+        let final_result = dock_ok_result(action_name, resp.value);
+        Ok(self
+            .decorate_for_effective_tab(controller.as_ref(), final_result, effective_tab_id)
+            .await)
+    }
+
+    async fn decorate_for_effective_tab(
+        &self,
+        controller: &dyn DockController,
+        result: ToolResult,
+        effective_tab_id: Option<u32>,
+    ) -> ToolResult {
+        let Some(tab_id) = effective_tab_id else {
+            return result;
+        };
+        let owner = lookup_tab_owner(controller, tab_id).await;
+        decorate_result_with_owner(result, tab_id, owner)
     }
 
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
@@ -1292,10 +1699,15 @@ impl Tool for BrowserTool {
 
     fn description(&self) -> &str {
         concat!(
-            "Web/browser automation with pluggable backends (tauri_dock, agent-browser, rust-native, computer_use). ",
-            "When running inside the SenAgentOS desktop app, the `auto` backend drives the **visible embedded ",
-            "browser dock** (TauriDockController) so the user sees every navigate/click/fill/screenshot live; ",
-            "prefer this for Debug-mode reproduction & verification and for Agent-mode web-facing tasks. ",
+            "**Built-in browser** — the SenAgentOS embedded dock webview is the ONLY browser the user wants you to drive ",
+            "for opening pages, navigating URLs, scraping, screenshots, and any in-app browsing task. ",
+            "When the user says \"open <site>\", \"打开<网站>\", \"navigate to ...\", call this tool with ",
+            "`action='open'` and `url=<target>` — that single call fully opens the page in the visible dock and you ",
+            "MUST NOT additionally call `browser_open`, `browser_delegate`, or any external/system-browser launcher; ",
+            "doing so causes the URL to also pop in Chrome/Edge which the user has explicitly forbidden. ",
+            "Backends: `auto` selects tauri_dock inside the desktop app (TauriDockController) so every ",
+            "navigate/click/fill/screenshot is rendered live in the dock; other backends (agent-browser, rust-native, ",
+            "computer_use) are fallbacks. ",
             "Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, ",
             "key_type, key_press, screen_capture) through a computer-use sidecar. ",
             "**Selector formats** (all backends): `@e1`-style refs returned by `snapshot`, raw CSS (e.g. `#id`, ",
@@ -1304,12 +1716,18 @@ impl Tool for BrowserTool {
             "then drive them via click/fill/type/hover passing that ref as `selector`. ",
             "**Navigation**: `action='open'` on the dock backend automatically waits for the new page to become ",
             "interactive before returning, so a follow-up `click`/`get_text` will run against the loaded DOM. ",
+            "`action='open'` already fulfils \"open this URL\" requests on its own — do NOT chain a second tool to ",
+            "re-open the same URL. ",
             "**Wait**: `action='wait'` with only `ms` sleeps for that many milliseconds (use it sparingly — prefer ",
             "`selector` or `text` for resilience). Use `selector` to wait until an element is visible, or `text` ",
             "to wait until specific text appears anywhere in the body. ",
-            "**Multi-tab** (`open_tab`/`close_tab`/`activate_tab`/`list_tabs`) is only available in the dock backend. ",
+            "**Multi-tab** (`open_tab`/`close_tab`/`activate_tab`/`list_tabs`/`attach_tab`) is only available in the dock backend. ",
+            "Use `list_tabs` to enumerate every tab (including ones the user already opened) with `{tab_id, owner, url, title, is_active}`. ",
+            "`attach_tab(tab_id=<id>)` switches to a specific tab and binds subsequent commands to it — required when ",
+            "operating on a user-pre-authenticated tab so no credentials are needed. ",
+            "Use `collect_links` to enumerate same-origin `<a href>`/`form action` for BFS crawling, and `network_errors` to pull ",
+            "recent `status >= 400` fetch/XHR responses for backend coverage checks. ",
             "Enforces `browser.allowed_domains` for public hosts when the command policy is enabled. ",
-            "Do NOT use `browser_open` (system browser) for in-app debugging when the dock is available. ",
             "**Local preview workflow**: for static HTML/JS/CSS, navigate directly to a `file:///<absolute path>/index.html` ",
             "URL — the embedded dock backend supports file:// natively, no HTTP server required. ",
             "For dev servers (e.g. `python -m http.server`, `vite`, `next dev`), first launch the server with the ",
@@ -1329,13 +1747,24 @@ impl Tool for BrowserTool {
                              "get_title", "get_url", "screenshot", "wait", "press",
                              "hover", "scroll", "is_visible", "close", "find",
                              "open_tab", "close_tab", "activate_tab", "list_tabs",
+                             "attach_tab", "collect_links", "network_errors",
                              "mouse_move", "mouse_click", "mouse_drag", "key_type",
-                             "key_press", "screen_capture"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_* actions require backend=tauri_dock)"
+                             "key_press", "screen_capture",
+                             "assert", "console_logs", "network_idle", "clear_storage",
+                             "back", "forward", "reload"],
+                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_*/QA actions require backend=tauri_dock)"
                 },
                 "tab": {
                     "type": "integer",
                     "description": "Tab id (for close_tab / activate_tab; tauri_dock backend only)"
+                },
+                "tab_id": {
+                    "type": "integer",
+                    "description": "When provided, run the action against this tab id (use `list_tabs` to discover). Required for `attach_tab`. Setting it lets the assistant operate on a user-owned tab without credentials."
+                },
+                "same_origin": {
+                    "type": "boolean",
+                    "description": "For collect_links: when true, drop URLs whose origin differs from the current page"
                 },
                 "activate": {
                     "type": "boolean",
@@ -1436,6 +1865,73 @@ impl Tool for BrowserTool {
                 "fill_value": {
                     "type": "string",
                     "description": "For find with fill action: value to fill"
+                },
+                "assert_kind": {
+                    "type": "string",
+                    "enum": [
+                        "text",
+                        "visible",
+                        "not_visible",
+                        "url",
+                        "title",
+                        "attribute",
+                        "value",
+                        "count",
+                        "console_clean"
+                    ],
+                    "description": "For assert action: type of assertion to evaluate"
+                },
+                "expected": {
+                    "type": "string",
+                    "description": "For assert action: expected value/substring to match"
+                },
+                "attribute": {
+                    "type": "string",
+                    "description": "For assert action with kind=attribute: attribute name"
+                },
+                "op": {
+                    "type": "string",
+                    "enum": ["==", "!=", ">", ">=", "<", "<="],
+                    "description": "For assert count: comparison operator"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "For assert count: expected element count"
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Custom timeout in milliseconds (assert / network_idle)"
+                },
+                "until": {
+                    "type": "string",
+                    "enum": ["network_idle", "load", "dom_content_loaded"],
+                    "description": "For wait action: page lifecycle event to wait for"
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["log", "info", "warn", "error", "debug"],
+                    "description": "For console_logs: filter by log level"
+                },
+                "since_ms": {
+                    "type": "integer",
+                    "description": "For console_logs: only entries newer than this unix-ms timestamp"
+                },
+                "clear_after": {
+                    "type": "boolean",
+                    "description": "For console_logs: clear ring buffer after returning entries"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "For console_logs: maximum number of entries"
+                },
+                "idle_ms": {
+                    "type": "integer",
+                    "description": "For network_idle (or wait until=network_idle): required idle window in milliseconds"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "cookies", "local", "session", "indexeddb", "cache"],
+                    "description": "For clear_storage: which storage scope to wipe (default=all)"
                 }
             },
             "required": ["action"]
@@ -1459,6 +1955,11 @@ impl Tool for BrowserTool {
                 error: Some("Action blocked: rate limit exceeded".into()),
             });
         }
+
+        let args = match crate::services::credential_vault::try_get_credential_vault() {
+            Some(vault) => vault.resolve_json(&args),
+            None => args,
+        };
 
         let backend = match self.resolve_backend().await {
             Ok(selected) => selected,
@@ -1507,7 +2008,12 @@ impl Tool for BrowserTool {
             }
         };
 
-        self.execute_action(action, backend).await
+        let request_tab_id = args
+            .get("tab_id")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v as u32);
+
+        self.execute_action(action, backend, request_tab_id).await
     }
 }
 
@@ -1680,7 +2186,12 @@ mod native_backend {
 
                     Ok(payload)
                 }
-                BrowserAction::Wait { selector, ms, text } => {
+                BrowserAction::Wait {
+                    selector,
+                    ms,
+                    text,
+                    until: _,
+                } => {
                     let client = self.active_client()?;
                     if let Some(sel) = selector.as_ref() {
                         wait_for_selector(client, sel).await?;
@@ -1865,6 +2376,16 @@ mod native_backend {
                 | BrowserAction::ListTabs => anyhow::bail!(
                     "Multi-tab actions are only supported by the embedded dock backend \
                      (tauri_dock). Switch backend or run inside the SenAgentOS desktop app."
+                ),
+                BrowserAction::Assert { .. }
+                | BrowserAction::ConsoleLogs { .. }
+                | BrowserAction::NetworkIdle { .. }
+                | BrowserAction::ClearStorage { .. }
+                | BrowserAction::Back
+                | BrowserAction::Forward
+                | BrowserAction::Reload => anyhow::bail!(
+                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload) require the \
+                     embedded dock backend (tauri_dock). Run inside the SenAgentOS desktop app."
                 ),
             }
         }
@@ -2287,6 +2808,7 @@ fn parse_browser_action(action_str: &str, args: &Value) -> anyhow::Result<Browse
                 .map(String::from),
             ms: args.get("ms").and_then(serde_json::Value::as_u64),
             text: args.get("text").and_then(|v| v.as_str()).map(String::from),
+            until: args.get("until").and_then(|v| v.as_str()).map(String::from),
         }),
         "press" => {
             let key = args
@@ -2375,6 +2897,75 @@ fn parse_browser_action(action_str: &str, args: &Value) -> anyhow::Result<Browse
             Ok(BrowserAction::ActivateTab { tab: tab as u32 })
         }
         "list_tabs" => Ok(BrowserAction::ListTabs),
+        "assert" => {
+            let kind = args
+                .get("assert_kind")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("kind").and_then(|v| v.as_str()))
+                .ok_or_else(|| anyhow::anyhow!("Missing 'assert_kind' for assert action"))?
+                .to_string();
+            Ok(BrowserAction::Assert {
+                kind,
+                selector: args
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                expected: args
+                    .get("expected")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                attribute: args
+                    .get("attribute")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                op: args.get("op").and_then(|v| v.as_str()).map(String::from),
+                count: args
+                    .get("count")
+                    .and_then(serde_json::Value::as_i64),
+                timeout_ms: args
+                    .get("timeout_ms")
+                    .and_then(serde_json::Value::as_u64),
+            })
+        }
+        "console_logs" => Ok(BrowserAction::ConsoleLogs {
+            level: args.get("level").and_then(|v| v.as_str()).map(String::from),
+            since_ms: args.get("since_ms").and_then(serde_json::Value::as_u64),
+            clear_after: args
+                .get("clear_after")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            limit: args.get("limit").and_then(serde_json::Value::as_u64),
+        }),
+        "network_idle" => Ok(BrowserAction::NetworkIdle {
+            idle_ms: args.get("idle_ms").and_then(serde_json::Value::as_u64),
+            timeout_ms: args.get("timeout_ms").and_then(serde_json::Value::as_u64),
+        }),
+        "clear_storage" => Ok(BrowserAction::ClearStorage {
+            scope: args.get("scope").and_then(|v| v.as_str()).map(String::from),
+        }),
+        "back" => Ok(BrowserAction::Back),
+        "forward" => Ok(BrowserAction::Forward),
+        "reload" => Ok(BrowserAction::Reload),
+        "attach_tab" => {
+            let tab_id = args
+                .get("tab_id")
+                .and_then(|v| v.as_u64())
+                .or_else(|| args.get("tab").and_then(|v| v.as_u64()))
+                .ok_or_else(|| anyhow::anyhow!("Missing 'tab_id' for attach_tab"))?;
+            Ok(BrowserAction::AttachTab {
+                tab_id: tab_id as u32,
+            })
+        }
+        "collect_links" => Ok(BrowserAction::CollectLinks {
+            same_origin: args
+                .get("same_origin")
+                .and_then(serde_json::Value::as_bool),
+            limit: args.get("limit").and_then(serde_json::Value::as_u64),
+        }),
+        "network_errors" => Ok(BrowserAction::NetworkErrors {
+            since_ms: args.get("since_ms").and_then(serde_json::Value::as_u64),
+            limit: args.get("limit").and_then(serde_json::Value::as_u64),
+        }),
         other => anyhow::bail!("Unsupported browser action: {other}"),
     }
 }
@@ -2408,6 +2999,16 @@ fn is_supported_browser_action(action: &str) -> bool {
             | "key_type"
             | "key_press"
             | "screen_capture"
+            | "assert"
+            | "console_logs"
+            | "network_idle"
+            | "clear_storage"
+            | "back"
+            | "forward"
+            | "reload"
+            | "attach_tab"
+            | "collect_links"
+            | "network_errors"
     )
 }
 
@@ -2649,4 +3250,451 @@ fn host_matches_allowlist(host: &str, allowed: &[String]) -> bool {
             host == pattern || host.ends_with(&format!(".{pattern}"))
         }
     })
+}
+
+fn workspace_anchor() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn resolve_screenshot_path(target: &str) -> anyhow::Result<(std::path::PathBuf, String)> {
+    if let Some(rest) = target.strip_prefix("auto://") {
+        let mut parts = rest.splitn(2, '/');
+        let run_id = parts
+            .next()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("auto:// screenshot path requires a <run_id> segment")
+            })?;
+        let remainder = parts.next().unwrap_or("step.png");
+        let remainder = remainder.trim_matches('/');
+        let remainder = if remainder.is_empty() {
+            "step.png".to_string()
+        } else {
+            remainder.to_string()
+        };
+        let safe_run_id = sanitize_path_segment(run_id);
+        let safe_remainder: std::path::PathBuf = remainder
+            .split('/')
+            .map(sanitize_path_segment)
+            .collect();
+        let anchor = workspace_anchor();
+        let relative = std::path::PathBuf::from(".senagentos")
+            .join("debug-reports")
+            .join(&safe_run_id)
+            .join("screenshots")
+            .join(&safe_remainder);
+        let absolute = anchor.join(&relative);
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
+        return Ok((absolute, rel_str));
+    }
+    let path = std::path::PathBuf::from(target);
+    let abs = if path.is_absolute() {
+        path.clone()
+    } else {
+        workspace_anchor().join(&path)
+    };
+    Ok((abs, target.to_string()))
+}
+
+fn sanitize_path_segment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            'A'..='Z'
+            | 'a'..='z'
+            | '0'..='9'
+            | '_'
+            | '-'
+            | '.'
+            | '(' | ')'
+            | '[' | ']' => out.push(ch),
+            ' ' => out.push('_'),
+            _ => out.push('_'),
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
+fn dock_response_to_result(action: &str, resp: DockResponse) -> ToolResult {
+    if !resp.ok {
+        return ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(
+                resp.error
+                    .unwrap_or_else(|| format!("dock backend reported failure for {action}")),
+            ),
+        };
+    }
+    dock_ok_result(action, resp.value)
+}
+
+fn inject_tab_id_into_args(args: Value, tab_id: Option<u32>) -> Value {
+    let Some(tab) = tab_id else {
+        return args;
+    };
+    match args {
+        Value::Null => json!({ "tab_id": tab }),
+        Value::Object(mut map) => {
+            if !map.contains_key("tab_id") {
+                map.insert("tab_id".into(), Value::from(tab));
+            }
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+async fn lookup_tab_owner(controller: &dyn DockController, tab_id: u32) -> Option<String> {
+    controller
+        .list_tabs()
+        .await
+        .ok()
+        .and_then(|tabs| {
+            tabs.into_iter()
+                .find(|t| t.id == tab_id)
+                .and_then(|t| t.owner)
+        })
+}
+
+fn decorate_result_with_owner(mut result: ToolResult, tab_id: u32, owner: Option<String>) -> ToolResult {
+    if !result.success {
+        return result;
+    }
+    let parsed: Value = match serde_json::from_str(&result.output) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+    let Value::Object(mut map) = parsed else {
+        return result;
+    };
+    let is_user_tab = owner.as_deref() == Some("user");
+    map.insert("tab_id".into(), Value::from(tab_id));
+    if let Some(owner_str) = owner.clone() {
+        map.insert("owner".into(), Value::String(owner_str));
+    }
+    if is_user_tab {
+        map.insert("takeover".into(), Value::Bool(true));
+    }
+    let merged = Value::Object(map);
+    result.output = serde_json::to_string_pretty(&merged).unwrap_or(result.output);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_assert(
+    controller: &dyn DockController,
+    kind: String,
+    selector: Option<String>,
+    expected: Option<String>,
+    attribute: Option<String>,
+    op: Option<String>,
+    count: Option<i64>,
+    timeout_ms: Option<u64>,
+    effective_tab_id: Option<u32>,
+) -> anyhow::Result<ToolResult> {
+    let start = std::time::Instant::now();
+    let dock_timeout = timeout_ms.unwrap_or(30_000);
+    let kind_lower = kind.to_ascii_lowercase();
+
+    macro_rules! dock_exec {
+        ($k:expr, $args:expr) => {{
+            let merged_args = inject_tab_id_into_args($args, effective_tab_id);
+            controller
+                .exec(DockRequest {
+                    kind: $k.to_string(),
+                    args: merged_args,
+                    timeout_ms: dock_timeout,
+                })
+                .await
+        }};
+    }
+
+    let assert_failure = |actual: serde_json::Value, message: String| -> ToolResult {
+        let payload = json!({
+            "passed": false,
+            "kind": kind_lower,
+            "selector": selector,
+            "expected": expected,
+            "actual": actual,
+            "elapsed_ms": start.elapsed().as_millis() as u64,
+            "reason": message,
+        });
+        dock_ok_result("assert", payload)
+    };
+
+    let assert_success = |actual: serde_json::Value| -> ToolResult {
+        let payload = json!({
+            "passed": true,
+            "kind": kind_lower,
+            "selector": selector,
+            "expected": expected,
+            "actual": actual,
+            "elapsed_ms": start.elapsed().as_millis() as u64,
+        });
+        dock_ok_result("assert", payload)
+    };
+
+    match kind_lower.as_str() {
+        "text" => {
+            let sel = selector
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert text requires selector"))?;
+            let exp = expected
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert text requires expected"))?;
+            let resp = dock_exec!("get_text", json!({ "selector": sel }))?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error.unwrap_or_else(|| "get_text failed".into()),
+                ));
+            }
+            let actual_text = resp
+                .value
+                .as_object()
+                .and_then(|m| m.get("text").or_else(|| m.get("value")))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if actual_text.contains(&exp) {
+                Ok(assert_success(serde_json::Value::String(actual_text)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::String(actual_text),
+                    "text did not contain expected substring".to_string(),
+                ))
+            }
+        }
+        "visible" | "not_visible" => {
+            let sel = selector
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert visibility requires selector"))?;
+            let resp = dock_exec!("is_visible", json!({ "selector": sel }))?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error.unwrap_or_else(|| "is_visible failed".into()),
+                ));
+            }
+            let visible = resp
+                .value
+                .as_object()
+                .and_then(|m| {
+                    m.get("visible")
+                        .or_else(|| m.get("is_visible"))
+                        .or_else(|| m.get("value"))
+                })
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let want_visible = kind_lower == "visible";
+            if visible == want_visible {
+                Ok(assert_success(serde_json::Value::Bool(visible)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::Bool(visible),
+                    format!(
+                        "expected element {} but actual={}",
+                        if want_visible { "visible" } else { "hidden" },
+                        visible
+                    ),
+                ))
+            }
+        }
+        "url" | "title" => {
+            let dock_kind = if kind_lower == "url" { "get_url" } else { "get_title" };
+            let resp = dock_exec!(dock_kind, json!({}))?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error.unwrap_or_else(|| format!("{dock_kind} failed")),
+                ));
+            }
+            let actual_str = resp
+                .value
+                .as_object()
+                .and_then(|m| {
+                    m.get(if kind_lower == "url" { "url" } else { "title" })
+                        .or_else(|| m.get("value"))
+                })
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let exp = expected.clone().unwrap_or_default();
+            let passed = if exp.is_empty() {
+                !actual_str.is_empty()
+            } else {
+                actual_str.contains(&exp)
+            };
+            if passed {
+                Ok(assert_success(serde_json::Value::String(actual_str)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::String(actual_str),
+                    format!("{kind_lower} mismatch"),
+                ))
+            }
+        }
+        "attribute" => {
+            let sel = selector
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert attribute requires selector"))?;
+            let attr = attribute
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert attribute requires attribute"))?;
+            let exp = expected.clone().unwrap_or_default();
+            let resp = dock_exec!(
+                "get_attribute",
+                json!({ "selector": sel, "attribute": attr })
+            )?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error
+                        .unwrap_or_else(|| "get_attribute failed".into()),
+                ));
+            }
+            let actual_str = resp
+                .value
+                .as_object()
+                .and_then(|m| m.get("value").or_else(|| m.get("attribute")))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let passed = if exp.is_empty() {
+                !actual_str.is_empty()
+            } else {
+                actual_str == exp || actual_str.contains(&exp)
+            };
+            if passed {
+                Ok(assert_success(serde_json::Value::String(actual_str)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::String(actual_str),
+                    "attribute mismatch".to_string(),
+                ))
+            }
+        }
+        "value" => {
+            let sel = selector
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert value requires selector"))?;
+            let exp = expected.clone().unwrap_or_default();
+            let resp = dock_exec!(
+                "get_attribute",
+                json!({ "selector": sel, "attribute": "value" })
+            )?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error
+                        .unwrap_or_else(|| "get_attribute failed".into()),
+                ));
+            }
+            let actual_str = resp
+                .value
+                .as_object()
+                .and_then(|m| m.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let passed = if exp.is_empty() {
+                !actual_str.is_empty()
+            } else {
+                actual_str == exp
+            };
+            if passed {
+                Ok(assert_success(serde_json::Value::String(actual_str)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::String(actual_str),
+                    "value mismatch".to_string(),
+                ))
+            }
+        }
+        "count" => {
+            let sel = selector
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("assert count requires selector"))?;
+            let op_str = op.clone().unwrap_or_else(|| "==".to_string());
+            let want = count.unwrap_or(0);
+            let resp = dock_exec!("count", json!({ "selector": sel }))?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error.unwrap_or_else(|| "count failed".into()),
+                ));
+            }
+            let actual_count = resp
+                .value
+                .as_object()
+                .and_then(|m| m.get("count").or_else(|| m.get("value")))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let passed = compare_count(actual_count, &op_str, want);
+            if passed {
+                Ok(assert_success(serde_json::Value::from(actual_count)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::from(actual_count),
+                    format!("count {} {} {} failed", actual_count, op_str, want),
+                ))
+            }
+        }
+        "console_clean" => {
+            let resp = dock_exec!("console_logs", json!({ "level": "error" }))?;
+            if !resp.ok {
+                return Ok(assert_failure(
+                    serde_json::Value::Null,
+                    resp.error.unwrap_or_else(|| "console_logs failed".into()),
+                ));
+            }
+            let entries = resp
+                .value
+                .as_object()
+                .and_then(|m| m.get("entries"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let error_count = entries
+                .iter()
+                .filter(|e| {
+                    e.as_object()
+                        .and_then(|o| o.get("level"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("error"))
+                        .unwrap_or(false)
+                })
+                .count();
+            if error_count == 0 {
+                Ok(assert_success(serde_json::Value::from(0)))
+            } else {
+                Ok(assert_failure(
+                    serde_json::Value::from(error_count as u64),
+                    format!("found {error_count} console errors"),
+                ))
+            }
+        }
+        other => Ok(ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("Unsupported assert_kind '{other}'")),
+        }),
+    }
+}
+
+fn compare_count(actual: i64, op: &str, expected: i64) -> bool {
+    match op.trim() {
+        "==" | "=" | "eq" => actual == expected,
+        "!=" | "ne" => actual != expected,
+        ">" | "gt" => actual > expected,
+        ">=" | "gte" => actual >= expected,
+        "<" | "lt" => actual < expected,
+        "<=" | "lte" => actual <= expected,
+        _ => actual == expected,
+    }
 }

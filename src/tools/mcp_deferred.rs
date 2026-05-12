@@ -137,6 +137,7 @@ impl DeferredMcpToolSet {
 pub struct ActivatedToolSet {
     tools: HashMap<String, Arc<dyn Tool>>,
     specs: HashMap<String, ToolSpec>,
+    revision: u64,
 }
 
 impl ActivatedToolSet {
@@ -144,19 +145,40 @@ impl ActivatedToolSet {
         Self {
             tools: HashMap::new(),
             specs: HashMap::new(),
+            revision: 0,
         }
     }
 
     pub fn activate(&mut self, name: String, tool: Arc<dyn Tool>) {
+        let already = self.tools.contains_key(&name);
         self.tools.insert(name, tool);
+        if !already {
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 
     pub fn activate_spec(&mut self, name: String, spec: ToolSpec) {
+        let already = self.specs.contains_key(&name);
         self.specs.insert(name, spec);
+        if !already {
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 
     pub fn is_activated(&self, name: &str) -> bool {
         self.tools.contains_key(name) || self.specs.contains_key(name)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn len(&self) -> usize {
+        self.tools.len() + self.specs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty() && self.specs.is_empty()
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -216,11 +238,12 @@ pub fn build_deferred_tools_section(deferred: &DeferredMcpToolSet) -> String {
     let mut out = String::new();
     out.push_str("## Deferred Tools\n\n");
     out.push_str(
-        "The tools listed below are available but NOT yet loaded. \
-         To use any of them you MUST first call the `tool_search` tool \
-         to fetch their full schemas. Use `\"select:name1,name2\"` for \
-         exact tools or keywords to search. Once activated, the tools \
-         become callable for the rest of the conversation.\n\n",
+        "The MCP tools listed below are available but their full schemas are NOT yet loaded. \
+         To use any of them you MUST first call the `tool_search` tool to fetch their schemas:\n\
+         - Exact: `tool_search(query=\"select:server__tool_a,server__tool_b\")`.\n\
+         - Keyword: `tool_search(query=\"<1-4 keywords>\")`.\n\
+         After activation, call the tool directly by its prefixed name — no need to invoke \
+         `tool_search` again for the same tool.\n\n",
     );
     out.push_str("<available-deferred-tools>\n");
     for stub in &deferred.stubs {
@@ -315,6 +338,10 @@ impl DeferredBuiltinToolSet {
     }
 }
 
+#[deprecated(
+    since = "0.1.0",
+    note = "Use crate::tools::tool_tier::classify / partition_for_llm instead; this list will be removed after two release cycles."
+)]
 pub const BUILTIN_CORE_TOOL_NAMES: &[&str] = &[
     "file_read",
     "file_write",
@@ -342,6 +369,16 @@ pub const BUILTIN_CORE_TOOL_NAMES: &[&str] = &[
 ];
 
 pub fn build_deferred_builtin_section(deferred: &DeferredBuiltinToolSet) -> String {
+    build_deferred_builtin_section_with_surface(
+        deferred,
+        crate::tools::tool_tier::ToolSurfaceBaseline::Both,
+    )
+}
+
+pub fn build_deferred_builtin_section_with_surface(
+    deferred: &DeferredBuiltinToolSet,
+    surface: crate::tools::tool_tier::ToolSurfaceBaseline,
+) -> String {
     if deferred.is_empty() {
         return String::new();
     }
@@ -349,15 +386,23 @@ pub fn build_deferred_builtin_section(deferred: &DeferredBuiltinToolSet) -> Stri
     out.push_str("## Deferred Built-in Tools\n\n");
     out.push_str(
         "The built-in tools listed below are available but their full schemas are NOT loaded \
-         to keep the context window small. To call any of them you MUST first invoke the \
-         `tool_search` tool with the desired name(s) to fetch their schemas. Use \
-         `\"select:name1,name2\"` for exact tools or keywords to search. Once activated, \
-         the tools become callable for the rest of the conversation.\n\n",
+         to keep the context window small. Activate via `tool_search`:\n\
+         - Exact: `tool_search(query=\"select:name1,name2\")` — preferred when you know the tool name.\n\
+         - Keyword: `tool_search(query=\"<1-4 keywords>\")` — fuzzy match on name + description.\n\
+         Once a tool is activated, call it directly by its name on subsequent turns — do NOT \
+         invoke `tool_search` again for the same tool. Activations persist per-workspace across sessions. \
+         The `[Tier/Risk]` badge is informational metadata only and never blocks the call; \
+         treat `HighRisk` as a hint to confirm intent before destructive operations.\n\n",
     );
     out.push_str("<available-deferred-builtin-tools>\n");
     for stub in &deferred.stubs {
+        let entry = crate::tools::tool_tier::classify(&stub.name, surface);
         out.push_str(&stub.name);
-        out.push_str(" - ");
+        out.push_str(" [");
+        out.push_str(entry.tier.as_str());
+        out.push('/');
+        out.push_str(entry.risk.as_str());
+        out.push_str("] - ");
         out.push_str(&stub.description);
         out.push('\n');
     }

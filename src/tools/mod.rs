@@ -60,6 +60,7 @@ pub mod cron_runs;
 pub mod cron_update;
 #[cfg(feature = "tool-cloud-ops")]
 pub mod data_management;
+pub mod debug_test_report;
 pub mod delegate;
 pub mod delegate_parallel;
 pub mod diagnostics;
@@ -199,6 +200,7 @@ pub mod text_browser;
 pub mod todo_write;
 pub mod tool_groups;
 pub mod tool_search;
+pub mod tool_tier;
 pub mod traits;
 pub mod update_plan;
 pub mod verifiable_intent;
@@ -304,9 +306,11 @@ pub use llm_task::LlmTaskTool;
 pub use lsp::LspTool;
 pub use lsp_rename::LspRenameTool;
 pub use mcp_client::McpRegistry;
+#[allow(deprecated)]
+pub use mcp_deferred::BUILTIN_CORE_TOOL_NAMES;
 pub use mcp_deferred::{
-    ActivatedToolSet, BUILTIN_CORE_TOOL_NAMES, DeferredBuiltinToolSet, DeferredMcpToolSet,
-    build_deferred_builtin_section, build_deferred_tools_section,
+    ActivatedToolSet, DeferredBuiltinToolSet, DeferredMcpToolSet, build_deferred_builtin_section,
+    build_deferred_builtin_section_with_surface, build_deferred_tools_section,
 };
 pub use mcp_resources_list::McpResourcesListTool;
 pub use mcp_resources_read::McpResourcesReadTool;
@@ -389,6 +393,14 @@ pub use team_delete::TeamDeleteTool;
 pub use text_browser::TextBrowserTool;
 pub use todo_write::TodoWriteTool;
 pub use tool_search::ToolSearchTool;
+#[allow(unused_imports)]
+pub use tool_tier::{
+    BuiltinDeferredRegistrationOptions, BuiltinToolTier, TOOL_TIERS, ToolRiskLevel,
+    ToolSurfaceBaseline, ToolTierEntry, apply_builtin_deferred_registration,
+    apply_builtin_deferred_registration_with_options, build_deferred_builtin_set_for_surface,
+    classify as classify_tool_tier, deferred_loading_effective, is_eager_tier, known_tool_names,
+    partition_for_llm, risk_for, tier_for,
+};
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
@@ -922,6 +934,8 @@ pub fn all_tools_with_runtime(
             root_config.skills.disabled_skills.clone(),
         )));
     }
+
+    tool_arcs.push(Arc::new(debug_test_report::DebugTestReportTool::new()));
 
     if browser_config.enabled {
 

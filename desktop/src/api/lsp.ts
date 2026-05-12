@@ -41,11 +41,57 @@ export const lspApi = {
   }) => api.post<{ ok: boolean; skipped?: string }>('/api/lsp/textdocument', body),
 
   request: <T = unknown>(body: {
-    method: 'hover' | 'completion' | 'definition' | 'references'
+    method:
+      | 'hover'
+      | 'completion'
+      | 'definition'
+      | 'references'
+      | 'inlayHint'
+      | 'signatureHelp'
+      | 'documentSymbol'
+      | 'formatting'
+      | 'codeAction'
+      | 'executeCommand'
     uri: string
     languageId?: string
-    line: number
-    character: number
+    line?: number
+    character?: number
     text?: string
+    range?: {
+      start: { line: number; character: number }
+      end: { line: number; character: number }
+    }
+    options?: {
+      tabSize: number
+      insertSpaces: boolean
+    }
+    triggerCharacter?: string
+    diagnostics?: Array<Record<string, unknown>>
+    only?: string[]
+    command?: string
+    arguments?: unknown[]
   }) => api.post<{ result: T | null; error?: string }>('/api/lsp/request', body),
+
+  getPreferences: () =>
+    api.get<{ inlayHintsEnabled: boolean; formatOnSave: boolean; hoverDelayMs: number }>(
+      '/api/lsp/preferences',
+    ),
+
+  setPreferences: (body: {
+    inlayHintsEnabled?: boolean
+    formatOnSave?: boolean
+    hoverDelayMs?: number
+  }) =>
+    api.put<{
+      ok: true
+      inlayHintsEnabled: boolean
+      formatOnSave: boolean
+      hoverDelayMs: number
+    }>('/api/lsp/preferences', body),
+}
+
+export type LspPreferences = {
+  inlayHintsEnabled: boolean
+  formatOnSave: boolean
+  hoverDelayMs: number
 }

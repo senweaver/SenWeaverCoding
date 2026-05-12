@@ -27,6 +27,7 @@ use super::session_memory::SessionMemoryService;
 use super::settings_sync::{ConflictStrategy, SettingsSyncService};
 use super::team_memory_sync::TeamMemorySyncService;
 use super::token_estimation::TokenEstimator;
+use super::tool_activation_store::ToolActivationStore;
 use super::tool_use_summary::ToolUseSummaryService;
 
 use crate::agent::coding_mode::{CodingMode, CodingModeHandle};
@@ -137,6 +138,22 @@ pub struct ServiceContainer {
     pub health_broadcaster: crate::agent::health_signal::HealthBroadcaster,
 
     pub deferred_builtin_names: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+
+    pub tool_activation_store: Arc<ToolActivationStore>,
+
+    pub tool_search_invocations_total: Arc<std::sync::atomic::AtomicU64>,
+    pub tool_search_activations_total: Arc<std::sync::atomic::AtomicU64>,
+    pub tool_search_high_risk_blocked_total: Arc<std::sync::atomic::AtomicU64>,
+    pub tool_search_total_latency_ms: Arc<std::sync::atomic::AtomicU64>,
+    pub tool_search_latency_samples: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct ToolSearchMetricsSnapshot {
+    pub invocations: u64,
+    pub activations: u64,
+    pub high_risk_blocked: u64,
+    pub avg_latency_ms: u64,
 }
 
 pub struct ServiceContainerConfig {
@@ -206,6 +223,56 @@ impl ServiceContainer {
             deferred_builtin_names: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            tool_activation_store: Arc::new(ToolActivationStore::new(
+                cfg.data_dir.join("tool_activations"),
+            )),
+            tool_search_invocations_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_search_activations_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_search_high_risk_blocked_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_search_total_latency_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_search_latency_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub fn record_tool_search_invocation(&self, latency_ms: u64) {
+        use std::sync::atomic::Ordering;
+        self.tool_search_invocations_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.tool_search_total_latency_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
+        self.tool_search_latency_samples
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tool_search_activations(&self, count: u64) {
+        use std::sync::atomic::Ordering;
+        if count > 0 {
+            self.tool_search_activations_total
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_tool_search_high_risk_blocked(&self) {
+        use std::sync::atomic::Ordering;
+        self.tool_search_high_risk_blocked_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn tool_search_metrics_snapshot(&self) -> ToolSearchMetricsSnapshot {
+        use std::sync::atomic::Ordering;
+        let invocations = self.tool_search_invocations_total.load(Ordering::Relaxed);
+        let activations = self.tool_search_activations_total.load(Ordering::Relaxed);
+        let blocked = self
+            .tool_search_high_risk_blocked_total
+            .load(Ordering::Relaxed);
+        let total = self.tool_search_total_latency_ms.load(Ordering::Relaxed);
+        let samples = self.tool_search_latency_samples.load(Ordering::Relaxed);
+        let avg = if samples > 0 { total / samples } else { 0 };
+        ToolSearchMetricsSnapshot {
+            invocations,
+            activations,
+            high_risk_blocked: blocked,
+            avg_latency_ms: avg,
         }
     }
 

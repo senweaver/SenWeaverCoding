@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
-import { useWebResearchStore } from '../../stores/webResearchStore'
 import { useTranslation } from '../../i18n'
 import { useDockSuspend } from '../../hooks/useDockSuspend'
 import type { CodingModeId } from '../../types/codingMode'
@@ -51,21 +50,10 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const codingModes = useSettingsStore((s) => s.codingModes)
   const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const webSearchEnabled = useWebResearchStore((s) => s.webSearch?.enabled ?? null)
-  const webFetchEnabled = useWebResearchStore((s) => s.webFetch?.enabled ?? null)
-  const webHasFetched = useWebResearchStore((s) => s.hasFetched)
-  const webIsLoading = useWebResearchStore((s) => s.isLoading)
-  const fetchWebResearch = useWebResearchStore((s) => s.fetch)
   const [open, setOpen] = useState(false)
   const [pendingAutonomous, setPendingAutonomous] = useState<CodingModeId | null>(null)
   useDockSuspend(pendingAutonomous !== null)
   const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (open && !webHasFetched && !webIsLoading) {
-      void fetchWebResearch()
-    }
-  }, [open, webHasFetched, webIsLoading, fetchWebResearch])
 
   const isControlled = value !== undefined
   const currentMode: CodingModeId = isControlled ? value : storeMode
@@ -218,11 +206,6 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
               </button>
             )
           })}
-          <WebResearchStatusFooter
-            searchEnabled={webSearchEnabled}
-            fetchEnabled={webFetchEnabled}
-            t={t}
-          />
         </div>
       )}
 
@@ -275,40 +258,6 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
           </div>,
           document.body,
         )}
-    </div>
-  )
-}
-
-function WebResearchStatusFooter({
-  searchEnabled,
-  fetchEnabled,
-  t,
-}: {
-  searchEnabled: boolean | null
-  fetchEnabled: boolean | null
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string
-}) {
-  const searchOn = searchEnabled === true
-  const fetchOn = fetchEnabled === true
-  const dotClass = (on: boolean) =>
-    on ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-tertiary)]'
-
-  return (
-    <div className="mt-2 border-t border-[var(--color-border)]/60 px-3 pt-2 pb-1 text-[10px] text-[var(--color-text-tertiary)]">
-      <div className="flex items-center gap-2">
-        <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass(searchOn)}`} />
-        <span className="flex-1 truncate">{t('codingMode.webSearchStatus')}</span>
-        <span className="font-medium text-[var(--color-text-secondary)]">
-          {t(searchOn ? 'codingMode.webStatusOn' : 'codingMode.webStatusOff')}
-        </span>
-      </div>
-      <div className="mt-1 flex items-center gap-2">
-        <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass(fetchOn)}`} />
-        <span className="flex-1 truncate">{t('codingMode.webFetchStatus')}</span>
-        <span className="font-medium text-[var(--color-text-secondary)]">
-          {t(fetchOn ? 'codingMode.webStatusOn' : 'codingMode.webStatusOff')}
-        </span>
-      </div>
     </div>
   )
 }

@@ -47,11 +47,14 @@ export function clampRectToHost(
   }
 }
 
+export type BrowserDockTabOwner = 'user' | 'agent'
+
 export type BrowserDockTabInfo = {
   id: number
   url: string | null
   title: string | null
   active: boolean
+  owner?: BrowserDockTabOwner
 }
 
 export type BrowserDockEvent =

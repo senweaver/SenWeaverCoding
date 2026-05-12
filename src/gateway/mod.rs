@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 //! Axum-based HTTP gateway with proper HTTP/1.1 compliance, body limits, and timeouts.
@@ -24,8 +24,10 @@ pub mod sse;
 
 pub mod tls;
 pub mod ws;
+pub mod credential_routes;
 pub mod desktop_routes;
 pub mod evolution_routes;
+pub mod git_routes;
 pub mod workspace_files;
 pub mod ws_desktop;
 
@@ -553,6 +555,12 @@ pub struct AppState {
     pub lsp: Arc<crate::lsp::LspManager>,
 
     pub lsp_events: crate::lsp::LspBroadcast,
+
+    pub session_run_state: Arc<crate::session::SessionRunStateRegistry>,
+
+    pub workspace_run_state: Arc<crate::session::WorkspaceRunRegistry>,
+
+    pub git_status_cache: git_routes::GitStatusCache,
 }
 
 impl AppState {
@@ -682,6 +690,12 @@ async fn run_gateway_inner(
     hooks_runner.rebuild(&config, &hooks_workspace_anchor);
     let hooks: std::sync::Arc<crate::hooks::HotHookRunner> = std::sync::Arc::clone(&hooks_runner);
 
+    if let Err(err) =
+        crate::services::credential_vault::init_credential_vault(&hooks_workspace_anchor)
+    {
+        tracing::warn!(error = %err, "Failed to initialise credential vault");
+    }
+
     let lsp_broadcast = crate::lsp::LspBroadcast::default();
     let lsp_service = crate::services::try_get_services()
         .map(|svc| svc.lsp.clone())
@@ -805,6 +819,11 @@ async fn run_gateway_inner(
         Some(canvas_store.clone()),
     );
 
+    let (gateway_builtin_deferred_enabled, gateway_mcp_deferred_enabled) =
+        crate::tools::deferred_loading_effective(&config);
+    let mut gateway_activated_handle: Option<
+        std::sync::Arc<parking_lot::Mutex<tools::ActivatedToolSet>>,
+    > = None;
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
         tracing::info!(
             "Gateway: initializing MCP client  -  {} server(s) configured",
@@ -831,7 +850,7 @@ async fn run_gateway_inner(
         match mcp_outcome {
             Ok(registry) => {
                 let registry = std::sync::Arc::new(registry);
-                if config.mcp.deferred_loading {
+                if gateway_mcp_deferred_enabled {
                     let deferred_set =
                         tools::DeferredMcpToolSet::from_registry(std::sync::Arc::clone(&registry))
                             .await;
@@ -843,6 +862,7 @@ async fn run_gateway_inner(
                     let activated = std::sync::Arc::new(parking_lot::Mutex::new(
                         tools::ActivatedToolSet::new(),
                     ));
+                    gateway_activated_handle = Some(std::sync::Arc::clone(&activated));
                     tools_registry_raw.push(Box::new(tools::ToolSearchTool::new(
                         deferred_set,
                         activated,
@@ -876,6 +896,38 @@ async fn run_gateway_inner(
                 tracing::error!("Gateway MCP registry failed to initialize: {e:#}");
             }
         }
+    }
+
+    if gateway_builtin_deferred_enabled {
+        let mut gateway_deferred_section = String::new();
+        let workspace_key = crate::session::workspace_key_from_path(
+            &config.workspace_dir,
+            "gateway",
+        );
+        let allowlist = config.permissions.tool_allowlist.clone();
+        let sink = crate::gateway::ws::gateway_approval_sink_handle();
+        let bus = crate::gateway::ws::gateway_approval_bus().clone();
+        let gate: Option<crate::security::permissions::ToolActivationGateHandle> = Some(
+            std::sync::Arc::new(crate::security::permissions::SessionActivationGate::new(
+                sink,
+                bus,
+                300_000,
+            )) as crate::security::permissions::ToolActivationGateHandle,
+        );
+        let options = crate::tools::BuiltinDeferredRegistrationOptions {
+            workspace_key,
+            allowlist,
+            gate,
+            config: Some(&config),
+        };
+        let _gateway_builtin_set =
+            crate::tools::apply_builtin_deferred_registration_with_options(
+                &mut tools_registry_raw,
+                &mut gateway_deferred_section,
+                crate::tools::ToolSurfaceBaseline::Desktop,
+                &mut gateway_activated_handle,
+                options,
+            );
     }
 
     let tools_registry: Arc<Vec<ToolSpec>> =
@@ -1226,6 +1278,9 @@ async fn run_gateway_inner(
         hooks: hooks.clone(),
         lsp: lsp_manager.clone(),
         lsp_events: lsp_broadcast.clone(),
+        session_run_state: crate::session::SessionRunStateRegistry::new(),
+        workspace_run_state: crate::session::WorkspaceRunRegistry::new(),
+        git_status_cache: git_routes::new_git_status_cache(),
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(crate::security::SecretStore::new(
@@ -1309,6 +1364,10 @@ async fn run_gateway_inner(
         .route(
             "/api/sessions",
             get(api::handle_api_sessions_list).post(api::handle_api_session_create),
+        )
+        .route(
+            "/api/sessions/events",
+            get(api::handle_api_sessions_events),
         )
         .route(
             "/api/sessions/recent-projects",
@@ -1418,6 +1477,14 @@ async fn run_gateway_inner(
         .route(
             "/api/providers/{id}/test",
             post(desktop_routes::handle_providers_test),
+        )
+        .route(
+            "/api/credentials",
+            get(credential_routes::handle_list).put(credential_routes::handle_put),
+        )
+        .route(
+            "/api/credentials/{name}",
+            delete(credential_routes::handle_delete),
         )
         .route(
             "/api/skills",
@@ -1613,6 +1680,11 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_lsp_list).put(desktop_routes::handle_lsp_global_put),
         )
         .route(
+            "/api/lsp/preferences",
+            get(desktop_routes::handle_lsp_preferences_get)
+                .put(desktop_routes::handle_lsp_preferences_put),
+        )
+        .route(
             "/api/lsp/servers",
             post(desktop_routes::handle_lsp_create),
         )
@@ -1701,6 +1773,7 @@ async fn run_gateway_inner(
         .route("/api/workspace/entry", delete(workspace_files::handle_workspace_delete))
         .route("/api/workspace/search", get(workspace_files::handle_workspace_search))
         .route("/api/workspace/watch", get(workspace_files::handle_workspace_watch))
+        .route("/api/git/status", get(git_routes::handle_git_status))
         .route(
             "/api/settings/user",
             get(desktop_routes::handle_settings_user_get).put(desktop_routes::handle_settings_user_put),

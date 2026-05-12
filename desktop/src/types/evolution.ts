@@ -53,6 +53,13 @@ export type EvolutionOverview = {
     recent24hHarvested: number
     lastHarvestAt: string | null
   }
+  tools?: {
+    invocations: number
+    activations: number
+    highRiskBlocked: number
+    avgLatencyMs: number
+    deferredBuiltinCount?: number
+  }
 }
 
 export type EvolutionLesson = {

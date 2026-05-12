@@ -6,7 +6,7 @@
 // publishDiagnostics events all reach this store without polling.
 
 import { create } from 'zustand'
-import { lspApi } from '../api/lsp'
+import { lspApi, type LspPreferences } from '../api/lsp'
 import type {
   LspBroadcastEvent,
   LspDiagnostic,
@@ -42,6 +42,9 @@ type LspStore = {
   installProgress: InstallProgressMap
   serverStatus: ServerStatusMap
 
+  preferences: LspPreferences
+  preferencesLoaded: boolean
+
   fetch: () => Promise<void>
   setGlobalEnabled: (enabled: boolean) => Promise<void>
   createServer: (payload: LspUpsertPayload) => Promise<LspServerRecord>
@@ -51,6 +54,9 @@ type LspStore = {
   installServer: (id: string) => Promise<void>
   restartServer: (id: string) => Promise<void>
   selectServer: (id: string | null) => void
+
+  fetchPreferences: () => Promise<void>
+  setPreferences: (payload: Partial<LspPreferences>) => Promise<void>
 
   handleBroadcastEvent: (event: LspBroadcastEvent) => void
 }
@@ -143,6 +149,9 @@ export const useLspStore = create<LspStore>((set, get) => ({
   installProgress: {},
   serverStatus: {},
 
+  preferences: { inlayHintsEnabled: true, formatOnSave: false, hoverDelayMs: 250 },
+  preferencesLoaded: false,
+
   fetch: async () => {
     set({ isLoading: true, error: null })
     try {
@@ -222,6 +231,30 @@ export const useLspStore = create<LspStore>((set, get) => ({
   },
 
   selectServer: (id) => set({ selectedId: id }),
+
+  fetchPreferences: async () => {
+    try {
+      const prefs = await lspApi.getPreferences()
+      set({ preferences: prefs, preferencesLoaded: true })
+    } catch (err) {
+      set({
+        preferencesLoaded: true,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  },
+
+  setPreferences: async (payload) => {
+    const result = await lspApi.setPreferences(payload)
+    set({
+      preferences: {
+        inlayHintsEnabled: result.inlayHintsEnabled,
+        formatOnSave: result.formatOnSave,
+        hoverDelayMs: result.hoverDelayMs,
+      },
+      preferencesLoaded: true,
+    })
+  },
 
   handleBroadcastEvent: (event) => {
     switch (event.type) {

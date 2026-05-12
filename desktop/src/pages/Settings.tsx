@@ -21,6 +21,7 @@ import { RulesSkillsSubagentsSettings } from './RulesSkillsSubagentsSettings'
 import { AgentsSettings } from './AgentsSettings'
 import { LspSettings } from './LspSettings'
 import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings'
+import { CredentialsSettings } from './CredentialsSettings'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 
 export function Settings() {
@@ -53,6 +54,7 @@ export function Settings() {
             <TabButton icon="build" label={t('settings.tab.mcp')} active={activeTab === 'mcp'} onClick={() => setActiveTab('mcp')} />
             <TabButton icon="code" label={t('settings.tab.lsp')} active={activeTab === 'lsp'} onClick={() => setActiveTab('lsp')} />
             <TabButton icon="keyboard" label={t('settings.tab.keyboard')} active={activeTab === 'keyboard'} onClick={() => setActiveTab('keyboard')} />
+            <TabButton icon="key" label={t('settings.tab.credentials')} active={activeTab === 'credentials'} onClick={() => setActiveTab('credentials')} />
             <TabButton icon="webhook" label={t('settings.tab.hooks')} active={activeTab === 'hooks'} onClick={() => setActiveTab('hooks')} />
           </div>
           <div className="flex-shrink-0 border-t border-[var(--color-border)] pt-2 mt-2">
@@ -79,6 +81,7 @@ export function Settings() {
           {activeTab === 'hooks' && <HooksSettings />}
           {activeTab === 'usage' && <UsageSettings />}
           {activeTab === 'evolution' && <EvolutionSettings />}
+          {activeTab === 'credentials' && <CredentialsSettings />}
         </div>
       </div>
     </div>

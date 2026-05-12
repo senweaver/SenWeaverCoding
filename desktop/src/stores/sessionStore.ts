@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { sessionsApi } from '../api/sessions'
+import { useSessionRunStateStore } from './sessionRunStateStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { SCHEDULED_TAB_ID } from './tabStore'
 import type { SessionListItem } from '../types/session'
@@ -75,6 +76,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       }
       const sessions = [...byId.values()]
       const availableProjects = [...new Set(sessions.map((s) => s.projectPath).filter(Boolean))].sort()
+      const runningIds = sessions.filter((s) => s.running === true).map((s) => s.id)
+      if (runningIds.length > 0) {
+        useSessionRunStateStore.getState().mergeIds(runningIds)
+      }
       set({ sessions, availableProjects, isLoading: false })
     } catch (err) {
       set({ error: (err as Error).message, isLoading: false })

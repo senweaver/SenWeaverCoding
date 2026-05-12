@@ -10,6 +10,7 @@ import type {
 export type WorkspaceWatchEvent = {
   kind: 'created' | 'modified' | 'removed' | 'renamed'
   relPath: string
+  fromRelPath?: string
 }
 
 function qs(params: Record<string, string | number | boolean | undefined>) {
@@ -138,6 +139,9 @@ export const workspaceFilesApi = {
       try {
         const data = JSON.parse(msg.data) as WorkspaceWatchEvent
         if (data && typeof data.relPath === 'string' && typeof data.kind === 'string') {
+          if (typeof data.fromRelPath !== 'string') {
+            delete (data as { fromRelPath?: string }).fromRelPath
+          }
           onEvent(data)
         }
       } catch {

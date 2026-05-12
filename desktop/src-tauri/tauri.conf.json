@@ -22,7 +22,9 @@
         "decorations": false,
         "shadow": false,
         "transparent": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "visible": false,
+        "backgroundColor": "#00000000"
       }
     ],
     "security": {

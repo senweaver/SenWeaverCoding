@@ -245,6 +245,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         token_saver: crate::config::schema::TokenSaverConfig::default(),
         custom_tools: crate::config::schema::CustomToolsConfig::default(),
         lsp: crate::config::schema::LspConfig::default(),
+        permissions: crate::security::permissions::PermissionsConfig::default(),
     };
 
     println!(
@@ -707,6 +708,7 @@ async fn run_quick_setup_with_home(
         token_saver: crate::config::schema::TokenSaverConfig::default(),
         custom_tools: crate::config::schema::CustomToolsConfig::default(),
         lsp: crate::config::schema::LspConfig::default(),
+        permissions: crate::security::permissions::PermissionsConfig::default(),
     };
 
     config.save().await?;

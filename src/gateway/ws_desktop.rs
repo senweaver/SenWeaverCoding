@@ -936,21 +936,23 @@ impl DesktopSqlitePersist {
 
     fn on_tool_use(&mut self, name: &str, tool_use_id: &str, input: serde_json::Value) {
         self.absorb_pending_text_into_segment();
+        let safe_input = crate::services::credential_vault::redact_args_optional(&input);
         self.assistant_segment.push(json!({
             "type": "tool_use",
             "name": name,
             "id": tool_use_id,
-            "input": input,
+            "input": safe_input,
         }));
     }
 
     fn on_tool_result(&mut self, tool_use_id: &str, output: String, is_error: bool) {
         self.absorb_pending_text_into_segment();
         self.finalize_assistant_segment();
+        let safe_output = crate::services::credential_vault::redact_for_audit_optional(&output);
         let payload = vec![json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": output,
+            "content": safe_output,
             "is_error": is_error,
         })];
         if let Ok(s) = serde_json::to_string(&payload) {
@@ -981,6 +983,38 @@ async fn run_turn(
     content: &str,
 ) {
     use crate::agent::TurnEvent;
+
+    let workspace_key = crate::session::workspace_key_from_path(
+        agent.current_workspace_dir(),
+        session_id,
+    );
+    let _workspace_guard = match state
+        .workspace_run_state
+        .try_acquire(&workspace_key, session_id)
+    {
+        Some(g) => g,
+        None => {
+            let holder = state.workspace_run_state.current(&workspace_key);
+            tracing::warn!(
+                session_id,
+                workspace_key = %workspace_key,
+                holder = ?holder,
+                "run_turn rejected: workspace already busy",
+            );
+            let _ = send_json(
+                sender,
+                &serde_json::json!({
+                    "type": "workspace_busy",
+                    "workspaceKey": workspace_key,
+                    "currentSessionId": holder,
+                }),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let _run_guard = state.session_run_state.guard(session_id.to_string());
 
     let _ = send_json(
         sender,
@@ -1137,8 +1171,9 @@ async fn run_turn(
                     let id = next_tool_use_id();
                     current_tool_use_id = Some(id.clone());
                     tool_use_id_for_name.insert(name.clone(), id.clone());
+                    let safe_args = crate::services::credential_vault::redact_args_optional(&args);
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
-                        pg.on_tool_use(&name, &id, args.clone());
+                        pg.on_tool_use(&name, &id, safe_args.clone());
                     }
                     let _ = send_json(
                         sender,
@@ -1156,7 +1191,7 @@ async fn run_turn(
                             "type": "tool_use_complete",
                             "toolName": name,
                             "toolUseId": id,
-                            "input": args,
+                            "input": safe_args,
                         }),
                     )
                     .await;
@@ -1169,15 +1204,17 @@ async fn run_turn(
                     current_tool_use_id = None;
                     let is_error = !success
                         || crate::agent::tool_event_status::output_indicates_error(&output);
+                    let safe_output =
+                        crate::services::credential_vault::redact_for_audit_optional(&output);
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
-                        pg.on_tool_result(&id, output.clone(), is_error);
+                        pg.on_tool_result(&id, safe_output.clone(), is_error);
                     }
                     let _ = send_json(
                         sender,
                         &serde_json::json!({
                             "type": "tool_result",
                             "toolUseId": id,
-                            "content": output,
+                            "content": safe_output,
                             "isError": is_error,
                         }),
                     )

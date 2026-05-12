@@ -138,6 +138,13 @@ pub async fn handle_overview(
     let judge_metrics = engine.judge_worker_metrics();
     let scheduler_metrics = engine.reflection_scheduler_metrics();
     let recycling_metrics = engine.recycling_metrics();
+    let services_opt = crate::services::try_get_services();
+    let tools_metrics = services_opt
+        .map(|svc| svc.tool_search_metrics_snapshot())
+        .unwrap_or_default();
+    let deferred_builtin_count = services_opt
+        .map(|svc| svc.deferred_builtin_names.read().len() as u64)
+        .unwrap_or(0);
     Json(serde_json::json!({
         "enabled": snapshot.enabled,
         "persistTrainingData": snapshot.persist_training_data,
@@ -176,6 +183,13 @@ pub async fn handle_overview(
             "totalHarvested": recycling_metrics.total_harvested,
             "recent24hHarvested": recycling_metrics.recent_24h_harvested,
             "lastHarvestAt": recycling_metrics.last_harvest_at,
+        },
+        "tools": {
+            "invocations": tools_metrics.invocations,
+            "activations": tools_metrics.activations,
+            "highRiskBlocked": tools_metrics.high_risk_blocked,
+            "avgLatencyMs": tools_metrics.avg_latency_ms,
+            "deferredBuiltinCount": deferred_builtin_count,
         },
     }))
     .into_response()

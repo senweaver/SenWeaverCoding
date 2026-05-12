@@ -416,7 +416,7 @@ function MenuRow({ children, onClick }: { children: ReactNode; onClick: () => vo
       type="button"
       role="menuitem"
       onClick={onClick}
-      className="flex w-full px-3 py-1.5 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+      className="flex w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
     >
       {children}
     </button>

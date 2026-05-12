@@ -144,15 +144,163 @@ const BRIDGE_JS: &str = r#"
 
   window.addEventListener('error', (ev) => {
     try {
-      send('console', { level: 'error', message: `[uncaught] ${ev.message} (${ev.filename}:${ev.lineno})`, ts: Date.now() });
+      const entry = { level: 'error', message: `[uncaught] ${ev.message} (${ev.filename}:${ev.lineno})`, ts: Date.now() };
+      consoleRing.push(entry);
+      while (consoleRing.length > ringMax) consoleRing.shift();
+      send('console', entry);
     } catch (_) {}
   });
   window.addEventListener('unhandledrejection', (ev) => {
     try {
       const reason = ev.reason && (ev.reason.stack || ev.reason.message || String(ev.reason));
-      send('console', { level: 'error', message: `[unhandledrejection] ${reason}`, ts: Date.now() });
+      const entry = { level: 'error', message: `[unhandledrejection] ${reason}`, ts: Date.now() };
+      consoleRing.push(entry);
+      while (consoleRing.length > ringMax) consoleRing.shift();
+      send('console', entry);
     } catch (_) {}
   });
+
+  let netInflight = 0;
+  let netLastActive = Date.now();
+  const netErrorsMax = 64;
+  const netErrors = [];
+  function recordNetError(entry) {
+    try {
+      const safe = {
+        ts: Number(entry && entry.ts) || Date.now(),
+        method: String((entry && entry.method) || 'GET').toUpperCase(),
+        url: String((entry && entry.url) || ''),
+        status: Number((entry && entry.status) || 0),
+        duration_ms: Number((entry && entry.duration_ms) || 0),
+        page_url: window.location && window.location.href ? window.location.href : '',
+      };
+      if (!safe.url) return;
+      netErrors.push(safe);
+      while (netErrors.length > netErrorsMax) netErrors.shift();
+      send('network_error', safe);
+    } catch (_) {}
+  }
+  function normaliseFetchUrl(input) {
+    try {
+      if (typeof input === 'string') return input;
+      if (input && typeof input.url === 'string') return input.url;
+    } catch (_) {}
+    return '';
+  }
+  function normaliseFetchMethod(input, init) {
+    try {
+      if (init && typeof init.method === 'string') return init.method;
+      if (input && typeof input.method === 'string') return input.method;
+    } catch (_) {}
+    return 'GET';
+  }
+  function markNetStart() {
+    netInflight += 1;
+    netLastActive = Date.now();
+  }
+  function markNetEnd() {
+    if (netInflight > 0) netInflight -= 1;
+    netLastActive = Date.now();
+  }
+  try {
+    const origFetch = window.fetch ? window.fetch.bind(window) : null;
+    if (origFetch) {
+      window.fetch = function patchedFetch(input, init) {
+        markNetStart();
+        const startedAt = Date.now();
+        const reqUrl = normaliseFetchUrl(input);
+        const reqMethod = normaliseFetchMethod(input, init);
+        let promise;
+        try { promise = origFetch(input, init); } catch (err) { markNetEnd(); throw err; }
+        return promise.then((res) => {
+          markNetEnd();
+          try {
+            if (res && typeof res.status === 'number' && res.status >= 400) {
+              recordNetError({
+                ts: Date.now(),
+                method: reqMethod,
+                url: (res && res.url) || reqUrl,
+                status: res.status,
+                duration_ms: Date.now() - startedAt,
+              });
+            }
+          } catch (_) {}
+          return res;
+        }, (err) => {
+          markNetEnd();
+          try {
+            recordNetError({
+              ts: Date.now(),
+              method: reqMethod,
+              url: reqUrl,
+              status: 0,
+              duration_ms: Date.now() - startedAt,
+            });
+          } catch (_) {}
+          throw err;
+        });
+      };
+    }
+  } catch (_) {}
+  try {
+    const XHR = window.XMLHttpRequest;
+    if (XHR && XHR.prototype) {
+      const origOpen = XHR.prototype.open;
+      const origSend = XHR.prototype.send;
+      XHR.prototype.open = function patchedOpen(method, url) {
+        try {
+          this.__senTracked = true;
+          this.__senMethod = (typeof method === 'string' ? method : 'GET');
+          this.__senUrl = (typeof url === 'string' ? url : '');
+        } catch (_) {}
+        return origOpen.apply(this, arguments);
+      };
+      XHR.prototype.send = function patchedSend(...args) {
+        if (this.__senTracked) {
+          markNetStart();
+          const startedAt = Date.now();
+          const xhrRef = this;
+          const finish = () => {
+            markNetEnd();
+            try {
+              const status = Number(xhrRef.status) || 0;
+              if (status >= 400 || status === 0) {
+                recordNetError({
+                  ts: Date.now(),
+                  method: xhrRef.__senMethod || 'GET',
+                  url: xhrRef.responseURL || xhrRef.__senUrl || '',
+                  status,
+                  duration_ms: Date.now() - startedAt,
+                });
+              }
+            } catch (_) {}
+          };
+          this.addEventListener('loadend', finish, { once: true });
+          this.addEventListener('abort', finish, { once: true });
+          this.addEventListener('error', finish, { once: true });
+        }
+        return origSend.apply(this, args);
+      };
+    }
+  } catch (_) {}
+  try {
+    const NativeWS = window.WebSocket;
+    if (NativeWS) {
+      const Patched = function PatchedWebSocket(url, protocols) {
+        const ws = protocols == null ? new NativeWS(url) : new NativeWS(url, protocols);
+        markNetStart();
+        let closed = false;
+        const finish = () => { if (!closed) { closed = true; markNetEnd(); } };
+        try {
+          ws.addEventListener('close', finish);
+          ws.addEventListener('error', finish);
+        } catch (_) {}
+        return ws;
+      };
+      Patched.prototype = NativeWS.prototype;
+      try { window.WebSocket = Patched; } catch (_) {}
+    }
+  } catch (_) {}
 
   function isOpenableHttpUrl(absolute) {
     if (typeof absolute !== 'string') return false;
@@ -505,9 +653,178 @@ const BRIDGE_JS: &str = r#"
     },
     get_attribute(args) {
       const el = findOne(args && args.selector);
-      const name = (args && args.name) || '';
+      const name = (args && (args.name || args.attribute)) || '';
       if (!name) throw new Error('attribute name is required');
-      return { selector: args.selector, name, value: el.getAttribute(name) };
+      let value;
+      if (name === 'value') {
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+          value = el.value;
+        } else {
+          value = el.getAttribute('value');
+        }
+      } else if (name === 'checked') {
+        value = el instanceof HTMLInputElement ? String(el.checked) : el.getAttribute('checked');
+      } else {
+        value = el.getAttribute(name);
+      }
+      return { selector: args.selector, name, attribute: name, value };
+    },
+    count(args) {
+      const sel = args && args.selector;
+      if (!sel) throw new Error('selector is required');
+      try {
+        const all = document.querySelectorAll(sel);
+        return { selector: sel, count: all.length };
+      } catch (err) {
+        return { selector: sel, count: 0, error: String(err && err.message || err) };
+      }
+    },
+    console_logs(args) {
+      const level = args && args.level;
+      const since = (args && Number(args.since_ms)) || 0;
+      const limit = (args && Number(args.limit)) || 0;
+      let entries = consoleRing.slice();
+      if (level) entries = entries.filter((e) => e.level === level);
+      if (since > 0) entries = entries.filter((e) => Number(e.ts) >= since);
+      if (limit > 0 && entries.length > limit) entries = entries.slice(entries.length - limit);
+      if (args && args.clear_after) {
+        consoleRing.length = 0;
+      }
+      return { entries, count: entries.length, buffered: consoleRing.length };
+    },
+    network_errors(args) {
+      const since = (args && Number(args.since_ms)) || 0;
+      const limit = (args && Number(args.limit)) || 0;
+      let entries = netErrors.slice();
+      if (since > 0) entries = entries.filter((e) => Number(e.ts) >= since);
+      if (limit > 0 && entries.length > limit) entries = entries.slice(entries.length - limit);
+      return { entries, count: entries.length, buffered: netErrors.length, page_url: window.location ? window.location.href : '' };
+    },
+    collect_links(args) {
+      const sameOrigin = !!(args && args.same_origin);
+      const limit = (args && Number(args.limit)) || 0;
+      const seen = new Set();
+      const out = [];
+      let origin = '';
+      try { origin = window.location && window.location.origin ? window.location.origin : ''; } catch (_) {}
+      const els = document.querySelectorAll('a[href], [role="link"], form[action]');
+      for (let i = 0; i < els.length; i += 1) {
+        const el = els[i];
+        let rawUrl = '';
+        try {
+          if (typeof el.href === 'string' && el.href) {
+            rawUrl = el.href;
+          } else if (el.getAttribute) {
+            rawUrl = el.getAttribute('action') || el.getAttribute('href') || '';
+          }
+        } catch (_) { rawUrl = ''; }
+        if (!rawUrl) continue;
+        let absolute = '';
+        try { absolute = new URL(rawUrl, window.location.href).toString(); } catch (_) { absolute = ''; }
+        if (!absolute) continue;
+        if (sameOrigin && origin) {
+          try {
+            const candidateOrigin = new URL(absolute).origin;
+            if (candidateOrigin !== origin) continue;
+          } catch (_) { continue; }
+        }
+        if (seen.has(absolute)) continue;
+        seen.add(absolute);
+        let text = '';
+        try {
+          if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement) {
+            text = String(el.value || el.innerText || '');
+          } else {
+            text = String(el.innerText || el.textContent || '');
+          }
+        } catch (_) { text = ''; }
+        text = text.trim().replace(/\s+/g, ' ').slice(0, 120);
+        let tag = '';
+        try { tag = (el.tagName || '').toLowerCase(); } catch (_) { tag = ''; }
+        out.push({ url: absolute, text, type: tag || 'link' });
+        if (limit > 0 && out.length >= limit) break;
+      }
+      return { links: out, count: out.length, same_origin: sameOrigin, origin };
+    },
+    network_snapshot() {
+      return { inflight: netInflight, idle_ms: Date.now() - netLastActive };
+    },
+    network_idle(args) {
+      const idleMs = (args && Number(args.idle_ms)) || 500;
+      const timeoutMs = (args && Number(args.timeout_ms)) || 15000;
+      const start = Date.now();
+      return new Promise((resolve, reject) => {
+        const tick = () => {
+          if (netInflight === 0 && (Date.now() - netLastActive) >= idleMs) {
+            resolve({ idle_ms: Date.now() - netLastActive, elapsed_ms: Date.now() - start });
+            return;
+          }
+          if (Date.now() - start >= timeoutMs) {
+            reject(new Error('network_idle timeout'));
+            return;
+          }
+          setTimeout(tick, 100);
+        };
+        tick();
+      });
+    },
+    clear_storage(args) {
+      const scope = (args && String(args.scope || 'all')).toLowerCase();
+      const out = { scope, cookies: false, storage: false, cache: false, indexeddb: false };
+      try {
+        if (scope === 'all' || scope === 'local') {
+          try { localStorage.clear(); } catch (_) {}
+        }
+        if (scope === 'all' || scope === 'session') {
+          try { sessionStorage.clear(); } catch (_) {}
+        }
+        out.storage = true;
+      } catch (_) {}
+      if (scope === 'all' || scope === 'cookies') {
+        try {
+          document.cookie.split(';').forEach((c) => {
+            const eq = c.indexOf('=');
+            const name = eq > -1 ? c.slice(0, eq).trim() : c.trim();
+            if (!name) return;
+            document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+          });
+          out.cookies = true;
+        } catch (_) {}
+      }
+      if (scope === 'all' || scope === 'cache') {
+        try {
+          if (window.caches && caches.keys) {
+            return caches.keys()
+              .then((names) => Promise.all(names.map((n) => caches.delete(n))))
+              .then(() => { out.cache = true; return out; })
+              .catch(() => out);
+          }
+        } catch (_) {}
+      }
+      if (scope === 'all' || scope === 'indexeddb') {
+        try {
+          if (indexedDB && indexedDB.databases) {
+            return indexedDB.databases().then((dbs) => {
+              dbs.forEach((db) => { try { if (db.name) indexedDB.deleteDatabase(db.name); } catch (_) {} });
+              out.indexeddb = true;
+              return out;
+            }).catch(() => out);
+          }
+        } catch (_) {}
+      }
+      return out;
+    },
+    history_back() {
+      try { window.history.back(); } catch (_) {}
+      return { back: true };
+    },
+    history_forward() {
+      try { window.history.forward(); } catch (_) {}
+      return { forward: true };
+    },
+    history_reload() {
+      try { window.location.reload(); } catch (_) {}
+      return { reloaded: true };
     },
     select_option(args) {
       const el = findOne(args && args.selector);
@@ -600,8 +917,26 @@ const BRIDGE_JS: &str = r#"
     wait_for(args) {
       const sel = args && args.selector;
       const text = args && args.text;
-      const readyState = args && (args.ready_state || args.readyState);
+      let readyState = args && (args.ready_state || args.readyState);
+      const until = args && args.until;
+      if (until === 'load') readyState = 'complete';
+      else if (until === 'dom_content_loaded') readyState = 'interactive';
       const timeoutMs = (args && (args.timeout_ms || args.ms)) || 15000;
+      if (until === 'network_idle') {
+        const idleMs = (args && Number(args.idle_ms)) || 500;
+        const start = Date.now();
+        return new Promise((resolve, reject) => {
+          const tick = () => {
+            if (netInflight === 0 && (Date.now() - netLastActive) >= idleMs) {
+              resolve({ until: 'network_idle', idle_ms: Date.now() - netLastActive, elapsed_ms: Date.now() - start });
+              return;
+            }
+            if (Date.now() - start >= timeoutMs) { reject(new Error('wait_for network_idle timeout')); return; }
+            setTimeout(tick, 100);
+          };
+          tick();
+        });
+      }
       const onlyMs = !sel && !text && !readyState && (args && (args.ms != null));
       if (onlyMs) {
         const ms = Number(args.ms) || 0;
@@ -823,10 +1158,24 @@ impl DockRect {
 
 pub type TabId = u32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabOwner {
+    User,
+    Agent,
+}
+
+impl Default for TabOwner {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 struct TabRecord {
     last_url: Option<String>,
     last_title: Option<String>,
+    owner: TabOwner,
 }
 
 #[derive(Default)]
@@ -839,6 +1188,7 @@ struct TabsState {
     parked: bool,
     dock_visible: bool,
     last_state_url: HashMap<TabId, String>,
+    agent_tab_id: Option<TabId>,
 }
 
 #[derive(Default, Clone)]
@@ -850,6 +1200,7 @@ pub struct TabSummary {
     pub url: Option<String>,
     pub title: Option<String>,
     pub active: bool,
+    pub owner: TabOwner,
 }
 
 impl DockSharedState {
@@ -902,13 +1253,14 @@ impl DockSharedState {
         g.next_id
     }
 
-    fn register_tab(&self, id: TabId, url: Option<String>) {
+    fn register_tab(&self, id: TabId, url: Option<String>, owner: TabOwner) {
         let mut g = self.0.lock();
         g.tabs.insert(
             id,
             TabRecord {
                 last_url: url,
                 last_title: None,
+                owner,
             },
         );
         if !g.order.contains(&id) {
@@ -917,12 +1269,33 @@ impl DockSharedState {
         if g.active.is_none() {
             g.active = Some(id);
         }
+        if matches!(owner, TabOwner::Agent) && g.agent_tab_id.is_none() {
+            g.agent_tab_id = Some(id);
+        }
     }
 
-    fn acquire_active_or_reserve(&self, url: Option<String>) -> (TabId, bool) {
+    fn acquire_or_create_user_tab(&self, url: Option<String>) -> (TabId, bool) {
         let mut g = self.0.lock();
         if let Some(active) = g.active {
-            return (active, false);
+            if let Some(rec) = g.tabs.get(&active) {
+                if matches!(rec.owner, TabOwner::User) {
+                    return (active, false);
+                }
+            }
+        }
+        let existing_user = g
+            .order
+            .iter()
+            .rev()
+            .find(|tid| {
+                g.tabs
+                    .get(tid)
+                    .is_some_and(|rec| matches!(rec.owner, TabOwner::User))
+            })
+            .copied();
+        if let Some(uid) = existing_user {
+            g.active = Some(uid);
+            return (uid, false);
         }
         g.next_id = g.next_id.checked_add(1).unwrap_or(1);
         let id = g.next_id;
@@ -931,6 +1304,7 @@ impl DockSharedState {
             TabRecord {
                 last_url: url,
                 last_title: None,
+                owner: TabOwner::User,
             },
         );
         if !g.order.contains(&id) {
@@ -940,6 +1314,47 @@ impl DockSharedState {
         (id, true)
     }
 
+    fn acquire_or_create_agent_tab(&self, url: Option<String>) -> (TabId, bool) {
+        let mut g = self.0.lock();
+        if let Some(existing) = g.agent_tab_id {
+            if g.tabs.contains_key(&existing) {
+                if let Some(target) = url {
+                    if let Some(rec) = g.tabs.get_mut(&existing) {
+                        rec.last_url = Some(target);
+                    }
+                }
+                return (existing, false);
+            }
+            g.agent_tab_id = None;
+        }
+        g.next_id = g.next_id.checked_add(1).unwrap_or(1);
+        let id = g.next_id;
+        g.tabs.insert(
+            id,
+            TabRecord {
+                last_url: url,
+                last_title: None,
+                owner: TabOwner::Agent,
+            },
+        );
+        if !g.order.contains(&id) {
+            g.order.push(id);
+        }
+        g.agent_tab_id = Some(id);
+        if g.active.is_none() {
+            g.active = Some(id);
+        }
+        (id, true)
+    }
+
+    fn agent_tab_id(&self) -> Option<TabId> {
+        self.0.lock().agent_tab_id
+    }
+
+    fn tab_owner(&self, id: TabId) -> Option<TabOwner> {
+        self.0.lock().tabs.get(&id).map(|r| r.owner)
+    }
+
     fn remove_tab(&self, id: TabId) -> Option<TabId> {
         let mut g = self.0.lock();
         g.tabs.remove(&id);
@@ -947,6 +1362,9 @@ impl DockSharedState {
         g.last_state_url.remove(&id);
         if g.active == Some(id) {
             g.active = g.order.last().copied();
+        }
+        if g.agent_tab_id == Some(id) {
+            g.agent_tab_id = None;
         }
         g.active
     }
@@ -975,6 +1393,7 @@ impl DockSharedState {
                     url: t.last_url.clone(),
                     title: t.last_title.clone(),
                     active: active == Some(*id),
+                    owner: t.owner,
                 })
             })
             .collect()
@@ -999,6 +1418,25 @@ impl DockSharedState {
             Some(rec) => (rec.last_url.clone(), rec.last_title.clone()),
             None => (None, None),
         }
+    }
+
+    fn find_owner_tab_with_url(&self, owner: TabOwner, target_url: &str) -> Option<TabId> {
+        let normalized = normalize_url_for_match(target_url);
+        if normalized.is_empty() {
+            return None;
+        }
+        let g = self.0.lock();
+        for id in &g.order {
+            let Some(rec) = g.tabs.get(id) else { continue };
+            if rec.owner != owner {
+                continue;
+            }
+            let Some(url) = rec.last_url.as_deref() else { continue };
+            if normalize_url_for_match(url) == normalized {
+                return Some(*id);
+            }
+        }
+        None
     }
 
     fn snapshot(&self) -> (Option<String>, Option<String>) {
@@ -1457,9 +1895,26 @@ pub async fn browser_dock_open(
     state.set_parked(false);
     let s = state.inner().clone();
 
-    let (active, _created) = s.acquire_active_or_reserve(url.clone());
-    if let Some(target) = url.as_ref().filter(|t| !t.trim().is_empty()) {
-        s.set_url(active, target.clone());
+    let target = url
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    if let Some(target_url) = target.as_deref() {
+        if let Some(existing) = s.find_owner_tab_with_url(TabOwner::User, target_url) {
+            let _ = s.set_active(existing);
+            ensure_dock_webview(&app, &s)?;
+            dock_navigate_active(&app, &s)?;
+            update_dock_layout(&app, &s)?;
+            focus_dock_webview(&app);
+            emit_tabs_event(&app, &s);
+            return Ok(());
+        }
+    }
+
+    let (active, _created) = s.acquire_or_create_user_tab(target.clone());
+    if let Some(target_url) = target.as_ref() {
+        s.set_url(active, target_url.clone());
     }
 
     ensure_dock_webview(&app, &s)?;
@@ -1548,6 +2003,19 @@ pub async fn browser_dock_navigate(
     let id = state
         .active()
         .ok_or_else(|| "no active dock tab".to_string())?;
+    let trimmed = url.trim();
+    if !trimmed.is_empty() {
+        if let Some(existing) = state.find_owner_tab_with_url(TabOwner::User, trimmed) {
+            if existing != id {
+                state.set_active(existing)?;
+            }
+            ensure_dock_webview(&app, state.inner())?;
+            dock_navigate_active(&app, state.inner())?;
+            focus_dock_webview(&app);
+            emit_tabs_event(&app, state.inner());
+            return Ok(());
+        }
+    }
     state.set_url(id, url);
     ensure_dock_webview(&app, state.inner())?;
     dock_navigate_active(&app, state.inner())?;
@@ -1564,7 +2032,7 @@ pub async fn browser_dock_new_tab(
     activate: Option<bool>,
 ) -> Result<TabId, String> {
     let id = state.alloc_id();
-    state.register_tab(id, url.clone());
+    state.register_tab(id, url.clone(), TabOwner::User);
     let want_activate = activate.unwrap_or(true);
     if want_activate {
         let _ = state.set_active(id);
@@ -1584,8 +2052,20 @@ fn open_url_in_new_tab(app: &AppHandle, url: String) -> Result<TabId, String> {
         .try_state::<DockSharedState>()
         .ok_or_else(|| "browser dock state not initialised".to_string())?;
     let state = state_handle.inner();
+    let trimmed = url.trim();
+    if !trimmed.is_empty() {
+        if let Some(existing) = state.find_owner_tab_with_url(TabOwner::User, trimmed) {
+            let _ = state.set_active(existing);
+            ensure_dock_webview(app, state)?;
+            dock_navigate_active(app, state)?;
+            let _ = update_dock_layout(app, state);
+            focus_dock_webview(app);
+            emit_tabs_event(app, state);
+            return Ok(existing);
+        }
+    }
     let id = state.alloc_id();
-    state.register_tab(id, Some(url));
+    state.register_tab(id, Some(url), TabOwner::User);
     let _ = state.set_active(id);
     ensure_dock_webview(app, state)?;
     dock_navigate_active(app, state)?;
@@ -1877,6 +2357,12 @@ struct TauriDockControllerInner {
 
     nav_waiters: Mutex<HashMap<TabId, Vec<oneshot::Sender<()>>>>,
     next_req_id: AtomicU64,
+    takeover_state: Mutex<HashMap<TabId, TakeoverEntry>>,
+}
+
+struct TakeoverEntry {
+    started_at: u64,
+    abort: tokio::task::AbortHandle,
 }
 
 #[derive(Default)]
@@ -1921,7 +2407,58 @@ impl TauriDockController {
             drive_locks: Mutex::new(HashMap::new()),
             nav_waiters: Mutex::new(HashMap::new()),
             next_req_id: AtomicU64::new(1),
+            takeover_state: Mutex::new(HashMap::new()),
         }))
+    }
+
+    fn note_takeover_activity(&self, tab_id: TabId, owner: Option<TabOwner>) {
+        if !matches!(owner, Some(TabOwner::User)) {
+            return;
+        }
+        let now = now_millis() as u64;
+        let inner = self.0.clone();
+        let mut started_at = now;
+        let mut emit_start = false;
+        {
+            let mut guard = inner.takeover_state.lock();
+            if let Some(prev) = guard.remove(&tab_id) {
+                started_at = prev.started_at;
+                prev.abort.abort();
+            } else {
+                emit_start = true;
+            }
+            let inner_for_task = inner.clone();
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(3_000)).await;
+                let removed = {
+                    let mut g = inner_for_task.takeover_state.lock();
+                    g.remove(&tab_id)
+                };
+                if removed.is_some() {
+                    let payload = serde_json::json!({
+                        "kind": "dock_takeover_end",
+                        "tabId": tab_id,
+                        "data": { "tab_id": tab_id, "ended_at": now_millis() },
+                    });
+                    let _ = inner_for_task.app.emit("browser_dock_event", payload);
+                }
+            });
+            guard.insert(
+                tab_id,
+                TakeoverEntry {
+                    started_at,
+                    abort: handle.abort_handle(),
+                },
+            );
+        }
+        if emit_start {
+            let payload = serde_json::json!({
+                "kind": "dock_takeover",
+                "tabId": tab_id,
+                "data": { "tab_id": tab_id, "started_at": started_at },
+            });
+            let _ = self.0.app.emit("browser_dock_event", payload);
+        }
     }
 
     fn register_nav_waiter(&self, tab_id: TabId) -> oneshot::Receiver<()> {
@@ -2109,29 +2646,38 @@ impl TauriDockController {
     }
 }
 
+fn normalize_url_for_match(s: &str) -> String {
+    let trimmed = s.trim();
+    let no_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let trimmed_tail = no_fragment.trim_end_matches('/');
+    if trimmed_tail.is_empty() {
+        no_fragment.to_string()
+    } else {
+        trimmed_tail.to_string()
+    }
+}
+
 fn urls_logically_match(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    let normalize = |s: &str| -> String {
-        let no_fragment = s.split('#').next().unwrap_or(s);
-        no_fragment.trim_end_matches('/').to_string()
-    };
-    normalize(a) == normalize(b)
+    normalize_url_for_match(a) == normalize_url_for_match(b)
 }
 
-fn resolve_target_tab(req: &DockRequest, state: &DockSharedState) -> Result<TabId> {
+fn resolve_agent_target_tab(req: &DockRequest, state: &DockSharedState) -> TabId {
     if let Some(id) = req
         .args
         .as_object()
         .and_then(|m| m.get("tab_id"))
         .and_then(|v| v.as_u64())
     {
-        return Ok(id as TabId);
+        return id as TabId;
     }
-    state
-        .active()
-        .ok_or_else(|| anyhow::anyhow!("no active dock tab to drive"))
+    if let Some(agent_id) = state.agent_tab_id() {
+        return agent_id;
+    }
+    let (id, _) = state.acquire_or_create_agent_tab(None);
+    id
 }
 
 #[async_trait]
@@ -2143,12 +2689,13 @@ impl DockController for TauriDockController {
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .unwrap_or_default();
-        let (_active, created) = state.acquire_active_or_reserve(None);
+        let (agent_tab, created) = state.acquire_or_create_agent_tab(None);
         if created {
             if state.rect().is_none() {
                 state.set_rect(DockRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
             }
             state.set_parked(false);
+            let _ = state.set_active(agent_tab);
             if let Err(err) = ensure_dock_webview(&self.0.app, &state) {
                 tracing::warn!(
                     "[browser_dock] auto-create on ensure_visible failed: {err}"
@@ -2162,7 +2709,7 @@ impl DockController for TauriDockController {
 
         let payload = serde_json::json!({
             "kind": "visible",
-            "data": { "session": session_hint, "source": "agent" },
+            "data": { "session": session_hint, "source": "agent", "agentTabId": agent_tab },
         });
         if let Err(err) = self.0.app.emit("browser_dock_event", payload) {
             tracing::warn!("[browser_dock] emit visible failed: {err}");
@@ -2177,11 +2724,17 @@ impl DockController for TauriDockController {
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
-        let tab_id = resolve_target_tab(&req, &state)?;
-        let active = state
-            .active()
-            .ok_or_else(|| anyhow::anyhow!("no active dock tab to drive"))?;
-        if tab_id != active {
+        let tab_id = resolve_agent_target_tab(&req, &state);
+        let tab_owner = state.tab_owner(tab_id);
+        if tab_owner.is_none() {
+            return Err(anyhow::anyhow!(
+                "dock tab {tab_id} does not exist; call ensure_visible or browser.open_tab first"
+            ));
+        }
+        self.note_takeover_activity(tab_id, tab_owner);
+
+        let active = state.active();
+        if active != Some(tab_id) {
             state
                 .set_active(tab_id)
                 .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
@@ -2199,6 +2752,13 @@ impl DockController for TauriDockController {
         let _drive = lock.lock().await;
 
         const READY_TIMEOUT: Duration = Duration::from_millis(15_000);
+
+        if req.kind == "navigate" {
+            return self
+                .exec_navigate_via_rust(tab_id, &req, &state, READY_TIMEOUT)
+                .await;
+        }
+
         if let Err(err) = self.await_dock_ready(tab_id, READY_TIMEOUT).await {
             tracing::warn!(
                 "[browser_dock] await_dock_ready before exec failed: {err}"
@@ -2232,8 +2792,15 @@ impl DockController for TauriDockController {
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
         let tab_id = state
-            .active()
+            .agent_tab_id()
+            .or_else(|| state.active())
             .ok_or_else(|| anyhow::anyhow!("no active dock tab to capture"))?;
+        if state.active() != Some(tab_id) {
+            let _ = state.set_active(tab_id);
+            let _ = dock_navigate_active(&self.0.app, &state);
+            let _ = update_dock_layout(&self.0.app, &state);
+            emit_tabs_event(&self.0.app, &state);
+        }
 
         let lock = self.tab_lock(tab_id);
         let _drive = lock.lock().await;
@@ -2308,7 +2875,7 @@ impl DockController for TauriDockController {
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
         let id = state.alloc_id();
-        state.register_tab(id, url);
+        state.register_tab(id, url, TabOwner::Agent);
         if activate {
             let _ = state.set_active(id);
             ensure_dock_webview(&self.0.app, &state)
@@ -2351,6 +2918,8 @@ impl DockController for TauriDockController {
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let owner = state.tab_owner(tab_id);
+        self.note_takeover_activity(tab_id, owner);
         state
             .set_active(tab_id)
             .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
@@ -2378,12 +2947,119 @@ impl DockController for TauriDockController {
                 url: t.url,
                 title: t.title,
                 active: t.active,
+                owner: Some(match t.owner {
+                    TabOwner::User => "user".to_string(),
+                    TabOwner::Agent => "agent".to_string(),
+                }),
             })
             .collect())
     }
 }
 
 impl TauriDockController {
+    async fn exec_navigate_via_rust(
+        &self,
+        tab_id: TabId,
+        req: &DockRequest,
+        state: &DockSharedState,
+        ready_timeout: Duration,
+    ) -> Result<DockResponse> {
+        let url_raw = req
+            .args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("navigate requires a non-empty 'url' argument"))?;
+
+        let parsed = Url::parse(&url_raw)
+            .map_err(|err| anyhow::anyhow!("invalid url '{url_raw}': {err}"))?;
+        let normalized = parsed.as_str().to_string();
+
+        let owner = state.tab_owner(tab_id).unwrap_or(TabOwner::Agent);
+        if let Some(existing) = state.find_owner_tab_with_url(owner, &normalized) {
+            if existing != tab_id {
+                state
+                    .set_active(existing)
+                    .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
+                ensure_dock_webview(&self.0.app, state)
+                    .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+                update_dock_layout(&self.0.app, state)
+                    .map_err(|e| anyhow::anyhow!("update_dock_layout: {e}"))?;
+                emit_tabs_event(&self.0.app, state);
+                self.signal_nav_ready(existing);
+            } else {
+                self.signal_nav_ready(tab_id);
+            }
+            return Ok(DockResponse {
+                ok: true,
+                value: serde_json::json!({
+                    "navigated": false,
+                    "reused": true,
+                    "url": normalized,
+                    "tab_id": existing,
+                }),
+                error: None,
+            });
+        }
+
+        state.set_url(tab_id, normalized.clone());
+        state.forget_state_url(tab_id);
+
+        if state.active() != Some(tab_id) {
+            state
+                .set_active(tab_id)
+                .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
+        }
+        ensure_dock_webview(&self.0.app, state)
+            .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+        update_dock_layout(&self.0.app, state)
+            .map_err(|e| anyhow::anyhow!("update_dock_layout: {e}"))?;
+        emit_tabs_event(&self.0.app, state);
+
+        let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
+        let _ = self.0.app.emit(
+            "browser_dock_event",
+            serde_json::json!({
+                "kind": "agent_action",
+                "tabId": tab_id,
+                "data": {
+                    "reqId": preview_id,
+                    "kind": "navigate",
+                    "args": { "url": normalized },
+                    "tabId": tab_id,
+                    "ts": now_millis(),
+                },
+            }),
+        );
+
+        let webview = dock_webview(&self.0.app)
+            .ok_or_else(|| anyhow::anyhow!("dock webview is not open"))?;
+        webview
+            .navigate(parsed)
+            .map_err(|err| anyhow::anyhow!("webview navigate failed: {err}"))?;
+
+        let wait_budget = Duration::from_millis(req.timeout_ms.max(ready_timeout.as_millis() as u64));
+        match self.await_dock_ready(tab_id, wait_budget).await {
+            Ok(()) => Ok(DockResponse {
+                ok: true,
+                value: serde_json::json!({
+                    "navigated": true,
+                    "url": normalized,
+                    "tab_id": tab_id,
+                }),
+                error: None,
+            }),
+            Err(err) => Ok(DockResponse {
+                ok: false,
+                value: Value::Null,
+                error: Some(format!(
+                    "navigate dispatched but page did not signal ready in time: {err}"
+                )),
+            }),
+        }
+    }
+
     async fn exec_on_tab(&self, tab_id: TabId, req: DockRequest) -> Result<DockResponse> {
         let webview = dock_webview(&self.0.app)
             .ok_or_else(|| anyhow::anyhow!("dock webview is not open"))?;

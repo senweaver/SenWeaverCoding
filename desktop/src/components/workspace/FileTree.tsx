@@ -8,8 +8,14 @@ import {
   useWorkspaceFilesStore,
 } from '../../stores/workspaceFilesStore'
 import type { FileTreeNode } from '../../types/workspaceFile'
+import { copyTextToClipboard } from '../chat/clipboard'
+import { isTauriRuntime } from '../../lib/desktopRuntime'
+import { revealInExplorer } from '../../lib/revealInExplorer'
+import { joinWorkspaceAbsPath } from '../../lib/workspacePath'
+import { inferLanguageFromPath, languageToMarkdownLang } from '../../lib/extLanguage'
+import { workspaceFilesApi } from '../../api/workspaceFiles'
 import { FileTreeContextMenu, type ContextMenuTarget } from './FileTreeContextMenu'
-import { FileTreeNodeView } from './FileTreeNodeView'
+import { FileTreeNodeView, type FilterState } from './FileTreeNodeView'
 import { InlineNamePrompt } from './InlineNamePrompt'
 
 type Props = {
@@ -75,8 +81,48 @@ export function FileTree({ workDir, onSelect }: Props) {
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
   const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null)
   const [isDraggingExternal, setIsDraggingExternal] = useState(false)
+  const [filterText, setFilterText] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const uploadParentRef = useRef<string>('')
+
+  const filterNeedle = filterText.trim()
+  const dirsForFilter = useWorkspaceFilesStore((s) =>
+    filterNeedle ? s.dirs : undefined,
+  )
+  const filterState: FilterState | undefined = useMemo(() => {
+    if (!filterNeedle) return undefined
+    const matches = new Set<string>()
+    const ancestors = new Set<string>()
+    const target = filterNeedle.toLowerCase()
+    if (!root) {
+      return { active: true, needle: filterNeedle, matches, ancestors }
+    }
+    const visit = (entries: FileTreeNode[]) => {
+      for (const entry of entries) {
+        const lowerName = entry.name.toLowerCase()
+        const lowerRel = entry.relPath.toLowerCase()
+        if (lowerName.includes(target) || lowerRel.includes(target)) {
+          matches.add(entry.relPath)
+          let parent = parentOf(entry.relPath)
+          while (parent && !ancestors.has(parent)) {
+            ancestors.add(parent)
+            parent = parentOf(parent)
+          }
+        }
+        if (entry.isDir) {
+          const childKey = `${root}::${entry.relPath}`
+          const dir = dirsForFilter?.[childKey]
+          if (dir?.children?.length) {
+            visit(dir.children)
+          } else if (entry.children?.length) {
+            visit(entry.children)
+          }
+        }
+      }
+    }
+    visit(rootEntries)
+    return { active: true, needle: filterNeedle, matches, ancestors }
+  }, [filterNeedle, root, rootEntries, dirsForFilter])
 
   useEffect(() => {
     setRoot(workDir)
@@ -226,6 +272,91 @@ export function FileTree({ workDir, onSelect }: Props) {
     [addToast, renameAction, renameTarget],
   )
 
+  const handleCopyAbsolutePath = useCallback(
+    async (node: FileTreeNode) => {
+      const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+      const ok = await copyTextToClipboard(abs)
+      addToast({
+        type: ok ? 'success' : 'error',
+        message: ok ? t('files.preview.copied') : t('files.preview.copyFailed'),
+      })
+    },
+    [addToast, t, workDir],
+  )
+
+  const handleCopyRelativePath = useCallback(
+    async (node: FileTreeNode) => {
+      const ok = await copyTextToClipboard(node.relPath)
+      addToast({
+        type: ok ? 'success' : 'error',
+        message: ok ? t('files.preview.copied') : t('files.preview.copyFailed'),
+      })
+    },
+    [addToast, t],
+  )
+
+  const handleCopyAsMarkdown = useCallback(
+    async (node: FileTreeNode) => {
+      if (node.isDir) return
+      const currentRoot = root
+      if (!currentRoot) return
+      try {
+        const res = await workspaceFilesApi.readFile({
+          root: currentRoot,
+          path: node.relPath,
+        })
+        let content = ''
+        if (res.encoding === 'base64') {
+          addToast({
+            type: 'error',
+            message: t('files.tree.copyMarkdownFailed'),
+          })
+          return
+        }
+        content = res.content ?? ''
+        const lang = languageToMarkdownLang(inferLanguageFromPath(node.relPath))
+        const fenceHeader = lang
+          ? `\`\`\`${lang} ${node.relPath}`
+          : `\`\`\`${node.relPath}`
+        const body =
+          content.length === 0 || content.endsWith('\n') ? content : `${content}\n`
+        const markdown = `${fenceHeader}\n${body}\`\`\`\n`
+        const ok = await copyTextToClipboard(markdown)
+        addToast({
+          type: ok ? 'success' : 'error',
+          message: ok
+            ? t('files.tree.copyMarkdownDone')
+            : t('files.tree.copyMarkdownFailed'),
+        })
+      } catch {
+        addToast({
+          type: 'error',
+          message: t('files.tree.copyMarkdownFailed'),
+        })
+      }
+    },
+    [addToast, root, t],
+  )
+
+  const handleReveal = useCallback(
+    async (node: FileTreeNode) => {
+      try {
+        const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+        await revealInExplorer(abs)
+      } catch (err) {
+        addToast({
+          type: 'error',
+          message: t('files.preview.revealFailed', {
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        })
+      }
+    },
+    [addToast, t, workDir],
+  )
+
+  const canReveal = useMemo(() => isTauriRuntime(), [])
+
   const containerProps = useMemo(
     () => ({
       onDragOver: (event: React.DragEvent) => {
@@ -320,6 +451,40 @@ export function FileTree({ workDir, onSelect }: Props) {
         </div>
       </div>
 
+      <div className="sticky top-7 z-[9] flex h-7 items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2">
+        <span
+          aria-hidden="true"
+          className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]"
+        >
+          filter_alt
+        </span>
+        <input
+          type="text"
+          value={filterText}
+          onChange={(e) => setFilterText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation()
+              setFilterText('')
+            }
+          }}
+          placeholder={t('files.filterPlaceholder')}
+          spellCheck={false}
+          className="h-5 flex-1 bg-transparent text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-tertiary)] outline-none"
+        />
+        {filterText && (
+          <button
+            type="button"
+            onClick={() => setFilterText('')}
+            aria-label={t('files.filterClear')}
+            title={t('files.filterClear')}
+            className="flex h-5 w-5 items-center justify-center rounded text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          >
+            <span className="material-symbols-outlined text-[14px]">close</span>
+          </button>
+        )}
+      </div>
+
       {rootError && (
         <div className="px-3 py-2 text-[11px] text-[var(--color-danger)]">
           {t('files.errorLoadingTree', { message: rootError })}
@@ -352,6 +517,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           selectedRelPath={selectedRelPath}
           renameTarget={renameTarget}
           createTarget={createTarget}
+          filter={filterState}
           onSelect={handleSelect}
           onContextMenu={handleContextMenu}
           onDrop={handleDrop}
@@ -369,6 +535,12 @@ export function FileTree({ workDir, onSelect }: Props) {
         </div>
       )}
 
+      {filterState && filterState.matches.size === 0 && rootEntries.length > 0 && (
+        <div className="px-3 py-3 text-center text-[11px] text-[var(--color-text-tertiary)] italic">
+          {t('files.filterEmpty')}
+        </div>
+      )}
+
       {isDraggingExternal && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-accent)]/10 text-[12px] text-[var(--color-accent)]">
           {t('files.dropToUpload')}
@@ -380,6 +552,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           x={contextMenu.x}
           y={contextMenu.y}
           target={contextMenu.target}
+          canReveal={canReveal}
           onClose={() => setContextMenu(null)}
           onNewFile={handleNewFile}
           onNewFolder={handleNewFolder}
@@ -387,6 +560,10 @@ export function FileTree({ workDir, onSelect }: Props) {
           onDelete={handleDelete}
           onRefresh={refreshRoot}
           onUpload={handleUpload}
+          onCopyAbsolutePath={handleCopyAbsolutePath}
+          onCopyRelativePath={handleCopyRelativePath}
+          onCopyAsMarkdown={handleCopyAsMarkdown}
+          onReveal={handleReveal}
         />
       )}
     </div>

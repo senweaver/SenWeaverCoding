@@ -170,7 +170,10 @@ impl Tool for BrowserDelegateTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate browser-based tasks to a browser-capable CLI for interacting with web applications like Teams, Outlook, Jira, Confluence"
+        "Delegate browser-based tasks to an **external browser-capable CLI subprocess** (e.g. Claude Code with claude-in-chrome) \
+         for interacting with corporate web apps (Teams, Outlook, Jira, Confluence) that need a persistent SSO Chrome profile. \
+         This spawns an external CLI and external Chrome — on desktop ALWAYS prefer the built-in `browser` tool (embedded dock) \
+         for ordinary browsing; only use this when the task truly requires a logged-in external Chrome profile."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

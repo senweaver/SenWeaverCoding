@@ -1913,6 +1913,11 @@ pub async fn handle_api_sessions_list(
             .unwrap_or_default()
     };
     let default_wd = default_workspace_dir(&state);
+    let running_set: std::collections::HashSet<String> = state
+        .session_run_state
+        .snapshot()
+        .into_iter()
+        .collect();
 
     let sessions: Vec<serde_json::Value> = all_metadata
         .into_iter()
@@ -1926,6 +1931,7 @@ pub async fn handle_api_sessions_list(
                 .map(ToString::to_string)
                 .unwrap_or_else(|| default_wd.clone());
             let work_dir_exists = std::path::Path::new(&work_dir).exists();
+            let running = running_set.contains(&session_id);
             Some(serde_json::json!({
                 "id": session_id,
                 "title": title,
@@ -1935,6 +1941,7 @@ pub async fn handle_api_sessions_list(
                 "projectPath": work_dir,
                 "workDir": work_dir,
                 "workDirExists": work_dir_exists,
+                "running": running,
             }))
         })
         .collect();
@@ -3444,4 +3451,49 @@ pub async fn handle_api_multi_agent_status(
         }))
         .into_response()
     }
+}
+
+pub async fn handle_api_sessions_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::stream::StreamExt;
+    use std::convert::Infallible;
+    use std::time::Duration;
+    use tokio_stream::wrappers::BroadcastStream;
+
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let snapshot_ids = state.session_run_state.snapshot();
+    let rx = state.session_run_state.subscribe();
+
+    let snapshot_event = Event::default()
+        .event("snapshot")
+        .json_data(serde_json::json!({ "running": snapshot_ids }))
+        .unwrap_or_else(|_| Event::default().event("snapshot").data("{\"running\":[]}"));
+    let snapshot_stream =
+        futures_util::stream::once(async move { Ok::<Event, Infallible>(snapshot_event) });
+
+    let delta_stream = BroadcastStream::new(rx).filter_map(|item| async move {
+        match item {
+            Ok(evt) => match Event::default().event("run_state").json_data(&evt) {
+                Ok(ev) => Some(Ok::<Event, Infallible>(ev)),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        }
+    });
+
+    let stream = snapshot_stream.chain(delta_stream);
+
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(25))
+                .text("keep-alive"),
+        )
+        .into_response()
 }

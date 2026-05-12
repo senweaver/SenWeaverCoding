@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { workspaceFilesApi, type WorkspaceWatchEvent } from '../api/workspaceFiles'
 import type { FileTreeNode } from '../types/workspaceFile'
+import { useGitStatusStore } from './gitStatusStore'
 
 type DirState = {
   loaded: boolean
@@ -23,6 +24,27 @@ export type FileBuffer = {
   saving: boolean
   error?: string
   saveError?: string
+}
+
+export type MonacoEditOperation = {
+  range: {
+    startLineNumber: number
+    startColumn: number
+    endLineNumber: number
+    endColumn: number
+  }
+  text: string | null
+  forceMoveMarkers?: boolean
+}
+
+export type MonacoModelHandle = {
+  pushEditOperations(
+    beforeCursorState: null,
+    editOperations: MonacoEditOperation[],
+    cursorStateComputer: (...args: unknown[]) => null,
+  ): unknown | null
+  getLanguageId(): string
+  isDisposed?(): boolean
 }
 
 type Key = string
@@ -63,6 +85,8 @@ export type WorkspaceFilesState = {
 
   lastSeenContent: Record<string, string>
 
+  monacoModels: Record<string, MonacoModelHandle>
+
   setRoot: (root: string | null) => void
   refreshRoot: () => Promise<void>
   loadDirectory: (relPath: string) => Promise<void>
@@ -96,6 +120,10 @@ export type WorkspaceFilesState = {
   acknowledgeExternalChange: (relPath: string) => void
 
   snapshotLastSeen: (relPath: string, content: string) => void
+
+  registerMonacoModel: (relPath: string, model: MonacoModelHandle) => void
+
+  unregisterMonacoModel: (relPath: string, model?: MonacoModelHandle) => void
 
   createFile: (parentRelPath: string, name: string) => Promise<void>
   createDir: (parentRelPath: string, name: string) => Promise<void>
@@ -148,6 +176,89 @@ const emptyDir: DirState = {
   children: [],
 }
 
+const PERSIST_VERSION = 1
+const PERSIST_DEBOUNCE_MS = 500
+
+const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+type PersistedExpanded = {
+  version: number
+  expanded: string[]
+}
+
+function persistKeyForRoot(root: string): string {
+  let encoded: string
+  try {
+    encoded = window.btoa(unescape(encodeURIComponent(root)))
+  } catch {
+    encoded = root
+  }
+  const safe = encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `sen-workspace-tree-expanded:${safe}`
+}
+
+function loadExpandedFromLocalStorage(root: string): Record<Key, DirState> {
+  if (typeof window === 'undefined' || !window.localStorage) return {}
+  try {
+    const raw = window.localStorage.getItem(persistKeyForRoot(root))
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as PersistedExpanded
+    if (!parsed || parsed.version !== PERSIST_VERSION) return {}
+    if (!Array.isArray(parsed.expanded)) return {}
+    const dirs: Record<Key, DirState> = {}
+    for (const rel of parsed.expanded) {
+      if (typeof rel !== 'string') continue
+      dirs[k(root, rel)] = {
+        loaded: false,
+        loading: false,
+        expanded: true,
+        children: [],
+      }
+    }
+    return dirs
+  } catch {
+    return {}
+  }
+}
+
+function persistExpandedToLocalStorage(
+  root: string,
+  dirs: Record<Key, DirState>,
+) {
+  if (typeof window === 'undefined' || !window.localStorage) return
+  const prefix = `${root}::`
+  const expanded: string[] = []
+  for (const key of Object.keys(dirs)) {
+    if (!key.startsWith(prefix)) continue
+    const entry = dirs[key]
+    if (!entry?.expanded) continue
+    expanded.push(key.slice(prefix.length))
+  }
+  expanded.sort()
+  const payload: PersistedExpanded = {
+    version: PERSIST_VERSION,
+    expanded,
+  }
+  try {
+    window.localStorage.setItem(persistKeyForRoot(root), JSON.stringify(payload))
+  } catch {
+
+  }
+}
+
+function schedulePersistExpanded(
+  root: string | null,
+  dirs: Record<Key, DirState>,
+) {
+  if (!root) return
+  const existing = persistTimers[root]
+  if (existing) clearTimeout(existing)
+  persistTimers[root] = setTimeout(() => {
+    delete persistTimers[root]
+    persistExpandedToLocalStorage(root, dirs)
+  }, PERSIST_DEBOUNCE_MS)
+}
+
 export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => ({
   root: null,
   rootEntries: [],
@@ -165,6 +276,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   aiModifiedAt: {},
   externalChanged: {},
   lastSeenContent: {},
+  monacoModels: {},
 
   setRoot: (root) => {
     const current = get().root
@@ -173,6 +285,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       watcherDispose()
       watcherDispose = null
     }
+    const restoredDirs = root ? loadExpandedFromLocalStorage(root) : {}
     set({
       root,
       rootEntries: [],
@@ -180,7 +293,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       rootLoading: false,
       rootError: undefined,
       truncated: false,
-      dirs: {},
+      dirs: restoredDirs,
       files: {},
       openTabs: [],
       activeTab: null,
@@ -190,15 +303,28 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       aiModifiedAt: {},
       externalChanged: {},
       lastSeenContent: {},
+      monacoModels: {},
     })
     if (root) {
       void get().refreshRoot()
+      void useGitStatusStore.getState().fetchStatus(root, { forceRefresh: true })
+      const restoredRels: string[] = []
+      const restoredPrefix = `${root}::`
+      for (const key of Object.keys(restoredDirs)) {
+        if (!key.startsWith(restoredPrefix)) continue
+        restoredRels.push(key.slice(restoredPrefix.length))
+      }
+      restoredRels.sort((a, b) => a.length - b.length)
+      for (const rel of restoredRels) {
+        void get().loadDirectory(rel)
+      }
       watcherDispose = workspaceFilesApi.watch(
         root,
         (event) => {
 
           if (get().root === root) {
             get().handleWatchEvent(event)
+            useGitStatusStore.getState().scheduleRefresh(root)
           }
         },
         () => {
@@ -243,8 +369,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         path: relPath,
         depth: 1,
       })
-      set((s) => ({
-        dirs: {
+      set((s) => {
+        const nextDirs = {
           ...s.dirs,
           [key]: {
             loaded: true,
@@ -252,8 +378,10 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
             expanded: true,
             children: tree.entries,
           },
-        },
-      }))
+        }
+        schedulePersistExpanded(root, nextDirs)
+        return { dirs: nextDirs }
+      })
     } catch (err) {
       set((s) => ({
         dirs: {
@@ -272,15 +400,17 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     const root = get().root
     if (!root) return
     const key = k(root, relPath)
-    set((s) => ({
-      dirs: {
+    set((s) => {
+      const nextDirs = {
         ...s.dirs,
         [key]: {
           ...(s.dirs[key] ?? emptyDir),
           expanded,
         },
-      },
-    }))
+      }
+      schedulePersistExpanded(root, nextDirs)
+      return { dirs: nextDirs }
+    })
   },
 
   toggleExpanded: async (relPath: string) => {
@@ -292,12 +422,14 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       await get().loadDirectory(relPath)
       return
     }
-    set((s) => ({
-      dirs: {
+    set((s) => {
+      const nextDirs = {
         ...s.dirs,
         [key]: { ...dir, expanded: !dir.expanded },
-      },
-    }))
+      }
+      schedulePersistExpanded(root, nextDirs)
+      return { dirs: nextDirs }
+    })
   },
 
   selectFile: async (relPath: string) => {
@@ -508,6 +640,17 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (!relPath) return
     const now = Date.now()
 
+    if (event.kind === 'renamed' && event.fromRelPath && event.fromRelPath !== relPath) {
+      migrateRename(get, set, root, event.fromRelPath, relPath)
+      void refreshDir(get, set, parentOf(event.fromRelPath))
+      const newParent = parentOf(relPath)
+      if (newParent !== parentOf(event.fromRelPath)) {
+        void refreshDir(get, set, newParent)
+      }
+      useGitStatusStore.getState().scheduleRefresh(root)
+      return
+    }
+
     const aiTs = get().aiPendingWrites[relPath]
     const isAi = aiTs !== undefined && now - aiTs <= AI_PENDING_WINDOW_MS
     const selfTs = get().selfPendingWrites[relPath]
@@ -581,6 +724,26 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
 
   snapshotLastSeen: (relPath: string, content: string) => {
     set((s) => ({ lastSeenContent: { ...s.lastSeenContent, [relPath]: content } }))
+  },
+
+  registerMonacoModel: (relPath: string, model: MonacoModelHandle) => {
+    if (!relPath || !model) return
+    set((s) => {
+      if (s.monacoModels[relPath] === model) return {}
+      return { monacoModels: { ...s.monacoModels, [relPath]: model } }
+    })
+  },
+
+  unregisterMonacoModel: (relPath: string, model?: MonacoModelHandle) => {
+    if (!relPath) return
+    set((s) => {
+      const current = s.monacoModels[relPath]
+      if (!current) return {}
+      if (model && current !== model) return {}
+      const next = { ...s.monacoModels }
+      delete next[relPath]
+      return { monacoModels: next }
+    })
   },
 
   updateDraft: (relPath: string, content: string) => {
@@ -927,6 +1090,96 @@ async function refreshDir(
       },
     }))
   }
+}
+
+function migrateRename(
+  _get: () => WorkspaceFilesState,
+  set: (
+    partial:
+      | Partial<WorkspaceFilesState>
+      | ((s: WorkspaceFilesState) => Partial<WorkspaceFilesState>),
+  ) => void,
+  root: string,
+  from: string,
+  to: string,
+) {
+  if (!from || !to || from === to) return
+  set((s) => {
+    const fromPrefix = from.endsWith('/') ? from : `${from}/`
+    const fromKey = k(root, from)
+    const toKey = k(root, to)
+
+    const nextDirs: Record<Key, DirState> = {}
+    for (const [key, value] of Object.entries(s.dirs)) {
+      if (key === fromKey) {
+        nextDirs[toKey] = value
+        continue
+      }
+      const prefix = `${fromKey}/`
+      if (key.startsWith(prefix)) {
+        const suffix = key.slice(prefix.length)
+        nextDirs[`${toKey}/${suffix}`] = value
+        continue
+      }
+      nextDirs[key] = value
+    }
+
+    const nextFiles: Record<Key, FileBuffer> = {}
+    for (const [key, value] of Object.entries(s.files)) {
+      if (key === fromKey) {
+        nextFiles[toKey] = value
+        continue
+      }
+      const prefix = `${fromKey}/`
+      if (key.startsWith(prefix)) {
+        const suffix = key.slice(prefix.length)
+        nextFiles[`${toKey}/${suffix}`] = value
+        continue
+      }
+      nextFiles[key] = value
+    }
+
+    const renameRel = (rel: string): string => {
+      if (rel === from) return to
+      if (rel.startsWith(fromPrefix)) return `${to}/${rel.slice(fromPrefix.length)}`
+      return rel
+    }
+
+    const nextOpenTabs = s.openTabs.map(renameRel)
+    const nextActive =
+      s.activeTab && (s.activeTab === from || s.activeTab.startsWith(fromPrefix))
+        ? renameRel(s.activeTab)
+        : s.activeTab
+    const nextSelected =
+      s.selectedRelPath &&
+      (s.selectedRelPath === from || s.selectedRelPath.startsWith(fromPrefix))
+        ? renameRel(s.selectedRelPath)
+        : s.selectedRelPath
+
+    const remap = <V,>(map: Record<string, V>): Record<string, V> => {
+      const out: Record<string, V> = {}
+      for (const [key, value] of Object.entries(map)) {
+        out[renameRel(key)] = value
+      }
+      return out
+    }
+
+    schedulePersistExpanded(root, nextDirs)
+
+    return {
+      dirs: nextDirs,
+      files: nextFiles,
+      openTabs: nextOpenTabs,
+      activeTab: nextActive,
+      selectedRelPath: nextSelected,
+      aiPendingWrites: remap(s.aiPendingWrites),
+      selfPendingWrites: remap(s.selfPendingWrites),
+      aiModifiedAt: remap(s.aiModifiedAt),
+      externalChanged: remap(s.externalChanged),
+      lastSeenContent: remap(s.lastSeenContent),
+      monacoModels: remap(s.monacoModels),
+    }
+  })
 }
 
 export { joinPath, nameOf, parentOf }

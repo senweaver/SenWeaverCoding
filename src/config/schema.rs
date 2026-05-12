@@ -1102,6 +1102,9 @@ pub struct Config {
 
     #[serde(default)]
     pub lsp: LspConfig,
+
+    #[serde(default)]
+    pub permissions: crate::security::permissions::PermissionsConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -2052,8 +2055,15 @@ pub struct AgentConfig {
     #[serde(default)]
     pub auto_index: AutoIndexConfig,
 
-    #[serde(default)]
+    #[serde(default = "default_builtin_tool_deferred_loading")]
     pub builtin_tool_deferred_loading: bool,
+
+    #[serde(default)]
+    pub tool_eager_override: bool,
+}
+
+fn default_builtin_tool_deferred_loading() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2250,7 +2260,8 @@ impl Default for AgentConfig {
             global_directives: Vec::new(),
             project_config_dir: None,
             auto_index: AutoIndexConfig::default(),
-            builtin_tool_deferred_loading: false,
+            builtin_tool_deferred_loading: default_builtin_tool_deferred_loading(),
+            tool_eager_override: false,
         }
     }
 }
@@ -6357,6 +6368,7 @@ impl Default for Config {
             token_saver: TokenSaverConfig::default(),
             custom_tools: CustomToolsConfig::default(),
             lsp: LspConfig::default(),
+            permissions: crate::security::permissions::PermissionsConfig::default(),
         }
     }
 }
@@ -9051,6 +9063,19 @@ pub struct LspConfig {
 
     #[serde(default = "default_lsp_servers")]
     pub servers: Vec<LspServerEntry>,
+
+    #[serde(default = "default_true")]
+    pub inlay_hints_enabled: bool,
+
+    #[serde(default)]
+    pub format_on_save: bool,
+
+    #[serde(default = "default_lsp_hover_delay_ms")]
+    pub hover_delay_ms: u32,
+}
+
+fn default_lsp_hover_delay_ms() -> u32 {
+    250
 }
 
 impl Default for LspConfig {
@@ -9058,6 +9083,9 @@ impl Default for LspConfig {
         Self {
             enabled: true,
             servers: default_lsp_servers(),
+            inlay_hints_enabled: true,
+            format_on_save: false,
+            hover_delay_ms: 250,
         }
     }
 }

@@ -1,10 +1,14 @@
 import { forwardRef, useRef, useState, useEffect, useCallback } from 'react'
 import { useTabStore, type Tab } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useIsSessionRunning } from '../../stores/sessionRunStateStore'
+import { useQueueLengthForSession } from '../../stores/workspaceQueueStore'
 import { useTranslation } from '../../i18n'
 import { useDockSuspend } from '../../hooks/useDockSuspend'
 import { resolveSessionTitle } from '../../utils/sessionTitle'
 import { RightSidebarToggle } from './RightSidebarToggle'
+import { Spinner } from '../shared/Spinner'
+import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
 
 const TAB_WIDTH = 180
 const DRAG_START_THRESHOLD = 4
@@ -23,7 +27,8 @@ export function TabBar() {
   const [canScrollRight, setCanScrollRight] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null)
   const [closingTabId, setClosingTabId] = useState<string | null>(null)
-  useDockSuspend(closingTabId !== null)
+  const [queueClosingTabId, setQueueClosingTabId] = useState<string | null>(null)
+  useDockSuspend(closingTabId !== null || queueClosingTabId !== null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [draggingSessionId, setDraggingSessionId] = useState<string | null>(null)
   const [dragOffsetX, setDragOffsetX] = useState(0)
@@ -82,6 +87,14 @@ export function TabBar() {
     const tab = tabs.find((t) => t.sessionId === sessionId)
     if (tab && tab.type !== 'session') {
       closeTab(sessionId)
+      return
+    }
+
+    const queueLen = useWorkspaceQueueStore
+      .getState()
+      .getQueueForSession(sessionId).length
+    if (queueLen > 0) {
+      setQueueClosingTabId(sessionId)
       return
     }
 
@@ -354,6 +367,57 @@ export function TabBar() {
           </div>
         </div>
       )}
+
+      {queueClosingTabId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30">
+          <div className="bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)] p-6 max-w-md w-full mx-4" style={{ boxShadow: 'var(--shadow-dropdown)' }}>
+            <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">
+              {t('tabs.close.queueWarning.title', {
+                count: useWorkspaceQueueStore.getState().getQueueForSession(queueClosingTabId).length,
+              })}
+            </h3>
+            <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+              {t('tabs.close.queueWarning.body')}
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <button
+                onClick={() => setQueueClosingTabId(null)}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                onClick={() => {
+                  const id = queueClosingTabId
+                  useWorkspaceQueueStore.getState().cancelAllForSession(id)
+                  const sessionState = useChatStore.getState().sessions[id]
+                  const isRunning = sessionState && sessionState.chatState !== 'idle'
+                  if (isRunning) {
+                    useChatStore.getState().stopGeneration(id)
+                  }
+                  disconnectSession(id)
+                  closeTab(id)
+                  setQueueClosingTabId(null)
+                }}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                {t('tabs.close.queueWarning.discard')}
+              </button>
+              <button
+                onClick={() => {
+                  const id = queueClosingTabId
+                  useWorkspaceQueueStore.getState().setKeepDraining(id, true)
+                  closeTab(id)
+                  setQueueClosingTabId(null)
+                }}
+                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-brand)] text-white hover:opacity-90"
+              >
+                {t('tabs.close.queueWarning.keep')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -370,6 +434,9 @@ const TabItem = forwardRef<HTMLDivElement, {
   onMouseDown: (event: React.MouseEvent) => void
 }>(({ tab, isActive, isDragOver, isDragging, dragOffsetX, onClick, onClose, onContextMenu, onMouseDown }, ref) => {
   const t = useTranslation()
+  const sessionRunning = useIsSessionRunning(tab.type === 'session' ? tab.sessionId : null)
+  const queuedCount = useQueueLengthForSession(tab.type === 'session' ? tab.sessionId : null)
+  const isRunning = tab.type === 'session' && (tab.status === 'running' || sessionRunning)
   const displayTitle =
     tab.type === 'session' ? resolveSessionTitle(tab.title, t('sidebar.untitled')) : tab.title
   return (
@@ -396,10 +463,24 @@ const TabItem = forwardRef<HTMLDivElement, {
         transform: isDragging ? `translateX(${dragOffsetX}px) scale(1.02)` : undefined,
       }}
     >
-      {tab.type === 'session' && tab.status === 'running' && (
-        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)] animate-pulse flex-shrink-0" />
+            {isRunning && (
+              <span
+                aria-label={t('common.running')}
+                className="inline-flex items-center flex-shrink-0 text-[var(--color-brand)]"
+              >
+                <Spinner size={8} />
+              </span>
+            )}
+      {!isRunning && queuedCount > 0 && tab.type === 'session' && (
+        <span
+          aria-label={t('tabs.queuedBadge', { count: queuedCount })}
+          title={t('tabs.queuedBadge', { count: queuedCount })}
+          className="inline-flex flex-shrink-0 items-center text-[10px] tabular-nums text-[var(--color-text-tertiary)]"
+        >
+          ·{queuedCount}
+        </span>
       )}
-      {tab.type === 'session' && tab.status === 'error' && (
+      {tab.type === 'session' && !isRunning && tab.status === 'error' && (
         <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-error)] flex-shrink-0" />
       )}
       {tab.type === 'scheduled' && (

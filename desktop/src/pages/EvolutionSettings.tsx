@@ -453,6 +453,7 @@ function MetricsCard({
   const judge = overview?.judgeWorker
   const scheduler = overview?.reflectionScheduler
   const recycling = overview?.recycling
+  const tools = overview?.tools
   const judgeState: 'running' | 'idle' | 'error' = judge?.lastErrorAt
     ? 'error'
     : judge?.running
@@ -480,7 +481,7 @@ function MetricsCard({
         <Stat label={t('settings.evolution.metrics.exports')} value={formatNumber(overview?.exportsCount)} />
         <Stat label={t('settings.evolution.metrics.pushes')} value={formatNumber(overview?.pushReceiptsCount)} />
       </div>
-      {(judge || scheduler || recycling) && (
+      {(judge || scheduler || recycling || tools) && (
         <div className="flex flex-wrap gap-2 mt-3">
           {judge && (
             <span
@@ -514,6 +515,26 @@ function MetricsCard({
               {t('settings.evolution.recycling.runtime.totalHarvested', {
                 count: String(recycling.totalHarvested),
               })}
+            </span>
+          )}
+          {tools && (
+            <span
+              className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
+              title={t('settings.evolution.metrics.toolSearchTooltip')}
+            >
+              {t('settings.evolution.metrics.toolSearch')}
+              {' · '}
+              {formatNumber(tools.invocations)} / {formatNumber(tools.activations)} / {formatNumber(tools.highRiskBlocked)}
+              {' · '}
+              {tools.avgLatencyMs.toFixed(1)} ms
+              {typeof tools.deferredBuiltinCount === 'number' && tools.deferredBuiltinCount > 0 && (
+                <>
+                  {' · '}
+                  {t('settings.evolution.metrics.deferredBuiltin', {
+                    count: String(tools.deferredBuiltinCount),
+                  })}
+                </>
+              )}
             </span>
           )}
         </div>

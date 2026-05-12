@@ -22,6 +22,7 @@ import { ResizeHandles } from './ResizeHandles'
 import { StatusBar } from './StatusBar'
 import { useTabStore } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
 import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
 import { Settings } from '../../pages/Settings'
@@ -69,6 +70,7 @@ export function AppShell() {
         await initializeDesktopServerUrl({ signal: abort.signal })
         await fetchSettingsWithRetry(fetchSettings, { signal: abort.signal })
         startBackgroundShellMirror()
+        useSessionRunStateStore.getState().start()
 
         while (!abort.signal.aborted) {
           try {
@@ -101,6 +103,43 @@ export function AppShell() {
 
     return () => abort.abort()
   }, [fetchSettings])
+
+  useEffect(() => {
+    let cancelled = false
+    const reveal = async () => {
+      try {
+        const [{ invoke }, { getCurrentWindow }] = await Promise.all([
+          import(/* @vite-ignore */ '@tauri-apps/api/core'),
+          import(/* @vite-ignore */ '@tauri-apps/api/window'),
+        ])
+        if (cancelled) return
+        try {
+          await invoke('signal_frontend_ready')
+        } catch {
+          const win = getCurrentWindow()
+          try {
+            await win.show()
+          } catch {
+
+          }
+          try {
+            await win.setFocus()
+          } catch {
+
+          }
+        }
+      } catch {
+
+      }
+    }
+    const raf = window.requestAnimationFrame(() => {
+      void reveal()
+    })
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(raf)
+    }
+  }, [])
 
   useEffect(() => {
     let unlisten: (() => void) | undefined

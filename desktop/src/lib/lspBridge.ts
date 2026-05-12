@@ -16,6 +16,8 @@
 import { lspApi } from '../api/lsp'
 import { wsManager } from '../api/websocket'
 import { useLspStore } from '../stores/lspStore'
+import { useWorkspaceFilesStore } from '../stores/workspaceFilesStore'
+import { inferLanguageFromPath } from './extLanguage'
 import type {
   LspBroadcastEvent,
   LspDiagnostic,
@@ -167,6 +169,174 @@ export const lspBridge = {
       uri: normalizeUri(params.uri),
     })
     return response.result ?? null
+  },
+
+  async references(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+  }) {
+    const response = await lspApi.request<unknown>({
+      ...params,
+      method: 'references',
+      uri: normalizeUri(params.uri),
+    })
+    return response.result ?? null
+  },
+
+  async inlayHint(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    range: {
+      start: { line: number; character: number }
+      end: { line: number; character: number }
+    }
+  }) {
+    const response = await lspApi.request<unknown>({
+      method: 'inlayHint',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      range: params.range,
+    })
+    return response.result ?? null
+  },
+
+  async signatureHelp(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+    triggerCharacter?: string
+  }) {
+    const response = await lspApi.request<unknown>({
+      ...params,
+      method: 'signatureHelp',
+      uri: normalizeUri(params.uri),
+    })
+    return response.result ?? null
+  },
+
+  async documentSymbol(params: {
+    uri: string
+    languageId?: string
+    text?: string
+  }) {
+    const response = await lspApi.request<unknown>({
+      method: 'documentSymbol',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+    })
+    return response.result ?? null
+  },
+
+  async formatting(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    options?: { tabSize: number; insertSpaces: boolean }
+  }) {
+    const response = await lspApi.request<unknown>({
+      method: 'formatting',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      options: params.options ?? { tabSize: 4, insertSpaces: true },
+    })
+    return response.result ?? null
+  },
+
+  async codeAction(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    range: {
+      start: { line: number; character: number }
+      end: { line: number; character: number }
+    }
+    diagnostics?: Array<Record<string, unknown>>
+    only?: string[]
+  }) {
+    const response = await lspApi.request<unknown>({
+      method: 'codeAction',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      range: params.range,
+      diagnostics: params.diagnostics,
+      only: params.only,
+    })
+    return response.result ?? null
+  },
+
+  async executeCommand(params: {
+    command: string
+    arguments?: unknown[]
+    uri?: string
+    languageId?: string
+  }) {
+    let languageId = params.languageId
+    if (!languageId || languageId.trim() === '') {
+      if (params.uri) {
+        const inferred = inferLanguageFromPath(params.uri)
+        if (inferred && inferred !== 'text') {
+          languageId = inferred
+        }
+      }
+      if (!languageId || languageId.trim() === '') {
+        const state = useWorkspaceFilesStore.getState()
+        const activeTab = state.activeTab
+        if (activeTab) {
+          const model = state.monacoModels[activeTab]
+          if (model && !model.isDisposed?.()) {
+            try {
+              const fromModel = model.getLanguageId()
+              if (fromModel && fromModel.trim() !== '') {
+                languageId = fromModel
+              }
+            } catch {}
+          }
+          if (!languageId || languageId.trim() === '') {
+            const fromPath = inferLanguageFromPath(activeTab)
+            if (fromPath && fromPath !== 'text') {
+              languageId = fromPath
+            }
+          }
+        }
+      }
+    }
+    const response = await lspApi.request<unknown>({
+      method: 'executeCommand',
+      uri: params.uri ? normalizeUri(params.uri) : '',
+      languageId,
+      command: params.command,
+      arguments: params.arguments,
+    })
+    return response.result ?? null
+  },
+
+  async willSave(params: DocumentParams) {
+    const uri = normalizeUri(params.uri)
+    const pending = changeTimers.get(uri)
+    if (pending) {
+      clearTimeout(pending)
+      changeTimers.delete(uri)
+    }
+    try {
+      await lspApi.notify({
+        method: 'didChange',
+        uri,
+        languageId: params.languageId,
+        text: params.text,
+      })
+    } catch (err) {
+      console.warn('[lsp] willSave didChange failed', err)
+    }
   },
 
   diagnosticsFor(uri: string): LspDiagnostic[] {

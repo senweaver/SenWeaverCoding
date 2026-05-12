@@ -52,6 +52,15 @@ pub fn subscribe_gateway_approval_events(
     gateway_approval_sender().subscribe()
 }
 
+pub fn gateway_approval_bus(
+) -> &'static tokio::sync::broadcast::Sender<crate::session::SessionEvent> {
+    gateway_approval_sender()
+}
+
+pub fn gateway_approval_sink_handle() -> crate::session::SessionEventSink {
+    crate::session::SessionEventSink::new(gateway_approval_sender().clone())
+}
+
 pub(super) fn approval_sender_for_desktop(
 ) -> &'static tokio::sync::broadcast::Sender<crate::session::SessionEvent> {
     gateway_approval_sender()

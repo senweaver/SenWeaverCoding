@@ -26,23 +26,78 @@ const GATEWAY_HEALTH_PROBE_TIMEOUT_MS: u64 = 2_000;
 const RESTART_DEBOUNCE_SECS: u64 = 90;
 
 #[cfg(target_os = "windows")]
+fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use std::ptr;
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+    use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    };
+
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+
+    if hwnd.is_null() {
+        return;
+    }
+
+    let chrome_style_mask: isize =
+        (WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME) as isize;
+    let required_style_bits: isize = (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
+    let prev_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    let new_style = (prev_style & !chrome_style_mask) | required_style_bits;
+    if new_style != prev_style {
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
+        }
+    }
+
+    let value: u32 = DWMWA_COLOR_NONE;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR as u32,
+            (&value as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        InvalidateRect(hwnd, ptr::null(), 1);
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn disable_window_focus_border(window: &tauri::WebviewWindow) {
     use std::ptr;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
-    use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
+    use windows_sys::Win32::Graphics::Gdi::{
+        InvalidateRect, RedrawWindow, RDW_FRAME, RDW_INVALIDATE,
+    };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsZoomed, SetWindowLongPtrW,
         SetWindowPos, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT,
         HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SWP_FRAMECHANGED,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_ACTIVATEAPP,
-        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_SETFOCUS, WS_BORDER, WS_CAPTION,
-        WS_DLGFRAME, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+        WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_DWMNCRENDERINGCHANGED, WM_NCACTIVATE,
+        WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SHOWWINDOW,
+        WM_THEMECHANGED, WM_WINDOWPOSCHANGED, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
     };
 
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
     const SUBCLASS_ID: usize = 0x53_45_4E_57;
+    const WM_NCUAHDRAWCAPTION: u32 = 0x00AE;
+    const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
 
     unsafe extern "system" fn no_border_subclass(
         hwnd: HWND,
@@ -53,14 +108,13 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
         _data: usize,
     ) -> LRESULT {
         match msg {
-
             WM_NCCALCSIZE => 0,
             WM_NCPAINT => 0,
+            WM_NCUAHDRAWCAPTION | WM_NCUAHDRAWFRAME => 0,
 
-            WM_NCACTIVATE => unsafe { DefSubclassProc(hwnd, msg, 1, lparam) },
+            WM_NCACTIVATE => unsafe { DefSubclassProc(hwnd, msg, wparam, -1) },
 
             WM_NCHITTEST => {
-
                 if unsafe { IsZoomed(hwnd) } != 0 {
                     return HTCLIENT as LRESULT;
                 }
@@ -99,6 +153,38 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
                     _ => HTCLIENT,
                 };
                 hit as LRESULT
+            }
+
+            WM_DWMCOMPOSITIONCHANGED
+            | WM_DWMNCRENDERINGCHANGED
+            | WM_THEMECHANGED
+            | WM_DPICHANGED
+            | WM_SETTINGCHANGE => {
+                let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                reapply_chrome_styles(hwnd);
+                r
+            }
+
+            WM_SHOWWINDOW => {
+                let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                if wparam != 0 {
+                    reapply_chrome_styles(hwnd);
+                }
+                r
+            }
+
+            WM_WINDOWPOSCHANGED => {
+                let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                unsafe {
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                    RedrawWindow(
+                        hwnd,
+                        ptr::null(),
+                        ptr::null_mut(),
+                        RDW_FRAME | RDW_INVALIDATE,
+                    );
+                }
+                r
             }
 
             WM_ACTIVATE | WM_ACTIVATEAPP | WM_SETFOCUS => {
@@ -238,6 +324,61 @@ fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn signal_frontend_ready(handle: AppHandle) -> Result<(), String> {
+    if let Some(main) = handle.get_webview_window("main") {
+        show_main_window_now(&main);
+    }
+    Ok(())
+}
+
+const MAIN_WINDOW_SHOW_FALLBACK_MS: u64 = 1_500;
+
+fn show_main_window_now(window: &tauri::WebviewWindow) {
+    static SHOWN: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
+    {
+        let mut guard = SHOWN.lock();
+        if *guard {
+            return;
+        }
+        *guard = true;
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = window.hwnd() {
+        use windows_sys::Win32::Foundation::HWND;
+        let raw = hwnd.0 as HWND;
+        reapply_chrome_styles(raw);
+    }
+
+    if let Err(err) = window.show() {
+        tracing::warn!("[sen-desktop] window.show() failed: {err}");
+    }
+    if let Err(err) = window.set_focus() {
+        tracing::debug!("[sen-desktop] window.set_focus() failed: {err}");
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = window.hwnd() {
+        use windows_sys::Win32::Foundation::HWND;
+        let raw = hwnd.0 as HWND;
+        reapply_chrome_styles(raw);
+    }
+}
+
+fn schedule_main_window_show_fallback(window: tauri::WebviewWindow) {
+    thread::Builder::new()
+        .name("sen-window-show-fallback".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(MAIN_WINDOW_SHOW_FALLBACK_MS));
+            let win_for_closure = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                show_main_window_now(&win_for_closure);
+            });
+        })
+        .ok();
+}
+
+#[tauri::command]
 fn reveal_in_explorer(path: String) -> Result<(), String> {
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
@@ -332,6 +473,7 @@ pub fn run() {
             get_server_url,
             restart_embedded_gateway,
             prepare_for_update_install,
+            signal_frontend_ready,
             reveal_in_explorer,
             terminal::terminal_spawn,
             terminal::terminal_write,
@@ -365,9 +507,11 @@ pub fn run() {
 
     let app = builder
         .setup(|app| {
-            #[cfg(target_os = "windows")]
             if let Some(main) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
                 disable_window_focus_border(&main);
+
+                schedule_main_window_show_fallback(main.clone());
             }
 
             browser_dock::install_into(app.handle());

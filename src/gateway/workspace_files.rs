@@ -883,7 +883,8 @@ pub async fn handle_workspace_watch(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match watch_impl::start_watch_stream(root).await {
+    let cache = state.git_status_cache.clone();
+    match watch_impl::start_watch_stream(root, cache).await {
         Ok(sse) => sse.into_response(),
         Err(e) => {
             tracing::warn!(err = %e, "workspace watch start failed");
@@ -922,21 +923,103 @@ mod watch_impl {
     use notify::event::{EventKind, ModifyKind, RenameMode};
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::convert::Infallible;
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_stream::Stream;
 
     const DEBOUNCE_MS: u64 = 100;
 
+    const RENAME_WINDOW_MS: u64 = 800;
+
+    const RECENT_REMOVED_TTL_MS: u64 = 1500;
+
+    const RECENT_REMOVED_CAP: usize = 32;
+
     const CHANNEL_SIZE: usize = 64;
 
     const KEEP_ALIVE_SECS: u64 = 15;
 
+    #[derive(Clone)]
+    struct PendingEvent {
+        kind: &'static str,
+        from_rel: Option<String>,
+    }
+
+    struct RecentRemoved {
+        rel: String,
+        basename: String,
+        parent: String,
+        expires_at: Instant,
+    }
+
+    fn split_rel(rel: &str) -> (String, String) {
+        if let Some(idx) = rel.rfind('/') {
+            (rel[..idx].to_string(), rel[idx + 1..].to_string())
+        } else {
+            (String::new(), rel.to_string())
+        }
+    }
+
+    fn push_recent_removed(buf: &mut VecDeque<RecentRemoved>, rel: &str) {
+        let (parent, basename) = split_rel(rel);
+        if basename.is_empty() {
+            return;
+        }
+        while buf.len() >= RECENT_REMOVED_CAP {
+            buf.pop_front();
+        }
+        buf.push_back(RecentRemoved {
+            rel: rel.to_string(),
+            basename,
+            parent,
+            expires_at: Instant::now() + Duration::from_millis(RECENT_REMOVED_TTL_MS),
+        });
+    }
+
+    fn match_recent_removed(
+        buf: &mut VecDeque<RecentRemoved>,
+        to_rel: &str,
+    ) -> Option<String> {
+        let (to_parent, to_base) = split_rel(to_rel);
+        if to_base.is_empty() {
+            return None;
+        }
+        if let Some(idx) = buf
+            .iter()
+            .position(|r| r.basename == to_base && r.parent == to_parent)
+        {
+            return buf.remove(idx).map(|r| r.rel);
+        }
+        if let Some(idx) = buf.iter().position(|r| r.basename == to_base) {
+            return buf.remove(idx).map(|r| r.rel);
+        }
+        None
+    }
+
+    fn compute_next_deadline(
+        pending_renames: &HashMap<usize, (String, Instant)>,
+        recent_removed: &VecDeque<RecentRemoved>,
+    ) -> Option<tokio::time::Instant> {
+        let mut next: Option<Instant> = None;
+        for (_, ts) in pending_renames.values() {
+            let exp = *ts + Duration::from_millis(RENAME_WINDOW_MS);
+            next = Some(next.map_or(exp, |n: Instant| n.min(exp)));
+        }
+        for r in recent_removed {
+            next = Some(next.map_or(r.expires_at, |n: Instant| n.min(r.expires_at)));
+        }
+        next.map(|i| {
+            let remaining = i.saturating_duration_since(Instant::now());
+            tokio::time::Instant::now() + remaining
+        })
+    }
+
     pub(super) async fn start_watch_stream(
         root: PathBuf,
+        git_status_cache: crate::gateway::git_routes::GitStatusCache,
     ) -> std::io::Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
         let (raw_tx, mut raw_rx) =
             tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
@@ -959,7 +1042,10 @@ mod watch_impl {
         tokio::spawn(async move {
 
             let _watcher_guard = watcher;
-            let mut pending: HashMap<String, &'static str> = HashMap::new();
+            let mut pending: HashMap<String, PendingEvent> = HashMap::new();
+            let mut pending_renames: HashMap<usize, (String, Instant)> = HashMap::new();
+            let mut recent_removed: VecDeque<RecentRemoved> =
+                VecDeque::with_capacity(RECENT_REMOVED_CAP);
             let mut deadline: Option<tokio::time::Instant> = None;
 
             loop {
@@ -970,14 +1056,47 @@ mod watch_impl {
                 tokio::select! {
                     biased;
                     Some(_) = &mut sleep_fut => {
-                        let drained: Vec<(String, &'static str)> =
+                        let now = Instant::now();
+                        let stale_keys: Vec<usize> = pending_renames
+                            .iter()
+                            .filter_map(|(k, (_, ts))| {
+                                if now.duration_since(*ts)
+                                    >= Duration::from_millis(RENAME_WINDOW_MS)
+                                {
+                                    Some(*k)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        for key in stale_keys {
+                            if let Some((rel, _)) = pending_renames.remove(&key) {
+                                push_recent_removed(&mut recent_removed, &rel);
+                                pending.entry(rel).or_insert(PendingEvent {
+                                    kind: "removed",
+                                    from_rel: None,
+                                });
+                            }
+                        }
+                        while let Some(front) = recent_removed.front() {
+                            if front.expires_at <= now {
+                                recent_removed.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                        let drained: Vec<(String, PendingEvent)> =
                             pending.drain().collect();
-                        deadline = None;
-                        for (rel, kind_str) in drained {
-                            let payload = json!({
-                                "kind": kind_str,
+                        deadline =
+                            compute_next_deadline(&pending_renames, &recent_removed);
+                        for (rel, info) in drained {
+                            let mut payload = json!({
+                                "kind": info.kind,
                                 "relPath": rel,
                             });
+                            if let Some(from) = info.from_rel {
+                                payload["fromRelPath"] = json!(from);
+                            }
                             let event = SseEvent::default().data(payload.to_string());
                             if out_tx.send(Ok(event)).await.is_err() {
                                 return;
@@ -993,21 +1112,152 @@ mod watch_impl {
                                 continue;
                             }
                         };
-                        let Some(kind_str) = classify_event_kind(&event.kind) else {
-                            continue;
-                        };
-                        for path in &event.paths {
-                            let rel = relative_path(&root, path);
-                            if rel.is_empty() {
-                                continue;
+                        let mut should_invalidate_git = false;
+                        let rels: Vec<String> = event
+                            .paths
+                            .iter()
+                            .map(|p| relative_path(&root, p))
+                            .filter(|r| !r.is_empty())
+                            .collect();
+                        for rel in &rels {
+                            if !rel.starts_with(".git/") && rel != ".git" {
+                                should_invalidate_git = true;
                             }
-
-                            pending.insert(rel, kind_str);
                         }
-                        if deadline.is_none() && !pending.is_empty() {
+                        let mut handled = false;
+                        match &event.kind {
+                            EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+                                if rels.len() == 2 =>
+                            {
+                                let from = rels[0].clone();
+                                let to = rels[1].clone();
+                                pending.insert(
+                                    to,
+                                    PendingEvent {
+                                        kind: "renamed",
+                                        from_rel: Some(from),
+                                    },
+                                );
+                                handled = true;
+                            }
+                            EventKind::Modify(ModifyKind::Name(RenameMode::From))
+                                if !rels.is_empty() =>
+                            {
+                                let from = rels[0].clone();
+                                if let Some(tracker) = event.attrs.tracker() {
+                                    pending_renames
+                                        .insert(tracker, (from, Instant::now()));
+                                    handled = true;
+                                } else {
+                                    push_recent_removed(&mut recent_removed, &from);
+                                    pending.insert(
+                                        from,
+                                        PendingEvent {
+                                            kind: "removed",
+                                            from_rel: None,
+                                        },
+                                    );
+                                    handled = true;
+                                }
+                            }
+                            EventKind::Modify(ModifyKind::Name(RenameMode::To))
+                                if !rels.is_empty() =>
+                            {
+                                let to = rels[0].clone();
+                                let paired = event
+                                    .attrs
+                                    .tracker()
+                                    .and_then(|t| pending_renames.remove(&t));
+                                if let Some((from, _)) = paired {
+                                    pending.insert(
+                                        to,
+                                        PendingEvent {
+                                            kind: "renamed",
+                                            from_rel: Some(from),
+                                        },
+                                    );
+                                } else if let Some(from) =
+                                    match_recent_removed(&mut recent_removed, &to)
+                                {
+                                    pending.insert(
+                                        to,
+                                        PendingEvent {
+                                            kind: "renamed",
+                                            from_rel: Some(from),
+                                        },
+                                    );
+                                } else {
+                                    pending.insert(
+                                        to,
+                                        PendingEvent {
+                                            kind: "renamed",
+                                            from_rel: None,
+                                        },
+                                    );
+                                }
+                                handled = true;
+                            }
+                            _ => {}
+                        }
+                        if !handled {
+                            let Some(kind_str) = classify_event_kind(&event.kind) else {
+                                if should_invalidate_git {
+                                    crate::gateway::git_routes::invalidate_root(
+                                        &git_status_cache,
+                                        &root,
+                                    );
+                                }
+                                continue;
+                            };
+                            for rel in rels {
+                                let matched_from = if kind_str == "created" {
+                                    match_recent_removed(&mut recent_removed, &rel)
+                                } else {
+                                    None
+                                };
+                                if let Some(from) = matched_from {
+                                    pending.insert(
+                                        rel,
+                                        PendingEvent {
+                                            kind: "renamed",
+                                            from_rel: Some(from),
+                                        },
+                                    );
+                                } else {
+                                    pending
+                                        .entry(rel)
+                                        .and_modify(|existing| {
+                                            if existing.kind != "renamed" {
+                                                existing.kind = kind_str;
+                                            }
+                                        })
+                                        .or_insert(PendingEvent {
+                                            kind: kind_str,
+                                            from_rel: None,
+                                        });
+                                }
+                            }
+                        }
+                        if should_invalidate_git {
+                            crate::gateway::git_routes::invalidate_root(
+                                &git_status_cache,
+                                &root,
+                            );
+                        }
+                        let needs_deadline = !pending.is_empty()
+                            || !pending_renames.is_empty()
+                            || !recent_removed.is_empty();
+                        if deadline.is_none() && needs_deadline {
+                            let wait = if !pending.is_empty() {
+                                DEBOUNCE_MS
+                            } else if !pending_renames.is_empty() {
+                                RENAME_WINDOW_MS
+                            } else {
+                                RECENT_REMOVED_TTL_MS
+                            };
                             deadline = Some(
                                 tokio::time::Instant::now()
-                                    + Duration::from_millis(DEBOUNCE_MS),
+                                    + Duration::from_millis(wait),
                             );
                         }
                     }

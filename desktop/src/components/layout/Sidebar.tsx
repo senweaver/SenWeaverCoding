@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
 import { ProjectFilter } from './ProjectFilter'
@@ -9,6 +10,8 @@ import { useTabStore, SCHEDULED_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { isPlaceholderTitle, resolveSessionTitle } from '../../utils/sessionTitle'
+import { Spinner } from '../shared/Spinner'
+import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
@@ -32,6 +35,17 @@ type WorkspaceGroup = {
 
 export function Sidebar() {
   const sessions = useSessionStore((s) => s.sessions)
+  const runningSessions = useSessionRunStateStore((s) => s.running)
+  const queueState = useWorkspaceQueueStore((s) => s.queues)
+  const queuedCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const list of Object.values(queueState)) {
+      for (const item of list) {
+        counts[item.sessionId] = (counts[item.sessionId] ?? 0) + 1
+      }
+    }
+    return counts
+  }, [queueState])
   const selectedProjects = useSessionStore((s) => s.selectedProjects)
   const error = useSessionStore((s) => s.error)
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
@@ -211,6 +225,8 @@ export function Sidebar() {
 
   const renderSessionRow = (session: SessionListItem) => {
     const displayTitle = resolveSessionTitle(session.title, t('sidebar.untitled'))
+    const isRunning = runningSessions.has(session.id)
+    const queuedCount = queuedCounts[session.id] ?? 0
     return (
       <div key={session.id} className="group/row relative">
         {renamingId === session.id ? (
@@ -226,7 +242,7 @@ export function Sidebar() {
                 setRenameValue('')
               }
             }}
-            className="ml-1 w-full rounded-[var(--radius-md)] border border-[var(--color-border-focus)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
+            className="ml-1 w-full rounded-[var(--radius-md)] border border-[var(--color-border-focus)] bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-text-primary)] outline-none"
           />
         ) : (
           <>
@@ -238,7 +254,7 @@ export function Sidebar() {
               onContextMenu={(e) => handleContextMenu(e, session.id)}
               title={displayTitle}
               className={`
-                w-full rounded-[12px] px-3 py-2 pr-9 text-left text-sm transition-colors duration-200
+                w-full rounded-[12px] px-3 py-2 pr-9 text-left text-xs transition-colors duration-200
                 ${session.id === activeTabId
                   ? 'bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)]'
@@ -246,23 +262,41 @@ export function Sidebar() {
               `}
             >
               <span className="flex items-center gap-2.5">
-                <span
-                  className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
-                  style={{
-                    backgroundColor: session.id === activeTabId ? 'var(--color-brand)' : 'var(--color-text-tertiary)',
-                    opacity: session.id === activeTabId ? 1 : 0.5,
-                  }}
-                />
+                {isRunning ? (
+                  <span
+                    aria-label={t('common.running')}
+                    className="inline-flex items-center flex-shrink-0 text-[var(--color-brand)]"
+                  >
+                    <Spinner size={8} />
+                  </span>
+                ) : (
+                  <span
+                    className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
+                    style={{
+                      backgroundColor: session.id === activeTabId ? 'var(--color-brand)' : 'var(--color-text-tertiary)',
+                      opacity: session.id === activeTabId ? 1 : 0.5,
+                    }}
+                  />
+                )}
                 <span className="flex-1 truncate font-medium tracking-[-0.01em]">{displayTitle}</span>
+                {!isRunning && queuedCount > 0 && (
+                  <span
+                    aria-label={t('tabs.queuedBadge', { count: queuedCount })}
+                    title={t('tabs.queuedBadge', { count: queuedCount })}
+                    className="flex-shrink-0 inline-flex items-center text-[10px] tabular-nums text-[var(--color-text-tertiary)]"
+                  >
+                    ·{queuedCount}
+                  </span>
+                )}
                 {!session.workDirExists && (
                   <span
-                    className="flex-shrink-0 text-[10px] text-[var(--color-warning)]"
+                    className="flex-shrink-0 text-xs text-[var(--color-warning)]"
                     title={session.workDir ?? ''}
                   >
                     {t('sidebar.missingDir')}
                   </span>
                 )}
-                <span className="flex-shrink-0 text-[10px] text-[var(--color-text-tertiary)] opacity-50 transition-opacity duration-150 group-hover/row:opacity-0">
+                <span className="flex-shrink-0 text-xs text-[var(--color-text-tertiary)] opacity-50 transition-opacity duration-150 group-hover/row:opacity-0">
                   {formatRelativeTime(session.modifiedAt)}
                 </span>
               </span>
@@ -409,20 +443,20 @@ export function Sidebar() {
                           aria-expanded={wsOpen}
                           aria-label={wsOpen ? t('sidebar.collapseWorkspace') : t('sidebar.expandWorkspace')}
                           title={ws.workspacePath || ws.workspaceLabel}
-                          className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1 text-left text-[12px] font-semibold tracking-wide text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
+                          className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1 text-left text-xs font-semibold tracking-wide text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
                         >
                           <ChevronRightIcon open={wsOpen} />
                           <FolderIcon existing={ws.workspaceExists} />
                           <span className="flex-1 truncate">{ws.workspaceLabel}</span>
                           {!ws.workspaceExists && ws.workspaceKey !== WORKSPACE_UNKNOWN_KEY && (
                             <span
-                              className="flex-shrink-0 text-[10px] font-normal text-[var(--color-warning)]"
+                              className="flex-shrink-0 text-xs font-normal text-[var(--color-warning)]"
                               title={ws.workspacePath}
                             >
                               {t('sidebar.missingDir')}
                             </span>
                           )}
-                          <span className="flex-shrink-0 text-[10px] font-normal tabular-nums text-[var(--color-text-tertiary)]">
+                          <span className="flex-shrink-0 text-xs font-normal tabular-nums text-[var(--color-text-tertiary)]">
                             {ws.totalCount}
                           </span>
                         </button>
@@ -446,11 +480,11 @@ export function Sidebar() {
                                     onClick={() => toggleTimeGroup(tgKey)}
                                     aria-expanded={tgOpen}
                                     aria-label={tgOpen ? t('sidebar.collapseTimeGroup') : t('sidebar.expandTimeGroup')}
-                                    className="flex w-full items-center gap-1 rounded-[8px] px-2 py-0.5 text-left text-[11px] font-semibold tracking-wide text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
+                                    className="flex w-full items-center gap-1 rounded-[8px] px-2 py-0.5 text-left text-xs font-semibold tracking-wide text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
                                   >
                                     <ChevronRightIcon open={tgOpen} size="sm" />
                                     <span className="flex-1 truncate">{timeGroupLabels[tg]}</span>
-                                    <span className="flex-shrink-0 text-[10px] font-normal tabular-nums opacity-70">
+                                    <span className="flex-shrink-0 text-xs font-normal tabular-nums opacity-70">
                                       {items.length}
                                     </span>
                                   </button>
@@ -698,7 +732,7 @@ function NavItem({
       title={collapsed ? label : undefined}
       className={`
         flex items-center transition-colors duration-200
-        ${collapsed ? 'h-10 w-10 justify-center rounded-[var(--radius-md)] px-0 py-0' : 'w-full gap-2.5 rounded-[12px] px-3 py-2.5 text-sm'}
+        ${collapsed ? 'h-10 w-10 justify-center rounded-[var(--radius-md)] px-0 py-0' : 'w-full gap-2.5 rounded-[12px] px-3 py-2.5 text-xs'}
         ${active
           ? 'bg-[var(--color-sidebar-item-active)] font-medium text-[var(--color-text-primary)]'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]'

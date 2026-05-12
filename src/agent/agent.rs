@@ -142,6 +142,8 @@ pub struct Agent {
 
     activated_tools: Option<Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
 
+    surface: crate::tools::ToolSurfaceBaseline,
+
     user_profile_config: crate::agent::user_profile::UserProfileConfig,
     skill_evolution_config: crate::agent::skill_evolution::SkillEvolutionConfig,
     prompt_optimizer_config: crate::agent::prompt_optimizer::PromptOptimizerConfig,
@@ -179,6 +181,14 @@ pub struct Agent {
     hook_runner: Option<std::sync::Arc<crate::hooks::HotHookRunner>>,
 
     cached_tools_signature: u64,
+
+    merged_specs_cache: parking_lot::Mutex<Option<MergedSpecsCacheEntry>>,
+}
+
+struct MergedSpecsCacheEntry {
+    activation_revision: u64,
+    base_ptr: usize,
+    merged: std::sync::Arc<Vec<ToolSpec>>,
 }
 
 pub struct AgentBuilder {
@@ -208,6 +218,7 @@ pub struct AgentBuilder {
     security_summary: Option<String>,
     autonomy_level: Option<crate::security::AutonomyLevel>,
     activated_tools: Option<Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
+    surface: Option<crate::tools::ToolSurfaceBaseline>,
     user_profile_config: Option<crate::agent::user_profile::UserProfileConfig>,
     skill_evolution_config: Option<crate::agent::skill_evolution::SkillEvolutionConfig>,
     prompt_optimizer_config: Option<crate::agent::prompt_optimizer::PromptOptimizerConfig>,
@@ -253,6 +264,7 @@ impl AgentBuilder {
             security_summary: None,
             autonomy_level: None,
             activated_tools: None,
+            surface: None,
             user_profile_config: None,
             skill_evolution_config: None,
             prompt_optimizer_config: None,
@@ -403,6 +415,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn surface(mut self, surface: crate::tools::ToolSurfaceBaseline) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
     pub fn activated_tools(
         mut self,
         activated: Option<Arc<parking_lot::Mutex<tools::ActivatedToolSet>>>,
@@ -505,6 +522,9 @@ impl AgentBuilder {
                 .autonomy_level
                 .unwrap_or(crate::security::AutonomyLevel::Supervised),
             activated_tools: self.activated_tools,
+            surface: self
+                .surface
+                .unwrap_or(crate::tools::ToolSurfaceBaseline::Both),
             user_profile_config: self.user_profile_config.unwrap_or_default(),
             skill_evolution_config: self.skill_evolution_config.unwrap_or_default(),
             prompt_optimizer_config: self.prompt_optimizer_config.unwrap_or_default(),
@@ -533,6 +553,7 @@ impl AgentBuilder {
             plan_execution_armed: parking_lot::Mutex::new(None),
             hook_runner: self.hook_runner,
             cached_tools_signature: 0,
+            merged_specs_cache: parking_lot::Mutex::new(None),
         })
     }
 
@@ -623,6 +644,60 @@ impl Agent {
             &mut entry.cache_creation_input_tokens,
             delta.cache_creation_input_tokens,
         );
+    }
+
+    fn current_tool_specs_with_activated(&self) -> std::sync::Arc<Vec<ToolSpec>> {
+        let Some(ref activated_arc) = self.activated_tools else {
+            return std::sync::Arc::clone(&self.tool_specs);
+        };
+
+        let (revision, extra_empty) = {
+            let guard = activated_arc.lock();
+            (guard.revision(), guard.is_empty())
+        };
+        if extra_empty {
+            return std::sync::Arc::clone(&self.tool_specs);
+        }
+
+        let base_ptr = std::sync::Arc::as_ptr(&self.tool_specs) as usize;
+
+        {
+            let cache = self.merged_specs_cache.lock();
+            if let Some(entry) = cache.as_ref() {
+                if entry.activation_revision == revision && entry.base_ptr == base_ptr {
+                    return std::sync::Arc::clone(&entry.merged);
+                }
+            }
+        }
+
+        let extra = activated_arc.lock().tool_specs();
+        if extra.is_empty() {
+            return std::sync::Arc::clone(&self.tool_specs);
+        }
+        let base = self.tool_specs.as_ref();
+        let mut merged: Vec<ToolSpec> = Vec::with_capacity(base.len() + extra.len());
+        let mut existing: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(base.len() + extra.len());
+        for spec in base.iter() {
+            if existing.insert(spec.name.clone()) {
+                merged.push(spec.clone());
+            }
+        }
+        for spec in extra {
+            if existing.insert(spec.name.clone()) {
+                merged.push(spec);
+            }
+        }
+        let merged_arc = std::sync::Arc::new(merged);
+
+        let mut cache = self.merged_specs_cache.lock();
+        *cache = Some(MergedSpecsCacheEntry {
+            activation_revision: revision,
+            base_ptr,
+            merged: std::sync::Arc::clone(&merged_arc),
+        });
+
+        merged_arc
     }
 
     pub async fn turn_streamed(
@@ -792,6 +867,7 @@ impl Agent {
             }
 
             let messages = self.tool_dispatcher.to_provider_messages(&self.history);
+            let merged_tool_specs = self.current_tool_specs_with_activated();
 
             let cache_key = self.build_response_cache_key(&messages, &effective_model);
             if let Some(cached) = self.try_response_cache_hit(&cache_key, user_message).await {
@@ -806,7 +882,7 @@ impl Agent {
                 crate::providers::ChatRequest {
                     messages: &messages,
                     tools: if self.tool_dispatcher.should_send_tool_specs() {
-                        Some(&self.tool_specs)
+                        Some(merged_tool_specs.as_slice())
                     } else {
                         None
                     },
@@ -958,7 +1034,7 @@ impl Agent {
                     ChatRequest {
                         messages: &messages,
                         tools: if self.tool_dispatcher.should_send_tool_specs() {
-                            Some(&self.tool_specs)
+                            Some(merged_tool_specs.as_slice())
                         } else {
                             None
                         },
@@ -1726,6 +1802,10 @@ impl Agent {
         self.memory_session_id = session_id;
     }
 
+    pub fn current_workspace_dir(&self) -> &std::path::Path {
+        &self.workspace_dir
+    }
+
     pub fn set_session_workspace_dir(&mut self, path: std::path::PathBuf) {
         if path.as_os_str().is_empty() {
             return;
@@ -2096,7 +2176,87 @@ impl Agent {
         let mut expanded =
             super::sqlite_gateway_hydrate::hydrate_gateway_sqlite_messages(messages);
         Self::repair_orphan_tool_result_messages(&mut expanded);
+        self.activate_deferred_tools_from_history(&expanded);
         self.history.extend(expanded);
+    }
+
+    fn activate_deferred_tools_from_history(&self, history: &[ConversationMessage]) {
+        if self.activated_tools.is_none() {
+            return;
+        }
+        let surface = self.surface;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut builtin_pending: Vec<(String, crate::tools::ToolSpec)> = Vec::new();
+        let mut mcp_pending: Vec<String> = Vec::new();
+        for msg in history {
+            if let ConversationMessage::AssistantToolCalls { tool_calls, .. } = msg {
+                for tc in tool_calls {
+                    if !seen.insert(tc.name.clone()) {
+                        continue;
+                    }
+                    if tc.name.contains("__") {
+                        mcp_pending.push(tc.name.clone());
+                        continue;
+                    }
+                    let entry = crate::tools::tool_tier::classify(&tc.name, surface);
+                    if !matches!(
+                        entry.tier,
+                        crate::tools::tool_tier::BuiltinToolTier::OnDemand
+                    ) {
+                        continue;
+                    }
+                    if let Some(spec) = self
+                        .tools
+                        .iter()
+                        .find(|t| t.name() == tc.name)
+                        .map(|t| t.spec())
+                    {
+                        builtin_pending.push((tc.name.clone(), spec));
+                    }
+                }
+            }
+        }
+        if builtin_pending.is_empty() && mcp_pending.is_empty() {
+            return;
+        }
+        let mut activated_now: Vec<String> = Vec::new();
+        if !builtin_pending.is_empty() {
+            if let Some(ref activated_arc) = self.activated_tools {
+                let mut guard = activated_arc.lock();
+                for (name, spec) in builtin_pending {
+                    if guard.is_activated(&name) {
+                        continue;
+                    }
+                    guard.activate_spec(name.clone(), spec);
+                    activated_now.push(name);
+                }
+            }
+        }
+        if !mcp_pending.is_empty() {
+            if let Some(tool_search_tool) =
+                self.tools.iter().find(|t| t.name() == "tool_search")
+            {
+                if let Some(any_ref) = tool_search_tool.as_any() {
+                    if let Some(ts) =
+                        any_ref.downcast_ref::<crate::tools::ToolSearchTool>()
+                    {
+                        for name in mcp_pending {
+                            if ts.activate_from_history(&name) {
+                                activated_now.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !activated_now.is_empty() {
+            tracing::info!(
+                target: "agent.tool_search.replay",
+                count = activated_now.len(),
+                names = ?activated_now,
+                "replayed deferred tool activations from hydrated history"
+            );
+        }
     }
 
     pub async fn from_config(
@@ -2104,6 +2264,16 @@ impl Agent {
         denied_tools: Option<Vec<String>>,
         shared_config: Option<crate::config::live::LiveConfig>,
     ) -> Result<Self> {
+        if crate::services::credential_vault::try_get_credential_vault().is_none() {
+            let anchor = if config.workspace_dir.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            } else {
+                config.workspace_dir.clone()
+            };
+            if let Err(err) = crate::services::credential_vault::init_credential_vault(&anchor) {
+                tracing::warn!(error = %err, "credential vault initialisation failed for agent session");
+            }
+        }
         let observer: Arc<dyn Observer> =
             Arc::from(observability::create_observer(&config.observability));
         let runtime: Arc<dyn runtime::RuntimeAdapter> =
@@ -2158,6 +2328,8 @@ impl Agent {
         );
 
         let mut activated_tools: Option<Arc<parking_lot::Mutex<tools::ActivatedToolSet>>> = None;
+        let (builtin_deferred_enabled, mcp_deferred_enabled) =
+            crate::tools::deferred_loading_effective(config);
         if config.mcp.enabled && !config.mcp.servers.is_empty() {
             tracing::info!(
                 "Initializing MCP client — {} server(s) configured",
@@ -2166,7 +2338,7 @@ impl Agent {
             match tools::McpRegistry::connect_all(&config.mcp.servers).await {
                 Ok(registry) => {
                     let registry = std::sync::Arc::new(registry);
-                    if config.mcp.deferred_loading {
+                    if mcp_deferred_enabled {
                         let deferred_set = tools::DeferredMcpToolSet::from_registry(
                             std::sync::Arc::clone(&registry),
                         )
@@ -2210,6 +2382,56 @@ impl Agent {
                 }
                 Err(e) => {
                     tracing::error!("MCP registry failed to initialize: {e:#}");
+                }
+            }
+        }
+
+        if builtin_deferred_enabled {
+            let mut deferred_section_unused = String::new();
+            let workspace_key = crate::session::workspace_key_from_path(
+                &config.workspace_dir,
+                "default",
+            );
+            let options = crate::tools::BuiltinDeferredRegistrationOptions {
+                workspace_key: workspace_key.clone(),
+                allowlist: Vec::new(),
+                gate: None,
+                config: Some(config),
+            };
+            let deferred_builtin_set =
+                crate::tools::apply_builtin_deferred_registration_with_options(
+                    &mut tools,
+                    &mut deferred_section_unused,
+                    crate::tools::ToolSurfaceBaseline::Both,
+                    &mut activated_tools,
+                    options,
+                );
+
+            if let (Some(activated_handle), Some(svc)) =
+                (activated_tools.as_ref(), crate::services::try_get_services())
+            {
+                match svc.tool_activation_store.load(&workspace_key).await {
+                    Ok(names) => {
+                        if !names.is_empty() {
+                            let mut guard = activated_handle.lock();
+                            for name in &names {
+                                if guard.is_activated(name) {
+                                    continue;
+                                }
+                                if let Some(spec) = deferred_builtin_set.tool_spec(name) {
+                                    guard.activate_spec(name.clone(), spec);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "tool_activation_store",
+                            workspace_key = %workspace_key,
+                            error = %e,
+                            "failed to preload activated tools"
+                        );
+                    }
                 }
             }
         }
@@ -2308,6 +2530,7 @@ impl Agent {
             .security_summary(Some(security.prompt_summary()))
             .autonomy_level(config.autonomy.level)
             .activated_tools(activated_tools)
+            .surface(crate::tools::ToolSurfaceBaseline::Both)
             .user_profile_config(config.user_profile.clone())
             .skill_evolution_config(config.skill_evolution.clone())
             .prompt_optimizer_config(config.prompt_optimizer.clone())

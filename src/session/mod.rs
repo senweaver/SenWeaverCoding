@@ -34,7 +34,14 @@ pub mod translators;
 
 pub mod rpc;
 
+pub mod run_state;
+pub mod workspace_run;
+
 pub use bridge::SessionEventSink;
+pub use run_state::{SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry};
+pub use workspace_run::{
+    WorkspaceRunGuard, WorkspaceRunRegistry, normalize_workspace_key, workspace_key_from_path,
+};
 pub use chat_view::{
     ChatEntry, ChatEntryKind, ChatViewSink, ChatViewSurface, SessionChatState,
     apply_session_event, apply_session_event_cli, apply_session_event_gui,

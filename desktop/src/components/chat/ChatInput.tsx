@@ -18,6 +18,7 @@ import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { ReviewCard } from './ReviewCard'
 import { TokenUsageRing } from './TokenUsageRing'
+import { WorkspaceQueuePanel } from './WorkspaceQueuePanel'
 import {
   FALLBACK_SLASH_COMMANDS,
   findSlashTrigger,
@@ -25,6 +26,7 @@ import {
   replaceSlashToken,
   resolveSlashUiAction,
 } from './composerUtils'
+import { useCredentialsStore } from '../../stores/credentialsStore'
 
 type GitInfo = { branch: string | null; repoName: string | null; workDir: string; changedFiles: number }
 
@@ -68,6 +70,13 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const composerPrefill = sessionState?.composerPrefill ?? null
   const codingMode = useSettingsStore((s) => s.codingMode)
   const isPlanMode = codingMode === 'plan'
+  const isDebugMode = codingMode === 'debug'
+  const credentialsList = useCredentialsStore((s) => s.credentials)
+  const credentialsHasFetched = useCredentialsStore((s) => s.hasFetched)
+  const credentialsIsLoading = useCredentialsStore((s) => s.isLoading)
+  const fetchCredentials = useCredentialsStore((s) => s.fetchAll)
+  const [credPanelOpen, setCredPanelOpen] = useState(false)
+  const credPanelRef = useRef<HTMLDivElement>(null)
   const activeSession = useSessionStore((state) => activeTabId ? state.sessions.find((session) => session.id === activeTabId) ?? null : null)
   const memberInfo = useTeamStore((s) => activeTabId ? s.getMemberBySessionId(activeTabId) : null)
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
@@ -86,6 +95,53 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       }
     }
   }, [isActive, stopRequested])
+  useEffect(() => {
+    if (!isDebugMode) {
+      setCredPanelOpen(false)
+      return
+    }
+    if (!credentialsHasFetched && !credentialsIsLoading) {
+      void fetchCredentials()
+    }
+  }, [isDebugMode, credentialsHasFetched, credentialsIsLoading, fetchCredentials])
+
+  useEffect(() => {
+    if (!credPanelOpen) return
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      const panel = credPanelRef.current
+      if (!panel || !target) return
+      if (panel.contains(target)) return
+      setCredPanelOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCredPanelOpen(false)
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [credPanelOpen])
+
+  const insertCredentialPlaceholder = useCallback((name: string) => {
+    const placeholder = `\${cred.${name}}`
+    const ta = textareaRef.current
+    if (!ta) {
+      setInput((prev) => `${prev}${placeholder}`)
+      return
+    }
+    const start = ta.selectionStart ?? input.length
+    const end = ta.selectionEnd ?? input.length
+    const next = `${input.slice(0, start)}${placeholder}${input.slice(end)}`
+    setInput(next)
+    requestAnimationFrame(() => {
+      const pos = start + placeholder.length
+      ta.focus()
+      ta.setSelectionRange(pos, pos)
+    })
+  }, [input])
   useEffect(() => {
     return () => {
       if (stopCooldownTimerRef.current) {
@@ -110,6 +166,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const showStopping = isActive && (stopRequested || stopCooldown)
   const isWorkspaceMissing = activeSession?.workDirExists === false
   const canSubmit = !isWorkspaceMissing && (input.trim().length > 0 || (!isMemberSession && attachments.length > 0))
+  const actAsStopButton = !isMemberSession && isActive && !canSubmit
   const isHeroComposer = variant === 'hero' && !isMemberSession
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
 
@@ -523,13 +580,15 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
 
   const composerPlaceholder = isPendingQuestion
     ? t('composer.askDetailsPlaceholder')
-    : isHeroComposer
-      ? t('empty.placeholder')
-      : isWorkspaceMissing
-        ? t('chat.placeholderMissing')
-        : isMemberSession
-          ? t('teams.memberPlaceholder')
-          : t('chat.placeholder')
+    : isDebugMode && !isWorkspaceMissing && !isMemberSession
+      ? t('debug.qa.inputPlaceholder')
+      : isHeroComposer
+        ? t('empty.placeholder')
+        : isWorkspaceMissing
+          ? t('chat.placeholderMissing')
+          : isMemberSession
+            ? t('teams.memberPlaceholder')
+            : t('chat.placeholder')
 
   return (
     <div
@@ -538,6 +597,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     >
       <div className={isHeroComposer ? 'mx-auto flex w-full max-w-3xl flex-col gap-1.5' : 'mx-auto max-w-[860px]'}>
         {!isMemberSession && <ReviewCard />}
+        {!isMemberSession && <WorkspaceQueuePanel sessionId={activeTabId} />}
         <div
           className={isHeroComposer
             ? 'glass-panel relative flex min-h-[100px] flex-col gap-1.5 rounded-xl px-3 py-2.5 transition-colors'
@@ -626,6 +686,52 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             )
           )}
 
+          {!isMemberSession && isDebugMode && (
+            <div className="mb-1.5" ref={credPanelRef}>
+              <button
+                type="button"
+                onClick={() => setCredPanelOpen((v) => !v)}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+                title={t('debug.qa.insertCred')}
+              >
+                <span className="material-symbols-outlined text-[14px]">key</span>
+                {t('debug.qa.panelTitle')}
+                <span className="material-symbols-outlined text-[14px]">
+                  {credPanelOpen ? 'expand_less' : 'expand_more'}
+                </span>
+              </button>
+              {credPanelOpen && (
+                <div className="mt-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-2">
+                  <div className="text-[11px] text-[var(--color-text-tertiary)] mb-1.5">
+                    {t('credentials.placeholder.hint')}
+                  </div>
+                  {credentialsList.length === 0 ? (
+                    <div className="text-[11px] italic text-[var(--color-text-tertiary)] py-1">
+                      {t('credentials.empty')}
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {credentialsList.map((cred) => (
+                        <button
+                          key={cred.name}
+                          type="button"
+                          onClick={() => insertCredentialPlaceholder(cred.name)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded border border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]"
+                          title={t('credentials.placeholder.insert').replace('{name}', cred.name)}
+                        >
+                          <span className="material-symbols-outlined text-[12px] text-[var(--color-text-secondary)]">
+                            key
+                          </span>
+                          {cred.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {isHeroComposer ? (
 
             <div className="flex flex-1 items-start gap-3">
@@ -684,28 +790,28 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                 <TokenUsageRing sessionId={activeTabId ?? null} size={14} />
               )}
               <button
-                onClick={!isMemberSession && isActive ? handleStopClick : handleSubmit}
+                onClick={actAsStopButton ? handleStopClick : handleSubmit}
                 disabled={
-                  !isMemberSession && isActive
+                  actAsStopButton
                     ? showStopping
                     : !canSubmit
                 }
                 aria-label={
-                  !isMemberSession && isActive
+                  actAsStopButton
                     ? showStopping
                       ? t('chat.stopping')
                       : t('chat.stopTitle')
                     : isMemberSession ? t('common.send') : t('common.run')
                 }
                 title={
-                  !isMemberSession && isActive
+                  actAsStopButton
                     ? showStopping
                       ? t('chat.stopping')
                       : t('chat.stopTitle')
                     : isMemberSession ? t('common.send') : t('common.run')
                 }
                 className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50 ${
-                  !isMemberSession && isActive
+                  actAsStopButton
                     ? isPlanMode
                       ? 'bg-[var(--color-plan-accent)] text-[var(--color-on-plan-accent-container)] shadow-[var(--shadow-button-primary)]'
                       : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
@@ -719,7 +825,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                     showStopping ? 'animate-spin' : ''
                   }`}
                 >
-                  {!isMemberSession && isActive
+                  {actAsStopButton
                     ? showStopping
                       ? 'progress_activity'
                       : 'stop'

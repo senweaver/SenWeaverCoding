@@ -1,4 +1,5 @@
 import './theme/globals.css'
+import 'katex/dist/katex.min.css'
 
 let bootCompleted = false
 
