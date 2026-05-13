@@ -28,6 +28,7 @@ pub mod credential_routes;
 pub mod desktop_routes;
 pub mod evolution_routes;
 pub mod git_routes;
+pub mod python_env_routes;
 pub mod workspace_files;
 pub mod ws_desktop;
 
@@ -708,7 +709,21 @@ async fn run_gateway_inner(
         )
         .await,
     );
-    lsp_manager.reconcile(&config).await;
+    {
+        let lsp_manager_bg = std::sync::Arc::clone(&lsp_manager);
+        let config_bg = config.clone();
+        crate::runtime::task_manager::spawn_supervised(
+            "gateway.lsp_reconcile",
+            async move {
+                let started = std::time::Instant::now();
+                lsp_manager_bg.reconcile(&config_bg).await;
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Gateway LSP: background reconcile finished"
+                );
+            },
+        );
+    }
 
     let (listener, actual_port) = match prebound {
         Some(l) => {
@@ -830,7 +845,7 @@ async fn run_gateway_inner(
             config.mcp.servers.len()
         );
         let mcp_started = std::time::Instant::now();
-        let mcp_overall_deadline = std::time::Duration::from_secs(60);
+        let mcp_overall_deadline = std::time::Duration::from_secs(5);
         let mcp_result = tokio::time::timeout(
             mcp_overall_deadline,
             tools::McpRegistry::connect_all(&config.mcp.servers),
@@ -842,7 +857,8 @@ async fn run_gateway_inner(
                 tracing::warn!(
                     elapsed_ms = mcp_started.elapsed().as_millis() as u64,
                     deadline_secs = mcp_overall_deadline.as_secs(),
-                    "Gateway MCP: connect_all exceeded overall deadline; continuing with no MCP tools"
+                    "Gateway MCP: connect_all exceeded startup deadline; continuing with empty registry. \
+                     Slow MCP servers will not block /health; tools become available after restart or when stubs are populated by background retry"
                 );
                 Ok(tools::McpRegistry::empty())
             }
@@ -1774,6 +1790,24 @@ async fn run_gateway_inner(
         .route("/api/workspace/search", get(workspace_files::handle_workspace_search))
         .route("/api/workspace/watch", get(workspace_files::handle_workspace_watch))
         .route("/api/git/status", get(git_routes::handle_git_status))
+        .route("/api/python/status", get(python_env_routes::handle_status))
+        .route("/api/python/discover", get(python_env_routes::handle_discover))
+        .route("/api/python/create", post(python_env_routes::handle_create))
+        .route("/api/python/select", post(python_env_routes::handle_select))
+        .route(
+            "/api/python/install_requirements",
+            post(python_env_routes::handle_install_requirements),
+        )
+        .route(
+            "/api/python/install",
+            post(python_env_routes::handle_install_smart),
+        )
+        .route("/api/python/purge", post(python_env_routes::handle_purge))
+        .route(
+            "/api/python/activation",
+            get(python_env_routes::handle_activation),
+        )
+        .route("/api/python/events", get(python_env_routes::handle_events))
         .route(
             "/api/settings/user",
             get(desktop_routes::handle_settings_user_get).put(desktop_routes::handle_settings_user_put),

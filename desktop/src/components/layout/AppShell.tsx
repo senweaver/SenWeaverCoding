@@ -6,15 +6,17 @@ import { UpdateChecker } from '../shared/UpdateChecker'
 import { CodingModeTransitionGuard } from '../controls/CodingModeTransitionGuard'
 import { QuickModeSwitcher } from '../controls/QuickModeSwitcher'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useUIStore } from '../../stores/uiStore'
+import { RIGHT_SIDEBAR_BOUNDS, useUIStore } from '../../stores/uiStore'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
 import { useTerminalCwdSync } from '../../hooks/useTerminalCwdSync'
 import {
+  DESKTOP_RUNTIME_TUNABLES,
   fetchSettingsWithRetry,
   getServerStatusSnapshot,
   initializeDesktopServerUrl,
   openLogDir,
   requestGatewayRestart,
+  subscribeServerStatus,
   type DesktopBootEvent,
   type ServerStatusSnapshot,
 } from '../../lib/desktopRuntime'
@@ -57,6 +59,7 @@ export function AppShell() {
   const [bootElapsedSecs, setBootElapsedSecs] = useState(0)
   const [bootLastEvent, setBootLastEvent] = useState<DesktopBootEvent | null>(null)
   const [bootStatus, setBootStatus] = useState<ServerStatusSnapshot | null>(null)
+  const [bootFailed, setBootFailed] = useState(false)
   const [retrying, setRetrying] = useState(false)
 
   const [isMaximized, setIsMaximized] = useState(false)
@@ -73,12 +76,29 @@ export function AppShell() {
         const snap = await getServerStatusSnapshot()
         if (snap) setBootStatus(snap)
       })()
-    }, 1_500)
+    }, DESKTOP_RUNTIME_TUNABLES.STATUS_FALLBACK_POLL_MS)
+    let unlistenStatus: (() => void) | null = null
+    void (async () => {
+      const snap = await getServerStatusSnapshot()
+      if (snap) setBootStatus(snap)
+      unlistenStatus = await subscribeServerStatus((payload) => {
+        setBootStatus(payload)
+      })
+    })()
     return () => {
       window.clearInterval(interval)
       window.clearInterval(statusPoll)
+      if (unlistenStatus) unlistenStatus()
     }
   }, [ready])
+
+  useEffect(() => {
+    if (ready) return
+    if (!bootStatus) return
+    if (bootStatus.state === 'failed') {
+      setBootFailed(true)
+    }
+  }, [bootStatus, ready])
 
   useEffect(() => {
     if (settingsOverlayOpen) setSettingsMounted(true)
@@ -94,6 +114,9 @@ export function AppShell() {
           onEvent: (event) => {
             if (abort.signal.aborted) return
             setBootLastEvent(event)
+            if (event.kind === 'bootstrap-failed') {
+              setBootFailed(true)
+            }
           },
         })
         await fetchSettingsWithRetry(fetchSettings, { signal: abort.signal })
@@ -122,8 +145,11 @@ export function AppShell() {
           return
         }
         setReady(true)
-      } catch {
-
+      } catch (error) {
+        if (!abort.signal.aborted) {
+          setBootFailed(true)
+          console.error('[desktop] bootstrap aborted with unrecoverable error', error)
+        }
       }
     }
 
@@ -252,8 +278,8 @@ export function AppShell() {
 
   if (!ready) {
     const showHint = bootElapsedSecs >= 6
-    const showActions = bootElapsedSecs >= 10
-    const showLongHint = bootElapsedSecs >= 20
+    const showActions = bootFailed || bootElapsedSecs >= 10
+    const showLongHint = bootElapsedSecs >= 20 && !bootFailed
     const lastEventDetail = bootLastEvent?.detail?.trim()
     const statusError = bootStatus?.error?.trim()
     const surfacedError = statusError || lastEventDetail || null
@@ -261,7 +287,10 @@ export function AppShell() {
       if (retrying) return
       setRetrying(true)
       try {
-        await requestGatewayRestart(true)
+        const ok = await requestGatewayRestart(true)
+        if (ok) {
+          setBootFailed(false)
+        }
       } finally {
         setRetrying(false)
       }
@@ -269,6 +298,18 @@ export function AppShell() {
     const handleOpenLogDir = () => {
       void openLogDir()
     }
+    const headerText = bootFailed
+      ? t('app.launchingFailed')
+      : t('app.launching')
+    const slowText = bootFailed
+      ? t('app.launchingFailedDetail').replace(
+          '{{seconds}}',
+          String(bootElapsedSecs),
+        )
+      : t('app.launchingSlow').replace(
+          '{{seconds}}',
+          String(bootElapsedSecs),
+        )
     return (
       <>
         <div
@@ -280,13 +321,10 @@ export function AppShell() {
           data-maximized={isMaximized ? 'true' : 'false'}
         >
           <div className="flex flex-col items-center gap-3 text-center px-6 max-w-[560px]">
-            <div>{t('app.launching')}</div>
-            {showHint && (
+            <div data-state={bootFailed ? 'failed' : 'starting'}>{headerText}</div>
+            {(showHint || bootFailed) && (
               <div className="text-xs text-[var(--color-text-tertiary)]">
-                {t('app.launchingSlow').replace(
-                  '{{seconds}}',
-                  String(bootElapsedSecs),
-                )}
+                {slowText}
               </div>
             )}
             {showLongHint && (
@@ -348,7 +386,7 @@ export function AppShell() {
         <div className="relative flex-1 flex min-w-0 overflow-hidden">
           <div
             className="relative flex flex-1 flex-col overflow-hidden"
-            style={{ minWidth: 240 }}
+            style={{ minWidth: RIGHT_SIDEBAR_BOUNDS.mainAreaMin }}
           >
             <main
               id="content-area"

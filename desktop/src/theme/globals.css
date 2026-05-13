@@ -697,18 +697,81 @@ button, input, textarea, select, a, [role="button"] {
   white-space: pre;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-outline); border-radius: 9999px; opacity: 0.3; }
-::-webkit-scrollbar-thumb:hover { opacity: 0.6; }
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover,
+*:focus-within {
+  scrollbar-color: color-mix(in srgb, var(--color-outline) 45%, transparent) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 9999px;
+  transition: background-color 180ms ease-out;
+}
+
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--color-outline) 42%, transparent);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--color-outline) 78%, transparent);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--color-outline) 92%, transparent);
+}
+
+[data-scroll-keep],
+[data-scroll-keep] * {
+  scrollbar-color: color-mix(in srgb, var(--color-outline) 60%, transparent) transparent;
+}
+
+[data-scroll-keep]::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+[data-scroll-keep]::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--color-outline) 55%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 9999px;
+}
+
+[data-scroll-keep]::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--color-outline) 85%, transparent);
+}
 
 .sidebar-scroll-area {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--color-outline) 72%, transparent) transparent;
+  scrollbar-color: transparent transparent;
+}
+
+.sidebar-scroll-area:hover,
+.sidebar-scroll-area:focus-within {
+  scrollbar-color: color-mix(in srgb, var(--color-outline) 55%, transparent) transparent;
 }
 
 .sidebar-scroll-area::-webkit-scrollbar {
-  width: 4px;
+  width: 8px;
 }
 
 .sidebar-scroll-area::-webkit-scrollbar-track {
@@ -716,12 +779,20 @@ button, input, textarea, select, a, [role="button"] {
 }
 
 .sidebar-scroll-area::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--color-outline) 78%, transparent);
+  background-color: transparent;
+  border: 2px solid transparent;
+  background-clip: padding-box;
   border-radius: 9999px;
+  transition: background-color 180ms ease-out;
+}
+
+.sidebar-scroll-area:hover::-webkit-scrollbar-thumb,
+.sidebar-scroll-area:focus-within::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--color-outline) 55%, transparent);
 }
 
 .sidebar-scroll-area::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--color-outline) 92%, transparent);
+  background-color: color-mix(in srgb, var(--color-outline) 88%, transparent);
 }
 
 @keyframes shimmer {

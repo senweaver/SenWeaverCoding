@@ -64,10 +64,180 @@ pub async fn install(server_id: &str, progress: InstallProgress) -> Result<Insta
             progress,
         )
         .await,
+        "gopls" => install_gopls(progress).await,
+        "bash-language-server" => install_npm_server(
+            "bash-language-server",
+            &["bash-language-server"],
+            "bash-language-server",
+            &["start"],
+            progress,
+        )
+        .await,
+        "yaml-language-server" => install_npm_server(
+            "yaml-language-server",
+            &["yaml-language-server"],
+            "yaml-language-server",
+            &["--stdio"],
+            progress,
+        )
+        .await,
+        "vscode-html-language-server" => install_npm_server(
+            "vscode-html-language-server",
+            &["vscode-langservers-extracted"],
+            "vscode-html-language-server",
+            &["--stdio"],
+            progress,
+        )
+        .await,
+        "vscode-css-language-server" => install_npm_server(
+            "vscode-css-language-server",
+            &["vscode-langservers-extracted"],
+            "vscode-css-language-server",
+            &["--stdio"],
+            progress,
+        )
+        .await,
+        "vscode-json-language-server" => install_npm_server(
+            "vscode-json-language-server",
+            &["vscode-langservers-extracted"],
+            "vscode-json-language-server",
+            &["--stdio"],
+            progress,
+        )
+        .await,
+        "clangd" => install_path_only(
+            "clangd",
+            "clangd",
+            &[],
+            "clangd is not bundled; install it via your platform package manager (apt, brew, winget, MSYS2, LLVM release) and re-try",
+            progress,
+        )
+        .await,
         other => Err(anyhow!(
             "no managed install recipe for `{other}`; switch the entry to manual mode and provide a command"
         )),
     }
+}
+
+async fn install_gopls(progress: InstallProgress) -> Result<InstallReport> {
+    progress(InstallPhase::Resolving {
+        message: "checking PATH for gopls".into(),
+    });
+
+    if let Some(existing) = which_on_path("gopls") {
+        let version = run_version_query(&existing, &["version"])
+            .await
+            .or_else(|| None);
+        let report = InstallReport {
+            server_id: "gopls".into(),
+            version: version.unwrap_or_else(|| "system".into()),
+            binary_path: existing.clone(),
+            default_args: Vec::new(),
+        };
+        progress(InstallPhase::Done {
+            version: report.version.clone(),
+            path: report.binary_path.to_string_lossy().to_string(),
+        });
+        return Ok(report);
+    }
+
+    let go = which_on_path("go").ok_or_else(|| {
+        anyhow!(
+            "managed install for `gopls` requires the Go toolchain (`go` on PATH); \
+             install Go from https://go.dev/dl/ or switch to manual mode and \
+             point the entry at an existing gopls binary"
+        )
+    })?;
+
+    progress(InstallPhase::Resolving {
+        message: "preparing GOBIN for gopls".into(),
+    });
+    let install_dir = managed_dir()?.join("gopls");
+    fs::create_dir_all(&install_dir)
+        .await
+        .with_context(|| format!("create {}", install_dir.display()))?;
+
+    progress(InstallPhase::Downloading {
+        percent: None,
+        bytes_downloaded: 0,
+        bytes_total: None,
+    });
+
+    let mut cmd = crate::util::hidden_async_command(&go);
+    cmd.arg("install").arg("golang.org/x/tools/gopls@latest");
+    cmd.env("GOBIN", &install_dir);
+    cmd.kill_on_drop(true);
+
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| "run `go install golang.org/x/tools/gopls@latest`".to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "`go install gopls` failed (status {}): {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    let bin_name = if cfg!(windows) { "gopls.exe" } else { "gopls" };
+    let bin_path = install_dir.join(bin_name);
+    if !fs::try_exists(&bin_path).await.unwrap_or(false) {
+        return Err(anyhow!(
+            "`go install gopls` completed but {} is missing",
+            bin_path.display()
+        ));
+    }
+    set_executable(&bin_path).await?;
+
+    progress(InstallPhase::Verifying {
+        message: format!("running `{} version`", bin_path.display()),
+    });
+    let version = run_version_query(&bin_path, &["version"])
+        .await
+        .unwrap_or_else(|| "managed".into());
+
+    let report = InstallReport {
+        server_id: "gopls".into(),
+        version: version.clone(),
+        binary_path: bin_path.clone(),
+        default_args: Vec::new(),
+    };
+
+    progress(InstallPhase::Done {
+        version,
+        path: bin_path.to_string_lossy().to_string(),
+    });
+
+    Ok(report)
+}
+
+async fn install_path_only(
+    server_id: &str,
+    bin_name: &str,
+    default_args: &[&str],
+    miss_message: &str,
+    progress: InstallProgress,
+) -> Result<InstallReport> {
+    progress(InstallPhase::Resolving {
+        message: format!("checking PATH for {bin_name}"),
+    });
+    let Some(existing) = which_on_path(bin_name) else {
+        return Err(anyhow!("{miss_message}"));
+    };
+    let version = run_version_query(&existing, &["--version"]).await;
+    let report = InstallReport {
+        server_id: server_id.into(),
+        version: version.unwrap_or_else(|| "system".into()),
+        binary_path: existing.clone(),
+        default_args: default_args.iter().map(|s| (*s).to_string()).collect(),
+    };
+    progress(InstallPhase::Done {
+        version: report.version.clone(),
+        path: report.binary_path.to_string_lossy().to_string(),
+    });
+    Ok(report)
 }
 
 async fn install_rust_analyzer(progress: InstallProgress) -> Result<InstallReport> {

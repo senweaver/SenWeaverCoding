@@ -577,6 +577,13 @@ impl LspServerHandle {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
 
+        if language.eq_ignore_ascii_case("python") {
+            for (k, v) in crate::python_env::activation_env(workspace_root) {
+                cmd.env(k, v);
+            }
+            cmd.env_remove("PYTHONHOME");
+        }
+
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x0800_0000);
 
@@ -615,6 +622,13 @@ impl LspServerHandle {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+
+        if config.language_id.eq_ignore_ascii_case("python") {
+            for (k, v) in crate::python_env::activation_env(&config.root_path) {
+                cmd.env(k, v);
+            }
+            cmd.env_remove("PYTHONHOME");
+        }
 
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x0800_0000);
@@ -1038,28 +1052,29 @@ async fn read_message(reader: &mut BufReader<ChildStdout>) -> Result<serde_json:
 }
 
 pub fn detect_language(path: &Path) -> Option<&'static str> {
-    match path.extension()?.to_str()? {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "rs" => Some("rust"),
-        "ts" | "tsx" => Some("typescript"),
+        "ts" | "tsx" | "mts" | "cts" => Some("typescript"),
         "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
         "py" | "pyi" => Some("python"),
         "go" => Some("go"),
         "c" | "h" => Some("c"),
-        "cpp" | "cxx" | "cc" | "hpp" | "hxx" => Some("cpp"),
+        "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => Some("cpp"),
         "java" => Some("java"),
         "zig" => Some("zig"),
         "lua" => Some("lua"),
         "rb" => Some("ruby"),
         "swift" => Some("swift"),
         "kt" | "kts" => Some("kotlin"),
+        "cs" => Some("csharp"),
         "css" => Some("css"),
-        "scss" => Some("scss"),
+        "scss" | "sass" => Some("scss"),
         "less" => Some("less"),
         "html" | "htm" => Some("html"),
-        "json" => Some("json"),
-        "jsonc" => Some("jsonc"),
+        "json" | "json5" | "jsonc" => Some("json"),
         "yaml" | "yml" => Some("yaml"),
         "toml" => Some("toml"),
+        "sh" | "bash" | "zsh" | "ksh" | "fish" => Some("shell"),
         _ => None,
     }
 }
@@ -1072,6 +1087,7 @@ fn server_candidates(language: &str) -> &'static [(&'static str, &'static [&'sta
         "go" => &[("gopls", &[])],
         "c" | "cpp" => &[("clangd", &[])],
         "java" => &[("jdtls", &[])],
+        "csharp" => &[("omnisharp", &["-lsp"]), ("OmniSharp", &["-lsp"])],
         "zig" => &[("zls", &[])],
         "lua" => &[("lua-language-server", &[])],
         "ruby" => &[("solargraph", &["stdio"])],
@@ -1091,6 +1107,7 @@ fn server_candidates(language: &str) -> &'static [(&'static str, &'static [&'sta
         ],
         "yaml" | "yml" => &[("yaml-language-server", &["--stdio"])],
         "toml" => &[("taplo", &["lsp", "stdio"])],
+        "shell" | "bash" => &[("bash-language-server", &["start"])],
         _ => &[],
     }
 }
@@ -1499,21 +1516,7 @@ pub fn format_call_hierarchy(
 }
 
 fn lsp_language_id_from_path(path: &Path) -> Option<String> {
-    let ext = path.extension().and_then(|s| s.to_str())?;
-    Some(
-        match ext.to_ascii_lowercase().as_str() {
-            "rs" => "rust",
-            "py" | "pyi" => "python",
-            "js" | "mjs" | "cjs" | "jsx" => "javascript",
-            "ts" | "tsx" => "typescript",
-            "go" => "go",
-            "java" => "java",
-            "c" | "h" => "c",
-            "cpp" | "cxx" | "cc" | "hpp" | "hh" | "hxx" => "cpp",
-            _ => return None,
-        }
-        .to_string(),
-    )
+    detect_language(path).map(|s| s.to_string())
 }
 
 fn infer_workspace_root(path: &Path) -> Option<PathBuf> {

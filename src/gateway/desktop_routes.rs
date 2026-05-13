@@ -7047,6 +7047,44 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(uri))
 }
 
+fn resolve_lsp_server_language(
+    snapshot: &crate::config::schema::Config,
+    language: &str,
+    path: Option<&std::path::Path>,
+) -> Option<String> {
+    if !snapshot.lsp.enabled {
+        return None;
+    }
+    let ext = path
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    for s in &snapshot.lsp.servers {
+        if !s.enabled || s.resolved_command().is_none() {
+            continue;
+        }
+        if s.language_id == language {
+            return Some(s.language_id.clone());
+        }
+    }
+    if let Some(ref ext_lower) = ext {
+        for s in &snapshot.lsp.servers {
+            if !s.enabled || s.resolved_command().is_none() {
+                continue;
+            }
+            if s
+                .file_extensions
+                .iter()
+                .any(|x| x.eq_ignore_ascii_case(ext_lower))
+            {
+                return Some(s.language_id.clone());
+            }
+        }
+    }
+    None
+}
+
 pub async fn handle_lsp_notify(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -7065,30 +7103,29 @@ pub async fn handle_lsp_notify(
                 .into_response();
         }
     };
-    let language_id = body
+    let hint_language = body
         .language_id
         .clone()
         .or_else(|| crate::services::lsp::detect_language(&path).map(str::to_string));
-    let Some(language) = language_id else {
+    let Some(hint) = hint_language else {
         return Json(serde_json::json!({"ok": false, "skipped": "unknown language"})).into_response();
     };
 
     let svc = state.lsp.service();
 
     let snapshot = state.config.lock().clone();
-    let server_available = snapshot
-        .lsp
-        .enabled
-        && snapshot.lsp.servers.iter().any(|s| {
-            s.enabled && s.language_id == language && s.resolved_command().is_some()
-        });
-    if !server_available && body.method != "didClose" {
+    let routed = resolve_lsp_server_language(&snapshot, &hint, Some(&path));
+    let Some(language) = routed else {
+        if body.method == "didClose" {
+            return Json(serde_json::json!({"ok": true, "skipped": "no server"}))
+                .into_response();
+        }
         return Json(serde_json::json!({
             "ok": false,
             "skipped": "no enabled server for this language"
         }))
         .into_response();
-    }
+    };
 
     let version = body.version.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -7253,26 +7290,20 @@ pub async fn handle_lsp_request(
                 .into_response();
         }
     };
-    let language_id = body
+    let hint_language = body
         .language_id
         .clone()
         .or_else(|| crate::services::lsp::detect_language(&path).map(str::to_string));
-    let Some(language) = language_id else {
+    let Some(hint) = hint_language else {
         return Json(serde_json::json!({"result": null})).into_response();
     };
 
     let svc = state.lsp.service();
     let snapshot = state.config.lock().clone();
     let workspace = snapshot.workspace_dir.clone();
-    let server_available = snapshot
-        .lsp
-        .enabled
-        && snapshot.lsp.servers.iter().any(|s| {
-            s.enabled && s.language_id == language && s.resolved_command().is_some()
-        });
-    if !server_available {
+    let Some(language) = resolve_lsp_server_language(&snapshot, &hint, Some(&path)) else {
         return Json(serde_json::json!({"result": null})).into_response();
-    }
+    };
     drop(snapshot);
     if let Some(text) = body.text.as_deref() {
 
@@ -7552,7 +7583,12 @@ async fn handle_lsp_pathless_request(
     let workspace = snapshot.workspace_dir.clone();
     let lsp_enabled = snapshot.lsp.enabled;
     let language = match hint_language {
-        Some(l) => l,
+        Some(l) => {
+            match resolve_lsp_server_language(&snapshot, &l, file_path.as_deref()) {
+                Some(routed) => routed,
+                None => return Json(serde_json::json!({"result": null})).into_response(),
+            }
+        }
         None => {
             let candidates: Vec<String> = snapshot
                 .lsp
@@ -7572,17 +7608,6 @@ async fn handle_lsp_pathless_request(
             }
         }
     };
-    let server_available = lsp_enabled
-        && state
-            .config
-            .lock()
-            .lsp
-            .servers
-            .iter()
-            .any(|s| s.enabled && s.language_id == language && s.resolved_command().is_some());
-    if !server_available {
-        return Json(serde_json::json!({"result": null})).into_response();
-    }
 
     let svc = state.lsp.service();
     let params = match lsp_method {
@@ -7648,7 +7673,12 @@ async fn handle_lsp_execute_command(
     let workspace = snapshot.workspace_dir.clone();
     let lsp_enabled = snapshot.lsp.enabled;
     let language = match hint_language {
-        Some(l) => l,
+        Some(l) => {
+            match resolve_lsp_server_language(&snapshot, &l, file_path.as_deref()) {
+                Some(routed) => routed,
+                None => return Json(serde_json::json!({"result": null})).into_response(),
+            }
+        }
         None => {
             let candidates: Vec<String> = snapshot
                 .lsp
@@ -7674,17 +7704,6 @@ async fn handle_lsp_execute_command(
             }
         }
     };
-    let server_available = lsp_enabled
-        && state
-            .config
-            .lock()
-            .lsp
-            .servers
-            .iter()
-            .any(|s| s.enabled && s.language_id == language && s.resolved_command().is_some());
-    if !server_available {
-        return Json(serde_json::json!({"result": null})).into_response();
-    }
 
     let svc = state.lsp.service();
     let params = serde_json::json!({

@@ -1,5 +1,6 @@
 
 
+mod bootstrap_diag;
 mod browser_dock;
 mod fetch_worker;
 mod process_lifetime;
@@ -16,18 +17,19 @@ use std::{
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 use browser_dock::DockSharedState;
 use terminal::TerminalState;
 
 const EMBEDDED_GATEWAY_PENDING_MSG: &str = "desktop server is starting";
-const GATEWAY_HEALTH_DEADLINE_SECS: u64 = 600;
+const GATEWAY_HEALTH_DEADLINE_SECS: u64 = 90;
 const GATEWAY_HEALTH_PROBE_INTERVAL_MS: u64 = 250;
 const GATEWAY_HEALTH_PROBE_TIMEOUT_MS: u64 = 2_000;
-const RESTART_DEBOUNCE_SECS: u64 = 90;
+const RESTART_DEBOUNCE_SECS: u64 = 45;
 const HEALTH_PROBE_HEADER: &str = "X-Sen-Ping";
 const HEALTH_PROBE_HEADER_VALUE: &str = "1";
+const BACKEND_STATE_EVENT: &str = "backend://state-change";
 
 #[cfg(target_os = "windows")]
 fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
@@ -46,9 +48,9 @@ fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
         return;
     }
 
-    let chrome_style_mask: isize =
-        (WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME) as isize;
-    let required_style_bits: isize = (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
+    let chrome_style_mask: isize = (WS_CAPTION | WS_BORDER | WS_DLGFRAME) as isize;
+    let required_style_bits: isize =
+        (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME) as isize;
     let prev_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
     let new_style = (prev_style & !chrome_style_mask) | required_style_bits;
     if new_style != prev_style {
@@ -210,12 +212,9 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
     };
     let raw = hwnd.0 as HWND;
 
-    let chrome_style_mask: isize = (WS_CAPTION
-        | WS_THICKFRAME
-        | WS_BORDER
-        | WS_DLGFRAME) as isize;
+    let chrome_style_mask: isize = (WS_CAPTION | WS_BORDER | WS_DLGFRAME) as isize;
     let required_style_bits: isize =
-        (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
+        (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME) as isize;
     let prev_style = unsafe { GetWindowLongPtrW(raw, GWL_STYLE) };
     let new_style = (prev_style & !chrome_style_mask) | required_style_bits;
     if new_style != prev_style {
@@ -290,7 +289,7 @@ struct ServerStatus {
     last_error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapStatusPayload {
     state: &'static str,
@@ -300,18 +299,7 @@ struct BootstrapStatusPayload {
     log_dir: Option<String>,
 }
 
-#[tauri::command]
-fn get_server_url(state: State<'_, ServerState>) -> Result<String, String> {
-    let guard = state.0.lock();
-    if let Some(url) = guard.url.as_ref() {
-        return Ok(url.clone());
-    }
-    Err(EMBEDDED_GATEWAY_PENDING_MSG.to_string())
-}
-
-#[tauri::command]
-fn get_server_status(state: State<'_, ServerState>) -> BootstrapStatusPayload {
-    let guard = state.0.lock();
+fn snapshot_status_locked(guard: &ServerStatus) -> BootstrapStatusPayload {
     let elapsed_ms = guard
         .last_bootstrap_started_at
         .map(|s| s.elapsed().as_millis() as u64);
@@ -334,6 +322,31 @@ fn get_server_status(state: State<'_, ServerState>) -> BootstrapStatusPayload {
     }
 }
 
+fn emit_backend_state(handle: &AppHandle, state: &ServerState) {
+    let payload = {
+        let g = state.0.lock();
+        snapshot_status_locked(&g)
+    };
+    if let Err(err) = handle.emit(BACKEND_STATE_EVENT, payload) {
+        tracing::debug!("[sen-desktop] failed to emit backend state event: {err}");
+    }
+}
+
+#[tauri::command]
+fn get_server_url(state: State<'_, ServerState>) -> Result<String, String> {
+    let guard = state.0.lock();
+    if let Some(url) = guard.url.as_ref() {
+        return Ok(url.clone());
+    }
+    Err(EMBEDDED_GATEWAY_PENDING_MSG.to_string())
+}
+
+#[tauri::command]
+fn get_server_status(state: State<'_, ServerState>) -> BootstrapStatusPayload {
+    let guard = state.0.lock();
+    snapshot_status_locked(&guard)
+}
+
 #[tauri::command]
 fn restart_embedded_gateway(
     handle: AppHandle,
@@ -342,13 +355,24 @@ fn restart_embedded_gateway(
 ) -> Result<(), String> {
     let force = force.unwrap_or(false);
     {
-        let guard = state.0.lock();
+        let mut guard = state.0.lock();
         if guard.bootstrap_in_progress {
-            return Err(
-                "gateway bootstrap is already in progress; ignoring restart request".to_string(),
+            if !force {
+                return Err(
+                    "gateway bootstrap is already in progress; ignoring restart request".to_string(),
+                );
+            }
+
+            guard.bootstrap_generation = guard.bootstrap_generation.saturating_add(1);
+            guard.bootstrap_in_progress = false;
+            guard.url = None;
+            guard.last_error = Some(
+                "previous bootstrap forcibly invalidated by restart request".to_string(),
             );
-        }
-        if !force {
+            tracing::warn!(
+                "[sen-desktop] force restart requested while bootstrap in progress; invalidating previous generation"
+            );
+        } else if !force {
             if let Some(started) = guard.last_bootstrap_started_at {
                 if started.elapsed() < Duration::from_secs(RESTART_DEBOUNCE_SECS) {
                     return Err(format!(
@@ -374,6 +398,10 @@ fn open_log_dir() -> Result<String, String> {
 }
 
 fn sen_log_dir() -> Option<PathBuf> {
+    sen_config_dir().map(|p| p.join("logs"))
+}
+
+fn sen_config_dir() -> Option<PathBuf> {
     if let Ok(custom) = std::env::var("SEN_CONFIG_DIR") {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
@@ -534,6 +562,13 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 }
 
 pub fn run() {
+    let log_dir = sen_log_dir();
+    bootstrap_diag::install_tracing(log_dir.as_deref());
+    tracing::info!(
+        log_dir = ?bootstrap_diag::current_log_dir(),
+        "[sen-desktop] starting desktop shell"
+    );
+
     process_lifetime::install_kill_on_close_job();
 
     let builder = tauri::Builder::default()
@@ -589,6 +624,10 @@ pub fn run() {
     let app = builder
         .setup(|app| {
             if let Some(main) = app.get_webview_window("main") {
+                if let Err(err) = main.set_resizable(true) {
+                    tracing::debug!("[sen-desktop] set_resizable(true) failed: {err}");
+                }
+
                 #[cfg(target_os = "windows")]
                 disable_window_focus_border(&main);
 
@@ -658,6 +697,7 @@ fn spawn_gateway_bootstrap_thread(
         g.last_bootstrap_started_at = Some(Instant::now());
         g.bootstrap_generation
     };
+    emit_backend_state(&handle, &server_state);
     let ss = server_state.clone();
     let h = handle.clone();
     let spawn_result = thread::Builder::new()
@@ -668,10 +708,14 @@ fn spawn_gateway_bootstrap_thread(
     match spawn_result {
         Ok(_) => Ok(()),
         Err(err) => {
-            let mut g = server_state.0.lock();
-            if g.bootstrap_generation == generation {
-                g.bootstrap_in_progress = false;
+            {
+                let mut g = server_state.0.lock();
+                if g.bootstrap_generation == generation {
+                    g.bootstrap_in_progress = false;
+                    g.last_error = Some(format!("spawn bootstrap thread: {err}"));
+                }
             }
+            emit_backend_state(&handle, &server_state);
             Err(format!("spawn gateway bootstrap thread: {err}"))
         }
     }
@@ -687,27 +731,33 @@ fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handl
     }
     match start_embedded_gateway_once(handle.clone(), &server_state, generation) {
         Ok(url) => {
-            let mut g = server_state.0.lock();
-            if g.bootstrap_generation != generation {
-                return;
+            {
+                let mut g = server_state.0.lock();
+                if g.bootstrap_generation != generation {
+                    return;
+                }
+                g.url = Some(url);
+                g.bootstrap_in_progress = false;
             }
-            g.url = Some(url);
-            g.bootstrap_in_progress = false;
             tracing::info!(
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "[sen-desktop] embedded gateway is HTTP-ready"
             );
+            emit_backend_state(&handle, &server_state);
         }
         Err(err) => {
             tracing::error!(
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "[sen-desktop] embedded gateway bootstrap failed; user can request restart via UI: {err}"
             );
-            let mut g = server_state.0.lock();
-            if g.bootstrap_generation == generation {
-                g.bootstrap_in_progress = false;
-                g.last_error = Some(err);
+            {
+                let mut g = server_state.0.lock();
+                if g.bootstrap_generation == generation {
+                    g.bootstrap_in_progress = false;
+                    g.last_error = Some(err);
+                }
             }
+            emit_backend_state(&handle, &server_state);
         }
     }
 }
@@ -791,17 +841,23 @@ fn wait_for_server_until_ready(
             );
             return Ok(());
         }
-        if last_log.elapsed() >= Duration::from_secs(15) {
+        let elapsed = started.elapsed();
+        if last_log.elapsed() >= Duration::from_secs(10) {
             tracing::info!(
+                deadline_secs = GATEWAY_HEALTH_DEADLINE_SECS,
                 "[sen-desktop] still waiting for embedded gateway /health on {host}:{port} ({}s elapsed)",
-                started.elapsed().as_secs()
+                elapsed.as_secs()
             );
             last_log = Instant::now();
         }
         if Instant::now() >= hard_deadline {
             return Err(format!(
-                "embedded gateway did not respond to /health on {host}:{port} within {}s",
-                GATEWAY_HEALTH_DEADLINE_SECS
+                "embedded gateway did not respond to /health on {host}:{port} within {}s; \
+                 check {} for backend logs",
+                GATEWAY_HEALTH_DEADLINE_SECS,
+                sen_log_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "~/.senweavercoding/logs".to_string()),
             ));
         }
         thread::sleep(Duration::from_millis(GATEWAY_HEALTH_PROBE_INTERVAL_MS));

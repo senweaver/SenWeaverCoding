@@ -73,6 +73,7 @@ mod peripherals;
 #[cfg(feature = "plugins-wasm")]
 mod plugins;
 mod providers;
+mod python_env;
 mod query {
     pub use senweavercoding::query::*;
 }

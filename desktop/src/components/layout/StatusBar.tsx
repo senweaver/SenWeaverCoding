@@ -6,9 +6,11 @@ import { useTabStore } from '../../stores/tabStore'
 import { useLspStore } from '../../stores/lspStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
+import { usePythonEnvStore } from '../../stores/pythonEnvStore'
 import { inferLanguageFromPath } from '../../lib/extLanguage'
 import type { CodingModeId } from '../../types/codingMode'
 import { useTranslation, useCodingModeText } from '../../i18n'
+import { PythonEnvPicker } from '../workspace/PythonEnvPicker'
 
 function detectIndentSpec(text: string): string {
   if (!text) return 'Spaces: 2'
@@ -225,6 +227,71 @@ export function StatusBar() {
   }, [lspIndicator.tone])
 
 
+  const workspaceRoot = useWorkspaceFilesStore((s) => s.root)
+  const pythonStatus = usePythonEnvStore((s) =>
+    workspaceRoot ? s.statusByRoot[workspaceRoot] : undefined,
+  )
+  const pythonJob = usePythonEnvStore((s) =>
+    workspaceRoot ? s.jobsByRoot[workspaceRoot] : undefined,
+  )
+  const subscribePython = usePythonEnvStore((s) => s.subscribe)
+  useEffect(() => {
+    if (!workspaceRoot) return
+    subscribePython(workspaceRoot)
+  }, [workspaceRoot, subscribePython])
+
+  const [pythonPickerOpen, setPythonPickerOpen] = useState(false)
+
+  const pythonSegment = useMemo(() => {
+    if (!workspaceRoot) return null
+    const isPython = languageId === 'python'
+    const hasStatus = !!pythonStatus && (
+      pythonStatus.isPythonProject ||
+      pythonStatus.interpreterPath !== null ||
+      pythonJob !== undefined
+    )
+    if (!isPython && !hasStatus) return null
+    let label = t('python.statusBar.notSet')
+    let dot = 'bg-[var(--color-text-tertiary)]'
+    let tooltip = t('python.statusBar.tooltip')
+    if (pythonJob?.kind === 'creating') {
+      label = t('python.statusBar.creating')
+      dot = 'bg-[var(--color-warning)] animate-pulse'
+    } else if (pythonJob?.kind === 'installing') {
+      label = t('python.statusBar.installing')
+      dot = 'bg-[var(--color-warning)] animate-pulse'
+    } else if (pythonStatus?.interpreterPath) {
+      const version = pythonStatus.version ?? ''
+      const pkg = pythonStatus.packagesCount
+      const pkgSuffix = pkg != null ? ` · ${pkg}` : ''
+      if (pythonStatus.isIsolated) {
+        label = version
+          ? t('python.statusBar.venv', { version, pkg: pkgSuffix })
+          : t('python.statusBar.venvNoVersion', { pkg: pkgSuffix })
+        dot = 'bg-emerald-500'
+      } else {
+        label = version
+          ? t('python.statusBar.system', { version, pkg: pkgSuffix })
+          : t('python.statusBar.systemNoVersion', { pkg: pkgSuffix })
+        dot = 'bg-amber-500'
+      }
+      const tooltipParts = [
+        pythonStatus.interpreterPath,
+        pythonStatus.tool && pythonStatus.tool !== 'unknown'
+          ? `tool: ${pythonStatus.tool}`
+          : null,
+        pythonStatus.requiredPython?.version
+          ? `requires: ${pythonStatus.requiredPython.version}`
+          : null,
+      ].filter(Boolean)
+      if (tooltipParts.length > 0) tooltip = tooltipParts.join(' · ')
+    } else if (pythonStatus?.lastError) {
+      dot = 'bg-[var(--color-error)]'
+      tooltip = pythonStatus.lastError
+    }
+    return { label, dot, tooltip }
+  }, [languageId, pythonJob, pythonStatus, t, workspaceRoot])
+
   const [version, setVersion] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -293,6 +360,20 @@ export function StatusBar() {
             {encodingLabel}
           </span>
         )}
+        {pythonSegment && (
+          <button
+            type="button"
+            onClick={() => setPythonPickerOpen(true)}
+            className="flex items-center gap-1 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+            title={pythonSegment.tooltip}
+          >
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 rounded-full ${pythonSegment.dot}`}
+            />
+            <span>{pythonSegment.label}</span>
+          </button>
+        )}
         {languageId && (
           <span className="text-[var(--color-text-tertiary)]" title="Language mode">
             {languageId}
@@ -347,6 +428,7 @@ export function StatusBar() {
           {version ? `v${version}` : ''}
         </span>
       </div>
+      <PythonEnvPicker open={pythonPickerOpen} onClose={() => setPythonPickerOpen(false)} />
     </div>
   )
 }

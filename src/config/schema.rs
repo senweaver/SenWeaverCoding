@@ -9095,6 +9095,16 @@ fn default_lsp_servers() -> Vec<LspServerEntry> {
         LspServerEntry::template_rust_analyzer(),
         LspServerEntry::template_typescript_language_server(),
         LspServerEntry::template_pyright(),
+        LspServerEntry::template_gopls(),
+        LspServerEntry::template_clangd(),
+        LspServerEntry::template_bash_language_server(),
+        LspServerEntry::template_yaml_language_server(),
+        LspServerEntry::template_vscode_html_language_server(),
+        LspServerEntry::template_vscode_css_language_server(),
+        LspServerEntry::template_vscode_json_language_server(),
+        LspServerEntry::template_lua_language_server(),
+        LspServerEntry::template_jdtls(),
+        LspServerEntry::template_omnisharp(),
     ]
 }
 
@@ -9184,6 +9194,179 @@ impl LspServerEntry {
             args: vec!["--stdio".to_string()],
             env: HashMap::new(),
             file_extensions: vec!["py".to_string(), "pyi".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_gopls() -> Self {
+        Self {
+            id: "gopls".to_string(),
+            language_id: "go".to_string(),
+            display_name: "gopls".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            file_extensions: vec!["go".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_clangd() -> Self {
+        Self {
+            id: "clangd".to_string(),
+            language_id: "cpp".to_string(),
+            display_name: "clangd".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            file_extensions: vec![
+                "c".to_string(),
+                "h".to_string(),
+                "cc".to_string(),
+                "cpp".to_string(),
+                "cxx".to_string(),
+                "hpp".to_string(),
+                "hh".to_string(),
+                "hxx".to_string(),
+            ],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_bash_language_server() -> Self {
+        Self {
+            id: "bash-language-server".to_string(),
+            language_id: "shell".to_string(),
+            display_name: "bash-language-server".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: vec!["start".to_string()],
+            env: HashMap::new(),
+            file_extensions: vec!["sh".to_string(), "bash".to_string(), "zsh".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_yaml_language_server() -> Self {
+        Self {
+            id: "yaml-language-server".to_string(),
+            language_id: "yaml".to_string(),
+            display_name: "yaml-language-server".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: vec!["--stdio".to_string()],
+            env: HashMap::new(),
+            file_extensions: vec!["yaml".to_string(), "yml".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_vscode_html_language_server() -> Self {
+        Self {
+            id: "vscode-html-language-server".to_string(),
+            language_id: "html".to_string(),
+            display_name: "vscode-html-language-server".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: vec!["--stdio".to_string()],
+            env: HashMap::new(),
+            file_extensions: vec!["html".to_string(), "htm".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_vscode_css_language_server() -> Self {
+        Self {
+            id: "vscode-css-language-server".to_string(),
+            language_id: "css".to_string(),
+            display_name: "vscode-css-language-server".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: vec!["--stdio".to_string()],
+            env: HashMap::new(),
+            file_extensions: vec![
+                "css".to_string(),
+                "scss".to_string(),
+                "less".to_string(),
+            ],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_vscode_json_language_server() -> Self {
+        Self {
+            id: "vscode-json-language-server".to_string(),
+            language_id: "json".to_string(),
+            display_name: "vscode-json-language-server".to_string(),
+            enabled: false,
+            managed: true,
+            command: None,
+            args: vec!["--stdio".to_string()],
+            env: HashMap::new(),
+            file_extensions: vec!["json".to_string(), "jsonc".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_lua_language_server() -> Self {
+        Self {
+            id: "lua-language-server".to_string(),
+            language_id: "lua".to_string(),
+            display_name: "lua-language-server".to_string(),
+            enabled: false,
+            managed: false,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            file_extensions: vec!["lua".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_jdtls() -> Self {
+        Self {
+            id: "jdtls".to_string(),
+            language_id: "java".to_string(),
+            display_name: "Eclipse JDT Language Server".to_string(),
+            enabled: false,
+            managed: false,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            file_extensions: vec!["java".to_string()],
+            initialization_options: None,
+            install_state: LspInstallState::default(),
+        }
+    }
+
+    fn template_omnisharp() -> Self {
+        Self {
+            id: "omnisharp".to_string(),
+            language_id: "csharp".to_string(),
+            display_name: "OmniSharp".to_string(),
+            enabled: false,
+            managed: false,
+            command: None,
+            args: vec!["-lsp".to_string()],
+            env: HashMap::new(),
+            file_extensions: vec!["cs".to_string()],
             initialization_options: None,
             install_state: LspInstallState::default(),
         }

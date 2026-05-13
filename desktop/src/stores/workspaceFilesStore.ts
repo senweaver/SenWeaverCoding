@@ -3,6 +3,74 @@ import { workspaceFilesApi, type WorkspaceWatchEvent } from '../api/workspaceFil
 import type { FileTreeNode } from '../types/workspaceFile'
 import { useGitStatusStore } from './gitStatusStore'
 import { useLspStore } from './lspStore'
+import { usePythonEnvStore } from './pythonEnvStore'
+import { useUIStore } from './uiStore'
+import { t } from '../i18n'
+
+const PYTHON_TOAST_DISMISS_KEY = 'sen.pythonEnv.dismissedRoots.v1'
+const PYTHON_DETECT_DEBOUNCE_MS = 1200
+
+let pythonDetectTimer: ReturnType<typeof setTimeout> | null = null
+
+function loadDismissedPythonRoots(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(PYTHON_TOAST_DISMISS_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, number>
+    }
+  } catch {
+    /* noop */
+  }
+  return {}
+}
+
+function rememberDismissedPythonRoot(root: string) {
+  try {
+    const map = loadDismissedPythonRoots()
+    map[root] = Date.now()
+    localStorage.setItem(PYTHON_TOAST_DISMISS_KEY, JSON.stringify(map))
+  } catch {
+    /* noop */
+  }
+}
+
+function isPythonRootDismissed(root: string): boolean {
+  return Boolean(loadDismissedPythonRoots()[root])
+}
+
+function schedulePythonDetectionToast(root: string) {
+  if (pythonDetectTimer) {
+    clearTimeout(pythonDetectTimer)
+    pythonDetectTimer = null
+  }
+  pythonDetectTimer = setTimeout(() => {
+    pythonDetectTimer = null
+    const py = usePythonEnvStore.getState()
+    if (py.activeRoot !== root) return
+    const status = py.statusByRoot[root]
+    if (!status) return
+    if (!status.isPythonProject) return
+    if (status.isIsolated) return
+    if (status.interpreterPath) return
+    if (isPythonRootDismissed(root)) return
+    const ui = useUIStore.getState()
+    ui.addToast({
+      type: 'info',
+      message: t('python.toast.detectedNoVenv'),
+      duration: 14000,
+      action: {
+        label: t('python.toast.createCta'),
+        onClick: () => {
+          rememberDismissedPythonRoot(root)
+          void usePythonEnvStore.getState().createVenv(root)
+        },
+      },
+      onDismiss: () => rememberDismissedPythonRoot(root),
+    })
+  }, PYTHON_DETECT_DEBOUNCE_MS)
+}
 
 type DirState = {
   loaded: boolean
@@ -367,6 +435,13 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (root) {
       void get().refreshRoot()
       void useGitStatusStore.getState().fetchStatus(root, { forceRefresh: true })
+      const py = usePythonEnvStore.getState()
+      py.setActiveRoot(root)
+      void py.refresh(root).catch((err) => {
+        console.warn('[workspaceFiles] python refresh failed', err)
+      })
+      void py.discover(root)
+      schedulePythonDetectionToast(root)
       const restoredRels: string[] = []
       const restoredPrefix = `${root}::`
       for (const key of Object.keys(restoredDirs)) {

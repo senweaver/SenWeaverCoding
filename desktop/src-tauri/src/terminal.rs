@@ -75,7 +75,7 @@ pub(crate) fn terminal_spawn(
 
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(cwd_path.as_os_str());
-    for (key, value) in terminal_environment(&shell) {
+    for (key, value) in terminal_environment(&shell, &cwd_path) {
         cmd.env(key, value);
     }
     cmd.env("TERM", "xterm-256color");
@@ -313,10 +313,14 @@ fn decode_terminal_output(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
     output
 }
 
-fn terminal_environment(shell: &str) -> HashMap<String, String> {
+fn terminal_environment(shell: &str, workspace: &std::path::Path) -> HashMap<String, String> {
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.extend(login_shell_environment(shell));
     ensure_utf8_locale(&mut env);
+    for (k, v) in senweavercoding::python_env::activation_env(workspace) {
+        env.insert(k, v);
+    }
+    env.remove("PYTHONHOME");
     env
 }
 

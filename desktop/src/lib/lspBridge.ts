@@ -47,8 +47,13 @@ function refreshLangSupportCache() {
   for (const server of servers) {
     if (!server.enabled) continue
     if (!server.command || server.command.trim() === '') continue
-    if (!server.languageId) continue
-    langSupportCache.set(server.languageId, true)
+    if (server.languageId) {
+      langSupportCache.set(server.languageId.toLowerCase(), true)
+    }
+    for (const ext of server.fileExtensions ?? []) {
+      const norm = ext.trim().toLowerCase().replace(/^\./, '')
+      if (norm) langSupportCache.set(norm, true)
+    }
   }
 }
 
@@ -68,7 +73,7 @@ export function hasServerForLanguage(languageId: string | undefined | null): boo
     refreshLangSupportCache()
     langSupportCacheVersion = 1
   }
-  return langSupportCache.get(languageId) === true
+  return langSupportCache.get(languageId.toLowerCase()) === true
 }
 
 export type DocumentParams = {

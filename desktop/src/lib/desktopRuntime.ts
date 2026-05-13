@@ -15,6 +15,10 @@ const HEALTH_BACKOFF_INITIAL_MS = 200
 const HEALTH_BACKOFF_MAX_MS = 1_500
 const RESTART_AFTER_STREAK_FAILURES = 3
 const MIN_RESTART_INTERVAL_MS = 12_000
+const STATUS_FALLBACK_POLL_MS = 5_000
+const BOOTSTRAP_AUTO_RESTART_AT_MS = 60_000
+const BOOTSTRAP_HARD_CAP_MS = 180_000
+const BACKEND_STATE_EVENT = 'backend://state-change'
 
 export type DesktopBootEventKind =
   | 'gateway-pending'
@@ -22,6 +26,7 @@ export type DesktopBootEventKind =
   | 'health-failed'
   | 'health-restart-attempt'
   | 'health-ok'
+  | 'bootstrap-failed'
 
 export type DesktopBootEvent = {
   kind: DesktopBootEventKind
@@ -31,8 +36,10 @@ export type DesktopBootEvent = {
 
 export type DesktopBootObserver = (event: DesktopBootEvent) => void
 
+export type ServerStatusState = 'pending' | 'starting' | 'ready' | 'failed'
+
 export type ServerStatusSnapshot = {
-  state: 'pending' | 'starting' | 'ready' | 'failed'
+  state: ServerStatusState
   url?: string
   error?: string
   elapsedMs?: number
@@ -150,6 +157,37 @@ export async function openLogDir(): Promise<string | null> {
   }
 }
 
+export type ServerStatusListener = (snapshot: ServerStatusSnapshot) => void
+
+export async function subscribeServerStatus(
+  listener: ServerStatusListener,
+): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {}
+  try {
+    const { listen } = (await import(
+      /* @vite-ignore */ '@tauri-apps/api/event'
+    )) as {
+      listen: <T>(
+        event: string,
+        handler: (event: { payload: T }) => void,
+      ) => Promise<() => void>
+    }
+    const unlisten = await listen<ServerStatusSnapshot>(
+      BACKEND_STATE_EVENT,
+      (event) => {
+        const payload = event.payload
+        if (payload && typeof payload.state === 'string') {
+          listener(payload)
+        }
+      },
+    )
+    return unlisten
+  } catch (error) {
+    console.warn('[desktop] subscribe backend state failed', error)
+    return () => {}
+  }
+}
+
 export async function initializeDesktopServerUrl(options?: {
   signal?: AbortSignal
   onEvent?: DesktopBootObserver
@@ -191,9 +229,58 @@ export async function initializeDesktopServerUrl(options?: {
   let healthFailureStreak = 0
   let lastRestartAttemptAt = 0
   let urlPollDelay = HEALTH_BACKOFF_INITIAL_MS
+  let autoForceRestartFired = false
+  let hardCapReportedAt = 0
+  let lastObservedGenerationStartMs = 0
+
+  const refreshGenerationWindow = async () => {
+    try {
+      const snap = await invoke<ServerStatusSnapshot>('get_server_status')
+      if (snap && typeof snap.elapsedMs === 'number') {
+        const observedStart = Date.now() - snap.elapsedMs
+        if (observedStart > lastObservedGenerationStartMs + 5_000) {
+          lastObservedGenerationStartMs = observedStart
+          autoForceRestartFired = false
+          hardCapReportedAt = 0
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const generationElapsed = () =>
+    lastObservedGenerationStartMs > 0
+      ? Date.now() - lastObservedGenerationStartMs
+      : Date.now() - startedAt
+
+  const maybeAutoForceRestart = async () => {
+    if (autoForceRestartFired) return
+    if (generationElapsed() < BOOTSTRAP_AUTO_RESTART_AT_MS) return
+    autoForceRestartFired = true
+    notify('health-restart-attempt', 'auto-force-restart')
+    try {
+      await invoke<void>('restart_embedded_gateway', { force: true })
+      console.info('[desktop] auto force-restart requested after 60s without ready')
+    } catch (err) {
+      console.info('[desktop] auto force-restart rejected', err)
+    }
+  }
+
+  const maybeReportFinalFailure = (detail: string) => {
+    if (generationElapsed() < BOOTSTRAP_HARD_CAP_MS) return
+    if (hardCapReportedAt > 0 && Date.now() - hardCapReportedAt < BOOTSTRAP_HARD_CAP_MS) {
+      return
+    }
+    hardCapReportedAt = Date.now()
+    notify('bootstrap-failed', detail)
+  }
 
   for (;;) {
     options?.signal?.throwIfAborted()
+    await refreshGenerationWindow()
+    maybeReportFinalFailure('hard cap reached without ready')
+    await maybeAutoForceRestart()
     let serverUrl: string | undefined
     try {
       const candidate = await invoke<string>('get_server_url')
@@ -254,4 +341,10 @@ export async function initializeDesktopServerUrl(options?: {
       await sleep(800)
     }
   }
+}
+
+export const DESKTOP_RUNTIME_TUNABLES = {
+  STATUS_FALLBACK_POLL_MS,
+  BOOTSTRAP_AUTO_RESTART_AT_MS,
+  BOOTSTRAP_HARD_CAP_MS,
 }

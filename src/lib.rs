@@ -225,6 +225,7 @@ pub mod observability;
 pub(crate) mod onboard;
 pub mod peripherals;
 pub mod providers;
+pub mod python_env;
 pub mod rag;
 pub mod routines;
 pub mod rpc;

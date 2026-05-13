@@ -20,15 +20,29 @@ function ToastItem({ toast }: { toast: ToastType }) {
         animate-in slide-in-from-right fade-in duration-200
       `}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span>{toast.message}</span>
+      <div className="flex items-start justify-between gap-2">
+        <span className="flex-1">{toast.message}</span>
         <button
           onClick={() => removeToast(toast.id)}
-          className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] text-lg leading-none"
+          className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] text-lg leading-none shrink-0"
         >
           ×
         </button>
       </div>
+      {toast.action && (
+        <div className="mt-2 flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              toast.action?.onClick()
+              removeToast(toast.id)
+            }}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+          >
+            {toast.action.label}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

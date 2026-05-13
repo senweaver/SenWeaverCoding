@@ -384,6 +384,11 @@ impl Tool for ShellTool {
             }
         }
 
+        for (k, v) in crate::python_env::activation_env(&self.security.workspace_dir()) {
+            cmd.env(k, v);
+        }
+        cmd.env_remove("PYTHONHOME");
+
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.stdin(std::process::Stdio::null());

@@ -94,6 +94,11 @@ impl Tool for PowerShellTool {
             cmd.current_dir(full_dir);
         }
 
+        for (k, v) in crate::python_env::activation_env(&self.security.workspace_dir()) {
+            cmd.env(k, v);
+        }
+        cmd.env_remove("PYTHONHOME");
+
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(timeout), cmd.output()).await;
 

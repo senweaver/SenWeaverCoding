@@ -7,8 +7,33 @@ const RIGHT_SIDEBAR_WIDTH_KEY = 'sen-right-sidebar-width'
 const RIGHT_SIDEBAR_WIDTH_AUTO_KEY = 'sen-right-sidebar-width-auto'
 
 const RIGHT_SIDEBAR_MIN_WIDTH = 240
-const RIGHT_SIDEBAR_MAX_WIDTH = 720
 const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360
+const RIGHT_SIDEBAR_ABSOLUTE_MAX_WIDTH = 4096
+const MAIN_AREA_MIN_WIDTH = 360
+
+function measureViewportWidth(): number {
+  if (typeof window === 'undefined') return RIGHT_SIDEBAR_ABSOLUTE_MAX_WIDTH
+  const inner = window.innerWidth
+  if (Number.isFinite(inner) && inner > 0) return inner
+  return RIGHT_SIDEBAR_ABSOLUTE_MAX_WIDTH
+}
+
+function measureElementWidth(selector: string): number {
+  if (typeof document === 'undefined') return 0
+  const el = document.querySelector(selector) as HTMLElement | null
+  if (!el) return 0
+  const rect = el.getBoundingClientRect()
+  return Number.isFinite(rect.width) ? rect.width : 0
+}
+
+export function getRightSidebarMaxWidth(): number {
+  const viewport = measureViewportWidth()
+  const leftWidth = measureElementWidth('[data-testid="sidebar-shell"]')
+  const browserWidth = measureElementWidth('[data-testid="embedded-browser-panel"]')
+  const available = viewport - leftWidth - browserWidth - MAIN_AREA_MIN_WIDTH
+  const upper = Math.min(RIGHT_SIDEBAR_ABSOLUTE_MAX_WIDTH, Math.floor(available))
+  return Math.max(RIGHT_SIDEBAR_MIN_WIDTH, upper)
+}
 
 function getStoredTheme(): ThemeMode {
   try {
@@ -51,13 +76,19 @@ function getStoredRightSidebarWidthAuto(): boolean {
 
 function clampRightSidebarWidth(value: number): number {
   if (!Number.isFinite(value)) return RIGHT_SIDEBAR_DEFAULT_WIDTH
-  return Math.min(RIGHT_SIDEBAR_MAX_WIDTH, Math.max(RIGHT_SIDEBAR_MIN_WIDTH, Math.round(value)))
+  const dynamicMax = getRightSidebarMaxWidth()
+  const rounded = Math.round(value)
+  return Math.min(dynamicMax, Math.max(RIGHT_SIDEBAR_MIN_WIDTH, rounded))
 }
 
 export const RIGHT_SIDEBAR_BOUNDS = {
   min: RIGHT_SIDEBAR_MIN_WIDTH,
-  max: RIGHT_SIDEBAR_MAX_WIDTH,
   default: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+  mainAreaMin: MAIN_AREA_MIN_WIDTH,
+  absoluteMax: RIGHT_SIDEBAR_ABSOLUTE_MAX_WIDTH,
+  get max(): number {
+    return getRightSidebarMaxWidth()
+  },
 }
 
 export function applyTheme(theme: ThemeMode) {
@@ -70,11 +101,18 @@ export function initializeTheme() {
   applyTheme(getStoredTheme())
 }
 
+export type ToastAction = {
+  label: string
+  onClick: () => void
+}
+
 export type Toast = {
   id: string
   type: 'success' | 'error' | 'warning' | 'info'
   message: string
   duration?: number
+  action?: ToastAction
+  onDismiss?: () => void
 }
 
 export type SettingsTab =
@@ -147,7 +185,7 @@ type UIStore = {
 
 let toastCounter = 0
 
-export const useUIStore = create<UIStore>((set) => ({
+export const useUIStore = create<UIStore>((set, get) => ({
   theme: getStoredTheme(),
   sidebarOpen: true,
   rightSidebarOpen: getStoredRightSidebarOpen(),
@@ -250,10 +288,25 @@ export const useUIStore = create<UIStore>((set) => ({
     const duration = toast.duration ?? 4000
     if (duration > 0) {
       setTimeout(() => {
-        set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+        const existing = get().toasts.find((t) => t.id === id)
+        if (existing) {
+          existing.onDismiss?.()
+          set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+        }
       }, duration)
     }
   },
 
-  removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+  removeToast: (id) =>
+    set((s) => {
+      const target = s.toasts.find((t) => t.id === id)
+      if (target?.onDismiss) {
+        try {
+          target.onDismiss()
+        } catch {
+          /* noop */
+        }
+      }
+      return { toasts: s.toasts.filter((t) => t.id !== id) }
+    }),
 }))
