@@ -24,6 +24,8 @@ pub mod credential_vault;
 #[allow(unused_imports)]
 pub mod diagnostics;
 #[allow(unused_imports)]
+pub mod pii_sanitizer;
+#[allow(unused_imports)]
 pub mod lsp;
 
 pub mod lsp_incremental;
@@ -92,6 +94,13 @@ pub use compact::CompactService;
 pub use credential_vault::{
     init_credential_vault, redact_args_optional, redact_for_audit_optional,
     try_get_credential_vault, CredentialKind, CredentialMeta, CredentialVault,
+};
+
+#[allow(unused_imports)]
+pub use pii_sanitizer::{
+    global_sanitizer, sanitize_json as pii_sanitize_json, sanitize_text as pii_sanitize_text,
+    sanitize_text_in_place as pii_sanitize_text_in_place, update_global_config as update_pii_config,
+    PiiKind, PiiSanitizer, PiiSanitizerConfig, SanitizationReport,
 };
 
 #[allow(unused_imports)]

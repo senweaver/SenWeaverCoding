@@ -547,6 +547,18 @@ impl RpcCtx {
                     )
                     .await;
                 }
+                TurnEvent::PiiSanitized { report } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "debug_pii_stats",
+                            "total": report.total(),
+                            "counts": report.to_label_map(),
+                        }),
+                    )
+                    .await;
+                }
             }
         }
 

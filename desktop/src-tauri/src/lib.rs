@@ -8,12 +8,14 @@ mod terminal;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::PathBuf,
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
+use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent, State};
 
 use browser_dock::DockSharedState;
@@ -24,6 +26,8 @@ const GATEWAY_HEALTH_DEADLINE_SECS: u64 = 600;
 const GATEWAY_HEALTH_PROBE_INTERVAL_MS: u64 = 250;
 const GATEWAY_HEALTH_PROBE_TIMEOUT_MS: u64 = 2_000;
 const RESTART_DEBOUNCE_SECS: u64 = 90;
+const HEALTH_PROBE_HEADER: &str = "X-Sen-Ping";
+const HEALTH_PROBE_HEADER_VALUE: &str = "1";
 
 #[cfg(target_os = "windows")]
 fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
@@ -282,6 +286,18 @@ struct ServerStatus {
     bootstrap_in_progress: bool,
 
     last_bootstrap_started_at: Option<Instant>,
+
+    last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapStatusPayload {
+    state: &'static str,
+    url: Option<String>,
+    error: Option<String>,
+    elapsed_ms: Option<u64>,
+    log_dir: Option<String>,
 }
 
 #[tauri::command]
@@ -294,10 +310,37 @@ fn get_server_url(state: State<'_, ServerState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_server_status(state: State<'_, ServerState>) -> BootstrapStatusPayload {
+    let guard = state.0.lock();
+    let elapsed_ms = guard
+        .last_bootstrap_started_at
+        .map(|s| s.elapsed().as_millis() as u64);
+    let log_dir = sen_log_dir().map(|p| p.to_string_lossy().into_owned());
+    let state_label: &'static str = if guard.url.is_some() {
+        "ready"
+    } else if guard.bootstrap_in_progress {
+        "starting"
+    } else if guard.last_error.is_some() {
+        "failed"
+    } else {
+        "pending"
+    };
+    BootstrapStatusPayload {
+        state: state_label,
+        url: guard.url.clone(),
+        error: guard.last_error.clone(),
+        elapsed_ms,
+        log_dir,
+    }
+}
+
+#[tauri::command]
 fn restart_embedded_gateway(
     handle: AppHandle,
     state: State<'_, ServerState>,
+    force: Option<bool>,
 ) -> Result<(), String> {
+    let force = force.unwrap_or(false);
     {
         let guard = state.0.lock();
         if guard.bootstrap_in_progress {
@@ -305,16 +348,49 @@ fn restart_embedded_gateway(
                 "gateway bootstrap is already in progress; ignoring restart request".to_string(),
             );
         }
-        if let Some(started) = guard.last_bootstrap_started_at {
-            if started.elapsed() < Duration::from_secs(RESTART_DEBOUNCE_SECS) {
-                return Err(format!(
-                    "gateway was (re)started less than {}s ago; refusing duplicate restart",
-                    RESTART_DEBOUNCE_SECS
-                ));
+        if !force {
+            if let Some(started) = guard.last_bootstrap_started_at {
+                if started.elapsed() < Duration::from_secs(RESTART_DEBOUNCE_SECS) {
+                    return Err(format!(
+                        "gateway was (re)started less than {}s ago; refusing duplicate restart",
+                        RESTART_DEBOUNCE_SECS
+                    ));
+                }
             }
         }
     }
     spawn_gateway_bootstrap_thread(handle, state.inner().clone())
+}
+
+#[tauri::command]
+fn open_log_dir() -> Result<String, String> {
+    let dir = sen_log_dir().ok_or_else(|| "could not resolve sen config directory".to_string())?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("create log dir failed: {err}"))?;
+    }
+    reveal_in_explorer(dir.to_string_lossy().into_owned())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+fn sen_log_dir() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("SEN_CONFIG_DIR") {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home).join(".senweavercoding"));
+        }
+    }
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        if !userprofile.is_empty() {
+            return Some(PathBuf::from(userprofile).join(".senweavercoding"));
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -471,7 +547,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_server_url,
+            get_server_status,
             restart_embedded_gateway,
+            open_log_dir,
             prepare_for_update_install,
             signal_frontend_ready,
             reveal_in_explorer,
@@ -503,6 +581,9 @@ pub fn run() {
             browser_dock::browser_dock_activate_tab,
             browser_dock::browser_dock_list_tabs,
             browser_dock::browser_dock_screenshot,
+            browser_dock::browser_dock_pin_test_target,
+            browser_dock::browser_dock_clear_test_target,
+            browser_dock::browser_dock_get_test_target,
         ]);
 
     let app = builder
@@ -571,6 +652,7 @@ fn spawn_gateway_bootstrap_thread(
             return Err("gateway bootstrap already in progress; skipping duplicate spawn".into());
         }
         g.url = None;
+        g.last_error = None;
         g.bootstrap_generation = g.bootstrap_generation.saturating_add(1);
         g.bootstrap_in_progress = true;
         g.last_bootstrap_started_at = Some(Instant::now());
@@ -624,6 +706,7 @@ fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handl
             let mut g = server_state.0.lock();
             if g.bootstrap_generation == generation {
                 g.bootstrap_in_progress = false;
+                g.last_error = Some(err);
             }
         }
     }
@@ -661,6 +744,7 @@ fn probe_health_once(addr: SocketAddr, timeout_ms: u64) -> bool {
         "GET /health HTTP/1.1\r\n\
          Host: {host}\r\n\
          User-Agent: sen-desktop-bootstrap\r\n\
+         {HEALTH_PROBE_HEADER}: {HEALTH_PROBE_HEADER_VALUE}\r\n\
          Connection: close\r\n\
          Accept: */*\r\n\r\n"
     );

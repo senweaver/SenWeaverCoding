@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { workspaceFilesApi, type WorkspaceWatchEvent } from '../api/workspaceFiles'
 import type { FileTreeNode } from '../types/workspaceFile'
 import { useGitStatusStore } from './gitStatusStore'
+import { useLspStore } from './lspStore'
 
 type DirState = {
   loaded: boolean
@@ -24,6 +25,7 @@ export type FileBuffer = {
   saving: boolean
   error?: string
   saveError?: string
+  missing?: boolean
 }
 
 export type MonacoEditOperation = {
@@ -57,6 +59,17 @@ const SELF_PENDING_WINDOW_MS = 3_000
 
 export const AI_FRESH_WINDOW_MS = 8_000
 
+export type TabViewState = {
+  scrollTop: number
+  scrollLeft: number
+  selection: {
+    startLineNumber: number
+    startColumn: number
+    endLineNumber: number
+    endColumn: number
+  } | null
+}
+
 export type WorkspaceFilesState = {
   root: string | null
   rootEntries: FileTreeNode[]
@@ -86,6 +99,16 @@ export type WorkspaceFilesState = {
   lastSeenContent: Record<string, string>
 
   monacoModels: Record<string, MonacoModelHandle>
+
+  pendingNavigation: { relPath: string; line: number; character: number; ticket: number } | null
+
+  requestNavigation: (relPath: string, line: number, character: number) => Promise<void>
+
+  consumeNavigation: () => void
+
+  tabViewStates: Record<string, TabViewState>
+
+  setTabViewState: (relPath: string, state: TabViewState) => void
 
   setRoot: (root: string | null) => void
   refreshRoot: () => Promise<void>
@@ -277,6 +300,35 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   externalChanged: {},
   lastSeenContent: {},
   monacoModels: {},
+  pendingNavigation: null,
+  tabViewStates: {},
+
+  setTabViewState: (relPath, state) => {
+    if (!relPath) return
+    set((s) => ({
+      tabViewStates: { ...s.tabViewStates, [relPath]: state },
+    }))
+  },
+
+  requestNavigation: async (relPath, line, character) => {
+    if (!relPath) return
+    const state = get()
+    if (state.activeTab !== relPath) {
+      try {
+        await state.selectFile(relPath)
+      } catch {
+        return
+      }
+    }
+    const ticket = Date.now() + Math.random()
+    set({
+      pendingNavigation: { relPath, line, character, ticket },
+    })
+  },
+
+  consumeNavigation: () => {
+    set({ pendingNavigation: null })
+  },
 
   setRoot: (root) => {
     const current = get().root
@@ -284,6 +336,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (watcherDispose) {
       watcherDispose()
       watcherDispose = null
+    }
+    try {
+      useLspStore.getState().clearDiagnostics()
+    } catch (err) {
+      console.warn('[workspaceFiles] clearDiagnostics failed on setRoot', err)
     }
     const restoredDirs = root ? loadExpandedFromLocalStorage(root) : {}
     set({
@@ -304,6 +361,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       externalChanged: {},
       lastSeenContent: {},
       monacoModels: {},
+      pendingNavigation: null,
+      tabViewStates: {},
     })
     if (root) {
       void get().refreshRoot()
@@ -697,7 +756,20 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
 
     if (isOpen && !isSelf) {
       if (event.kind === 'removed') {
-
+        if (buf && buf.isDirty) {
+          set((s) => ({
+            externalChanged: { ...s.externalChanged, [relPath]: Date.now() },
+            files: {
+              ...s.files,
+              [k(root, relPath)]: {
+                ...buf,
+                missing: true,
+              },
+            },
+          }))
+          return
+        }
+        void get().closeTab(relPath)
         return
       }
       if (buf && !buf.isDirty) {

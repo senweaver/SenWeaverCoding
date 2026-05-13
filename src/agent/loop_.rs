@@ -307,6 +307,209 @@ static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#).unwrap()
 });
 
+pub(crate) fn pii_sanitize_text_outside_image_markers(
+    input: &str,
+) -> (String, crate::services::pii_sanitizer::SanitizationReport) {
+    let mut combined =
+        crate::services::pii_sanitizer::SanitizationReport::default();
+    if input.is_empty() {
+        return (String::new(), combined);
+    }
+
+    let marker = "[IMAGE:";
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0_usize;
+
+    while let Some(rel) = input[cursor..].find(marker) {
+        let start = cursor + rel;
+        let prefix = &input[cursor..start];
+        if !prefix.is_empty() {
+            let (clean, report) = crate::services::pii_sanitizer::sanitize_text(prefix);
+            combined.merge(&report);
+            output.push_str(&clean);
+        }
+
+        let marker_open = start + marker.len();
+        if let Some(rel_end) = input[marker_open..].find(']') {
+            let end = marker_open + rel_end;
+            output.push_str(&input[start..=end]);
+            cursor = end + 1;
+        } else {
+
+            output.push_str(&input[start..]);
+            cursor = input.len();
+            break;
+        }
+    }
+
+    if cursor < input.len() {
+        let (clean, report) = crate::services::pii_sanitizer::sanitize_text(&input[cursor..]);
+        combined.merge(&report);
+        output.push_str(&clean);
+    }
+
+    (output, combined)
+}
+
+fn pii_sanitize_assistant_content(
+    content: &str,
+    report: &mut crate::services::pii_sanitizer::SanitizationReport,
+) -> String {
+    let trimmed = content.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
+        report.merge(&sub);
+        return clean;
+    }
+
+    let mut value = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(v) => v,
+        Err(_) => {
+            let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
+            report.merge(&sub);
+            return clean;
+        }
+    };
+
+    let object = match value.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            let (clean_value, sub) =
+                crate::services::pii_sanitizer::sanitize_json(&value);
+            report.merge(&sub);
+            return clean_value.to_string();
+        }
+    };
+
+    if let Some(text_field) = object.get_mut("content") {
+        match text_field {
+            serde_json::Value::String(s) => {
+                let (clean, sub) = pii_sanitize_text_outside_image_markers(s);
+                report.merge(&sub);
+                *text_field = serde_json::Value::String(clean);
+            }
+            other => {
+                let (clean, sub) = crate::services::pii_sanitizer::sanitize_json(other);
+                report.merge(&sub);
+                *other = clean;
+            }
+        }
+    }
+
+    if let Some(reasoning) = object.get_mut("reasoning_content") {
+        if let serde_json::Value::String(s) = reasoning {
+            let (clean, sub) = pii_sanitize_text_outside_image_markers(s);
+            report.merge(&sub);
+            *reasoning = serde_json::Value::String(clean);
+        }
+    }
+
+    if let Some(serde_json::Value::Array(calls)) = object.get_mut("tool_calls") {
+        for call in calls.iter_mut() {
+            if let Some(arguments) = call.get_mut("arguments") {
+                match arguments.clone() {
+                    serde_json::Value::String(args_str) => {
+
+                        if let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Value>(&args_str)
+                        {
+                            let (clean, sub) =
+                                crate::services::pii_sanitizer::sanitize_json(&parsed);
+                            report.merge(&sub);
+                            *arguments = serde_json::Value::String(clean.to_string());
+                        } else {
+                            let (clean, sub) =
+                                pii_sanitize_text_outside_image_markers(&args_str);
+                            report.merge(&sub);
+                            *arguments = serde_json::Value::String(clean);
+                        }
+                    }
+                    other => {
+                        let (clean, sub) =
+                            crate::services::pii_sanitizer::sanitize_json(&other);
+                        report.merge(&sub);
+                        *arguments = clean;
+                    }
+                }
+            }
+        }
+    }
+
+    value.to_string()
+}
+
+fn pii_sanitize_tool_envelope(
+    content: &str,
+    report: &mut crate::services::pii_sanitizer::SanitizationReport,
+) -> String {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('{') {
+        let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
+        report.merge(&sub);
+        return clean;
+    }
+
+    let mut value = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(v) => v,
+        Err(_) => {
+            let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
+            report.merge(&sub);
+            return clean;
+        }
+    };
+
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(inner) = obj.get_mut("content") {
+            match inner {
+                serde_json::Value::String(s) => {
+                    let (clean, sub) = pii_sanitize_text_outside_image_markers(s);
+                    report.merge(&sub);
+                    *inner = serde_json::Value::String(clean);
+                }
+                other => {
+                    let (clean, sub) = crate::services::pii_sanitizer::sanitize_json(other);
+                    report.merge(&sub);
+                    *other = clean;
+                }
+            }
+        }
+        return value.to_string();
+    }
+
+    let (clean, sub) = crate::services::pii_sanitizer::sanitize_json(&value);
+    report.merge(&sub);
+    clean.to_string()
+}
+
+pub(crate) fn apply_outgoing_pii_sanitization(
+    coding_mode: Option<crate::agent::coding_mode::CodingMode>,
+    messages: &mut [ChatMessage],
+) -> crate::services::pii_sanitizer::SanitizationReport {
+    let mut report = crate::services::pii_sanitizer::SanitizationReport::default();
+    if !matches!(coding_mode, Some(crate::agent::coding_mode::CodingMode::Debug)) {
+        return report;
+    }
+    if !crate::services::pii_sanitizer::global_sanitizer().enabled() {
+        return report;
+    }
+
+    for msg in messages.iter_mut() {
+        let original = std::mem::take(&mut msg.content);
+        let cleaned = match msg.role.as_str() {
+            "assistant" => pii_sanitize_assistant_content(&original, &mut report),
+            "tool" => pii_sanitize_tool_envelope(&original, &mut report),
+            _ => {
+                let (clean, sub) = pii_sanitize_text_outside_image_markers(&original);
+                report.merge(&sub);
+                clean
+            }
+        };
+        msg.content = cleaned;
+    }
+
+    report
+}
+
 pub(crate) fn scrub_credentials(input: &str) -> String {
     let after_vault =
         crate::services::credential_vault::redact_for_audit_optional(input);
@@ -430,6 +633,10 @@ pub enum DraftEvent {
         agent_id: String,
         kind: crate::agent::SubagentChunkKind,
         delta: String,
+    },
+
+    PiiSanitized {
+        report: crate::services::pii_sanitizer::SanitizationReport,
     },
 }
 
@@ -2938,6 +3145,12 @@ async fn execute_one_tool(
         }
     }
 
+    let browser_trace_args = if call_name == "browser" {
+        Some(call_arguments.clone())
+    } else {
+        None
+    };
+
     let tool_future = tool.execute(call_arguments);
     let tool_result = if let Some(token) = cancellation_token {
         tokio::select! {
@@ -2964,6 +3177,16 @@ async fn execute_one_tool(
         } else {
             crate::agent::web_search_url_guard::record_web_search_failure();
         }
+    }
+
+    if let Some(args) = browser_trace_args.as_ref() {
+        let success = matches!(&tool_result, Ok(r) if r.success);
+        let action_label = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        crate::tools::debug_test_report::record_browser_action(&action_label, args, success);
     }
 
     match tool_result {
@@ -3348,6 +3571,9 @@ pub(crate) async fn run_tool_call_loop(
                 reminder.to_string(),
             );
         }
+        if let Some(pinned) = crate::agent::mode_effects::pinned_test_target_reminder(mode) {
+            crate::agent::mode_effects::replace_or_push_system_reminder(history, pinned);
+        }
         let cfg = svc.config();
         if let Some(web_reminder) = crate::agent::mode_effects::web_research_disabled_reminder(
             mode,
@@ -3547,8 +3773,30 @@ pub(crate) async fn run_tool_call_loop(
                 (provider, provider_name, model)
             };
 
-        let prepared_messages =
+        let mut prepared_messages =
             multimodal::prepare_messages_for_provider(history, multimodal_config).await?;
+
+        let active_coding_mode = crate::services::try_get_services()
+            .map(|svc| *svc.coding_mode.read())
+            .unwrap_or(crate::agent::coding_mode::CodingMode::Debug);
+        let sanitization_report = apply_outgoing_pii_sanitization(
+            Some(active_coding_mode),
+            &mut prepared_messages.messages,
+        );
+        if !sanitization_report.is_empty() {
+            tracing::debug!(
+                target: "agent.pii",
+                redactions = sanitization_report.total(),
+                "applied outbound PII sanitization in Debug mode"
+            );
+            if let Some(ref tx) = on_delta {
+                let _ = tx
+                    .send(DraftEvent::PiiSanitized {
+                        report: sanitization_report.clone(),
+                    })
+                    .await;
+            }
+        }
 
         if let Some(ref tx) = on_delta {
             let phase = if iteration == 0 {

@@ -6,6 +6,7 @@ import { useUIStore } from '../stores/uiStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useTerminalPanelStore } from '../stores/terminalPanelStore'
 import { useKeyboardShortcutsStore } from '../stores/keyboardShortcutsStore'
+import { useWorkspaceFilesStore } from '../stores/workspaceFilesStore'
 import { matchesBinding } from '../types/shortcuts'
 import { getActiveTabWorkDir } from '../lib/activeWorkDir'
 
@@ -106,6 +107,85 @@ export function useKeyboardShortcuts() {
         const tabId = activeTabIdRef.current
         if (tabId) setSessionCodingMode(tabId, 'plan')
         return
+      }
+
+      const ctrlOrMeta = e.ctrlKey || e.metaKey
+      const targetEl = e.target as HTMLElement | null
+      const tag = targetEl?.tagName?.toLowerCase()
+      const isContentEditable = targetEl?.isContentEditable === true
+      const isMonacoEditor = !!targetEl?.closest?.('[data-workspace-editor], .monaco-editor')
+      const isChatInput =
+        !!targetEl?.closest?.('[data-role="chat-composer"], [data-chat-input], [data-chat-textarea]') ||
+        (tag === 'textarea' && !isMonacoEditor)
+      const isFormInput = tag === 'input' || tag === 'textarea' || isContentEditable
+      const isEditing = isFormInput && !isMonacoEditor
+      const isEditingForGlobalSearch = isChatInput
+
+      if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        e.stopPropagation()
+        useUIStore.getState().openWorkspaceFinder('quick-open')
+        return
+      }
+      if (ctrlOrMeta && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        if (isEditingForGlobalSearch) {
+          return
+        }
+        e.preventDefault()
+        e.stopPropagation()
+        useUIStore.getState().openWorkspaceFinder('search-in-files')
+        return
+      }
+      if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 't') {
+        if (isEditing) return
+        e.preventDefault()
+        e.stopPropagation()
+        useUIStore.getState().openWorkspaceFinder('workspace-symbol')
+        return
+      }
+      if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'w') {
+        const workspaceState = useWorkspaceFilesStore.getState()
+        const tab = workspaceState.activeTab
+        const finderOpen = useUIStore.getState().workspaceFinderMode !== null
+        if (tab && !isEditing && !finderOpen) {
+          e.preventDefault()
+          e.stopPropagation()
+          useUIStore.getState().requestEditorTabClose(tab)
+          return
+        }
+      }
+      if (ctrlOrMeta && !e.altKey && e.key === 'Tab') {
+        const workspaceState = useWorkspaceFilesStore.getState()
+        if (workspaceState.openTabs.length > 1) {
+          e.preventDefault()
+          e.stopPropagation()
+          const tabs = workspaceState.openTabs
+          const current = workspaceState.activeTab
+          const idx = current ? tabs.indexOf(current) : -1
+          const dir = e.shiftKey ? -1 : 1
+          const nextIdx = (idx + dir + tabs.length) % tabs.length
+          const nextRel = tabs[nextIdx] ?? tabs[0]
+          if (nextRel) {
+            void workspaceState.selectFile(nextRel)
+          }
+          return
+        }
+      }
+      if (
+        ctrlOrMeta &&
+        !e.altKey &&
+        !e.shiftKey &&
+        /^[1-9]$/.test(e.key)
+      ) {
+        const workspaceState = useWorkspaceFilesStore.getState()
+        const idx = parseInt(e.key, 10) - 1
+        const target = workspaceState.openTabs[idx]
+        if (target) {
+          e.preventDefault()
+          e.stopPropagation()
+          void workspaceState.selectFile(target)
+          return
+        }
       }
     }
 

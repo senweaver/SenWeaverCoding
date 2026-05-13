@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useSettingsStore } from '../stores/settingsStore'
+import { useSettingsStore, PII_KIND_LABELS, type PiiKindLabel } from '../stores/settingsStore'
+import { useChatStore } from '../stores/chatStore'
+import { useTabStore } from '../stores/tabStore'
 import { useAutonomyStore } from '../stores/autonomyStore'
 import { useProviderStore } from '../stores/providerStore'
-import { useTranslation, useCodingModeText } from '../i18n'
+import { useTranslation, useCodingModeText, type TranslationKey } from '../i18n'
 import { Modal } from '../components/shared/Modal'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
 import { Input } from '../components/shared/Input'
@@ -901,6 +903,103 @@ function CodingModeSettings() {
             {t('settings.codingMode.loading')}
           </div>
         )}
+      </div>
+
+      <DebugPrivacySettings />
+    </div>
+  )
+}
+
+function DebugPrivacySettings() {
+  const t = useTranslation()
+  const piiSanitizer = useSettingsStore((s) => s.piiSanitizer)
+  const setPiiEnabled = useSettingsStore((s) => s.setPiiEnabled)
+  const setPiiKindEnabled = useSettingsStore((s) => s.setPiiKindEnabled)
+  const resetPiiSanitizer = useSettingsStore((s) => s.resetPiiSanitizer)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const sessionStats = useChatStore((s) =>
+    activeTabId ? s.sessions[activeTabId]?.debugPiiStats : undefined,
+  )
+  const resetDebugPiiStats = useChatStore((s) => s.resetDebugPiiStats)
+
+  const disabledSet = useMemo(
+    () => new Set<PiiKindLabel>(piiSanitizer.disabledKinds),
+    [piiSanitizer.disabledKinds],
+  )
+
+  return (
+    <div className="mt-8 border-t border-[var(--color-border)] pt-6">
+      <h3 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">
+        {t('settings.debugPrivacy.title')}
+      </h3>
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
+        {t('settings.debugPrivacy.description')}
+      </p>
+
+      <label className="flex items-center justify-between gap-3 mb-3 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+        <div className="flex flex-col">
+          <span className="text-xs font-medium text-[var(--color-text-primary)]">
+            {t('settings.debugPrivacy.enable')}
+          </span>
+          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+            {t('settings.debugPrivacy.enableHint')}
+          </span>
+        </div>
+        <input
+          type="checkbox"
+          checked={piiSanitizer.enabled}
+          onChange={(e) => setPiiEnabled(e.target.checked)}
+          className="h-4 w-4"
+        />
+      </label>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+        {PII_KIND_LABELS.map((kind) => {
+          const enabled = !disabledSet.has(kind)
+          return (
+            <label
+              key={kind}
+              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border text-[12px] ${
+                piiSanitizer.enabled
+                  ? 'border-[var(--color-border)] bg-[var(--color-surface)]'
+                  : 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] opacity-60'
+              }`}
+            >
+              <span className="text-[var(--color-text-secondary)]">
+                {t(`debug.privacy.categories.${kind}` as TranslationKey)}
+              </span>
+              <input
+                type="checkbox"
+                disabled={!piiSanitizer.enabled}
+                checked={enabled}
+                onChange={(e) => setPiiKindEnabled(kind, e.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+            </label>
+          )
+        })}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 mb-3 px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-xs">
+        <span className="text-[var(--color-text-secondary)]">
+          {t('settings.debugPrivacy.sessionStats')}
+        </span>
+        <span className="font-mono text-[var(--color-text-primary)]">
+          {sessionStats?.total ?? 0}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          onClick={() => activeTabId && resetDebugPiiStats(activeTabId)}
+          disabled={!activeTabId || (sessionStats?.total ?? 0) === 0}
+        >
+          {t('settings.debugPrivacy.clearStats')}
+        </Button>
+        <Button variant="ghost" onClick={resetPiiSanitizer}>
+          {t('settings.debugPrivacy.resetDefaults')}
+        </Button>
       </div>
     </div>
   )

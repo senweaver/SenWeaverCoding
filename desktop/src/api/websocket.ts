@@ -2,6 +2,7 @@ import type { ClientMessage, ServerMessage } from '../types/chat'
 import { getBaseUrl } from './client'
 
 type MessageHandler = (msg: ServerMessage) => void
+type ConnectListener = (sessionId: string) => void
 
 type Connection = {
   ws: WebSocket
@@ -15,10 +16,28 @@ type Connection = {
 
 class WebSocketManager {
   private connections = new Map<string, Connection>()
+  private connectListeners = new Set<ConnectListener>()
 
   isConnected(sessionId: string): boolean {
     const conn = this.connections.get(sessionId)
     return conn?.ws.readyState === WebSocket.OPEN
+  }
+
+  onConnected(listener: ConnectListener): () => void {
+    this.connectListeners.add(listener)
+    return () => {
+      this.connectListeners.delete(listener)
+    }
+  }
+
+  private notifyConnected(sessionId: string) {
+    for (const listener of this.connectListeners) {
+      try {
+        listener(sessionId)
+      } catch (err) {
+        console.warn('[wsManager] onConnected listener failed', err)
+      }
+    }
   }
 
   getConnectedSessionIds(): string[] {
@@ -56,6 +75,7 @@ class WebSocketManager {
     ws.onopen = () => {
       conn.reconnectAttempt = 0
       this.startPingLoop(sessionId)
+      this.notifyConnected(sessionId)
       while (conn.pendingMessages.length > 0) {
         const msg = conn.pendingMessages.shift()!
         ws.send(JSON.stringify(msg))

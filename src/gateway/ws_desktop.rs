@@ -448,6 +448,29 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .await;
                 }
             }
+            "set_pii_config" => {
+                let payload = parsed.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                let cfg =
+                    crate::services::pii_sanitizer::PiiSanitizerConfig::from_settings(&payload);
+                crate::services::pii_sanitizer::update_global_config(cfg.clone());
+                let labels: Vec<String> = cfg
+                    .disabled_kinds
+                    .iter()
+                    .map(|k| k.label().to_string())
+                    .collect();
+                let _ = send_json(
+                    &mut sender,
+                    &serde_json::json!({
+                        "type": "system_notification",
+                        "subtype": "pii_config_updated",
+                        "data": {
+                            "enabled": cfg.enabled,
+                            "disabledKinds": labels,
+                        },
+                    }),
+                )
+                .await;
+            }
             "set_runtime_config" => {
 
                 let provider = parsed
@@ -1399,6 +1422,32 @@ async fn run_turn(
                 }
                 TurnEvent::Error { message } => {
                     send_error(sender, &message, "TURN_ERROR").await;
+                }
+                TurnEvent::PiiSanitized { report } => {
+                    let mut counts = serde_json::Map::new();
+                    let mut total: u64 = 0;
+                    for (kind, count) in report.counts.iter() {
+                        counts.insert(
+                            kind.label().to_string(),
+                            serde_json::Value::from(*count as u64),
+                        );
+                        total += *count as u64;
+                    }
+                    if total == 0 {
+                        continue;
+                    }
+                    let _ = send_json(
+                        sender,
+                        &serde_json::json!({
+                            "type": "system_notification",
+                            "subtype": "debug_pii_stats",
+                            "data": {
+                                "total": total,
+                                "counts": serde_json::Value::Object(counts),
+                            }
+                        }),
+                    )
+                    .await;
                 }
             }
         }

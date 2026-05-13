@@ -296,6 +296,9 @@ impl<'a> AgentLoopCore<'a> {
                             kind,
                             delta,
                         },
+                        crate::agent::loop_::DraftEvent::PiiSanitized { report } => {
+                            crate::agent::TurnEvent::PiiSanitized { report }
+                        }
                     };
                     if event_tx.send(turn_event).await.is_err() {
                         tracing::debug!(

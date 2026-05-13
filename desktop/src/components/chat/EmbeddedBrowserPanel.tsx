@@ -477,6 +477,8 @@ export function EmbeddedBrowserPanel() {
   const closeTabAction = useBrowserPanelStore((s) => s.closeTab)
   const activateTabAction = useBrowserPanelStore((s) => s.activateTab)
   const refreshTabs = useBrowserPanelStore((s) => s.refreshTabs)
+  const setPreferredTestTab = useBrowserPanelStore((s) => s.setPreferredTestTab)
+  const clearPreferredTestTab = useBrowserPanelStore((s) => s.clearPreferredTestTab)
 
   useEffect(() => {
     if (!sessionId || !visible) return
@@ -728,6 +730,7 @@ export function EmbeddedBrowserPanel() {
                     tabAgentTs > 0 && Date.now() - tabAgentTs < AGENT_LIVE_WINDOW_MS
                   const ownedByAgent = tab.owner === 'agent'
                   const inTakeover = !!takeoverTabs[tab.id]
+                  const isPinned = (panel?.preferredTestTabId ?? null) === tab.id
                   void liveTick
                   return (
                     <div
@@ -740,14 +743,18 @@ export function EmbeddedBrowserPanel() {
                           ? t('debug.qa.takeover')
                           : tabIsLive
                             ? t('browser.panel.tabs.agentActive')
-                            : t('browser.panel.tabs.activate')
+                            : isPinned
+                              ? t('browser.panel.tabs.testTargetBadge')
+                              : t('browser.panel.tabs.activate')
                       }
-                      className={`group flex h-7 max-w-[200px] cursor-pointer items-center gap-1 rounded-t-md border border-b-0 px-2 text-[12px] transition-colors ${
+                      className={`group flex h-7 max-w-[220px] cursor-pointer items-center gap-1 rounded-t-md border border-b-0 px-2 text-[12px] transition-colors ${
                         inTakeover
                           ? 'border-[var(--color-error)] bg-[var(--color-surface)] text-[var(--color-text-primary)] ring-1 ring-[var(--color-error)]'
-                          : isActive
-                            ? 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-primary)]'
-                            : 'border-transparent bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+                          : isPinned
+                            ? 'border-[var(--color-brand)] bg-[var(--color-surface)] text-[var(--color-text-primary)] ring-1 ring-[var(--color-brand)]'
+                            : isActive
+                              ? 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-primary)]'
+                              : 'border-transparent bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                       }`}
                       style={
                         inTakeover
@@ -777,6 +784,44 @@ export function EmbeddedBrowserPanel() {
                         </span>
                       )}
                       <span className="truncate">{label}</span>
+                      {isPinned && (
+                        <span
+                          aria-label={t('browser.panel.tabs.testTargetBadge')}
+                          title={t('browser.panel.tabs.testTargetBadge')}
+                          className="ml-0.5 inline-flex items-center rounded-sm border border-[var(--color-brand)] px-1 py-px text-[10px] font-semibold uppercase tracking-wide text-[var(--color-brand)]"
+                        >
+                          QA
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (!sessionId) return
+                          if (isPinned) {
+                            void clearPreferredTestTab(sessionId)
+                          } else {
+                            void setPreferredTestTab(sessionId, tab.id)
+                          }
+                        }}
+                        title={
+                          isPinned
+                            ? t('browser.panel.tabs.unpinTestTarget')
+                            : t('browser.panel.tabs.pinAsTestTarget')
+                        }
+                        aria-label={
+                          isPinned
+                            ? t('browser.panel.tabs.unpinTestTarget')
+                            : t('browser.panel.tabs.pinAsTestTarget')
+                        }
+                        className={`ml-1 inline-flex h-4 w-4 items-center justify-center rounded transition-colors ${
+                          isPinned
+                            ? 'text-[var(--color-brand)] hover:bg-[var(--color-surface-hover)]'
+                            : 'text-[var(--color-text-tertiary)] opacity-60 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-brand)] hover:opacity-100'
+                        }`}
+                      >
+                        <span className="material-symbols-outlined text-[12px]">push_pin</span>
+                      </button>
                       <button
                         type="button"
                         onClick={(e) => {

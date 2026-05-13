@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { settingsApi } from '../api/settings'
 import { modelsApi } from '../api/models'
 import { codingModesApi } from '../api/codingModes'
+import { wsManager } from '../api/websocket'
 import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode } from '../types/settings'
 import type { CodingModeId, CodingModeInfo } from '../types/codingMode'
 import { DEFAULT_CODING_MODE, isVisibleCodingMode } from '../types/codingMode'
@@ -24,6 +25,81 @@ function getStoredLocale(): Locale {
   return 'zh'
 }
 
+export const PII_KIND_LABELS = [
+  'id_card',
+  'phone',
+  'email',
+  'bank_card',
+  'jwt',
+  'api_key',
+  'bearer',
+  'auth_header',
+  'url_password',
+  'kv_secret',
+  'private_key',
+  'ipv4',
+  'mac',
+] as const
+
+export type PiiKindLabel = (typeof PII_KIND_LABELS)[number]
+
+export type PiiSanitizerSettings = {
+  enabled: boolean
+  disabledKinds: PiiKindLabel[]
+}
+
+const PII_STORAGE_KEY = 'sen-pii-sanitizer'
+
+const DEFAULT_PII_SETTINGS: PiiSanitizerSettings = {
+  enabled: true,
+  disabledKinds: ['ipv4', 'mac'],
+}
+
+const PII_LEGACY_ALIASES: Record<string, PiiKindLabel> = {
+  authorization_header: 'auth_header',
+  mac_address: 'mac',
+}
+
+function normalizePiiLabel(raw: unknown): PiiKindLabel | null {
+  if (typeof raw !== 'string') return null
+  const lower = raw.toLowerCase()
+  if (PII_KIND_LABELS.includes(lower as PiiKindLabel)) {
+    return lower as PiiKindLabel
+  }
+  return PII_LEGACY_ALIASES[lower] ?? null
+}
+
+function getStoredPiiSettings(): PiiSanitizerSettings {
+  try {
+    const raw = localStorage.getItem(PII_STORAGE_KEY)
+    if (!raw) return { ...DEFAULT_PII_SETTINGS }
+    const parsed = JSON.parse(raw) as Partial<PiiSanitizerSettings>
+    if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PII_SETTINGS }
+    const enabled =
+      typeof parsed.enabled === 'boolean' ? parsed.enabled : DEFAULT_PII_SETTINGS.enabled
+    const disabledKinds = Array.isArray(parsed.disabledKinds)
+      ? Array.from(
+          new Set(
+            parsed.disabledKinds
+              .map(normalizePiiLabel)
+              .filter((k): k is PiiKindLabel => k !== null),
+          ),
+        )
+      : [...DEFAULT_PII_SETTINGS.disabledKinds]
+    return { enabled, disabledKinds }
+  } catch {
+    return { ...DEFAULT_PII_SETTINGS }
+  }
+}
+
+function storePiiSettings(settings: PiiSanitizerSettings): void {
+  try {
+    localStorage.setItem(PII_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // ignore
+  }
+}
+
 type SettingsStore = {
 
   codingMode: CodingModeId
@@ -40,6 +116,8 @@ type SettingsStore = {
   isLoading: boolean
   error: string | null
 
+  piiSanitizer: PiiSanitizerSettings
+
   pendingCodingModeTransition: PendingCodingModeTransition | null
 
   fetchAll: () => Promise<void>
@@ -55,6 +133,10 @@ type SettingsStore = {
   setEffort: (level: EffortLevel) => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
+
+  setPiiEnabled: (enabled: boolean) => void
+  setPiiKindEnabled: (kind: PiiKindLabel, enabled: boolean) => void
+  resetPiiSanitizer: () => void
 }
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
@@ -70,6 +152,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isLoading: false,
   error: null,
   pendingCodingModeTransition: null,
+  piiSanitizer: getStoredPiiSettings(),
 
   fetchAll: async () => {
     set({ isLoading: true, error: null })
@@ -241,4 +324,73 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       useUIStore.getState().setTheme(prev)
     }
   },
+
+  setPiiEnabled: (enabled) => {
+    const prev = get().piiSanitizer
+    const next: PiiSanitizerSettings = { ...prev, enabled }
+    set({ piiSanitizer: next })
+    storePiiSettings(next)
+    broadcastPiiConfig(next)
+  },
+
+  setPiiKindEnabled: (kind, enabled) => {
+    const prev = get().piiSanitizer
+    const set_ = new Set<PiiKindLabel>(prev.disabledKinds)
+    if (enabled) set_.delete(kind)
+    else set_.add(kind)
+    const next: PiiSanitizerSettings = {
+      enabled: prev.enabled,
+      disabledKinds: PII_KIND_LABELS.filter((k) => set_.has(k)),
+    }
+    set({ piiSanitizer: next })
+    storePiiSettings(next)
+    broadcastPiiConfig(next)
+  },
+
+  resetPiiSanitizer: () => {
+    const next: PiiSanitizerSettings = { ...DEFAULT_PII_SETTINGS }
+    set({ piiSanitizer: next })
+    storePiiSettings(next)
+    broadcastPiiConfig(next)
+  },
 }))
+
+function buildPiiMessage(settings: PiiSanitizerSettings) {
+  return {
+    type: 'set_pii_config' as const,
+    data: {
+      enabled: settings.enabled,
+      disabledKinds: [...settings.disabledKinds],
+    },
+  }
+}
+
+function sendPiiConfigTo(sessionId: string, settings: PiiSanitizerSettings) {
+  try {
+    wsManager.send(sessionId, buildPiiMessage(settings))
+  } catch (err) {
+    console.warn('[settings] send pii config failed', err)
+  }
+}
+
+function broadcastPiiConfig(settings: PiiSanitizerSettings): void {
+  try {
+    const sessionIds = wsManager.getConnectedSessionIds()
+    for (const sid of sessionIds) {
+      sendPiiConfigTo(sid, settings)
+    }
+  } catch (err) {
+    console.warn('[settings] broadcast pii config failed', err)
+  }
+}
+
+if (typeof window !== 'undefined') {
+  wsManager.onConnected((sessionId) => {
+    try {
+      const settings = useSettingsStore.getState().piiSanitizer
+      sendPiiConfigTo(sessionId, settings)
+    } catch {
+      // ignore
+    }
+  })
+}

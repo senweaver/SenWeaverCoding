@@ -101,6 +101,30 @@ export type PerSessionState = {
   activeTaskToolUseId: string | null
 
   stopRequested: boolean
+
+  debugPiiStats: DebugPiiStats
+}
+
+export type DebugPiiKind =
+  | 'id_card'
+  | 'phone'
+  | 'email'
+  | 'bank_card'
+  | 'jwt'
+  | 'api_key'
+  | 'bearer'
+  | 'auth_header'
+  | 'url_password'
+  | 'kv_secret'
+  | 'private_key'
+  | 'ipv4'
+  | 'mac'
+  | string
+
+export interface DebugPiiStats {
+  total: number
+  counts: Record<string, number>
+  lastEventAt: number | null
 }
 
 const DEFAULT_SESSION_STATE: PerSessionState = {
@@ -129,6 +153,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   subagentTimelines: {},
   activeTaskToolUseId: null,
   stopRequested: false,
+  debugPiiStats: { total: 0, counts: {}, lastEventAt: null },
 }
 
 function createDefaultSessionState(): PerSessionState {
@@ -241,6 +266,8 @@ type ChatStore = {
   undoAllPendingEdits: (sessionId: string) => Promise<void>
 
   resumePlanExecution: (sessionId: string, planPath: string) => void
+
+  resetDebugPiiStats: (sessionId: string) => void
 }
 
 export const ASK_QUESTION_TOOL_NAMES = new Set(['ask_question', 'AskUserQuestion'])
@@ -985,6 +1012,52 @@ function updateSessionIn(
   return { ...sessions, [sessionId]: { ...session, ...updater(session) } }
 }
 
+const PII_KIND_ALIAS_FRONTEND: Record<string, string> = {
+  authorization_header: 'auth_header',
+  mac_address: 'mac',
+}
+
+function applyDebugPiiStatsDelta(
+  update: (updater: (s: PerSessionState) => Partial<PerSessionState>) => void,
+  payload: Record<string, unknown>,
+) {
+  const totalDelta =
+    typeof payload.total === 'number' && Number.isFinite(payload.total)
+      ? Math.max(0, Math.floor(payload.total as number))
+      : 0
+  const rawCounts =
+    payload.counts && typeof payload.counts === 'object'
+      ? (payload.counts as Record<string, unknown>)
+      : {}
+  const countsDelta: Record<string, number> = {}
+  for (const [rawKey, value] of Object.entries(rawCounts)) {
+    if (typeof rawKey !== 'string' || rawKey.length === 0) continue
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num) || num <= 0) continue
+    const key = PII_KIND_ALIAS_FRONTEND[rawKey] ?? rawKey
+    countsDelta[key] = (countsDelta[key] ?? 0) + Math.floor(num)
+  }
+  if (totalDelta <= 0 && Object.keys(countsDelta).length === 0) return
+  update((session) => {
+    const prev = session.debugPiiStats ?? {
+      total: 0,
+      counts: {},
+      lastEventAt: null,
+    }
+    const mergedCounts: Record<string, number> = { ...prev.counts }
+    for (const [key, value] of Object.entries(countsDelta)) {
+      mergedCounts[key] = (mergedCounts[key] ?? 0) + value
+    }
+    return {
+      debugPiiStats: {
+        total: prev.total + totalDelta,
+        counts: mergedCounts,
+        lastEventAt: Date.now(),
+      },
+    }
+  })
+}
+
 async function hydrateCumulativeTokensFromUsage(sessionId: string): Promise<void> {
   try {
     await useUsageStore.getState().fetch()
@@ -1643,6 +1716,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     await sessionsApi.revertBatches(sessionId, batchIds)
     set((s) => ({
       sessions: updateSessionIn(s.sessions, sessionId, () => ({ pendingEdits: [] })),
+    }))
+  },
+
+  resetDebugPiiStats: (sessionId) => {
+    if (!sessionId) return
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, () => ({
+        debugPiiStats: { total: 0, counts: {}, lastEventAt: null },
+      })),
     }))
   },
 
@@ -2317,6 +2399,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           update(() => ({ slashCommands: msg.data as Array<{ name: string; description: string }> }))
         }
 
+        if (msg.subtype === 'debug_pii_stats' && msg.data && typeof msg.data === 'object') {
+          applyDebugPiiStatsDelta(update, msg.data as Record<string, unknown>)
+        }
+
         if (msg.subtype === 'task_notification' && msg.data && typeof msg.data === 'object') {
           const data = msg.data as Record<string, unknown>
           const toolUseId =
@@ -2469,6 +2555,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       case 'pong':
         break
+      case 'debug_pii_stats': {
+        applyDebugPiiStatsDelta(update, msg as unknown as Record<string, unknown>)
+        break
+      }
       case 'workspace_busy': {
         useUIStore.getState().addToast({
           type: 'warning',

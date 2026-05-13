@@ -22,6 +22,7 @@ import {
   dockActivateTab,
   dockBack,
   dockClear,
+  dockClearTestTarget,
   dockClose,
   dockCloseTab,
   dockForward,
@@ -31,6 +32,7 @@ import {
   dockNavigate,
   dockNewTab,
   dockOpen,
+  dockPinTestTarget,
   dockRequestState,
   dockReload,
   dockSetPickMode,
@@ -159,6 +161,8 @@ export type BrowserPanelState = {
 
   activeTabId: number | null
 
+  preferredTestTabId: number | null
+
   columnWidth: number
 
   columnWidthAuto: boolean
@@ -218,6 +222,10 @@ type StoreState = {
   closeTab: (sessionId: string, tabId: number) => Promise<void>
 
   activateTab: (sessionId: string, tabId: number) => Promise<void>
+
+  setPreferredTestTab: (sessionId: string, tabId: number) => Promise<void>
+
+  clearPreferredTestTab: (sessionId: string) => Promise<void>
 
   setColumnWidth: (sessionId: string, px: number) => void
 
@@ -336,6 +344,7 @@ const DEFAULT_STATE: BrowserPanelState = {
   tabActivity: {},
   tabs: [],
   activeTabId: null,
+  preferredTestTabId: null,
   columnWidth: BROWSER_COLUMN_WIDTH_BOUNDS.default,
   columnWidthAuto: true,
   drawerHeightRatio: 0.35,
@@ -692,6 +701,36 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     }
   },
 
+  setPreferredTestTab: async (sessionId, tabId) => {
+    try {
+      await dockPinTestTarget(tabId)
+      set((state) => ({
+        panels: patchPanel(state.panels, sessionId, { preferredTestTabId: tabId }),
+      }))
+      get().appendUserAction(sessionId, {
+        kind: 'pin_test_target',
+        detail: String(tabId),
+      })
+    } catch (err) {
+      console.warn('[browserDock] pinTestTarget failed', err)
+    }
+  },
+
+  clearPreferredTestTab: async (sessionId) => {
+    try {
+      await dockClearTestTarget()
+      set((state) => ({
+        panels: patchPanel(state.panels, sessionId, { preferredTestTabId: null }),
+      }))
+      get().appendUserAction(sessionId, {
+        kind: 'clear_test_target',
+        detail: '',
+      })
+    } catch (err) {
+      console.warn('[browserDock] clearTestTarget failed', err)
+    }
+  },
+
   setColumnWidth: (sessionId, px) => {
     const next = clampColumnWidth(px)
     set((state) => {
@@ -812,6 +851,15 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       const act = tabs.find((t) => t.id === active)
       set((state) => {
         const prev = state.panels[sessionId] ?? DEFAULT_STATE
+        const stalePin =
+          prev.preferredTestTabId !== null &&
+          !tabs.some((t) => t.id === prev.preferredTestTabId)
+        const nextPin = stalePin ? null : prev.preferredTestTabId
+        if (stalePin) {
+          dockClearTestTarget().catch((err) => {
+            console.warn('[browserDock] auto-clear stale pin failed', err)
+          })
+        }
         return {
           panels: patchPanel(state.panels, sessionId, {
             tabs,
@@ -819,6 +867,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
             url: act?.url ?? prev.url,
             liveUrl: act?.url ?? prev.liveUrl,
             title: act?.title ?? prev.title,
+            preferredTestTabId: nextPin,
           }),
         }
       })

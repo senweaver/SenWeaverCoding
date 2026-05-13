@@ -590,6 +590,13 @@ async fn process_chat_message(
                         "description": description,
                     })
                 }
+                TurnEvent::PiiSanitized { report } => {
+                    serde_json::json!({
+                        "type": "debug_pii_stats",
+                        "total": report.total(),
+                        "counts": report.to_label_map(),
+                    })
+                }
             };
             let _ = sender.send(Message::Text(ws_msg.to_string().into())).await;
         }

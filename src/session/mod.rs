@@ -361,7 +361,8 @@ fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
         TurnEvent::ProgressTick { .. }
         | TurnEvent::CommandPreview { .. }
         | TurnEvent::Cancelling { .. }
-        | TurnEvent::PermissionRequest { .. } => {
+        | TurnEvent::PermissionRequest { .. }
+        | TurnEvent::PiiSanitized { .. } => {
 
             return None;
         }

@@ -27,12 +27,18 @@ export type FileTreeResponse = {
   truncated: boolean
 }
 
-export type FileSearchHit = FileEntry
+export type FileSearchHit = FileEntry & {
+  score?: number
+  line?: number
+  preview?: string
+  submatches?: Array<{ start: number; end: number }>
+}
 
 export type FileSearchResponse = {
   results: FileSearchHit[]
   total: number
   limit: number
+  kind?: 'name' | 'content'
 }
 
 export type WriteFileResponse = {

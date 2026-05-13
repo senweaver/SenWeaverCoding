@@ -88,10 +88,94 @@ type Props = {
   workDir: string
 }
 
+const FILENAME_LANGUAGE: Record<string, string> = {
+  dockerfile: 'dockerfile',
+  containerfile: 'dockerfile',
+  '.dockerignore': 'ignore',
+  makefile: 'plaintext',
+  gnumakefile: 'plaintext',
+  rakefile: 'ruby',
+  gemfile: 'ruby',
+  guardfile: 'ruby',
+  capfile: 'ruby',
+  brewfile: 'ruby',
+  podfile: 'ruby',
+  vagrantfile: 'ruby',
+  procfile: 'plaintext',
+  cmakelists: 'plaintext',
+  'cmakelists.txt': 'plaintext',
+  'cargo.toml': 'plaintext',
+  'cargo.lock': 'plaintext',
+  'package.json': 'json',
+  'package-lock.json': 'json',
+  'tsconfig.json': 'json',
+  'jsconfig.json': 'json',
+  'composer.json': 'json',
+  'composer.lock': 'json',
+  'yarn.lock': 'plaintext',
+  'pnpm-lock.yaml': 'yaml',
+  'docker-compose.yml': 'yaml',
+  'docker-compose.yaml': 'yaml',
+  '.gitignore': 'ignore',
+  '.gitattributes': 'plaintext',
+  '.gitconfig': 'ini',
+  '.gitmodules': 'ini',
+  '.editorconfig': 'ini',
+  '.npmrc': 'ini',
+  '.yarnrc': 'plaintext',
+  '.nvmrc': 'plaintext',
+  '.env': 'plaintext',
+  '.env.local': 'plaintext',
+  '.env.development': 'plaintext',
+  '.env.production': 'plaintext',
+  '.env.test': 'plaintext',
+  '.eslintrc': 'json',
+  '.eslintrc.json': 'json',
+  '.prettierrc': 'json',
+  '.prettierrc.json': 'json',
+  '.babelrc': 'json',
+  '.babelrc.json': 'json',
+  '.bashrc': 'shell',
+  '.zshrc': 'shell',
+  '.bash_profile': 'shell',
+  '.zprofile': 'shell',
+  '.profile': 'shell',
+  license: 'plaintext',
+  'license.md': 'markdown',
+  'license.txt': 'plaintext',
+  copying: 'plaintext',
+  notice: 'plaintext',
+  readme: 'plaintext',
+  'readme.md': 'markdown',
+  'readme.txt': 'plaintext',
+  changelog: 'plaintext',
+  'changelog.md': 'markdown',
+  authors: 'plaintext',
+  owners: 'plaintext',
+  contributors: 'plaintext',
+  contributing: 'plaintext',
+  'contributing.md': 'markdown',
+  todo: 'plaintext',
+  'todo.md': 'markdown',
+}
+
 function languageIdFor(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  if (!filename) return 'plaintext'
+  const lower = filename.toLowerCase()
+  const byName = FILENAME_LANGUAGE[lower]
+  if (byName) return byName
+  if (lower.startsWith('dockerfile.') || lower.endsWith('.dockerfile')) {
+    return 'dockerfile'
+  }
+  if (lower.startsWith('makefile.') || lower.endsWith('.mk') || lower.endsWith('.make')) {
+    return 'plaintext'
+  }
+  const dot = lower.lastIndexOf('.')
+  const ext = dot >= 0 ? lower.slice(dot + 1) : ''
   switch (ext) {
     case 'ts':
+    case 'mts':
+    case 'cts':
       return 'typescript'
     case 'tsx':
       return 'typescript'
@@ -105,12 +189,14 @@ function languageIdFor(filename: string): string {
       return 'rust'
     case 'py':
     case 'pyi':
+    case 'pyx':
       return 'python'
     case 'go':
       return 'go'
     case 'java':
       return 'java'
     case 'kt':
+    case 'kts':
       return 'kotlin'
     case 'swift':
       return 'swift'
@@ -119,6 +205,7 @@ function languageIdFor(filename: string): string {
     case 'cxx':
     case 'hpp':
     case 'hxx':
+    case 'hh':
       return 'cpp'
     case 'c':
     case 'h':
@@ -129,18 +216,35 @@ function languageIdFor(filename: string): string {
       return 'ruby'
     case 'php':
       return 'php'
+    case 'pl':
+    case 'pm':
+      return 'perl'
+    case 'r':
+      return 'r'
+    case 'jl':
+      return 'julia'
     case 'json':
     case 'jsonc':
+    case 'json5':
+    case 'jsonl':
       return 'json'
     case 'md':
     case 'markdown':
+    case 'mdx':
       return 'markdown'
+    case 'rst':
+      return 'plaintext'
+    case 'tex':
+    case 'latex':
+      return 'plaintext'
     case 'html':
     case 'htm':
+    case 'xhtml':
       return 'html'
     case 'css':
       return 'css'
     case 'scss':
+    case 'sass':
       return 'scss'
     case 'less':
       return 'less'
@@ -148,19 +252,93 @@ function languageIdFor(filename: string): string {
     case 'yml':
       return 'yaml'
     case 'toml':
-      return 'plaintext'
+      return 'ini'
+    case 'ini':
+    case 'cfg':
+    case 'conf':
+    case 'properties':
+      return 'ini'
     case 'xml':
+    case 'xsd':
+    case 'xsl':
+    case 'xslt':
+    case 'wxs':
+    case 'csproj':
+    case 'vbproj':
+    case 'fsproj':
+    case 'plist':
+    case 'resx':
+      return 'xml'
+    case 'vue':
+      return 'html'
+    case 'svelte':
+      return 'html'
+    case 'astro':
+      return 'html'
+    case 'svg':
       return 'xml'
     case 'sh':
     case 'bash':
     case 'zsh':
+    case 'fish':
+    case 'ksh':
       return 'shell'
+    case 'ps1':
+    case 'psm1':
+    case 'psd1':
+      return 'powershell'
+    case 'bat':
+    case 'cmd':
+      return 'bat'
     case 'sql':
       return 'sql'
+    case 'graphql':
+    case 'gql':
+      return 'graphql'
+    case 'proto':
+      return 'plaintext'
     case 'dockerfile':
       return 'dockerfile'
     case 'lua':
       return 'lua'
+    case 'dart':
+      return 'dart'
+    case 'scala':
+    case 'sbt':
+    case 'sc':
+      return 'scala'
+    case 'groovy':
+    case 'gradle':
+      return 'plaintext'
+    case 'diff':
+    case 'patch':
+      return 'plaintext'
+    case 'env':
+    case 'lock':
+    case 'log':
+    case 'csv':
+    case 'tsv':
+    case 'txt':
+      return 'plaintext'
+    case 'ex':
+    case 'exs':
+      return 'plaintext'
+    case 'hs':
+      return 'plaintext'
+    case 'clj':
+    case 'cljs':
+    case 'edn':
+      return 'plaintext'
+    case 'zig':
+      return 'plaintext'
+    case 'nim':
+      return 'plaintext'
+    case 'vim':
+      return 'plaintext'
+    case 'hcl':
+    case 'tf':
+    case 'tfvars':
+      return 'plaintext'
     default:
       return 'plaintext'
   }
@@ -172,6 +350,18 @@ function lspPosToMonaco(pos: LspPosition): MonacoNs.IPosition {
 
 function monacoPosToLsp(pos: MonacoNs.Position): LspPosition {
   return { line: pos.lineNumber - 1, character: pos.column - 1 }
+}
+
+function lspRangeToMonaco(range: {
+  start: LspPosition
+  end: LspPosition
+}): MonacoNs.IRange {
+  return {
+    startLineNumber: range.start.line + 1,
+    startColumn: range.start.character + 1,
+    endLineNumber: range.end.line + 1,
+    endColumn: range.end.character + 1,
+  }
 }
 
 function severityFor(
@@ -211,11 +401,14 @@ function lspToMarker(
   }
 }
 
-function flattenHover(result: unknown): string | null {
-  if (!result || typeof result !== 'object') return null
-  const r = result as { contents?: unknown }
+function flattenHover(result: unknown): {
+  text: string | null
+  range: { start: LspPosition; end: LspPosition } | null
+} {
+  if (!result || typeof result !== 'object') return { text: null, range: null }
+  const r = result as { contents?: unknown; range?: unknown }
   const contents = r.contents
-  if (!contents) return null
+  if (!contents) return { text: null, range: null }
   const collect = (node: unknown): string => {
     if (!node) return ''
     if (typeof node === 'string') return node
@@ -227,7 +420,19 @@ function flattenHover(result: unknown): string | null {
     return ''
   }
   const text = collect(contents).trim()
-  return text.length > 0 ? text : null
+  let range: { start: LspPosition; end: LspPosition } | null = null
+  const rawRange = r.range as
+    | { start?: LspPosition; end?: LspPosition }
+    | undefined
+  if (
+    rawRange?.start &&
+    rawRange?.end &&
+    typeof rawRange.start.line === 'number' &&
+    typeof rawRange.end.line === 'number'
+  ) {
+    range = { start: rawRange.start, end: rawRange.end }
+  }
+  return { text: text.length > 0 ? text : null, range }
 }
 
 type LspLocation = {
@@ -550,32 +755,88 @@ function uriToRelPath(uri: string, workspaceRoot: string): string | null {
 }
 
 type LspCompletionItem = {
-  label: string
+  label: string | { label: string; detail?: string; description?: string }
   kind?: number
   detail?: string
   documentation?: string | { kind?: string; value?: string }
   insertText?: string
+  insertTextFormat?: number
+  insertTextMode?: number
   filterText?: string
   sortText?: string
+  preselect?: boolean
+  deprecated?: boolean
+  tags?: number[]
+  command?: { title: string; command: string; arguments?: unknown[] }
+  data?: unknown
   textEdit?: {
     newText?: string
     range?: { start: LspPosition; end: LspPosition }
+    insert?: { start: LspPosition; end: LspPosition }
+    replace?: { start: LspPosition; end: LspPosition }
   }
+  additionalTextEdits?: LspTextEdit[]
 }
 
-function flattenCompletions(result: unknown): LspCompletionItem[] {
-  if (!result) return []
-  if (Array.isArray(result)) return result as LspCompletionItem[]
-  const r = result as { items?: unknown[] }
-  if (Array.isArray(r.items)) return r.items as LspCompletionItem[]
-  return []
+type LspCompletionList = {
+  isIncomplete?: boolean
+  items: LspCompletionItem[]
 }
 
-function docToString(doc: LspCompletionItem['documentation']): string | undefined {
+function flattenCompletions(result: unknown): {
+  items: LspCompletionItem[]
+  isIncomplete: boolean
+} {
+  if (!result) return { items: [], isIncomplete: false }
+  if (Array.isArray(result)) {
+    return { items: result as LspCompletionItem[], isIncomplete: false }
+  }
+  const r = result as LspCompletionList
+  if (Array.isArray(r.items)) {
+    return { items: r.items, isIncomplete: !!r.isIncomplete }
+  }
+  return { items: [], isIncomplete: false }
+}
+
+function completionLabelString(label: LspCompletionItem['label']): string {
+  if (typeof label === 'string') return label
+  if (label && typeof label === 'object' && typeof label.label === 'string') {
+    return label.label
+  }
+  return ''
+}
+
+function completionLabelDetails(label: LspCompletionItem['label']):
+  | { detail?: string; description?: string }
+  | undefined {
+  if (label && typeof label === 'object' && (label.detail || label.description)) {
+    return { detail: label.detail, description: label.description }
+  }
+  return undefined
+}
+
+function docToMarkdown(
+  doc: LspCompletionItem['documentation'],
+): MonacoNs.IMarkdownString | string | undefined {
   if (!doc) return undefined
   if (typeof doc === 'string') return doc
-  if (typeof doc === 'object' && typeof doc.value === 'string') return doc.value
+  if (typeof doc === 'object' && typeof doc.value === 'string') {
+    if (doc.kind === 'markdown') {
+      return { value: doc.value, isTrusted: false, supportThemeIcons: true }
+    }
+    return doc.value
+  }
   return undefined
+}
+
+function lspTextEditToMonacoEdit(
+  edit: LspTextEdit | null | undefined,
+): MonacoNs.languages.TextEdit | null {
+  if (!edit?.range?.start || !edit?.range?.end) return null
+  return {
+    range: lspRangeToMonaco(edit.range),
+    text: edit.newText ?? '',
+  }
 }
 
 const COMPLETION_KIND_TO_MONACO_KIND: Record<number, number> = {
@@ -614,6 +875,8 @@ export function MonacoFileEditor({ workDir }: Props) {
   const addToast = useUIStore((s) => s.addToast)
   const root = useWorkspaceFilesStore((s) => s.root)
   const activeTab = useWorkspaceFilesStore((s) => s.activeTab)
+  const pendingNavigation = useWorkspaceFilesStore((s) => s.pendingNavigation)
+  const consumeNavigation = useWorkspaceFilesStore((s) => s.consumeNavigation)
   const inlayHintsEnabled = useLspStore((s) => s.preferences.inlayHintsEnabled)
   const formatOnSave = useLspStore((s) => s.preferences.formatOnSave)
   const hoverDelayMs = useLspStore((s) => s.preferences.hoverDelayMs)
@@ -1106,9 +1369,24 @@ export function MonacoFileEditor({ workDir }: Props) {
   const applyLspCodeActionRef = useRef(applyLspCodeAction)
   applyLspCodeActionRef.current = applyLspCodeAction
 
+  useEffect(() => {
+    if (!activeTab) {
+      useUIStore.getState().setEditorCursor(null)
+    }
+    return () => {
+      const current = useUIStore.getState().editorCursor
+      if (current && (!activeTab || current.relPath === activeTab)) {
+        useUIStore.getState().setEditorCursor(null)
+      }
+    }
+  }, [activeTab])
+
   const onMount: OnMount = useCallback((editor, monaco) => {
     editorRef.current = editor
     monacoRef.current = monaco
+
+    const currentActiveTab = (): string | null =>
+      useWorkspaceFilesStore.getState().activeTab
 
     editor.updateOptions({ hover: { enabled: true, delay: ctxRef.current.hoverDelayMs } })
 
@@ -1154,7 +1432,7 @@ export function MonacoFileEditor({ workDir }: Props) {
           endLine = model.getLineCount()
         }
         const lang = model.getLanguageId() || ''
-        const rel = activeTab ?? ''
+        const rel = currentActiveTab() ?? ''
         const header =
           startLine === endLine
             ? `${rel}:${startLine}`
@@ -1178,7 +1456,7 @@ export function MonacoFileEditor({ workDir }: Props) {
       if (!first) return
       const rel = uriToRelPath(first.uri, workspaceRoot)
       if (rel === null) return
-      if (rel === activeTab) {
+      if (rel === currentActiveTab()) {
         const range: MonacoNs.IRange = {
           startLineNumber: first.range.start.line + 1,
           startColumn: first.range.start.character + 1,
@@ -1214,6 +1492,19 @@ export function MonacoFileEditor({ workDir }: Props) {
       setTimeout(tick, 50)
     }
 
+    const tokenToSignal = (
+      token?: MonacoNs.CancellationToken | undefined,
+    ): AbortSignal | undefined => {
+      if (!token) return undefined
+      const controller = new AbortController()
+      if (token.isCancellationRequested) {
+        controller.abort()
+      } else {
+        token.onCancellationRequested(() => controller.abort())
+      }
+      return controller.signal
+    }
+
     const ensureProviders = (lang: string) => {
       if (providersRegistered.current.has(lang)) return
       providersRegistered.current.add(lang)
@@ -1222,6 +1513,7 @@ export function MonacoFileEditor({ workDir }: Props) {
         provideHover: async (
           model: MonacoNs.editor.ITextModel,
           position: MonacoNs.Position,
+          token?: MonacoNs.CancellationToken,
         ) => {
           const uri = ctxRef.current.uri
           if (!uri) return null
@@ -1233,11 +1525,13 @@ export function MonacoFileEditor({ workDir }: Props) {
               line: lspPos.line,
               character: lspPos.character,
               text: model.getValue(),
+              signal: tokenToSignal(token),
             })
-            const text = flattenHover(result)
+            const { text, range } = flattenHover(result)
             if (!text) return null
             return {
-              contents: [{ value: text }],
+              contents: [{ value: text, isTrusted: false, supportThemeIcons: true }],
+              range: range ? lspRangeToMonaco(range) : undefined,
             }
           } catch {
             return null
@@ -1246,10 +1540,12 @@ export function MonacoFileEditor({ workDir }: Props) {
       })
 
       monaco.languages.registerCompletionItemProvider(lang, {
-        triggerCharacters: ['.', ':', '/', '@', '<', '"', "'", ' '],
+        triggerCharacters: ['.', ':', '/', '@', '<', '"', "'", '#', '$'],
         provideCompletionItems: async (
           model: MonacoNs.editor.ITextModel,
           position: MonacoNs.Position,
+          context: MonacoNs.languages.CompletionContext,
+          token?: MonacoNs.CancellationToken,
         ) => {
           const uri = ctxRef.current.uri
           if (!uri) return { suggestions: [] }
@@ -1261,33 +1557,112 @@ export function MonacoFileEditor({ workDir }: Props) {
               line: lspPos.line,
               character: lspPos.character,
               text: model.getValue(),
+              triggerKind: context.triggerKind + 1,
+              triggerCharacter: context.triggerCharacter,
+              signal: tokenToSignal(token),
             })
-            const items = flattenCompletions(result)
+            const { items, isIncomplete } = flattenCompletions(result)
             const word = model.getWordUntilPosition(position)
-            const range: MonacoNs.IRange = {
+            const fallbackRange: MonacoNs.IRange = {
               startLineNumber: position.lineNumber,
               endLineNumber: position.lineNumber,
               startColumn: word.startColumn,
               endColumn: word.endColumn,
             }
             return {
-              suggestions: items.map((item) => ({
-                label: item.label,
-                kind:
-                  (item.kind != null
-                    ? COMPLETION_KIND_TO_MONACO_KIND[item.kind]
-                    : monaco.languages.CompletionItemKind.Text) ??
-                  monaco.languages.CompletionItemKind.Text,
-                insertText: item.textEdit?.newText ?? item.insertText ?? item.label,
-                detail: item.detail,
-                documentation: docToString(item.documentation),
-                sortText: item.sortText,
-                filterText: item.filterText,
-                range,
-              })),
+              incomplete: isIncomplete,
+              suggestions: items.map((item) => {
+                const labelText = completionLabelString(item.label)
+                const labelDetails = completionLabelDetails(item.label)
+                const newText =
+                  item.textEdit?.newText ?? item.insertText ?? labelText
+                const isSnippet = item.insertTextFormat === 2
+                let range: MonacoNs.IRange | {
+                  insert: MonacoNs.IRange
+                  replace: MonacoNs.IRange
+                } = fallbackRange
+                if (item.textEdit) {
+                  if (item.textEdit.insert && item.textEdit.replace) {
+                    range = {
+                      insert: lspRangeToMonaco(item.textEdit.insert),
+                      replace: lspRangeToMonaco(item.textEdit.replace),
+                    }
+                  } else if (item.textEdit.range) {
+                    range = lspRangeToMonaco(item.textEdit.range)
+                  }
+                }
+                const additionalEdits = (item.additionalTextEdits ?? [])
+                  .map((e) => lspTextEditToMonacoEdit(e))
+                  .filter((e): e is MonacoNs.languages.TextEdit => e !== null)
+                const suggestion: MonacoNs.languages.CompletionItem = {
+                  label: labelDetails
+                    ? { label: labelText, detail: labelDetails.detail, description: labelDetails.description }
+                    : labelText,
+                  kind:
+                    (item.kind != null
+                      ? COMPLETION_KIND_TO_MONACO_KIND[item.kind]
+                      : monaco.languages.CompletionItemKind.Text) ??
+                    monaco.languages.CompletionItemKind.Text,
+                  insertText: newText,
+                  insertTextRules: isSnippet
+                    ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                    : monaco.languages.CompletionItemInsertTextRule.None,
+                  detail: item.detail,
+                  documentation: docToMarkdown(item.documentation),
+                  sortText: item.sortText,
+                  filterText: item.filterText,
+                  preselect: item.preselect,
+                  tags: Array.isArray(item.tags) ? (item.tags as MonacoNs.languages.CompletionItemTag[]) : undefined,
+                  range,
+                  additionalTextEdits: additionalEdits.length > 0 ? additionalEdits : undefined,
+                  command: item.command
+                    ? {
+                        id: item.command.command,
+                        title: item.command.title,
+                        arguments: item.command.arguments,
+                      }
+                    : undefined,
+                }
+                ;(suggestion as unknown as { _lsp: LspCompletionItem })._lsp = item
+                return suggestion
+              }),
             }
           } catch {
             return { suggestions: [] }
+          }
+        },
+        resolveCompletionItem: async (item: MonacoNs.languages.CompletionItem) => {
+          const original = (item as unknown as { _lsp?: LspCompletionItem })._lsp
+          if (!original) return item
+          try {
+            const resolved = (await lspBridge.completionResolve({
+              item: original,
+              uri: ctxRef.current.uri ?? undefined,
+              languageId: ctxRef.current.languageId,
+            })) as LspCompletionItem | null
+            if (!resolved || typeof resolved !== 'object') return item
+            const next = { ...item } as MonacoNs.languages.CompletionItem
+            if (resolved.detail && !next.detail) next.detail = resolved.detail
+            if (resolved.documentation) {
+              const doc = docToMarkdown(resolved.documentation)
+              if (doc) next.documentation = doc
+            }
+            if (Array.isArray(resolved.additionalTextEdits) && resolved.additionalTextEdits.length > 0) {
+              const edits = resolved.additionalTextEdits
+                .map((e) => lspTextEditToMonacoEdit(e))
+                .filter((e): e is MonacoNs.languages.TextEdit => e !== null)
+              if (edits.length > 0) next.additionalTextEdits = edits
+            }
+            if (resolved.command && !next.command) {
+              next.command = {
+                id: resolved.command.command,
+                title: resolved.command.title,
+                arguments: resolved.command.arguments,
+              }
+            }
+            return next
+          } catch {
+            return item
           }
         },
       })
@@ -1296,6 +1671,7 @@ export function MonacoFileEditor({ workDir }: Props) {
         provideDefinition: async (
           model: MonacoNs.editor.ITextModel,
           position: MonacoNs.Position,
+          token?: MonacoNs.CancellationToken,
         ) => {
           const uri = ctxRef.current.uri
           if (!uri) return null
@@ -1309,6 +1685,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               line: lspPos.line,
               character: lspPos.character,
               text: model.getValue(),
+              signal: tokenToSignal(token),
             })
             const locations = flattenLocations(result)
             if (locations.length === 0) return null
@@ -1317,7 +1694,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               const rel = uriToRelPath(loc.uri, workspaceRoot)
               if (rel === null) continue
               const targetUri =
-                rel === activeTab
+                rel === currentActiveTab()
                   ? model.uri
                   : monaco.Uri.parse(loc.uri)
               monacoLocations.push({
@@ -1334,7 +1711,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               const first = locations[0]
               if (first) {
                 const rel = uriToRelPath(first.uri, workspaceRoot)
-                if (rel !== null && rel !== activeTab) {
+                if (rel !== null && rel !== currentActiveTab()) {
                   void openLocationsInTabs(locations)
                   return null
                 }
@@ -1347,10 +1724,122 @@ export function MonacoFileEditor({ workDir }: Props) {
         },
       })
 
+      if (monaco.languages.registerDeclarationProvider) {
+        monaco.languages.registerDeclarationProvider(lang, {
+          provideDeclaration: async (
+            model: MonacoNs.editor.ITextModel,
+            position: MonacoNs.Position,
+            token?: MonacoNs.CancellationToken,
+          ) => {
+            const uri = ctxRef.current.uri
+            if (!uri) return null
+            const workspaceRoot = ctxRef.current.workspaceRoot
+            if (!workspaceRoot) return null
+            const lspPos = monacoPosToLsp(position)
+            try {
+              const result = await lspBridge.declaration({
+                uri,
+                languageId: ctxRef.current.languageId,
+                line: lspPos.line,
+                character: lspPos.character,
+                text: model.getValue(),
+                signal: tokenToSignal(token),
+              })
+              const locations = flattenLocations(result)
+              if (locations.length === 0) return null
+              const out: MonacoNs.languages.Location[] = []
+              for (const loc of locations) {
+                const rel = uriToRelPath(loc.uri, workspaceRoot)
+                if (rel === null) continue
+                out.push({
+                  uri:
+                    rel === currentActiveTab()
+                      ? model.uri
+                      : monaco.Uri.parse(loc.uri),
+                  range: lspRangeToMonaco(loc.range),
+                })
+              }
+              return out
+            } catch {
+              return null
+            }
+          },
+        })
+      }
+
+      monaco.languages.registerLinkProvider(lang, {
+        provideLinks: async (
+          model: MonacoNs.editor.ITextModel,
+          token?: MonacoNs.CancellationToken,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return { links: [] }
+          try {
+            const result = (await lspBridge.documentLink({
+              uri,
+              languageId: ctxRef.current.languageId,
+              text: model.getValue(),
+              signal: tokenToSignal(token),
+            })) as Array<{
+              range: {
+                start: { line: number; character: number }
+                end: { line: number; character: number }
+              }
+              target?: string
+              tooltip?: string
+            }> | null
+            if (!Array.isArray(result)) return { links: [] }
+            const links: MonacoNs.languages.ILink[] = []
+            for (const link of result) {
+              if (!link?.range?.start || !link?.range?.end) continue
+              const url = typeof link.target === 'string' ? link.target : undefined
+              links.push({
+                range: lspRangeToMonaco(link.range),
+                url,
+                tooltip: link.tooltip,
+              })
+            }
+            return { links }
+          } catch {
+            return { links: [] }
+          }
+        },
+      })
+
+      monaco.languages.registerDocumentSemanticTokensProvider(lang, {
+        getLegend: () => ({ tokenTypes: [], tokenModifiers: [] }),
+        provideDocumentSemanticTokens: async (
+          model: MonacoNs.editor.ITextModel,
+          _lastResultId: string | null,
+          token?: MonacoNs.CancellationToken,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          try {
+            const result = (await lspBridge.semanticTokensFull({
+              uri,
+              languageId: ctxRef.current.languageId,
+              text: model.getValue(),
+              signal: tokenToSignal(token),
+            })) as { data?: number[]; resultId?: string } | null
+            if (!result || !Array.isArray(result.data)) return null
+            return {
+              data: new Uint32Array(result.data),
+              resultId: typeof result.resultId === 'string' ? result.resultId : undefined,
+            }
+          } catch {
+            return null
+          }
+        },
+        releaseDocumentSemanticTokens: () => undefined,
+      })
+
       monaco.languages.registerReferenceProvider(lang, {
         provideReferences: async (
           model: MonacoNs.editor.ITextModel,
           position: MonacoNs.Position,
+          _context: MonacoNs.languages.ReferenceContext,
+          token?: MonacoNs.CancellationToken,
         ) => {
           const uri = ctxRef.current.uri
           if (!uri) return null
@@ -1364,6 +1853,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               line: lspPos.line,
               character: lspPos.character,
               text: model.getValue(),
+              signal: tokenToSignal(token),
             })
             const locations = flattenLocations(result)
             if (locations.length === 0) return null
@@ -1373,7 +1863,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               if (rel === null) continue
               out.push({
                 uri:
-                  rel === activeTab
+                  rel === currentActiveTab()
                     ? model.uri
                     : monaco.Uri.parse(loc.uri),
                 range: {
@@ -1627,12 +2117,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             for (const edit of result as LspTextEdit[]) {
               if (!edit?.range?.start || !edit?.range?.end) continue
               edits.push({
-                range: {
-                  startLineNumber: edit.range.start.line + 1,
-                  startColumn: edit.range.start.character + 1,
-                  endLineNumber: edit.range.end.line + 1,
-                  endColumn: edit.range.end.character + 1,
-                },
+                range: lspRangeToMonaco(edit.range),
                 text: edit.newText,
               })
             }
@@ -1642,16 +2127,497 @@ export function MonacoFileEditor({ workDir }: Props) {
           }
         },
       })
+
+      monaco.languages.registerDocumentRangeFormattingEditProvider(lang, {
+        provideDocumentRangeFormattingEdits: async (
+          model: MonacoNs.editor.ITextModel,
+          range: MonacoNs.Range,
+          options: MonacoNs.languages.FormattingOptions,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          try {
+            const result = await lspBridge.rangeFormatting({
+              uri,
+              languageId: ctxRef.current.languageId,
+              text: model.getValue(),
+              range: {
+                start: {
+                  line: range.startLineNumber - 1,
+                  character: range.startColumn - 1,
+                },
+                end: {
+                  line: range.endLineNumber - 1,
+                  character: range.endColumn - 1,
+                },
+              },
+              options: {
+                tabSize: options.tabSize,
+                insertSpaces: options.insertSpaces,
+              },
+            })
+            if (!Array.isArray(result)) return null
+            const edits: MonacoNs.languages.TextEdit[] = []
+            for (const edit of result as LspTextEdit[]) {
+              if (!edit?.range?.start || !edit?.range?.end) continue
+              edits.push({
+                range: lspRangeToMonaco(edit.range),
+                text: edit.newText,
+              })
+            }
+            return edits
+          } catch {
+            return null
+          }
+        },
+      })
+
+      monaco.languages.registerDocumentHighlightProvider(lang, {
+        provideDocumentHighlights: async (
+          model: MonacoNs.editor.ITextModel,
+          position: MonacoNs.Position,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          const lspPos = monacoPosToLsp(position)
+          try {
+            const result = await lspBridge.documentHighlight({
+              uri,
+              languageId: ctxRef.current.languageId,
+              line: lspPos.line,
+              character: lspPos.character,
+              text: model.getValue(),
+            })
+            if (!Array.isArray(result)) return null
+            const out: MonacoNs.languages.DocumentHighlight[] = []
+            for (const raw of result as Array<{
+              range?: { start: LspPosition; end: LspPosition }
+              kind?: number
+            }>) {
+              if (!raw?.range?.start || !raw?.range?.end) continue
+              out.push({
+                range: lspRangeToMonaco(raw.range),
+                kind:
+                  raw.kind === 2
+                    ? monaco.languages.DocumentHighlightKind.Read
+                    : raw.kind === 3
+                    ? monaco.languages.DocumentHighlightKind.Write
+                    : monaco.languages.DocumentHighlightKind.Text,
+              })
+            }
+            return out
+          } catch {
+            return null
+          }
+        },
+      })
+
+      monaco.languages.registerTypeDefinitionProvider(lang, {
+        provideTypeDefinition: async (
+          model: MonacoNs.editor.ITextModel,
+          position: MonacoNs.Position,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          const workspaceRoot = ctxRef.current.workspaceRoot
+          if (!workspaceRoot) return null
+          const lspPos = monacoPosToLsp(position)
+          try {
+            const result = await lspBridge.typeDefinition({
+              uri,
+              languageId: ctxRef.current.languageId,
+              line: lspPos.line,
+              character: lspPos.character,
+              text: model.getValue(),
+            })
+            const locations = flattenLocations(result)
+            if (locations.length === 0) return null
+            const out: MonacoNs.languages.Location[] = []
+            for (const loc of locations) {
+              const rel = uriToRelPath(loc.uri, workspaceRoot)
+              if (rel === null) continue
+              out.push({
+                uri:
+                  rel === currentActiveTab()
+                    ? model.uri
+                    : monaco.Uri.parse(loc.uri),
+                range: lspRangeToMonaco(loc.range),
+              })
+            }
+            return out
+          } catch {
+            return null
+          }
+        },
+      })
+
+      monaco.languages.registerImplementationProvider(lang, {
+        provideImplementation: async (
+          model: MonacoNs.editor.ITextModel,
+          position: MonacoNs.Position,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          const workspaceRoot = ctxRef.current.workspaceRoot
+          if (!workspaceRoot) return null
+          const lspPos = monacoPosToLsp(position)
+          try {
+            const result = await lspBridge.implementation({
+              uri,
+              languageId: ctxRef.current.languageId,
+              line: lspPos.line,
+              character: lspPos.character,
+              text: model.getValue(),
+            })
+            const locations = flattenLocations(result)
+            if (locations.length === 0) return null
+            const out: MonacoNs.languages.Location[] = []
+            for (const loc of locations) {
+              const rel = uriToRelPath(loc.uri, workspaceRoot)
+              if (rel === null) continue
+              out.push({
+                uri:
+                  rel === currentActiveTab()
+                    ? model.uri
+                    : monaco.Uri.parse(loc.uri),
+                range: lspRangeToMonaco(loc.range),
+              })
+            }
+            return out
+          } catch {
+            return null
+          }
+        },
+      })
+
+      monaco.languages.registerRenameProvider(lang, {
+        provideRenameEdits: async (
+          model: MonacoNs.editor.ITextModel,
+          position: MonacoNs.Position,
+          newName: string,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          const workspaceRoot = ctxRef.current.workspaceRoot
+          if (!workspaceRoot) return null
+          const lspPos = monacoPosToLsp(position)
+          try {
+            const result = (await lspBridge.rename({
+              uri,
+              languageId: ctxRef.current.languageId,
+              line: lspPos.line,
+              character: lspPos.character,
+              newName,
+              text: model.getValue(),
+            })) as LspWorkspaceEdit | null
+            if (!result || typeof result !== 'object') return null
+            const editsByUri = collectWorkspaceEditsByUri(result)
+            if (editsByUri.size === 0) return { edits: [] }
+            const edits: MonacoNs.languages.IWorkspaceTextEdit[] = []
+            for (const [docUri, lspEdits] of editsByUri.entries()) {
+              const rel = uriToRelPath(docUri, workspaceRoot)
+              const targetUri =
+                rel === currentActiveTab()
+                  ? model.uri
+                  : monaco.Uri.parse(docUri)
+              for (const e of lspEdits) {
+                if (!e?.range?.start || !e?.range?.end) continue
+                edits.push({
+                  resource: targetUri,
+                  versionId: undefined,
+                  textEdit: {
+                    range: lspRangeToMonaco(e.range),
+                    text: e.newText ?? '',
+                  },
+                })
+              }
+            }
+            return { edits }
+          } catch {
+            return null
+          }
+        },
+        resolveRenameLocation: async (
+          model: MonacoNs.editor.ITextModel,
+          position: MonacoNs.Position,
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          const lspPos = monacoPosToLsp(position)
+          try {
+            const result = await lspBridge.prepareRename({
+              uri,
+              languageId: ctxRef.current.languageId,
+              line: lspPos.line,
+              character: lspPos.character,
+              text: model.getValue(),
+            })
+            if (!result) return null
+            const word = model.getWordAtPosition(position)
+            const fallbackText = word?.word ?? ''
+            const fallbackRange: MonacoNs.IRange = word
+              ? {
+                  startLineNumber: position.lineNumber,
+                  endLineNumber: position.lineNumber,
+                  startColumn: word.startColumn,
+                  endColumn: word.endColumn,
+                }
+              : {
+                  startLineNumber: position.lineNumber,
+                  endLineNumber: position.lineNumber,
+                  startColumn: position.column,
+                  endColumn: position.column,
+                }
+            const r = result as
+              | { start: LspPosition; end: LspPosition }
+              | { range: { start: LspPosition; end: LspPosition }; placeholder?: string }
+              | { defaultBehavior: boolean }
+            if (typeof r === 'object' && 'defaultBehavior' in r && r.defaultBehavior) {
+              return { range: fallbackRange, text: fallbackText }
+            }
+            if (typeof r === 'object' && 'range' in r && r.range?.start && r.range?.end) {
+              return {
+                range: lspRangeToMonaco(r.range),
+                text: r.placeholder ?? fallbackText,
+              }
+            }
+            if (typeof r === 'object' && 'start' in r && 'end' in r) {
+              return {
+                range: lspRangeToMonaco(r as { start: LspPosition; end: LspPosition }),
+                text: fallbackText,
+              }
+            }
+            return { range: fallbackRange, text: fallbackText }
+          } catch {
+            return null
+          }
+        },
+      })
+
+      monaco.languages.registerFoldingRangeProvider(lang, {
+        provideFoldingRanges: async (model: MonacoNs.editor.ITextModel) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          try {
+            const result = await lspBridge.foldingRange({
+              uri,
+              languageId: ctxRef.current.languageId,
+              text: model.getValue(),
+            })
+            if (!Array.isArray(result)) return null
+            const out: MonacoNs.languages.FoldingRange[] = []
+            for (const raw of result as Array<{
+              startLine: number
+              endLine: number
+              kind?: string
+              startCharacter?: number
+              endCharacter?: number
+            }>) {
+              if (typeof raw.startLine !== 'number' || typeof raw.endLine !== 'number') continue
+              out.push({
+                start: raw.startLine + 1,
+                end: raw.endLine + 1,
+                kind:
+                  raw.kind === 'comment'
+                    ? monaco.languages.FoldingRangeKind.Comment
+                    : raw.kind === 'imports'
+                    ? monaco.languages.FoldingRangeKind.Imports
+                    : raw.kind === 'region'
+                    ? monaco.languages.FoldingRangeKind.Region
+                    : undefined,
+              })
+            }
+            return out
+          } catch {
+            return null
+          }
+        },
+      })
+
+      monaco.languages.registerSelectionRangeProvider(lang, {
+        provideSelectionRanges: async (
+          model: MonacoNs.editor.ITextModel,
+          positions: MonacoNs.Position[],
+        ) => {
+          const uri = ctxRef.current.uri
+          if (!uri) return null
+          try {
+            const result = await lspBridge.selectionRange({
+              uri,
+              languageId: ctxRef.current.languageId,
+              text: model.getValue(),
+              positions: positions.map((p) => ({
+                line: p.lineNumber - 1,
+                character: p.column - 1,
+              })),
+            })
+            if (!Array.isArray(result)) return null
+            const out: MonacoNs.languages.SelectionRange[][] = []
+            for (const node of result as Array<{
+              range: { start: LspPosition; end: LspPosition }
+              parent?: unknown
+            } | null>) {
+              const ranges: MonacoNs.languages.SelectionRange[] = []
+              let cursor: typeof node = node
+              while (cursor && cursor.range?.start && cursor.range?.end) {
+                ranges.push({ range: lspRangeToMonaco(cursor.range) })
+                cursor = (cursor.parent as typeof node) ?? null
+              }
+              out.push(ranges)
+            }
+            return out
+          } catch {
+            return null
+          }
+        },
+      })
     }
 
     ensureProviders(languageId)
+
+    const saveViewState = (() => {
+      let pending = false
+      return (rel: string | null) => {
+        if (!rel) return
+        if (pending) return
+        pending = true
+        window.setTimeout(() => {
+          pending = false
+          const e = editorRef.current
+          if (!e) return
+          const sel = e.getSelection()
+          const scrollTop = e.getScrollTop?.() ?? 0
+          const scrollLeft = e.getScrollLeft?.() ?? 0
+          useWorkspaceFilesStore.getState().setTabViewState(rel, {
+            scrollTop,
+            scrollLeft,
+            selection: sel
+              ? {
+                  startLineNumber: sel.startLineNumber,
+                  startColumn: sel.startColumn,
+                  endLineNumber: sel.endLineNumber,
+                  endColumn: sel.endColumn,
+                }
+              : null,
+          })
+        }, 250)
+      }
+    })()
+
+    const pushEditorCursor = () => {
+      const rel = currentActiveTab()
+      if (!rel) {
+        useUIStore.getState().setEditorCursor(null)
+        return
+      }
+      const pos = editor.getPosition()
+      const sel = editor.getSelection()
+      const model = editor.getModel()
+      if (!pos) return
+      const selectedCharCount =
+        sel && model && !sel.isEmpty() ? model.getValueInRange(sel).length : 0
+      useUIStore.getState().setEditorCursor({
+        relPath: rel,
+        line: pos.lineNumber,
+        column: pos.column,
+        selection: sel
+          ? {
+              startLine: sel.startLineNumber,
+              startColumn: sel.startColumn,
+              endLine: sel.endLineNumber,
+              endColumn: sel.endColumn,
+            }
+          : null,
+        selectedCharCount,
+      })
+    }
+
+    editor.onDidChangeCursorSelection(() => {
+      saveViewState(useWorkspaceFilesStore.getState().activeTab)
+      pushEditorCursor()
+    })
+    editor.onDidChangeCursorPosition(() => {
+      pushEditorCursor()
+    })
+    editor.onDidScrollChange(() => {
+      saveViewState(useWorkspaceFilesStore.getState().activeTab)
+    })
+
+    pushEditorCursor()
+
+    const restoreViewStateFor = (rel: string | null) => {
+      if (!rel) return
+      const persisted = useWorkspaceFilesStore.getState().tabViewStates[rel]
+      if (!persisted) return
+      const e = editorRef.current
+      if (!e) return
+      try {
+        if (persisted.selection) {
+          e.setSelection(persisted.selection)
+        }
+        if (typeof persisted.scrollTop === 'number') {
+          e.setScrollTop(persisted.scrollTop)
+        }
+        if (typeof persisted.scrollLeft === 'number') {
+          e.setScrollLeft(persisted.scrollLeft)
+        }
+      } catch {
+        /* ignore */
+      }
+    }
 
     editor.onDidChangeModel(() => {
       const model = editor.getModel()
       if (model) ensureProviders(model.getLanguageId())
       registerCurrentModel()
+      const rel = useWorkspaceFilesStore.getState().activeTab
+      window.setTimeout(() => restoreViewStateFor(rel), 0)
     })
-  }, [activeTab, addToast, handleSave, languageId, t])
+
+    {
+      const rel = useWorkspaceFilesStore.getState().activeTab
+      window.setTimeout(() => restoreViewStateFor(rel), 0)
+    }
+  }, [addToast, handleSave, t])
+
+  useEffect(() => {
+    if (!pendingNavigation) return
+    if (pendingNavigation.relPath !== activeTab) return
+    let cancelled = false
+    const tick = (attempts: number) => {
+      if (cancelled) return
+      const editor = editorRef.current
+      if (!editor) {
+        if (attempts > 0) setTimeout(() => tick(attempts - 1), 50)
+        return
+      }
+      const model = editor.getModel()
+      if (!model) {
+        if (attempts > 0) setTimeout(() => tick(attempts - 1), 50)
+        return
+      }
+      const lineNumber = pendingNavigation.line + 1
+      const column = pendingNavigation.character + 1
+      const range: MonacoNs.IRange = {
+        startLineNumber: lineNumber,
+        endLineNumber: lineNumber,
+        startColumn: column,
+        endColumn: column,
+      }
+      try {
+        editor.revealRangeInCenter(range)
+        editor.setPosition({ lineNumber, column })
+        editor.focus()
+      } catch {
+        /* ignore */
+      }
+      consumeNavigation()
+    }
+    tick(20)
+    return () => {
+      cancelled = true
+    }
+  }, [activeTab, consumeNavigation, pendingNavigation])
 
   useEffect(() => {
     return () => {
@@ -1843,7 +2809,7 @@ export function MonacoFileEditor({ workDir }: Props) {
           </button>
         </div>
       )}
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1" data-workspace-editor="true">
         {isMarkdown && markdownView === 'preview' && !showLargeFileGuard ? (
           <div className="markdown-preview-pane h-full overflow-auto bg-[var(--color-surface)] px-6 py-4">
             <MarkdownRenderer content={editorValue} variant="document" />
@@ -1861,7 +2827,7 @@ export function MonacoFileEditor({ workDir }: Props) {
           />
         ) : (
           <Editor
-            path={activeTab}
+            path={fileUri ?? activeTab}
             theme={theme === 'dark' ? 'vs-dark' : 'vs'}
             language={languageId}
             value={editorValue}
@@ -1894,7 +2860,6 @@ export function MonacoFileEditor({ workDir }: Props) {
               stickyScroll: { enabled: true },
               renderLineHighlight: 'all',
               folding: true,
-              foldingStrategy: 'indentation',
               showFoldingControls: 'mouseover',
               readOnly: truncated,
               formatOnPaste: true,

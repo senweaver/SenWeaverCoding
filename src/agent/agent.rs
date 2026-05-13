@@ -83,6 +83,10 @@ pub enum TurnEvent {
         kind: SubagentChunkKind,
         delta: String,
     },
+
+    PiiSanitized {
+        report: crate::services::pii_sanitizer::SanitizationReport,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

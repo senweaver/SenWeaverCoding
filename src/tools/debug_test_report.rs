@@ -3,10 +3,12 @@
 // Licensed under the MIT License.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use chrono::Utc;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -31,6 +33,56 @@ fn workspace_anchor() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+static ACTIVE_RUN_ID: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn active_run_slot() -> &'static RwLock<Option<String>> {
+    ACTIVE_RUN_ID.get_or_init(|| RwLock::new(None))
+}
+
+pub fn set_active_run_id(run_id: Option<String>) {
+    *active_run_slot().write() = run_id;
+}
+
+pub fn active_run_id() -> Option<String> {
+    active_run_slot().read().clone()
+}
+
+pub fn record_browser_action(
+    action: &str,
+    args: &Value,
+    success: bool,
+) {
+    let Some(run_id) = active_run_id() else {
+        return;
+    };
+    let tab_id = args
+        .get("tab_id")
+        .and_then(|v| v.as_u64())
+        .or_else(|| args.get("tab").and_then(|v| v.as_u64()));
+    let url = args
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| pii_only_str(s));
+    let selector = args
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .map(|s| pii_only_str(s));
+    let event = ReportEvent::BrowserAction {
+        run_id: run_id.clone(),
+        action: action.to_string(),
+        tab_id,
+        url,
+        selector,
+        success,
+        recorded_at: timestamp_now(),
+    };
+    tokio::spawn(async move {
+        if let Err(err) = append_event(&run_id, &event).await {
+            tracing::debug!(target: "debug_test_report.browser_trace", error = %err, "failed to append browser trace");
+        }
+    });
+}
+
 fn run_dir(run_id: &str) -> PathBuf {
     workspace_anchor()
         .join(".senagentos")
@@ -53,7 +105,14 @@ fn sanitize_segment(input: &str) -> String {
 }
 
 fn redact(value: &Value) -> Value {
-    crate::services::credential_vault::redact_args_optional(value)
+    let after_vault = crate::services::credential_vault::redact_args_optional(value);
+    let (after_pii, _) = crate::services::pii_sanitizer::global_sanitizer().sanitize_json(&after_vault);
+    after_pii
+}
+
+fn pii_only_str(input: &str) -> String {
+    let (clean, _) = crate::services::pii_sanitizer::global_sanitizer().sanitize(input);
+    clean
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +184,15 @@ enum ReportEvent {
         entries: Vec<Value>,
         recorded_at: String,
     },
+    BrowserAction {
+        run_id: String,
+        action: String,
+        tab_id: Option<u64>,
+        url: Option<String>,
+        selector: Option<String>,
+        success: bool,
+        recorded_at: String,
+    },
     Finalize {
         run_id: String,
         summary_note: Option<String>,
@@ -189,7 +257,8 @@ fn timestamp_now() -> String {
 }
 
 fn redact_str(s: &str) -> String {
-    crate::services::credential_vault::redact_for_audit_optional(s)
+    let after_vault = crate::services::credential_vault::redact_for_audit_optional(s);
+    pii_only_str(&after_vault)
 }
 
 fn redact_string_vec(items: &[String]) -> Vec<String> {
@@ -334,6 +403,7 @@ async fn action_start(args: &Value) -> anyhow::Result<ToolResult> {
         started_at: timestamp.to_rfc3339(),
     };
     let jsonl = append_event(&run_id, &event).await?;
+    set_active_run_id(Some(run_id.clone()));
 
     Ok(ok(json!({
         "run_id": run_id,
@@ -661,13 +731,26 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
         .map(String::from);
 
     let events = read_events(&run_id).await?;
-    let report_md = render_report(&events, summary_note.as_deref());
+    let raw_report = render_report(&events, summary_note.as_deref());
+
+    let (sanitized_report, pii_report) =
+        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_report);
+    let report_md = inject_pii_summary(&sanitized_report, &pii_report);
+
     let report_path = run_dir(&run_id).join("report.md");
     if let Some(parent) = report_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(&report_path, &report_md).await?;
     let report_path_str = report_path.to_string_lossy().to_string();
+
+    let raw_tech_doc = render_tech_doc(&events, summary_note.as_deref());
+    let (sanitized_tech_doc, _) =
+        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_tech_doc);
+    let tech_doc_path = run_dir(&run_id).join("tech_doc.md");
+    tokio::fs::write(&tech_doc_path, &sanitized_tech_doc).await?;
+    let tech_doc_path_str = tech_doc_path.to_string_lossy().to_string();
+
     let event = ReportEvent::Finalize {
         run_id: run_id.clone(),
         summary_note: summary_note.as_deref().map(redact_str),
@@ -675,16 +758,381 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
         report_path: report_path_str.clone(),
     };
     append_event(&run_id, &event).await?;
+    if active_run_id().as_deref() == Some(run_id.as_str()) {
+        set_active_run_id(None);
+    }
+
+    let mut pii_counts = serde_json::Map::new();
+    for (kind, count) in pii_report.counts.iter() {
+        pii_counts.insert(
+            kind.label().to_string(),
+            serde_json::Value::from(*count as u64),
+        );
+    }
+
     Ok(ok(json!({
         "run_id": run_id,
         "report_path": report_path_str,
+        "tech_doc_path": tech_doc_path_str,
         "relative_path": normalize_md_path(
             &report_path
                 .strip_prefix(workspace_anchor())
                 .unwrap_or(&report_path)
                 .to_string_lossy(),
         ),
+        "tech_doc_relative_path": normalize_md_path(
+            &tech_doc_path
+                .strip_prefix(workspace_anchor())
+                .unwrap_or(&tech_doc_path)
+                .to_string_lossy(),
+        ),
+        "pii_redacted": {
+            "total": pii_report.total(),
+            "counts": serde_json::Value::Object(pii_counts),
+        },
     })))
+}
+
+fn inject_pii_summary(
+    report_md: &str,
+    pii_report: &crate::services::pii_sanitizer::SanitizationReport,
+) -> String {
+    let mut header = String::new();
+    header.push_str("> 隐私脱敏 (PII Redaction): ");
+    if pii_report.is_empty() {
+        header.push_str("none detected.\n\n");
+    } else {
+        header.push_str(&format!("{} item(s) replaced with stable placeholders before write.\n\n", pii_report.total()));
+        header.push_str("| Category | Count |\n");
+        header.push_str("|----------|-------|\n");
+        let mut entries: Vec<_> = pii_report.counts.iter().collect();
+        entries.sort_by(|a, b| a.0.label().cmp(b.0.label()));
+        for (kind, count) in entries {
+            header.push_str(&format!("| {} | {} |\n", kind.label(), count));
+        }
+        header.push('\n');
+    }
+
+    if let Some(idx) = report_md.find("\n## ") {
+        let mut out = String::with_capacity(report_md.len() + header.len());
+        out.push_str(&report_md[..idx]);
+        out.push_str("\n");
+        out.push_str(&header);
+        out.push_str(&report_md[idx + 1..]);
+        out
+    } else {
+        format!("{report_md}\n{header}")
+    }
+}
+
+fn render_tech_doc(events: &[ReportEvent], summary_note: Option<&str>) -> String {
+    let mut title = String::from("Debug QA – Technical Documentation");
+    let mut started_at = String::new();
+    let mut target_urls: Vec<String> = Vec::new();
+    let mut run_id_value = String::new();
+    let mut findings: Vec<FindingRow> = Vec::new();
+    let mut coverage_rows: Vec<CoverageRow> = Vec::new();
+    let mut standalone_network_errors: Vec<(String, i64, Option<String>, Option<String>, String)> = Vec::new();
+    let mut interactions: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut console_groups: usize = 0;
+    let mut screenshots: Vec<ScreenshotRow> = Vec::new();
+
+    for event in events {
+        match event {
+            ReportEvent::Start {
+                run_id,
+                title: t,
+                target_urls: urls,
+                started_at: ts,
+                ..
+            } => {
+                run_id_value = run_id.clone();
+                title = format!("{} – Technical Documentation", t);
+                target_urls = urls.clone();
+                started_at = ts.clone();
+            }
+            ReportEvent::AddCase {
+                title: ctitle,
+                status,
+                steps,
+                ..
+            } => {
+                interactions.push((ctitle.clone(), status.clone(), steps.clone()));
+            }
+            ReportEvent::AddFinding {
+                finding_id,
+                severity,
+                title,
+                description,
+                repro_steps,
+                root_cause,
+                fix_suggestion,
+                category,
+                evidence,
+                ..
+            } => {
+                findings.push(FindingRow {
+                    id: finding_id.clone(),
+                    severity: severity.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    repro: repro_steps.clone(),
+                    root_cause: root_cause.clone(),
+                    fix_suggestion: fix_suggestion.clone(),
+                    category: category.clone(),
+                    evidence: evidence.clone(),
+                });
+            }
+            ReportEvent::AddCoverageEntry {
+                url,
+                title,
+                depth,
+                parent_url,
+                http_status,
+                console_errors,
+                network_errors,
+                ..
+            } => {
+                let row = CoverageRow {
+                    url: url.clone(),
+                    title: title.clone(),
+                    depth: *depth,
+                    http_status: *http_status,
+                    console_errors: *console_errors,
+                    network_errors: network_errors.clone(),
+                    parent_url: parent_url.clone(),
+                };
+                if let Some(slot) = coverage_rows.iter_mut().find(|r| r.url == row.url) {
+                    *slot = row;
+                } else {
+                    coverage_rows.push(row);
+                }
+            }
+            ReportEvent::RecordNetworkError {
+                url,
+                status,
+                method,
+                page_url,
+                when,
+                ..
+            } => {
+                standalone_network_errors.push((
+                    url.clone(),
+                    *status,
+                    method.clone(),
+                    page_url.clone(),
+                    when.clone(),
+                ));
+            }
+            ReportEvent::AttachConsoleLogs { .. } => {
+                console_groups += 1;
+            }
+            ReportEvent::AttachScreenshot {
+                attachment_id,
+                relative_path,
+                caption,
+                step_ref,
+                recorded_at,
+                ..
+            } => {
+                screenshots.push(ScreenshotRow {
+                    id: attachment_id.clone(),
+                    relative_path: relative_path.clone(),
+                    caption: caption.clone(),
+                    step_ref: step_ref.clone(),
+                    recorded_at: recorded_at.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", title));
+    out.push_str(&format!("- Run ID: `{}`\n", run_id_value));
+    if !started_at.is_empty() {
+        out.push_str(&format!("- Generated: {}\n", started_at));
+    }
+    if let Some(note) = summary_note {
+        if !note.is_empty() {
+            out.push_str(&format!("\n> {}\n", note));
+        }
+    }
+    out.push_str("\n本文档由 `debug_test_report` 工具在 finalize 阶段自动生成，描述被测系统的页面拓扑、API 痕迹、关键交互流程和已知风险。所有敏感数据已通过本地 PII 脱敏层替换为占位符，未提交给 LLM。\n");
+
+    out.push_str("\n## 1. 被测目标\n\n");
+    if target_urls.is_empty() {
+        out.push_str("- (no explicit targets recorded)\n");
+    } else {
+        for url in &target_urls {
+            out.push_str(&format!("- {}\n", url));
+        }
+    }
+
+    out.push_str("\n## 2. 页面/路由地图\n\n");
+    if coverage_rows.is_empty() {
+        out.push_str("(本次 run 未通过 add_coverage_entry 上报覆盖数据)\n");
+    } else {
+        let mut origins: std::collections::BTreeMap<String, Vec<&CoverageRow>> =
+            std::collections::BTreeMap::new();
+        for row in &coverage_rows {
+            let origin = extract_origin(&row.url).unwrap_or_else(|| "(unknown)".into());
+            origins.entry(origin).or_default().push(row);
+        }
+        for (origin, rows) in &origins {
+            out.push_str(&format!("### {}\n\n", origin));
+            for row in rows {
+                let title_part = row.title.as_deref().unwrap_or("");
+                let suffix = if title_part.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", title_part)
+                };
+                out.push_str(&format!(
+                    "- (depth {}) {}{} [http={}]\n",
+                    row.depth,
+                    row.url,
+                    suffix,
+                    row
+                        .http_status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".into())
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("\n## 3. API / 网络观测\n\n");
+    let mut api_lines: Vec<String> = Vec::new();
+    for row in &coverage_rows {
+        for entry in &row.network_errors {
+            if let Some(obj) = entry.as_object() {
+                let url = obj
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let status = obj.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
+                let method = obj.get("method").and_then(|v| v.as_str()).unwrap_or("-");
+                api_lines.push(format!(
+                    "- `{}` `{}` -> {} (page: {})",
+                    method, url, status, row.url
+                ));
+            }
+        }
+    }
+    for (url, status, method, page_url, _) in &standalone_network_errors {
+        api_lines.push(format!(
+            "- `{}` `{}` -> {} (page: {})",
+            method.as_deref().unwrap_or("-"),
+            url,
+            status,
+            page_url.as_deref().unwrap_or("-")
+        ));
+    }
+    if api_lines.is_empty() {
+        out.push_str("(no failing or notable network calls captured)\n");
+    } else {
+        for line in &api_lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    out.push_str("\n## 4. 关键交互流程\n\n");
+    if interactions.is_empty() {
+        out.push_str("(no test cases recorded)\n");
+    } else {
+        for (i, (title, status, steps)) in interactions.iter().enumerate() {
+            out.push_str(&format!(
+                "### Flow {}: {} `[{}]`\n\n",
+                i + 1,
+                title,
+                status
+            ));
+            if steps.is_empty() {
+                out.push_str("(no steps)\n");
+            } else {
+                for (idx, step) in steps.iter().enumerate() {
+                    out.push_str(&format!("{}. {}\n", idx + 1, step));
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("\n## 5. 风险与建议\n\n");
+    if findings.is_empty() {
+        out.push_str("(no findings recorded)\n");
+    } else {
+        let mut by_sev: std::collections::BTreeMap<String, Vec<&FindingRow>> =
+            std::collections::BTreeMap::new();
+        for f in &findings {
+            by_sev.entry(f.severity.clone()).or_default().push(f);
+        }
+        for (sev, list) in &by_sev {
+            out.push_str(&format!("### Severity: {}\n\n", sev));
+            for f in list {
+                out.push_str(&format!("- **{}** ({}): {}\n", f.id, f.title, f.description));
+                if let Some(rc) = &f.root_cause {
+                    out.push_str(&format!("  - Root cause: {}\n", rc));
+                }
+                if let Some(fix) = &f.fix_suggestion {
+                    out.push_str(&format!("  - Suggested fix: {}\n", fix));
+                }
+                if let Some(cat) = &f.category {
+                    out.push_str(&format!("  - Category: {}\n", cat));
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("\n## 6. Screenshots\n\n");
+    if screenshots.is_empty() {
+        out.push_str("(no screenshots attached)\n");
+    } else {
+        let mut by_case: std::collections::BTreeMap<String, Vec<&ScreenshotRow>> =
+            std::collections::BTreeMap::new();
+        for s in &screenshots {
+            let key = s
+                .step_ref
+                .clone()
+                .unwrap_or_else(|| "ungrouped".to_string());
+            by_case.entry(key).or_default().push(s);
+        }
+        for (case_id, shots) in &by_case {
+            out.push_str(&format!("### {}\n\n", case_id));
+            for s in shots {
+                let caption = s.caption.clone().unwrap_or_else(|| s.id.clone());
+                out.push_str(&format!(
+                    "- ![{caption}]({path}) — `{id}` @ {ts}\n",
+                    caption = caption,
+                    path = s.relative_path,
+                    id = s.id,
+                    ts = s.recorded_at,
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("\n## 7. 观测附录\n\n");
+    out.push_str(&format!("- 覆盖页面数: {}\n", coverage_rows.len()));
+    out.push_str(&format!("- API 失败条目: {}\n", api_lines.len()));
+    out.push_str(&format!("- 控制台日志组: {}\n", console_groups));
+    out.push_str(&format!("- Screenshots: {}\n", screenshots.len()));
+    out.push_str(&format!("- Findings: {}\n", findings.len()));
+
+    out
+}
+
+struct ScreenshotRow {
+    id: String,
+    relative_path: String,
+    caption: Option<String>,
+    step_ref: Option<String>,
+    recorded_at: String,
 }
 
 struct FindingRow {
@@ -720,6 +1168,7 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
     let mut run_id_value = String::new();
     let mut coverage_rows: Vec<CoverageRow> = Vec::new();
     let mut standalone_network_errors: Vec<(String, i64, Option<String>, Option<String>, String)> = Vec::new();
+    let mut browser_trace: Vec<BrowserTraceRow> = Vec::new();
 
     for event in events {
         match event {
@@ -836,6 +1285,24 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
                     page_url.clone(),
                     when.clone(),
                 ));
+            }
+            ReportEvent::BrowserAction {
+                action,
+                tab_id,
+                url,
+                selector,
+                success,
+                recorded_at,
+                ..
+            } => {
+                browser_trace.push(BrowserTraceRow {
+                    action: action.clone(),
+                    tab_id: *tab_id,
+                    url: url.clone(),
+                    selector: selector.clone(),
+                    success: *success,
+                    recorded_at: recorded_at.clone(),
+                });
             }
             ReportEvent::Finalize { .. } => {}
         }
@@ -1053,7 +1520,50 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
         }
     }
 
+    if !browser_trace.is_empty() {
+        out.push_str("\n## Browser Trace\n\n");
+        out.push_str("Auto-captured from `browser` tool calls during this run.\n\n");
+        out.push_str("| # | Time | Action | Tab | URL | Selector | Result |\n");
+        out.push_str("|---|------|--------|-----|-----|----------|--------|\n");
+        for (idx, row) in browser_trace.iter().enumerate() {
+            let url_cell = row
+                .url
+                .as_deref()
+                .unwrap_or("-")
+                .replace('|', "\\|");
+            let selector_cell = row
+                .selector
+                .as_deref()
+                .unwrap_or("-")
+                .replace('|', "\\|");
+            let tab_cell = row
+                .tab_id
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let result_cell = if row.success { "ok" } else { "fail" };
+            out.push_str(&format!(
+                "| {} | {} | `{}` | {} | {} | {} | {} |\n",
+                idx + 1,
+                row.recorded_at,
+                row.action,
+                tab_cell,
+                url_cell,
+                selector_cell,
+                result_cell,
+            ));
+        }
+    }
+
     out
+}
+
+struct BrowserTraceRow {
+    action: String,
+    tab_id: Option<u64>,
+    url: Option<String>,
+    selector: Option<String>,
+    success: bool,
+    recorded_at: String,
 }
 
 fn extract_origin(input: &str) -> Option<String> {

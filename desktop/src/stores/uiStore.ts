@@ -95,6 +95,16 @@ export type SettingsTab =
 
 type ActiveView = 'code' | 'scheduled' | 'terminal' | 'history' | 'settings'
 
+export type WorkspaceFinderMode = 'quick-open' | 'search-in-files' | 'workspace-symbol'
+
+export type EditorCursor = {
+  relPath: string
+  line: number
+  column: number
+  selection?: { startLine: number; startColumn: number; endLine: number; endColumn: number } | null
+  selectedCharCount?: number
+}
+
 type UIStore = {
   theme: ThemeMode
   sidebarOpen: boolean
@@ -106,6 +116,9 @@ type UIStore = {
   settingsOverlayOpen: boolean
   pendingSettingsTab: SettingsTab | null
   activeModal: string | null
+  workspaceFinderMode: WorkspaceFinderMode | null
+  editorCursor: EditorCursor | null
+  editorCloseRequest: { relPath: string; nonce: number } | null
   toasts: Toast[]
 
   setTheme: (theme: ThemeMode) => void
@@ -123,6 +136,11 @@ type UIStore = {
   setPendingSettingsTab: (tab: SettingsTab | null) => void
   openModal: (id: string) => void
   closeModal: () => void
+  openWorkspaceFinder: (mode: WorkspaceFinderMode) => void
+  closeWorkspaceFinder: () => void
+  setEditorCursor: (cursor: EditorCursor | null) => void
+  requestEditorTabClose: (relPath: string) => void
+  clearEditorCloseRequest: () => void
   addToast: (toast: Omit<Toast, 'id'>) => void
   removeToast: (id: string) => void
 }
@@ -139,6 +157,9 @@ export const useUIStore = create<UIStore>((set) => ({
   settingsOverlayOpen: false,
   pendingSettingsTab: null,
   activeModal: null,
+  workspaceFinderMode: null,
+  editorCursor: null,
+  editorCloseRequest: null,
   toasts: [],
 
   setTheme: (theme) => {
@@ -200,6 +221,27 @@ export const useUIStore = create<UIStore>((set) => ({
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   openModal: (id) => set({ activeModal: id }),
   closeModal: () => set({ activeModal: null }),
+
+  openWorkspaceFinder: (mode) => {
+    try {
+      localStorage.setItem(RIGHT_SIDEBAR_OPEN_KEY, 'true')
+    } catch {
+      /* ignore */
+    }
+    set({ workspaceFinderMode: mode, rightSidebarOpen: true })
+  },
+  closeWorkspaceFinder: () => set({ workspaceFinderMode: null }),
+
+  setEditorCursor: (cursor) => set({ editorCursor: cursor }),
+
+  requestEditorTabClose: (relPath) =>
+    set((s) => ({
+      editorCloseRequest: {
+        relPath,
+        nonce: (s.editorCloseRequest?.nonce ?? 0) + 1,
+      },
+    })),
+  clearEditorCloseRequest: () => set({ editorCloseRequest: null }),
 
   addToast: (toast) => {
     const id = `toast-${++toastCounter}`

@@ -443,6 +443,23 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
     }
 }
 
+pub fn pinned_test_target_reminder(mode: CodingMode) -> Option<String> {
+    if mode != CodingMode::Debug {
+        return None;
+    }
+    let tab_id = crate::tools::browser::current_test_target_tab()?;
+    Some(format!(
+        "[Debug Test Target] User has pinned tab #{tab_id} as the QA target. \
+         Drive ALL automated testing on tab_id={tab_id}: pass `tab_id={tab_id}` to every \
+         `browser` action that supports it (snapshot/click/fill/get_text/screenshot/etc.) \
+         and treat that tab's existing login/cookies/session as authoritative — DO NOT call \
+         `browser action=clear_storage` against it, do NOT prompt the user for credentials, \
+         and do NOT navigate it to an unrelated origin without explicit permission. \
+         Use `browser action=get_test_target` to re-confirm the pin if you lose track. \
+         The user's UI also displays a `Test Target` badge so they can verify."
+    ))
+}
+
 pub fn web_research_disabled_reminder(
     _mode: CodingMode,
     web_search_enabled: bool,

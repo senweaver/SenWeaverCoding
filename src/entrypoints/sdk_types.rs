@@ -344,6 +344,12 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
                     },
                 }
             }
+            T::PiiSanitized { report } => Self::Chunk {
+                delta: format!(
+                    "[debug_pii_stats] redacted {} item(s)",
+                    report.total()
+                ),
+            },
         }
     }
 }

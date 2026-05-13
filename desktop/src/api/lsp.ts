@@ -40,37 +40,68 @@ export const lspApi = {
     version?: number
   }) => api.post<{ ok: boolean; skipped?: string }>('/api/lsp/textdocument', body),
 
-  request: <T = unknown>(body: {
-    method:
-      | 'hover'
-      | 'completion'
-      | 'definition'
-      | 'references'
-      | 'inlayHint'
-      | 'signatureHelp'
-      | 'documentSymbol'
-      | 'formatting'
-      | 'codeAction'
-      | 'executeCommand'
-    uri: string
-    languageId?: string
-    line?: number
-    character?: number
-    text?: string
-    range?: {
-      start: { line: number; character: number }
-      end: { line: number; character: number }
-    }
-    options?: {
-      tabSize: number
-      insertSpaces: boolean
-    }
-    triggerCharacter?: string
-    diagnostics?: Array<Record<string, unknown>>
-    only?: string[]
-    command?: string
-    arguments?: unknown[]
-  }) => api.post<{ result: T | null; error?: string }>('/api/lsp/request', body),
+  request: <T = unknown>(
+    body: {
+      method:
+        | 'hover'
+        | 'completion'
+        | 'completionItem/resolve'
+        | 'completionResolve'
+        | 'definition'
+        | 'typeDefinition'
+        | 'implementation'
+        | 'declaration'
+        | 'references'
+        | 'documentHighlight'
+        | 'inlayHint'
+        | 'signatureHelp'
+        | 'documentSymbol'
+        | 'formatting'
+        | 'rangeFormatting'
+        | 'onTypeFormatting'
+        | 'codeAction'
+        | 'executeCommand'
+        | 'prepareRename'
+        | 'rename'
+        | 'foldingRange'
+        | 'selectionRange'
+        | 'documentLink'
+        | 'semanticTokens/full'
+        | 'semanticTokensFull'
+        | 'semanticTokens/full/delta'
+        | 'semanticTokensFullDelta'
+        | 'semanticTokens/range'
+        | 'semanticTokensRange'
+        | 'workspace/symbol'
+        | 'workspaceSymbol'
+      uri: string
+      languageId?: string
+      line?: number
+      character?: number
+      text?: string
+      range?: {
+        start: { line: number; character: number }
+        end: { line: number; character: number }
+      }
+      options?: {
+        tabSize: number
+        insertSpaces: boolean
+      }
+      triggerCharacter?: string
+      triggerKind?: number
+      diagnostics?: Array<Record<string, unknown>>
+      only?: string[]
+      command?: string
+      arguments?: unknown[]
+      newName?: string
+      item?: unknown
+      positions?: Array<{ line: number; character: number }>
+      previousResultId?: string
+      characterTyped?: string
+      query?: string
+    },
+    options?: { signal?: AbortSignal; timeout?: number },
+  ) => api.post<{ result: T | null; error?: string }>('/api/lsp/request', body, options),
 
   getPreferences: () =>
     api.get<{ inlayHintsEnabled: boolean; formatOnSave: boolean; hoverDelayMs: number }>(

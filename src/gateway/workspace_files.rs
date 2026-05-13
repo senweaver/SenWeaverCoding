@@ -376,49 +376,404 @@ pub async fn handle_workspace_file_get(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
-    let is_binary = looks_binary(&bytes);
     let modified = modified_at(&metadata);
     let mime = mime_from_extension(&target);
-    let payload = if is_binary {
-        json!({
-            "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            "encoding": "base64",
-            "isBinary": true,
-            "sizeBytes": metadata.len(),
-            "modifiedAt": modified,
-            "mimeType": mime,
-        })
-    } else {
-        let text = match String::from_utf8(bytes.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                return Json(json!({
-                    "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    "encoding": "base64",
-                    "isBinary": true,
-                    "sizeBytes": metadata.len(),
-                    "modifiedAt": modified,
-                    "mimeType": mime,
-                }))
-                .into_response();
-            }
-        };
-        json!({
+    let payload = match classify_file_content(&target, &bytes) {
+        Some(text) => json!({
             "content": text,
             "encoding": "utf8",
             "isBinary": false,
             "sizeBytes": metadata.len(),
             "modifiedAt": modified,
             "mimeType": mime,
-        })
+        }),
+        None => json!({
+            "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "encoding": "base64",
+            "isBinary": true,
+            "sizeBytes": metadata.len(),
+            "modifiedAt": modified,
+            "mimeType": mime,
+        }),
     };
     Json(payload).into_response()
 }
 
-fn looks_binary(bytes: &[u8]) -> bool {
-    let sniff_len = bytes.len().min(8_192);
-    bytes[..sniff_len].iter().any(|b| *b == 0)
+fn classify_file_content(path: &Path, bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    if let Some(text) = decode_with_bom(bytes) {
+        return Some(strip_bom_prefix(text));
+    }
+    if looks_text_by_content(bytes) {
+        return Some(decode_text_best_effort(bytes));
+    }
+    if is_known_text_path(path) {
+        if let Some(text) = try_decode_utf16_no_bom(bytes) {
+            return Some(strip_bom_prefix(text));
+        }
+        return Some(decode_text_best_effort(bytes));
+    }
+    None
 }
+
+fn decode_with_bom(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(b"\xEF\xBB\xBF") {
+        return Some(String::from_utf8_lossy(&bytes[3..]).into_owned());
+    }
+    if bytes.starts_with(b"\xFF\xFE\x00\x00") || bytes.starts_with(b"\x00\x00\xFE\xFF") {
+        return None;
+    }
+    if bytes.starts_with(b"\xFF\xFE") {
+        let (decoded, _, had_errors) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        if had_errors {
+            return None;
+        }
+        return Some(decoded.into_owned());
+    }
+    if bytes.starts_with(b"\xFE\xFF") {
+        let (decoded, _, had_errors) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        if had_errors {
+            return None;
+        }
+        return Some(decoded.into_owned());
+    }
+    None
+}
+
+fn strip_bom_prefix(s: String) -> String {
+    if let Some(rest) = s.strip_prefix('\u{FEFF}') {
+        rest.to_string()
+    } else {
+        s
+    }
+}
+
+fn looks_text_by_content(bytes: &[u8]) -> bool {
+    let sniff_len = bytes.len().min(8_192);
+    let sample = &bytes[..sniff_len];
+    if sample.iter().any(|b| *b == 0) {
+        return false;
+    }
+    if sample.is_empty() {
+        return true;
+    }
+    let non_text = sample.iter().filter(|b| !is_text_byte(**b)).count();
+    non_text * 100 / sample.len() <= 5
+}
+
+fn is_text_byte(b: u8) -> bool {
+    matches!(b, 0x07 | 0x08 | b'\t' | b'\n' | 0x0B | b'\x0C' | b'\r' | 0x1B)
+        || (0x20..=0x7E).contains(&b)
+        || b >= 0x80
+}
+
+fn decode_text_best_effort(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
+        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+fn try_decode_utf16_no_bom(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 4 || bytes.len() % 2 != 0 {
+        return None;
+    }
+    let sample_len = bytes.len().min(512);
+    let sample = &bytes[..sample_len];
+    let mut even_nul = 0usize;
+    let mut odd_nul = 0usize;
+    for (i, b) in sample.iter().enumerate() {
+        if *b == 0 {
+            if i % 2 == 0 {
+                even_nul += 1;
+            } else {
+                odd_nul += 1;
+            }
+        }
+    }
+    let pairs = sample_len / 2;
+    if pairs == 0 {
+        return None;
+    }
+    let high_threshold = (pairs * 4) / 10;
+    let low_threshold = pairs / 8;
+    if odd_nul >= high_threshold && even_nul <= low_threshold {
+        let (decoded, _, had_errors) = encoding_rs::UTF_16LE.decode(bytes);
+        if !had_errors {
+            return Some(decoded.into_owned());
+        }
+    }
+    if even_nul >= high_threshold && odd_nul <= low_threshold {
+        let (decoded, _, had_errors) = encoding_rs::UTF_16BE.decode(bytes);
+        if !had_errors {
+            return Some(decoded.into_owned());
+        }
+    }
+    None
+}
+
+fn is_known_text_path(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !ext.is_empty() && TEXT_EXTENSIONS.iter().any(|e| *e == ext) {
+        return true;
+    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !name.is_empty() && TEXT_FILENAMES.iter().any(|e| *e == name) {
+        return true;
+    }
+    false
+}
+
+const TEXT_EXTENSIONS: &[&str] = &[
+    "applescript",
+    "asm",
+    "astro",
+    "bash",
+    "bat",
+    "bazel",
+    "bib",
+    "build",
+    "c",
+    "cc",
+    "cfg",
+    "clj",
+    "cljs",
+    "cmake",
+    "cmd",
+    "cnf",
+    "code-workspace",
+    "coffee",
+    "conf",
+    "config",
+    "cpp",
+    "cs",
+    "csh",
+    "css",
+    "csv",
+    "cts",
+    "cxx",
+    "d",
+    "dart",
+    "diff",
+    "dockerfile",
+    "dprint",
+    "edn",
+    "ejs",
+    "elm",
+    "env",
+    "erl",
+    "ex",
+    "exs",
+    "fish",
+    "fs",
+    "fsi",
+    "fsx",
+    "gemspec",
+    "gitattributes",
+    "gitconfig",
+    "gitignore",
+    "gleam",
+    "go",
+    "gradle",
+    "graphql",
+    "groovy",
+    "gql",
+    "h",
+    "haml",
+    "hbs",
+    "hcl",
+    "hh",
+    "hpp",
+    "hs",
+    "htm",
+    "html",
+    "hxx",
+    "ics",
+    "ini",
+    "iml",
+    "j2",
+    "java",
+    "jinja",
+    "jl",
+    "js",
+    "json",
+    "json5",
+    "jsonc",
+    "jsonl",
+    "jsx",
+    "kt",
+    "kts",
+    "latex",
+    "less",
+    "lisp",
+    "lock",
+    "log",
+    "lua",
+    "m",
+    "manifest",
+    "markdown",
+    "md",
+    "mdx",
+    "mjs",
+    "mk",
+    "ml",
+    "mli",
+    "mm",
+    "mod",
+    "mts",
+    "nim",
+    "nix",
+    "patch",
+    "pas",
+    "php",
+    "pl",
+    "pp",
+    "pri",
+    "pro",
+    "properties",
+    "props",
+    "proto",
+    "ps1",
+    "psd1",
+    "psm1",
+    "pug",
+    "purs",
+    "py",
+    "pyi",
+    "pyx",
+    "qml",
+    "r",
+    "rb",
+    "re",
+    "resx",
+    "rmd",
+    "rs",
+    "rst",
+    "ru",
+    "s",
+    "sass",
+    "sbt",
+    "sc",
+    "scala",
+    "scss",
+    "service",
+    "sh",
+    "sln",
+    "slt",
+    "sql",
+    "stylus",
+    "sty",
+    "sum",
+    "svelte",
+    "svg",
+    "swift",
+    "sx",
+    "tcl",
+    "tex",
+    "textile",
+    "tf",
+    "tfvars",
+    "tml",
+    "toml",
+    "ts",
+    "tsv",
+    "tsx",
+    "twig",
+    "txt",
+    "v",
+    "vb",
+    "vbs",
+    "vim",
+    "vh",
+    "vhd",
+    "vhdl",
+    "vue",
+    "wat",
+    "wxs",
+    "xaml",
+    "xml",
+    "xsd",
+    "xsl",
+    "xslt",
+    "yaml",
+    "yml",
+    "zig",
+    "zsh",
+];
+
+const TEXT_FILENAMES: &[&str] = &[
+    ".babelrc",
+    ".bash_aliases",
+    ".bash_profile",
+    ".bashrc",
+    ".dockerignore",
+    ".editorconfig",
+    ".env",
+    ".eslintignore",
+    ".eslintrc",
+    ".gitattributes",
+    ".gitconfig",
+    ".gitignore",
+    ".gitmodules",
+    ".npmignore",
+    ".npmrc",
+    ".nvmrc",
+    ".prettierignore",
+    ".prettierrc",
+    ".profile",
+    ".python-version",
+    ".rspec",
+    ".rubocop.yml",
+    ".tool-versions",
+    ".yarnrc",
+    ".zshrc",
+    "authors",
+    "berksfile",
+    "brewfile",
+    "build",
+    "capfile",
+    "cargo.lock",
+    "cargo.toml",
+    "changelog",
+    "cmakelists.txt",
+    "code_of_conduct",
+    "contributing",
+    "contributors",
+    "copying",
+    "dockerfile",
+    "doxyfile",
+    "gemfile",
+    "guardfile",
+    "license",
+    "license.md",
+    "license.txt",
+    "makefile",
+    "notice",
+    "owners",
+    "package-lock.json",
+    "package.json",
+    "pipfile",
+    "podfile",
+    "procfile",
+    "rakefile",
+    "readme",
+    "readme.md",
+    "readme.txt",
+    "thanks",
+    "todo",
+    "vagrantfile",
+    "yarn.lock",
+];
 
 fn mime_from_extension(path: &Path) -> &'static str {
     let ext = path
@@ -427,24 +782,68 @@ fn mime_from_extension(path: &Path) -> &'static str {
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "json" => "application/json",
-        "md" | "markdown" => "text/markdown",
+        "json" | "json5" | "jsonc" | "jsonl" => "application/json",
+        "md" | "markdown" | "mdx" => "text/markdown",
         "html" | "htm" => "text/html",
         "css" => "text/css",
-        "js" | "mjs" | "cjs" => "text/javascript",
-        "ts" | "tsx" => "text/typescript",
+        "scss" => "text/x-scss",
+        "less" => "text/x-less",
+        "js" | "mjs" | "cjs" | "jsx" => "text/javascript",
+        "ts" | "tsx" | "mts" | "cts" => "text/typescript",
         "rs" => "text/x-rust",
-        "py" => "text/x-python",
+        "py" | "pyi" => "text/x-python",
         "go" => "text/x-go",
+        "java" => "text/x-java",
+        "kt" | "kts" => "text/x-kotlin",
+        "c" | "h" => "text/x-c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => "text/x-c++",
+        "cs" => "text/x-csharp",
+        "rb" => "text/x-ruby",
+        "php" => "application/x-php",
+        "swift" => "text/x-swift",
+        "dart" => "text/x-dart",
+        "lua" => "text/x-lua",
+        "sh" | "bash" | "zsh" => "application/x-shellscript",
+        "ps1" | "psm1" => "application/x-powershell",
+        "bat" | "cmd" => "application/x-bat",
         "yaml" | "yml" => "text/yaml",
         "toml" => "text/toml",
+        "ini" | "cfg" | "conf" | "properties" => "text/plain",
         "xml" => "text/xml",
+        "vue" => "text/x-vue",
+        "svelte" => "text/x-svelte",
+        "sql" => "application/sql",
+        "proto" => "text/x-proto",
+        "graphql" | "gql" => "application/graphql",
+        "diff" | "patch" => "text/x-diff",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "txt" | "log" => "text/plain",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "tif" | "tiff" => "image/tiff",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "ogv" => "video/ogg",
+        "avi" => "video/x-msvideo",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "m4a" => "audio/mp4",
+        "opus" => "audio/opus",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "env" | "lock" => "text/plain",
+        "rst" => "text/x-rst",
+        "tex" | "latex" => "text/x-tex",
         _ => "application/octet-stream",
     }
 }
@@ -800,6 +1199,16 @@ pub struct SearchQuery {
     pub limit: Option<usize>,
     #[serde(default, rename = "showHidden")]
     pub show_hidden: Option<bool>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default, rename = "caseSensitive")]
+    pub case_sensitive: Option<bool>,
+    #[serde(default, rename = "wholeWord")]
+    pub whole_word: Option<bool>,
+    #[serde(default)]
+    pub regex: Option<bool>,
+    #[serde(default, rename = "maxFileSizeBytes")]
+    pub max_file_size_bytes: Option<u64>,
 }
 
 pub async fn handle_workspace_search(
@@ -814,40 +1223,98 @@ pub async fn handle_workspace_search(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let needle = q.query.trim().to_ascii_lowercase();
-    if needle.is_empty() {
+    let needle_raw = q.query.trim().to_string();
+    if needle_raw.is_empty() {
         return Json(json!({"results": [], "total": 0})).into_response();
     }
     let limit = q.limit.unwrap_or(MAX_SEARCH_RESULTS).min(MAX_SEARCH_RESULTS);
     let show_hidden = q.show_hidden.unwrap_or(false);
+    let kind = q
+        .kind
+        .as_deref()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "name".to_string());
 
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    walk_filenames(&root, &root, &needle, show_hidden, limit, &mut results);
+    if kind == "content" {
+        let case_sensitive = q.case_sensitive.unwrap_or(false);
+        let whole_word = q.whole_word.unwrap_or(false);
+        let regex = q.regex.unwrap_or(false);
+        let max_size = q.max_file_size_bytes.unwrap_or(2 * 1024 * 1024);
+        let results = run_content_search(
+            &root,
+            &needle_raw,
+            limit,
+            show_hidden,
+            case_sensitive,
+            whole_word,
+            regex,
+            max_size,
+        );
+        let total = results.len();
+        return Json(json!({
+            "results": results,
+            "total": total,
+            "limit": limit,
+            "kind": "content",
+        }))
+        .into_response();
+    }
+
+    let needle_lower = needle_raw.to_ascii_lowercase();
+    let mut scored: Vec<FuzzyHit> = Vec::new();
+    walk_filenames_fuzzy(&root, &root, &needle_lower, show_hidden, &mut scored);
+    scored.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.depth.cmp(&b.depth))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+    scored.truncate(limit);
+    let results: Vec<serde_json::Value> = scored
+        .iter()
+        .map(|hit| {
+            let mut payload = entry_to_json(&root, &hit.absolute_path, &hit.name, hit.is_dir);
+            if let Some(map) = payload.as_object_mut() {
+                map.insert("score".into(), json!(hit.score));
+            }
+            payload
+        })
+        .collect();
     let total = results.len();
     Json(json!({
         "results": results,
         "total": total,
         "limit": limit,
+        "kind": "name",
     }))
     .into_response()
 }
 
-fn walk_filenames(
+#[derive(Debug)]
+struct FuzzyHit {
+    name: String,
+    rel_path: String,
+    absolute_path: PathBuf,
+    is_dir: bool,
+    depth: u32,
+    score: i64,
+}
+
+fn walk_filenames_fuzzy(
     root: &Path,
     dir: &Path,
-    needle: &str,
+    needle_lower: &str,
     show_hidden: bool,
-    cap: usize,
-    out: &mut Vec<serde_json::Value>,
+    out: &mut Vec<FuzzyHit>,
 ) {
-    if out.len() >= cap {
+    if out.len() >= MAX_SEARCH_RESULTS * 4 {
         return;
     }
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in read.flatten() {
-        if out.len() >= cap {
+        if out.len() >= MAX_SEARCH_RESULTS * 4 {
             return;
         }
         let name = entry.file_name().to_string_lossy().to_string();
@@ -856,11 +1323,389 @@ fn walk_filenames(
         }
         let path = entry.path();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if name.to_ascii_lowercase().contains(needle) {
-            out.push(entry_to_json(root, &path, &name, is_dir));
+        let rel_path = relative_path(root, &path);
+        let depth = rel_path.matches('/').count() as u32;
+        let name_lower = name.to_ascii_lowercase();
+        let rel_lower = rel_path.to_ascii_lowercase();
+        if let Some(score) = fuzzy_score(&name_lower, &rel_lower, needle_lower, depth) {
+            out.push(FuzzyHit {
+                name,
+                rel_path,
+                absolute_path: path.clone(),
+                is_dir,
+                depth,
+                score,
+            });
         }
         if is_dir {
-            walk_filenames(root, &path, needle, show_hidden, cap, out);
+            walk_filenames_fuzzy(root, &path, needle_lower, show_hidden, out);
+        }
+    }
+}
+
+fn fuzzy_score(
+    name_lower: &str,
+    rel_lower: &str,
+    needle_lower: &str,
+    depth: u32,
+) -> Option<i64> {
+    if needle_lower.is_empty() {
+        return None;
+    }
+    if needle_lower.contains('/') || needle_lower.contains('\\') {
+        let needle_norm = needle_lower.replace('\\', "/");
+        if !rel_lower.contains(&needle_norm) {
+            return None;
+        }
+        let mut score: i64 = 250;
+        if rel_lower.starts_with(&needle_norm) {
+            score += 200;
+        }
+        score -= depth as i64 * 5;
+        return Some(score);
+    }
+    let mut score: i64 = 0;
+    if name_lower == needle_lower {
+        score += 1000;
+    }
+    if name_lower.starts_with(needle_lower) {
+        score += 500;
+    }
+    if name_lower.contains(needle_lower) {
+        score += 200;
+    }
+    if let Some(sub) = fuzzy_subsequence_score(name_lower, needle_lower) {
+        score += sub;
+    } else if let Some(sub) = fuzzy_subsequence_score(rel_lower, needle_lower) {
+        score += sub / 2;
+    } else {
+        return None;
+    }
+    let camel_bonus = camel_hump_bonus(name_lower, needle_lower);
+    score += camel_bonus;
+    score -= depth as i64 * 3;
+    Some(score)
+}
+
+fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<i64> {
+    let mut hi = haystack.chars();
+    let mut prev_idx: Option<usize> = None;
+    let mut idx = 0usize;
+    let mut score: i64 = 0;
+    let mut consecutive = 0i64;
+    for ch in needle.chars() {
+        let mut found = false;
+        for h in hi.by_ref() {
+            idx += 1;
+            if h == ch {
+                if let Some(prev) = prev_idx {
+                    let gap = idx.saturating_sub(prev) as i64;
+                    if gap <= 1 {
+                        consecutive += 1;
+                        score += 8 + consecutive * 4;
+                    } else {
+                        consecutive = 0;
+                        score += (10 - gap.min(8)).max(1);
+                    }
+                } else {
+                    score += 12 - (idx as i64).min(8);
+                    consecutive = 1;
+                }
+                prev_idx = Some(idx);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some(score)
+}
+
+fn camel_hump_bonus(name: &str, needle: &str) -> i64 {
+    let mut bonus: i64 = 0;
+    let mut needle_chars = needle.chars().peekable();
+    let mut prev_was_separator = true;
+    let mut prev_was_lower = false;
+    for ch in name.chars() {
+        let is_upper = ch.is_ascii_uppercase();
+        let is_digit = ch.is_ascii_digit();
+        let is_alpha = ch.is_ascii_alphabetic();
+        let is_boundary = prev_was_separator
+            || (prev_was_lower && (is_upper || is_digit))
+            || !is_alpha;
+        if is_boundary {
+            if let Some(next) = needle_chars.peek() {
+                if ch.to_ascii_lowercase() == *next {
+                    bonus += 18;
+                    needle_chars.next();
+                }
+            }
+        }
+        prev_was_separator = !is_alpha && !is_digit;
+        prev_was_lower = ch.is_ascii_lowercase();
+    }
+    bonus
+}
+
+fn run_content_search(
+    root: &Path,
+    pattern: &str,
+    limit: usize,
+    show_hidden: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    regex: bool,
+    max_file_size_bytes: u64,
+) -> Vec<serde_json::Value> {
+    if let Some(rg_results) = run_ripgrep_search(
+        root,
+        pattern,
+        limit,
+        show_hidden,
+        case_sensitive,
+        whole_word,
+        regex,
+        max_file_size_bytes,
+    ) {
+        return rg_results;
+    }
+    fallback_content_search(
+        root,
+        pattern,
+        limit,
+        show_hidden,
+        case_sensitive,
+        whole_word,
+        max_file_size_bytes,
+    )
+}
+
+fn run_ripgrep_search(
+    root: &Path,
+    pattern: &str,
+    limit: usize,
+    show_hidden: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    regex: bool,
+    max_file_size_bytes: u64,
+) -> Option<Vec<serde_json::Value>> {
+    let mut cmd = crate::util::hidden_sync_command("rg");
+    cmd.arg("--json")
+        .arg("--max-count=20")
+        .arg("--max-filesize")
+        .arg(format!("{}b", max_file_size_bytes));
+    if !regex {
+        cmd.arg("--fixed-strings");
+    }
+    if whole_word {
+        cmd.arg("--word-regexp");
+    }
+    if !case_sensitive {
+        cmd.arg("--ignore-case");
+    }
+    if !show_hidden {
+        for excl in HIDDEN_DEFAULT_DIRS {
+            cmd.arg("--glob").arg(format!("!**/{}/**", excl));
+        }
+        cmd.arg("--glob").arg("!.*");
+    } else {
+        cmd.arg("--hidden");
+    }
+    cmd.arg("--").arg(pattern).arg(root);
+    let output = cmd.output().ok()?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for line in stdout.lines() {
+        if results.len() >= limit {
+            break;
+        }
+        let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(line) else {
+            continue;
+        };
+        let kind = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if kind != "match" {
+            continue;
+        }
+        let data = match value.get("data") {
+            Some(d) => d,
+            None => continue,
+        };
+        let path_text = data
+            .get("path")
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
+        if path_text.is_empty() {
+            continue;
+        }
+        let abs = PathBuf::from(path_text);
+        let rel = relative_path(root, &abs);
+        let line_number = data.get("line_number").and_then(|v| v.as_u64()).unwrap_or(0);
+        let line_text = data
+            .get("lines")
+            .and_then(|l| l.get("text"))
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .trim_end_matches(|c: char| c == '\n' || c == '\r')
+            .to_string();
+        let mut submatches_json: Vec<serde_json::Value> = Vec::new();
+        if let Some(arr) = data.get("submatches").and_then(|v| v.as_array()) {
+            for sm in arr {
+                let start = sm.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
+                let end = sm.get("end").and_then(|v| v.as_u64()).unwrap_or(0);
+                submatches_json.push(json!({
+                    "start": start,
+                    "end": end,
+                }));
+            }
+        }
+        results.push(json!({
+            "name": abs.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            "relPath": rel,
+            "isDir": false,
+            "line": line_number.saturating_sub(1),
+            "preview": line_text,
+            "submatches": submatches_json,
+        }));
+    }
+    Some(results)
+}
+
+fn fallback_content_search(
+    root: &Path,
+    pattern: &str,
+    limit: usize,
+    show_hidden: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    max_file_size_bytes: u64,
+) -> Vec<serde_json::Value> {
+    let needle = if case_sensitive {
+        pattern.to_string()
+    } else {
+        pattern.to_ascii_lowercase()
+    };
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    walk_content(
+        root,
+        root,
+        &needle,
+        show_hidden,
+        case_sensitive,
+        whole_word,
+        max_file_size_bytes,
+        limit,
+        &mut out,
+    );
+    out
+}
+
+fn walk_content(
+    root: &Path,
+    dir: &Path,
+    needle: &str,
+    show_hidden: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    max_size: u64,
+    limit: usize,
+    out: &mut Vec<serde_json::Value>,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        if out.len() >= limit {
+            return;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !show_hidden && is_hidden_default(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            walk_content(
+                root,
+                &path,
+                needle,
+                show_hidden,
+                case_sensitive,
+                whole_word,
+                max_size,
+                limit,
+                out,
+            );
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if metadata.len() > max_size {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (idx, line) in text.lines().enumerate() {
+            if out.len() >= limit {
+                return;
+            }
+            let haystack = if case_sensitive {
+                line.to_string()
+            } else {
+                line.to_ascii_lowercase()
+            };
+            let mut found = false;
+            if whole_word {
+                let needle_chars: Vec<char> = needle.chars().collect();
+                let line_chars: Vec<char> = haystack.chars().collect();
+                if needle_chars.is_empty() {
+                    continue;
+                }
+                let n = needle_chars.len();
+                'outer: for start in 0..line_chars.len().saturating_sub(n - 1) {
+                    if &line_chars[start..start + n] != needle_chars.as_slice() {
+                        continue;
+                    }
+                    let before = if start == 0 {
+                        None
+                    } else {
+                        Some(line_chars[start - 1])
+                    };
+                    let after = line_chars.get(start + n).copied();
+                    let is_word = |c: Option<char>| match c {
+                        Some(ch) => ch.is_alphanumeric() || ch == '_',
+                        None => false,
+                    };
+                    if !is_word(before) && !is_word(after) {
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            } else if haystack.contains(needle) {
+                found = true;
+            }
+            if found {
+                let preview = line.trim_end_matches(|c: char| c == '\r').to_string();
+                out.push(json!({
+                    "name": path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                    "relPath": relative_path(root, &path),
+                    "isDir": false,
+                    "line": idx as u64,
+                    "preview": preview,
+                }));
+            }
         }
     }
 }

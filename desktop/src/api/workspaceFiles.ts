@@ -114,6 +114,11 @@ export const workspaceFilesApi = {
     query: string
     limit?: number
     showHidden?: boolean
+    kind?: 'name' | 'content'
+    caseSensitive?: boolean
+    wholeWord?: boolean
+    regex?: boolean
+    maxFileSizeBytes?: number
   }) {
     return api.get<FileSearchResponse>(
       `/api/workspace/search${qs({
@@ -121,6 +126,11 @@ export const workspaceFilesApi = {
         query: opts.query,
         limit: opts.limit,
         showHidden: opts.showHidden,
+        kind: opts.kind,
+        caseSensitive: opts.caseSensitive,
+        wholeWord: opts.wholeWord,
+        regex: opts.regex,
+        maxFileSizeBytes: opts.maxFileSizeBytes,
       })}`,
     )
   },

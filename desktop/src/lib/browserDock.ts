@@ -217,6 +217,19 @@ export async function dockListTabs(): Promise<BrowserDockTabInfo[]> {
   return res ?? []
 }
 
+export async function dockPinTestTarget(tabId: number): Promise<void> {
+  await invokeIfTauri('browser_dock_pin_test_target', { tabId })
+}
+
+export async function dockClearTestTarget(): Promise<void> {
+  await invokeIfTauri('browser_dock_clear_test_target')
+}
+
+export async function dockGetTestTarget(): Promise<number | null> {
+  const res = await invokeIfTauri<number | null>('browser_dock_get_test_target')
+  return res ?? null
+}
+
 export type BrowserDockScreenshotPayload = {
   png_base64: string
   bytes: number

@@ -8,6 +8,8 @@ import {
   useWorkspaceFilesStore,
 } from '../../stores/workspaceFilesStore'
 import { ensureVscodeIcons, getFileIconId, isVscodeIconsReady } from '../../lib/fileIcons'
+import { UnsavedChangesDialog } from '../shared/UnsavedChangesDialog'
+import { useUIStore } from '../../stores/uiStore'
 
 const DRAG_MIME = 'application/x-sen-editor-tab'
 
@@ -26,6 +28,7 @@ export function EditorTabs() {
   const closeTab = useWorkspaceFilesStore((s) => s.closeTab)
   const closeAllTabs = useWorkspaceFilesStore((s) => s.closeAllTabs)
   const closeOtherTabs = useWorkspaceFilesStore((s) => s.closeOtherTabs)
+  const saveFile = useWorkspaceFilesStore((s) => s.saveFile)
   const reorderTab = useWorkspaceFilesStore((s) => s.reorderTab)
   const setActiveTab = useWorkspaceFilesStore((s) => s.setActiveTab)
   const root = useWorkspaceFilesStore((s) => s.root)
@@ -72,6 +75,83 @@ export function EditorTabs() {
 
   const [menu, setMenu] = useState<ContextMenu | null>(null)
   const dragOverIdx = useRef<number | null>(null)
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    queue: string[]
+    onAllResolved?: () => void
+  } | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
+
+  const dirtyByPathRef = useRef(dirtyByPath)
+  useEffect(() => {
+    dirtyByPathRef.current = dirtyByPath
+  }, [dirtyByPath])
+
+  const currentConfirmTarget = pendingConfirm?.queue[0] ?? null
+
+  const advanceConfirmQueue = useCallback(() => {
+    setPendingConfirm((prev) => {
+      if (!prev) return null
+      const [, ...rest] = prev.queue
+      if (rest.length === 0) {
+        prev.onAllResolved?.()
+        return null
+      }
+      return { queue: rest, onAllResolved: prev.onAllResolved }
+    })
+  }, [])
+
+  const handleConfirmCancel = useCallback(() => {
+    setConfirmBusy(false)
+    setPendingConfirm(null)
+  }, [])
+
+  const handleConfirmDiscard = useCallback(() => {
+    if (!currentConfirmTarget) return
+    closeTab(currentConfirmTarget)
+    advanceConfirmQueue()
+  }, [advanceConfirmQueue, closeTab, currentConfirmTarget])
+
+  const handleConfirmSave = useCallback(async () => {
+    if (!currentConfirmTarget) return
+    setConfirmBusy(true)
+    try {
+      await saveFile(currentConfirmTarget)
+      closeTab(currentConfirmTarget)
+      advanceConfirmQueue()
+    } catch {
+    } finally {
+      setConfirmBusy(false)
+    }
+  }, [advanceConfirmQueue, closeTab, currentConfirmTarget, saveFile])
+
+  const requestClose = useCallback(
+    (relPath: string) => {
+      if (dirtyByPathRef.current[relPath]) {
+        setPendingConfirm({ queue: [relPath] })
+        return
+      }
+      closeTab(relPath)
+    },
+    [closeTab],
+  )
+
+  const requestCloseMany = useCallback(
+    (relPaths: string[], onAllResolved: () => void) => {
+      const dirty: string[] = []
+      const clean: string[] = []
+      for (const rel of relPaths) {
+        if (dirtyByPathRef.current[rel]) dirty.push(rel)
+        else clean.push(rel)
+      }
+      for (const rel of clean) closeTab(rel)
+      if (dirty.length === 0) {
+        onAllResolved()
+        return
+      }
+      setPendingConfirm({ queue: dirty, onAllResolved })
+    },
+    [closeTab],
+  )
 
   const handleDragStart = useCallback(
     (event: React.DragEvent, relPath: string) => {
@@ -101,9 +181,9 @@ export function EditorTabs() {
   const handleClose = useCallback(
     (event: React.MouseEvent | React.KeyboardEvent, relPath: string) => {
       event.stopPropagation()
-      closeTab(relPath)
+      requestClose(relPath)
     },
-    [closeTab],
+    [requestClose],
   )
 
   const handleAuxClick = useCallback(
@@ -111,10 +191,10 @@ export function EditorTabs() {
 
       if (event.button === 1) {
         event.preventDefault()
-        closeTab(relPath)
+        requestClose(relPath)
       }
     },
-    [closeTab],
+    [requestClose],
   )
 
   const handleContextMenu = useCallback(
@@ -131,6 +211,14 @@ export function EditorTabs() {
     window.addEventListener('mousedown', onClick)
     return () => window.removeEventListener('mousedown', onClick)
   }, [menu])
+
+  const editorCloseRequest = useUIStore((s) => s.editorCloseRequest)
+  const clearEditorCloseRequest = useUIStore((s) => s.clearEditorCloseRequest)
+  useEffect(() => {
+    if (!editorCloseRequest) return
+    requestClose(editorCloseRequest.relPath)
+    clearEditorCloseRequest()
+  }, [clearEditorCloseRequest, editorCloseRequest, requestClose])
 
   if (!root || openTabs.length === 0) {
     return null
@@ -236,7 +324,7 @@ export function EditorTabs() {
           <MenuItem
             label={t('files.tab.close')}
             onClick={() => {
-              closeTab(menu.relPath)
+              requestClose(menu.relPath)
               setMenu(null)
             }}
           />
@@ -244,19 +332,41 @@ export function EditorTabs() {
             label={t('files.tab.closeOthers')}
             disabled={openTabs.length <= 1}
             onClick={() => {
-              closeOtherTabs(menu.relPath)
+              const others = openTabs.filter((rel) => rel !== menu.relPath)
+              requestCloseMany(others, () => {
+                closeOtherTabs(menu.relPath)
+              })
               setMenu(null)
             }}
           />
           <MenuItem
             label={t('files.tab.closeAll')}
             onClick={() => {
-              closeAllTabs()
+              requestCloseMany([...openTabs], () => {
+                closeAllTabs()
+              })
               setMenu(null)
             }}
           />
         </div>
       )}
+
+      <UnsavedChangesDialog
+        open={!!currentConfirmTarget}
+        title={t('editor.unsavedClose.title')}
+        body={
+          currentConfirmTarget
+            ? t('editor.unsavedClose.body').replace('{name}', nameOf(currentConfirmTarget))
+            : ''
+        }
+        saveLabel={t('editor.unsavedClose.save')}
+        discardLabel={t('editor.unsavedClose.discard')}
+        cancelLabel={t('editor.unsavedClose.cancel')}
+        busy={confirmBusy}
+        onSave={handleConfirmSave}
+        onDiscard={handleConfirmDiscard}
+        onCancel={handleConfirmCancel}
+      />
     </div>
   )
 }

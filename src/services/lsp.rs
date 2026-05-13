@@ -661,19 +661,202 @@ impl LspServerHandle {
             "processId": std::process::id(),
             "capabilities": {
                 "textDocument": {
+                    "synchronization": {
+                        "dynamicRegistration": false,
+                        "willSave": true,
+                        "willSaveWaitUntil": false,
+                        "didSave": true
+                    },
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
                     "definition": { "linkSupport": true },
-                    "references": {},
+                    "typeDefinition": { "linkSupport": true },
+                    "implementation": { "linkSupport": true },
+                    "declaration": { "linkSupport": true },
+                    "references": { "dynamicRegistration": false },
                     "documentSymbol": {
-                        "hierarchicalDocumentSymbolSupport": true
+                        "hierarchicalDocumentSymbolSupport": true,
+                        "symbolKind": {
+                            "valueSet": [
+                                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                                14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
+                            ]
+                        },
+                        "tagSupport": { "valueSet": [1] }
                     },
-                    "publishDiagnostics": { "relatedInformation": true },
-                    "diagnostic": {},
-                    "callHierarchy": {}
+                    "publishDiagnostics": {
+                        "relatedInformation": true,
+                        "versionSupport": true,
+                        "codeDescriptionSupport": true,
+                        "dataSupport": true,
+                        "tagSupport": { "valueSet": [1, 2] }
+                    },
+                    "diagnostic": {
+                        "dynamicRegistration": false,
+                        "relatedDocumentSupport": true
+                    },
+                    "callHierarchy": {},
+                    "completion": {
+                        "completionItem": {
+                            "snippetSupport": true,
+                            "commitCharactersSupport": false,
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "deprecatedSupport": true,
+                            "preselectSupport": true,
+                            "tagSupport": { "valueSet": [1] },
+                            "insertReplaceSupport": true,
+                            "resolveSupport": {
+                                "properties": [
+                                    "documentation",
+                                    "detail",
+                                    "additionalTextEdits",
+                                    "command"
+                                ]
+                            },
+                            "insertTextModeSupport": { "valueSet": [1, 2] },
+                            "labelDetailsSupport": true
+                        },
+                        "completionItemKind": {
+                            "valueSet": [
+                                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                                14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
+                            ]
+                        },
+                        "contextSupport": true,
+                        "insertTextMode": 2
+                    },
+                    "signatureHelp": {
+                        "signatureInformation": {
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "parameterInformation": {
+                                "labelOffsetSupport": true
+                            },
+                            "activeParameterSupport": true
+                        },
+                        "contextSupport": true
+                    },
+                    "inlayHint": {
+                        "dynamicRegistration": false,
+                        "resolveSupport": {
+                            "properties": [
+                                "tooltip",
+                                "textEdits",
+                                "label.tooltip",
+                                "label.location",
+                                "label.command"
+                            ]
+                        }
+                    },
+                    "codeAction": {
+                        "dynamicRegistration": false,
+                        "isPreferredSupport": true,
+                        "disabledSupport": true,
+                        "dataSupport": true,
+                        "honorsChangeAnnotations": false,
+                        "resolveSupport": {
+                            "properties": ["edit", "command"]
+                        },
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "",
+                                    "quickfix",
+                                    "refactor",
+                                    "refactor.extract",
+                                    "refactor.inline",
+                                    "refactor.rewrite",
+                                    "source",
+                                    "source.organizeImports",
+                                    "source.fixAll"
+                                ]
+                            }
+                        }
+                    },
+                    "formatting": { "dynamicRegistration": false },
+                    "rangeFormatting": { "dynamicRegistration": false },
+                    "onTypeFormatting": { "dynamicRegistration": false },
+                    "rename": {
+                        "dynamicRegistration": false,
+                        "prepareSupport": true,
+                        "prepareSupportDefaultBehavior": 1,
+                        "honorsChangeAnnotations": false
+                    },
+                    "documentHighlight": { "dynamicRegistration": false },
+                    "documentLink": {
+                        "dynamicRegistration": false,
+                        "tooltipSupport": true
+                    },
+                    "foldingRange": {
+                        "dynamicRegistration": false,
+                        "rangeLimit": 5000,
+                        "lineFoldingOnly": true,
+                        "foldingRangeKind": {
+                            "valueSet": ["comment", "imports", "region"]
+                        },
+                        "foldingRange": { "collapsedText": false }
+                    },
+                    "selectionRange": { "dynamicRegistration": false },
+                    "semanticTokens": {
+                        "dynamicRegistration": false,
+                        "requests": {
+                            "range": true,
+                            "full": { "delta": true }
+                        },
+                        "tokenTypes": [
+                            "namespace", "type", "class", "enum", "interface",
+                            "struct", "typeParameter", "parameter", "variable",
+                            "property", "enumMember", "event", "function",
+                            "method", "macro", "keyword", "modifier", "comment",
+                            "string", "number", "regexp", "operator", "decorator"
+                        ],
+                        "tokenModifiers": [
+                            "declaration", "definition", "readonly", "static",
+                            "deprecated", "abstract", "async", "modification",
+                            "documentation", "defaultLibrary"
+                        ],
+                        "formats": ["relative"],
+                        "overlappingTokenSupport": false,
+                        "multilineTokenSupport": false,
+                        "serverCancelSupport": true,
+                        "augmentsSyntaxTokens": true
+                    }
                 },
                 "workspace": {
-                    "symbol": {},
-                    "workspaceFolders": true
+                    "applyEdit": true,
+                    "workspaceEdit": {
+                        "documentChanges": true,
+                        "resourceOperations": ["create", "rename", "delete"],
+                        "failureHandling": "textOnlyTransactional",
+                        "normalizesLineEndings": true,
+                        "changeAnnotationSupport": { "groupsOnLabel": false }
+                    },
+                    "symbol": {
+                        "dynamicRegistration": false,
+                        "symbolKind": {
+                            "valueSet": [
+                                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                                14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
+                            ]
+                        },
+                        "tagSupport": { "valueSet": [1] },
+                        "resolveSupport": { "properties": ["location.range"] }
+                    },
+                    "executeCommand": { "dynamicRegistration": false },
+                    "configuration": true,
+                    "didChangeConfiguration": { "dynamicRegistration": false },
+                    "didChangeWatchedFiles": { "dynamicRegistration": false },
+                    "workspaceFolders": true,
+                    "semanticTokens": { "refreshSupport": true },
+                    "inlayHint": { "refreshSupport": true },
+                    "diagnostics": { "refreshSupport": true }
+                },
+                "window": {
+                    "workDoneProgress": true,
+                    "showMessage": {
+                        "messageActionItem": { "additionalPropertiesSupport": false }
+                    }
+                },
+                "general": {
+                    "positionEncodings": ["utf-16"]
                 }
             },
             "rootUri": &root_uri,

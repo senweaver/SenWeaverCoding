@@ -20,6 +20,7 @@ export type ClientMessage =
   | { type: 'set_permission_mode'; mode: PermissionMode }
   | { type: 'set_coding_mode'; mode: CodingModeId; scope?: 'session' | 'global' }
   | ({ type: 'set_runtime_config' } & RuntimeSelection)
+  | { type: 'set_pii_config'; data: { enabled: boolean; disabledKinds: string[] } }
   | { type: 'stop_generation' }
 
   | {
@@ -73,6 +74,11 @@ export type ServerMessage =
       currentSessionId?: string | null
     }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
+  | {
+      type: 'debug_pii_stats'
+      total?: number
+      counts?: Record<string, number>
+    }
   | { type: 'pong' }
   | { type: 'task_update'; taskId: string; status: string; progress?: string }
   | { type: 'session_title_updated'; sessionId: string; title: string }

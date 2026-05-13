@@ -16,6 +16,7 @@ import { ProjectContextChip } from '../shared/ProjectContextChip'
 import { DirectoryPicker } from '../shared/DirectoryPicker'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
+import { PrivacyBanner } from './PrivacyBanner'
 import { ReviewCard } from './ReviewCard'
 import { TokenUsageRing } from './TokenUsageRing'
 import { WorkspaceQueuePanel } from './WorkspaceQueuePanel'
@@ -596,6 +597,9 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       className={isHeroComposer ? 'bg-[var(--color-surface)] px-8 pb-4' : 'bg-[var(--color-surface)] px-4 py-3'}
     >
       <div className={isHeroComposer ? 'mx-auto flex w-full max-w-3xl flex-col gap-1.5' : 'mx-auto max-w-[860px]'}>
+        {!isMemberSession && isDebugMode && (
+          <PrivacyBanner sessionId={activeTabId ?? null} />
+        )}
         {!isMemberSession && <ReviewCard />}
         {!isMemberSession && <WorkspaceQueuePanel sessionId={activeTabId} />}
         <div

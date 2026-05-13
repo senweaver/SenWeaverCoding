@@ -37,6 +37,40 @@ const openCounts = new Map<string, number>()
 const changeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const DEBOUNCE_MS = 300
 
+const langSupportCache = new Map<string, boolean>()
+let langSupportCacheVersion = 0
+
+function refreshLangSupportCache() {
+  const { enabled, servers } = useLspStore.getState()
+  langSupportCache.clear()
+  if (!enabled) return
+  for (const server of servers) {
+    if (!server.enabled) continue
+    if (!server.command || server.command.trim() === '') continue
+    if (!server.languageId) continue
+    langSupportCache.set(server.languageId, true)
+  }
+}
+
+useLspStore.subscribe((state, prev) => {
+  if (
+    state.servers !== prev.servers ||
+    state.enabled !== prev.enabled
+  ) {
+    langSupportCacheVersion += 1
+    refreshLangSupportCache()
+  }
+})
+
+export function hasServerForLanguage(languageId: string | undefined | null): boolean {
+  if (!languageId) return false
+  if (langSupportCache.size === 0 && langSupportCacheVersion === 0) {
+    refreshLangSupportCache()
+    langSupportCacheVersion = 1
+  }
+  return langSupportCache.get(languageId) === true
+}
+
 export type DocumentParams = {
   uri: string
   languageId?: string
@@ -129,15 +163,21 @@ export const lspBridge = {
     line: number
     character: number
     text?: string
+    signal?: AbortSignal
   }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
     const response = await lspApi.request<{
       contents?: unknown
       range?: unknown
-    }>({
-      ...params,
-      method: 'hover',
-      uri: normalizeUri(params.uri),
-    })
+    }>(
+      {
+        ...rest,
+        method: 'hover',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
     return response.result ?? null
   },
 
@@ -147,11 +187,34 @@ export const lspBridge = {
     line: number
     character: number
     text?: string
+    triggerKind?: number
+    triggerCharacter?: string
+    signal?: AbortSignal
   }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
+    const response = await lspApi.request<unknown>(
+      {
+        ...rest,
+        method: 'completion',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
+    return response.result ?? null
+  },
+
+  async completionResolve(params: {
+    item: unknown
+    languageId?: string
+    uri?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
     const response = await lspApi.request<unknown>({
-      ...params,
-      method: 'completion',
-      uri: normalizeUri(params.uri),
+      method: 'completionItem/resolve',
+      uri: params.uri ? normalizeUri(params.uri) : '',
+      languageId: params.languageId,
+      item: params.item,
     })
     return response.result ?? null
   },
@@ -162,10 +225,88 @@ export const lspBridge = {
     line: number
     character: number
     text?: string
+    signal?: AbortSignal
   }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
+    const response = await lspApi.request<unknown>(
+      {
+        ...rest,
+        method: 'definition',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
+    return response.result ?? null
+  },
+
+  async declaration(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+    signal?: AbortSignal
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
+    const response = await lspApi.request<unknown>(
+      {
+        ...rest,
+        method: 'declaration',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
+    return response.result ?? null
+  },
+
+  async documentLink(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    signal?: AbortSignal
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
+    const response = await lspApi.request<unknown>(
+      {
+        ...rest,
+        method: 'documentLink',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
+    return response.result ?? null
+  },
+
+  async typeDefinition(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
     const response = await lspApi.request<unknown>({
       ...params,
-      method: 'definition',
+      method: 'typeDefinition',
+      uri: normalizeUri(params.uri),
+    })
+    return response.result ?? null
+  },
+
+  async implementation(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      ...params,
+      method: 'implementation',
       uri: normalizeUri(params.uri),
     })
     return response.result ?? null
@@ -177,10 +318,32 @@ export const lspBridge = {
     line: number
     character: number
     text?: string
+    signal?: AbortSignal
   }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
+    const response = await lspApi.request<unknown>(
+      {
+        ...rest,
+        method: 'references',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
+    return response.result ?? null
+  },
+
+  async documentHighlight(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
     const response = await lspApi.request<unknown>({
       ...params,
-      method: 'references',
+      method: 'documentHighlight',
       uri: normalizeUri(params.uri),
     })
     return response.result ?? null
@@ -194,14 +357,19 @@ export const lspBridge = {
       start: { line: number; character: number }
       end: { line: number; character: number }
     }
+    signal?: AbortSignal
   }) {
-    const response = await lspApi.request<unknown>({
-      method: 'inlayHint',
-      uri: normalizeUri(params.uri),
-      languageId: params.languageId,
-      text: params.text,
-      range: params.range,
-    })
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>(
+      {
+        method: 'inlayHint',
+        uri: normalizeUri(params.uri),
+        languageId: params.languageId,
+        text: params.text,
+        range: params.range,
+      },
+      params.signal ? { signal: params.signal } : undefined,
+    )
     return response.result ?? null
   },
 
@@ -212,12 +380,19 @@ export const lspBridge = {
     character: number
     text?: string
     triggerCharacter?: string
+    triggerKind?: number
+    signal?: AbortSignal
   }) {
-    const response = await lspApi.request<unknown>({
-      ...params,
-      method: 'signatureHelp',
-      uri: normalizeUri(params.uri),
-    })
+    if (!hasServerForLanguage(params.languageId)) return null
+    const { signal, ...rest } = params
+    const response = await lspApi.request<unknown>(
+      {
+        ...rest,
+        method: 'signatureHelp',
+        uri: normalizeUri(params.uri),
+      },
+      signal ? { signal } : undefined,
+    )
     return response.result ?? null
   },
 
@@ -225,13 +400,18 @@ export const lspBridge = {
     uri: string
     languageId?: string
     text?: string
+    signal?: AbortSignal
   }) {
-    const response = await lspApi.request<unknown>({
-      method: 'documentSymbol',
-      uri: normalizeUri(params.uri),
-      languageId: params.languageId,
-      text: params.text,
-    })
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>(
+      {
+        method: 'documentSymbol',
+        uri: normalizeUri(params.uri),
+        languageId: params.languageId,
+        text: params.text,
+      },
+      params.signal ? { signal: params.signal } : undefined,
+    )
     return response.result ?? null
   },
 
@@ -241,11 +421,57 @@ export const lspBridge = {
     text?: string
     options?: { tabSize: number; insertSpaces: boolean }
   }) {
+    if (!hasServerForLanguage(params.languageId)) return null
     const response = await lspApi.request<unknown>({
       method: 'formatting',
       uri: normalizeUri(params.uri),
       languageId: params.languageId,
       text: params.text,
+      options: params.options ?? { tabSize: 4, insertSpaces: true },
+    })
+    return response.result ?? null
+  },
+
+  async rangeFormatting(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    range: {
+      start: { line: number; character: number }
+      end: { line: number; character: number }
+    }
+    options?: { tabSize: number; insertSpaces: boolean }
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      method: 'rangeFormatting',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      range: params.range,
+      options: params.options ?? { tabSize: 4, insertSpaces: true },
+    })
+    return response.result ?? null
+  },
+
+  async onTypeFormatting(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    line: number
+    character: number
+    ch: string
+    options?: { tabSize: number; insertSpaces: boolean }
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      method: 'onTypeFormatting',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      line: params.line,
+      character: params.character,
+      characterTyped: params.ch,
       options: params.options ?? { tabSize: 4, insertSpaces: true },
     })
     return response.result ?? null
@@ -262,6 +488,7 @@ export const lspBridge = {
     diagnostics?: Array<Record<string, unknown>>
     only?: string[]
   }) {
+    if (!hasServerForLanguage(params.languageId)) return null
     const response = await lspApi.request<unknown>({
       method: 'codeAction',
       uri: normalizeUri(params.uri),
@@ -270,6 +497,127 @@ export const lspBridge = {
       range: params.range,
       diagnostics: params.diagnostics,
       only: params.only,
+    })
+    return response.result ?? null
+  },
+
+  async prepareRename(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    text?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      ...params,
+      method: 'prepareRename',
+      uri: normalizeUri(params.uri),
+    })
+    return response.result ?? null
+  },
+
+  async rename(params: {
+    uri: string
+    languageId?: string
+    line: number
+    character: number
+    newName: string
+    text?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      method: 'rename',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      line: params.line,
+      character: params.character,
+      newName: params.newName,
+    })
+    return response.result ?? null
+  },
+
+  async foldingRange(params: {
+    uri: string
+    languageId?: string
+    text?: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      method: 'foldingRange',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+    })
+    return response.result ?? null
+  },
+
+  async selectionRange(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    positions: Array<{ line: number; character: number }>
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      method: 'selectionRange',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      positions: params.positions,
+    })
+    return response.result ?? null
+  },
+
+  async semanticTokensFull(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    signal?: AbortSignal
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<{ resultId?: string; data?: number[] }>(
+      {
+        method: 'semanticTokens/full',
+        uri: normalizeUri(params.uri),
+        languageId: params.languageId,
+        text: params.text,
+      },
+      params.signal ? { signal: params.signal } : undefined,
+    )
+    return response.result ?? null
+  },
+
+  async semanticTokensFullDelta(params: {
+    uri: string
+    languageId?: string
+    text?: string
+    previousResultId: string
+  }) {
+    if (!hasServerForLanguage(params.languageId)) return null
+    const response = await lspApi.request<unknown>({
+      method: 'semanticTokens/full/delta',
+      uri: normalizeUri(params.uri),
+      languageId: params.languageId,
+      text: params.text,
+      previousResultId: params.previousResultId,
+    })
+    return response.result ?? null
+  },
+
+  async workspaceSymbol(params: {
+    query: string
+    languageId?: string
+  }) {
+    if (params.languageId && !hasServerForLanguage(params.languageId)) {
+      return null
+    }
+    const response = await lspApi.request<unknown>({
+      method: 'workspace/symbol',
+      uri: '',
+      languageId: params.languageId,
+      query: params.query,
     })
     return response.result ?? null
   },

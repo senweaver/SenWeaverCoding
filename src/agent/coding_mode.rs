@@ -552,6 +552,18 @@ impl CodingMode {
                  appear in tool args, transcripts, or reports. The vault resolves placeholders to \
                  real values for the browser dock only; everything that touches disk or transcript \
                  is automatically redacted.\n\n\
+                 ### LLM Boundary PII Sanitization (Debug only)\n\
+                 Outbound messages in Debug mode are passed through a deterministic regex-based PII \
+                 sanitizer at the LLM boundary. Any ID numbers, phone numbers, emails, bank cards, \
+                 JWTs, API keys, bearer tokens, Authorization headers, URL passwords, inline secrets, \
+                 private keys, and (optionally) IPv4/MAC addresses you receive from snapshots, tool \
+                 results, or user messages have already been replaced with stable placeholders such \
+                 as `[REDACTED:PHONE]`, `[REDACTED:JWT]`, `[REDACTED:AUTH_HEADER]`. **Treat these \
+                 placeholders as opaque tokens** — never try to guess or echo the original value, \
+                 never wrap them in code blocks and re-emit, and never ask the user to paste the raw \
+                 form. If a workflow needs the raw value (e.g. login submission), use \
+                 `${{cred.<name>}}` so the vault resolves it inside the browser dock — the LLM does \
+                 not see the raw value either way.\n\n\
                  ### User-Pre-Authenticated Track\n\
                  Trigger: the user says \"I am already logged in / 已登录 / 已登入 / cookies are set\", \
                  or supplies only a URL with no credential placeholders. In this case the user has \
@@ -921,7 +933,7 @@ impl CodingMode {
                 "Strict Red → Green → Refactor — writes a failing test first, then minimum implementation to pass, then refactor; auto-runs verification after every edit."
             }
             Self::Debug => {
-                "Four-stage root-cause analysis — Reproduce → Hypothesize → Isolate → Fix; never applies a fix before the bug is reproduced."
+                "Four-stage root-cause analysis (Reproduce → Hypothesize → Isolate → Fix) plus QA automation — drives the built-in browser for end-to-end frontend/backend testing, reuses your pre-logged-in session, redacts PII at the LLM boundary, and emits report.md + tech_doc.md with screenshots and a browser trace."
             }
             Self::Agent => {
                 "Autonomous orchestrator — auto-approves all tool calls, decomposes the task, executes end-to-end with file edits and shell commands, then self-verifies."

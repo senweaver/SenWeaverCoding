@@ -492,6 +492,16 @@ impl AcpServer {
                         "description": description,
                     }),
                 },
+                TurnEvent::PiiSanitized { report } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "debug_pii_stats",
+                        "total": report.total(),
+                        "counts": report.to_label_map(),
+                    }),
+                },
             };
             self.write_notification(&notification).await;
         }

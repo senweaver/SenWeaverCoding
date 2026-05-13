@@ -37,13 +37,13 @@ const DRAG_MIME = 'application/x-sen-workspace-rel-path'
 
 export function FileTree({ workDir, onSelect }: Props) {
   const t = useTranslation()
-  const setRoot = useWorkspaceFilesStore((s) => s.setRoot)
   const root = useWorkspaceFilesStore((s) => s.root)
   const rootEntries = useWorkspaceFilesStore((s) => s.rootEntries)
   const rootLoaded = useWorkspaceFilesStore((s) => s.rootLoaded)
   const rootLoading = useWorkspaceFilesStore((s) => s.rootLoading)
   const rootError = useWorkspaceFilesStore((s) => s.rootError)
   const refreshRoot = useWorkspaceFilesStore((s) => s.refreshRoot)
+  const loadDirectory = useWorkspaceFilesStore((s) => s.loadDirectory)
   const selectedRelPath = useWorkspaceFilesStore((s) => s.selectedRelPath)
   const renameAction = useWorkspaceFilesStore((s) => s.rename)
   const removeAction = useWorkspaceFilesStore((s) => s.remove)
@@ -82,8 +82,10 @@ export function FileTree({ workDir, onSelect }: Props) {
   const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null)
   const [isDraggingExternal, setIsDraggingExternal] = useState(false)
   const [filterText, setFilterText] = useState('')
+  const [focusedRelPath, setFocusedRelPath] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const uploadParentRef = useRef<string>('')
+  const treeRef = useRef<HTMLDivElement | null>(null)
 
   const filterNeedle = filterText.trim()
   const dirsForFilter = useWorkspaceFilesStore((s) =>
@@ -125,8 +127,53 @@ export function FileTree({ workDir, onSelect }: Props) {
   }, [filterNeedle, root, rootEntries, dirsForFilter])
 
   useEffect(() => {
-    setRoot(workDir)
-  }, [workDir, setRoot])
+    if (!filterNeedle || filterNeedle.length < 2) return
+    if (!root) return
+    const dirs = useWorkspaceFilesStore.getState().dirs
+    const candidates: string[] = []
+    const collect = (entries: FileTreeNode[], depth: number) => {
+      if (depth > 3) return
+      for (const entry of entries) {
+        if (!entry.isDir) continue
+        const key = `${root}::${entry.relPath}`
+        const dir = dirs[key]
+        if (!dir || (!dir.loaded && !dir.loading)) {
+          candidates.push(entry.relPath)
+        } else if (dir.children?.length) {
+          collect(dir.children, depth + 1)
+        }
+      }
+    }
+    collect(rootEntries, 0)
+    if (candidates.length === 0) return
+
+    let cancelled = false
+    let inFlight = 0
+    const queue = [...candidates]
+    const handle = window.setTimeout(() => {
+      const pump = () => {
+        if (cancelled) return
+        while (inFlight < 4 && queue.length > 0) {
+          const target = queue.shift()
+          if (!target) continue
+          inFlight += 1
+          loadDirectory(target)
+            .catch(() => {
+              /* ignore */
+            })
+            .finally(() => {
+              inFlight -= 1
+              if (!cancelled) pump()
+            })
+        }
+      }
+      pump()
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(handle)
+    }
+  }, [filterNeedle, root, rootEntries, loadDirectory])
 
   const handleSelect = useCallback(
     (node: FileTreeNode) => {
@@ -357,6 +404,147 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   const canReveal = useMemo(() => isTauriRuntime(), [])
 
+  const dirsForFlat = useWorkspaceFilesStore((s) => s.dirs)
+  const visibleNodes = useMemo(() => {
+    if (!root) return [] as FileTreeNode[]
+    const out: FileTreeNode[] = []
+    const visit = (entries: FileTreeNode[]) => {
+      for (const entry of entries) {
+        if (filterState?.active) {
+          const isMatch = filterState.matches.has(entry.relPath)
+          const isAncestor = filterState.ancestors.has(entry.relPath)
+          if (!isMatch && !isAncestor) continue
+        }
+        out.push(entry)
+        if (entry.isDir) {
+          const key = `${root}::${entry.relPath}`
+          const dir = dirsForFlat[key]
+          if (dir?.expanded) {
+            if (dir.children?.length) {
+              visit(dir.children)
+            } else if (entry.children?.length) {
+              visit(entry.children)
+            }
+          }
+        }
+      }
+    }
+    visit(rootEntries)
+    return out
+  }, [dirsForFlat, filterState, root, rootEntries])
+
+  const visibleByPath = useMemo(() => {
+    const map = new Map<string, FileTreeNode>()
+    for (const node of visibleNodes) map.set(node.relPath, node)
+    return map
+  }, [visibleNodes])
+
+  const setExpanded = useWorkspaceFilesStore((s) => s.setExpanded)
+
+  const handleTreeKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (renameTarget || createTarget) return
+      const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      if (visibleNodes.length === 0) return
+
+      const currentRel = focusedRelPath ?? selectedRelPath ?? visibleNodes[0]?.relPath ?? null
+      const currentIdx = currentRel
+        ? visibleNodes.findIndex((n) => n.relPath === currentRel)
+        : -1
+      const idx = currentIdx < 0 ? 0 : currentIdx
+      const node = visibleNodes[idx]
+
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        const next = Math.min(visibleNodes.length - 1, idx + 1)
+        const nextNode = visibleNodes[next]
+        if (nextNode) setFocusedRelPath(nextNode.relPath)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        const prev = Math.max(0, idx - 1)
+        const prevNode = visibleNodes[prev]
+        if (prevNode) setFocusedRelPath(prevNode.relPath)
+        return
+      }
+      if (event.key === 'ArrowRight') {
+        if (!node) return
+        event.preventDefault()
+        if (node.isDir) {
+          const key = `${root}::${node.relPath}`
+          const dir = dirsForFlat[key]
+          if (!dir?.expanded) {
+            setExpanded(node.relPath, true)
+          } else {
+            const nextIdx = Math.min(visibleNodes.length - 1, idx + 1)
+            const nextNode = visibleNodes[nextIdx]
+            if (nextNode) setFocusedRelPath(nextNode.relPath)
+          }
+        }
+        return
+      }
+      if (event.key === 'ArrowLeft') {
+        if (!node) return
+        event.preventDefault()
+        const key = `${root}::${node.relPath}`
+        const dir = dirsForFlat[key]
+        if (node.isDir && dir?.expanded) {
+          setExpanded(node.relPath, false)
+        } else {
+          const parent = parentOf(node.relPath)
+          if (parent) setFocusedRelPath(parent)
+        }
+        return
+      }
+      if (event.key === 'Enter') {
+        if (!node) return
+        event.preventDefault()
+        if (node.isDir) {
+          const key = `${root}::${node.relPath}`
+          const dir = dirsForFlat[key]
+          setExpanded(node.relPath, !dir?.expanded)
+        } else {
+          handleSelect(node)
+        }
+        return
+      }
+      if (event.key === 'F2') {
+        if (!node) return
+        event.preventDefault()
+        handleRename(node)
+        return
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (!node) return
+        if (event.key === 'Backspace' && !(event.metaKey || event.ctrlKey)) return
+        event.preventDefault()
+        void handleDelete(node)
+      }
+    },
+    [
+      createTarget,
+      dirsForFlat,
+      focusedRelPath,
+      handleDelete,
+      handleRename,
+      handleSelect,
+      renameTarget,
+      root,
+      selectedRelPath,
+      setExpanded,
+      visibleNodes,
+    ],
+  )
+
+  useEffect(() => {
+    if (!focusedRelPath) return
+    if (!visibleByPath.has(focusedRelPath)) {
+      setFocusedRelPath(null)
+    }
+  }, [focusedRelPath, visibleByPath])
+
   const containerProps = useMemo(
     () => ({
       onDragOver: (event: React.DragEvent) => {
@@ -378,9 +566,12 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   return (
     <div
+      ref={treeRef}
       role="tree"
+      tabIndex={0}
+      onKeyDown={handleTreeKeyDown}
       onContextMenu={handleRootContextMenu}
-      className="relative flex-1 overflow-y-auto"
+      className="relative flex-1 overflow-y-auto outline-none"
       {...containerProps}
     >
       <input
@@ -515,6 +706,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           node={entry}
           depth={0}
           selectedRelPath={selectedRelPath}
+          focusedRelPath={focusedRelPath}
           renameTarget={renameTarget}
           createTarget={createTarget}
           filter={filterState}

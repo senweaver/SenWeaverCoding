@@ -58,6 +58,8 @@ type LspStore = {
   fetchPreferences: () => Promise<void>
   setPreferences: (payload: Partial<LspPreferences>) => Promise<void>
 
+  clearDiagnostics: () => void
+
   handleBroadcastEvent: (event: LspBroadcastEvent) => void
 }
 
@@ -254,6 +256,10 @@ export const useLspStore = create<LspStore>((set, get) => ({
       },
       preferencesLoaded: true,
     })
+  },
+
+  clearDiagnostics: () => {
+    set({ diagnosticsByUri: {} })
   },
 
   handleBroadcastEvent: (event) => {

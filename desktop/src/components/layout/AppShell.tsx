@@ -11,7 +11,12 @@ import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
 import { useTerminalCwdSync } from '../../hooks/useTerminalCwdSync'
 import {
   fetchSettingsWithRetry,
+  getServerStatusSnapshot,
   initializeDesktopServerUrl,
+  openLogDir,
+  requestGatewayRestart,
+  type DesktopBootEvent,
+  type ServerStatusSnapshot,
 } from '../../lib/desktopRuntime'
 import { startAiWriteWatcher } from '../../lib/aiWriteWatcher'
 import { TabBar } from './TabBar'
@@ -25,6 +30,8 @@ import { useChatStore } from '../../stores/chatStore'
 import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
 import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
+import { WorkspaceFinder } from '../workspace/WorkspaceFinder'
+import { useActiveTabWorkDir } from '../../lib/activeWorkDir'
 import { Settings } from '../../pages/Settings'
 import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
 import { TerminalPanel } from '../terminal/TerminalPanel'
@@ -36,6 +43,9 @@ export function AppShell() {
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const rightSidebarOpen = useUIStore((s) => s.rightSidebarOpen)
+  const workspaceFinderMode = useUIStore((s) => s.workspaceFinderMode)
+  const closeWorkspaceFinder = useUIStore((s) => s.closeWorkspaceFinder)
+  const activeWorkDir = useActiveTabWorkDir()
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const terminalPanelOpen = useTerminalPanelStore((s) => s.open)
   const activeChatTabId = useTabStore((s) => s.activeTabId)
@@ -45,6 +55,9 @@ export function AppShell() {
   const [ready, setReady] = useState(false)
   const [settingsMounted, setSettingsMounted] = useState(false)
   const [bootElapsedSecs, setBootElapsedSecs] = useState(0)
+  const [bootLastEvent, setBootLastEvent] = useState<DesktopBootEvent | null>(null)
+  const [bootStatus, setBootStatus] = useState<ServerStatusSnapshot | null>(null)
+  const [retrying, setRetrying] = useState(false)
 
   const [isMaximized, setIsMaximized] = useState(false)
   const t = useTranslation()
@@ -55,7 +68,16 @@ export function AppShell() {
     const interval = window.setInterval(() => {
       setBootElapsedSecs(Math.floor((Date.now() - startedAt) / 1000))
     }, 1_000)
-    return () => window.clearInterval(interval)
+    const statusPoll = window.setInterval(() => {
+      void (async () => {
+        const snap = await getServerStatusSnapshot()
+        if (snap) setBootStatus(snap)
+      })()
+    }, 1_500)
+    return () => {
+      window.clearInterval(interval)
+      window.clearInterval(statusPoll)
+    }
   }, [ready])
 
   useEffect(() => {
@@ -67,7 +89,13 @@ export function AppShell() {
 
     const bootstrap = async () => {
       try {
-        await initializeDesktopServerUrl({ signal: abort.signal })
+        await initializeDesktopServerUrl({
+          signal: abort.signal,
+          onEvent: (event) => {
+            if (abort.signal.aborted) return
+            setBootLastEvent(event)
+          },
+        })
         await fetchSettingsWithRetry(fetchSettings, { signal: abort.signal })
         startBackgroundShellMirror()
         useSessionRunStateStore.getState().start()
@@ -223,8 +251,24 @@ export function AppShell() {
   }, [isMaximized])
 
   if (!ready) {
-    const showHint = bootElapsedSecs >= 8
-    const showLongHint = bootElapsedSecs >= 25
+    const showHint = bootElapsedSecs >= 6
+    const showActions = bootElapsedSecs >= 10
+    const showLongHint = bootElapsedSecs >= 20
+    const lastEventDetail = bootLastEvent?.detail?.trim()
+    const statusError = bootStatus?.error?.trim()
+    const surfacedError = statusError || lastEventDetail || null
+    const handleRetry = async () => {
+      if (retrying) return
+      setRetrying(true)
+      try {
+        await requestGatewayRestart(true)
+      } finally {
+        setRetrying(false)
+      }
+    }
+    const handleOpenLogDir = () => {
+      void openLogDir()
+    }
     return (
       <>
         <div
@@ -235,7 +279,7 @@ export function AppShell() {
           className="app-window-frame items-center justify-center text-[var(--color-text-secondary)]"
           data-maximized={isMaximized ? 'true' : 'false'}
         >
-          <div className="flex flex-col items-center gap-2 text-center px-6 max-w-[520px]">
+          <div className="flex flex-col items-center gap-3 text-center px-6 max-w-[560px]">
             <div>{t('app.launching')}</div>
             {showHint && (
               <div className="text-xs text-[var(--color-text-tertiary)]">
@@ -248,6 +292,30 @@ export function AppShell() {
             {showLongHint && (
               <div className="text-xs text-[var(--color-text-tertiary)] opacity-80">
                 {t('app.launchingTip')}
+              </div>
+            )}
+            {surfacedError && (
+              <div className="max-h-[120px] w-full overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2 text-left text-[11px] text-[var(--color-text-tertiary)]">
+                {surfacedError}
+              </div>
+            )}
+            {showActions && (
+              <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleRetry()}
+                  disabled={retrying}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-1 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-60"
+                >
+                  {retrying ? t('app.retrying') : t('app.retry')}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenLogDir}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-1 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+                >
+                  {t('app.openLogDir')}
+                </button>
               </div>
             )}
           </div>
@@ -323,6 +391,13 @@ export function AppShell() {
       <UpdateChecker />
       <CodingModeTransitionGuard />
       <QuickModeSwitcher />
+      {workspaceFinderMode && (
+        <WorkspaceFinder
+          mode={workspaceFinderMode}
+          workDir={activeWorkDir}
+          onClose={closeWorkspaceFinder}
+        />
+      )}
       </div>
       <ResizeHandles disabled={isMaximized} />
     </>

@@ -9,10 +9,35 @@ export function isTauriRuntime() {
   return '__TAURI_INTERNALS__' in window || '__TAURI__' in window
 }
 
-const HEALTH_FETCH_MS = 3_000
-const BROWSER_HEALTH_ATTEMPTS = 80
-const RESTART_AFTER_STREAK_FAILURES = 24
-const MIN_RESTART_INTERVAL_MS = 90_000
+const HEALTH_FETCH_MS = 2_500
+const BROWSER_HEALTH_ATTEMPTS = 32
+const HEALTH_BACKOFF_INITIAL_MS = 200
+const HEALTH_BACKOFF_MAX_MS = 1_500
+const RESTART_AFTER_STREAK_FAILURES = 3
+const MIN_RESTART_INTERVAL_MS = 12_000
+
+export type DesktopBootEventKind =
+  | 'gateway-pending'
+  | 'gateway-acquired'
+  | 'health-failed'
+  | 'health-restart-attempt'
+  | 'health-ok'
+
+export type DesktopBootEvent = {
+  kind: DesktopBootEventKind
+  elapsedMs: number
+  detail?: string
+}
+
+export type DesktopBootObserver = (event: DesktopBootEvent) => void
+
+export type ServerStatusSnapshot = {
+  state: 'pending' | 'starting' | 'ready' | 'failed'
+  url?: string
+  error?: string
+  elapsedMs?: number
+  logDir?: string
+}
 
 function healthFetchSignal(ms: number): AbortSignal | undefined {
   try {
@@ -22,24 +47,36 @@ function healthFetchSignal(ms: number): AbortSignal | undefined {
   }
 }
 
-async function waitForHealth(serverUrl: string, maxAttempts: number) {
+async function probeHealthOnce(serverUrl: string): Promise<boolean> {
+  const response = await fetch(`${serverUrl.replace(/\/$/, '')}/health`, {
+    cache: 'no-store',
+    headers: { 'X-Sen-Ping': '1' },
+    signal: healthFetchSignal(HEALTH_FETCH_MS),
+  })
+  return response.ok
+}
+
+async function waitForHealth(
+  serverUrl: string,
+  maxAttempts: number,
+  signal?: AbortSignal,
+) {
   let lastError: unknown
+  let delayMs = HEALTH_BACKOFF_INITIAL_MS
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    signal?.throwIfAborted()
     try {
-      const response = await fetch(`${serverUrl.replace(/\/$/, '')}/health`, {
-        cache: 'no-store',
-        signal: healthFetchSignal(HEALTH_FETCH_MS),
-      })
-      if (response.ok) {
+      if (await probeHealthOnce(serverUrl)) {
         return
       }
-      lastError = new Error(`healthcheck returned ${response.status}`)
+      lastError = new Error('healthcheck non-2xx')
     } catch (error) {
       lastError = error
     }
 
-    await sleep(250)
+    await sleep(delayMs)
+    delayMs = Math.min(HEALTH_BACKOFF_MAX_MS, Math.round(delayMs * 1.6))
   }
 
   throw lastError instanceof Error ? lastError : new Error('Local server healthcheck failed')
@@ -50,6 +87,7 @@ export async function fetchSettingsWithRetry(
   options?: { signal?: AbortSignal },
 ) {
   let i = 0
+  let delay = 300
   for (;;) {
     options?.signal?.throwIfAborted()
     try {
@@ -57,40 +95,102 @@ export async function fetchSettingsWithRetry(
       return
     } catch (error) {
       console.warn('[desktop] fetchSettings failed, retrying', error)
-      const delay = Math.min(10_000, 400 + i * 150)
       i += 1
       await sleep(delay)
+      delay = Math.min(10_000, Math.round(delay * 1.6))
     }
   }
 }
 
-export async function initializeDesktopServerUrl(options?: { signal?: AbortSignal }) {
+type TauriInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
+
+let invokeRef: TauriInvoke | null = null
+
+async function ensureInvoke(): Promise<TauriInvoke | null> {
+  if (!isTauriRuntime()) return null
+  if (invokeRef) return invokeRef
+  const mod = (await import(/* @vite-ignore */ '@tauri-apps/api/core')) as {
+    invoke: TauriInvoke
+  }
+  invokeRef = mod.invoke
+  return invokeRef
+}
+
+export async function getServerStatusSnapshot(): Promise<ServerStatusSnapshot | null> {
+  const invoke = await ensureInvoke()
+  if (!invoke) return null
+  try {
+    const snapshot = await invoke<ServerStatusSnapshot>('get_server_status')
+    return snapshot ?? null
+  } catch {
+    return null
+  }
+}
+
+export async function requestGatewayRestart(force = false): Promise<boolean> {
+  const invoke = await ensureInvoke()
+  if (!invoke) return false
+  try {
+    await invoke<void>('restart_embedded_gateway', { force })
+    return true
+  } catch (error) {
+    console.warn('[desktop] restart_embedded_gateway rejected', error)
+    return false
+  }
+}
+
+export async function openLogDir(): Promise<string | null> {
+  const invoke = await ensureInvoke()
+  if (!invoke) return null
+  try {
+    return await invoke<string>('open_log_dir')
+  } catch (error) {
+    console.warn('[desktop] open_log_dir failed', error)
+    return null
+  }
+}
+
+export async function initializeDesktopServerUrl(options?: {
+  signal?: AbortSignal
+  onEvent?: DesktopBootObserver
+}) {
   const fallbackUrl = getDefaultBaseUrl()
   const queryUrl =
     typeof window !== 'undefined'
       ? new URLSearchParams(window.location.search).get('serverUrl')
       : null
   const requestedUrl = queryUrl?.trim() || fallbackUrl
+  const startedAt = Date.now()
+  const emit = options?.onEvent
+  const notify = (kind: DesktopBootEventKind, detail?: string) => {
+    if (!emit) return
+    emit({ kind, elapsedMs: Date.now() - startedAt, detail })
+  }
 
   if (!isTauriRuntime()) {
     setBaseUrl(requestedUrl)
+    let pollDelay = HEALTH_BACKOFF_INITIAL_MS
     for (;;) {
       options?.signal?.throwIfAborted()
       try {
-        await waitForHealth(requestedUrl, BROWSER_HEALTH_ATTEMPTS)
+        await waitForHealth(requestedUrl, BROWSER_HEALTH_ATTEMPTS, options?.signal)
+        notify('health-ok')
         return requestedUrl
       } catch (error) {
+        notify('health-failed', error instanceof Error ? error.message : String(error))
         console.warn('[desktop] browser health check failed, retrying', error)
-        await sleep(600)
+        await sleep(pollDelay)
+        pollDelay = Math.min(HEALTH_BACKOFF_MAX_MS, Math.round(pollDelay * 1.6))
       }
     }
   }
 
-  const { invoke } = await import(/* @vite-ignore */ '@tauri-apps/api/core')
+  const invoke = (await ensureInvoke()) as TauriInvoke
 
   let pendingTicks = 0
   let healthFailureStreak = 0
   let lastRestartAttemptAt = 0
+  let urlPollDelay = HEALTH_BACKOFF_INITIAL_MS
 
   for (;;) {
     options?.signal?.throwIfAborted()
@@ -102,26 +202,34 @@ export async function initializeDesktopServerUrl(options?: { signal?: AbortSigna
       }
     } catch {
       pendingTicks += 1
-      if (pendingTicks % 80 === 0) {
+      if (pendingTicks % 40 === 0) {
+        notify('gateway-pending')
         console.info(
-          `[desktop] embedded gateway still warming up (${(pendingTicks * 250) / 1000}s elapsed)`,
+          `[desktop] embedded gateway still warming up (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`,
         )
       }
-      await sleep(250)
+      await sleep(urlPollDelay)
+      urlPollDelay = Math.min(HEALTH_BACKOFF_MAX_MS, Math.round(urlPollDelay * 1.6))
       continue
     }
 
     if (!serverUrl) {
-      await sleep(250)
+      await sleep(urlPollDelay)
+      urlPollDelay = Math.min(HEALTH_BACKOFF_MAX_MS, Math.round(urlPollDelay * 1.6))
       continue
     }
 
+    urlPollDelay = HEALTH_BACKOFF_INITIAL_MS
+    notify('gateway-acquired', serverUrl)
     setBaseUrl(serverUrl)
     try {
-      await waitForHealth(serverUrl, BROWSER_HEALTH_ATTEMPTS)
+      await waitForHealth(serverUrl, BROWSER_HEALTH_ATTEMPTS, options?.signal)
+      notify('health-ok')
       return serverUrl
     } catch (error) {
       healthFailureStreak += 1
+      const msg = error instanceof Error ? error.message : String(error)
+      notify('health-failed', msg)
       console.warn(
         `[desktop] /health probe failed (streak=${healthFailureStreak}); will retry`,
         error,
@@ -131,8 +239,9 @@ export async function initializeDesktopServerUrl(options?: { signal?: AbortSigna
         if (now - lastRestartAttemptAt >= MIN_RESTART_INTERVAL_MS) {
           lastRestartAttemptAt = now
           healthFailureStreak = 0
+          notify('health-restart-attempt')
           try {
-            await invoke<void>('restart_embedded_gateway')
+            await invoke<void>('restart_embedded_gateway', { force: false })
             console.info('[desktop] requested embedded gateway restart')
           } catch (restartErr) {
             console.info(

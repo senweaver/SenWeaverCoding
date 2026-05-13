@@ -60,7 +60,8 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use senweavercoding::tools::browser::{
-    DockController, DockRequest, DockResponse, DockTabInfo,
+    clear_test_target_tab, current_test_target_tab, set_test_target_tab, DockController,
+    DockRequest, DockResponse, DockTabInfo,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -2119,6 +2120,23 @@ pub async fn browser_dock_list_tabs(
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<Vec<TabSummary>, String> {
     Ok(state.list())
+}
+
+#[tauri::command]
+pub async fn browser_dock_pin_test_target(tab_id: TabId) -> Result<(), String> {
+    set_test_target_tab(tab_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_clear_test_target() -> Result<(), String> {
+    clear_test_target_tab();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_get_test_target() -> Result<Option<TabId>, String> {
+    Ok(current_test_target_tab())
 }
 
 fn eval_dock(app: &AppHandle, _state: &DockSharedState, source: &str) -> Result<(), String> {

@@ -14,13 +14,14 @@ use tokio::process::Command;
 use tracing::debug;
 
 pub use dock::{
-    DockController, DockRequest, DockResponse, DockTabInfo, dock_controller,
-    install_dock_controller,
+    clear_test_target_tab, current_test_target_tab, dock_controller, install_dock_controller,
+    set_test_target_tab, DockController, DockRequest, DockResponse, DockTabInfo,
 };
 
 mod dock {
     use anyhow::Result;
     use async_trait::async_trait;
+    use parking_lot::RwLock;
     use serde_json::Value;
     use std::sync::{Arc, OnceLock};
 
@@ -77,6 +78,24 @@ mod dock {
 
     pub fn dock_controller() -> Option<Arc<dyn DockController>> {
         CONTROLLER.get().cloned()
+    }
+
+    static TEST_TARGET_TAB: OnceLock<RwLock<Option<u32>>> = OnceLock::new();
+
+    fn target_slot() -> &'static RwLock<Option<u32>> {
+        TEST_TARGET_TAB.get_or_init(|| RwLock::new(None))
+    }
+
+    pub fn set_test_target_tab(tab_id: u32) {
+        *target_slot().write() = Some(tab_id);
+    }
+
+    pub fn clear_test_target_tab() {
+        *target_slot().write() = None;
+    }
+
+    pub fn current_test_target_tab() -> Option<u32> {
+        *target_slot().read()
     }
 }
 
@@ -310,6 +329,8 @@ pub enum BrowserAction {
     ClearStorage {
         #[serde(default)]
         scope: Option<String>,
+        #[serde(default)]
+        force: bool,
     },
 
     Back,
@@ -335,6 +356,12 @@ pub enum BrowserAction {
         #[serde(default)]
         limit: Option<u64>,
     },
+
+    PinTestTarget { tab_id: u32 },
+
+    ClearTestTarget,
+
+    GetTestTarget,
 }
 
 fn default_activate() -> bool {
@@ -849,6 +876,17 @@ impl BrowserTool {
                         .to_string(),
                 ),
             }),
+            BrowserAction::PinTestTarget { .. }
+            | BrowserAction::ClearTestTarget
+            | BrowserAction::GetTestTarget => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "Test-target actions (pin_test_target/clear_test_target/get_test_target) require the embedded dock backend (tauri_dock). \
+                     Run inside the SenAgentOS desktop app."
+                        .to_string(),
+                ),
+            }),
         }
     }
 
@@ -1117,9 +1155,75 @@ impl BrowserTool {
         const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
         let preferred = *self.preferred_tab.lock().await;
-        let effective_tab_id = request_tab_id.or(preferred);
+        let effective_tab_id = request_tab_id
+            .or(preferred)
+            .or_else(current_test_target_tab);
 
         match &action {
+            BrowserAction::PinTestTarget { tab_id } => {
+
+                let tabs = controller
+                    .list_tabs()
+                    .await
+                    .with_context(|| "tauri_dock list_tabs failed for pin_test_target")?;
+                let Some(info) = tabs.into_iter().find(|t| t.id == *tab_id) else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "pin_test_target: tab_id {tab_id} not found. Run action=list_tabs to discover available tabs."
+                        )),
+                    });
+                };
+                set_test_target_tab(*tab_id);
+                {
+                    let mut guard = self.preferred_tab.lock().await;
+                    *guard = Some(*tab_id);
+                }
+                let owner = info.owner.clone();
+                return Ok(dock_ok_result(
+                    "pin_test_target",
+                    json!({
+                        "tab_id": tab_id,
+                        "url": info.url,
+                        "title": info.title,
+                        "owner": owner.unwrap_or_else(|| "agent".to_string()),
+                    }),
+                ));
+            }
+            BrowserAction::ClearTestTarget => {
+                clear_test_target_tab();
+                {
+                    let mut guard = self.preferred_tab.lock().await;
+                    *guard = None;
+                }
+                return Ok(dock_ok_result(
+                    "clear_test_target",
+                    json!({ "cleared": true }),
+                ));
+            }
+            BrowserAction::GetTestTarget => {
+                let pinned = current_test_target_tab();
+                let local_pref = preferred;
+                let resolved = pinned.or(local_pref);
+                let mut payload = json!({
+                    "tab_id": resolved,
+                    "global_pinned": pinned,
+                    "session_pinned": local_pref,
+                });
+                if let Some(tab_id) = resolved {
+                    if let Ok(tabs) = controller.list_tabs().await {
+                        if let Some(info) = tabs.into_iter().find(|t| t.id == tab_id) {
+                            payload["url"] = serde_json::Value::from(info.url);
+                            payload["title"] = serde_json::Value::from(info.title);
+                            payload["owner"] = serde_json::Value::from(
+                                info.owner.unwrap_or_else(|| "agent".to_string()),
+                            );
+                        }
+                    }
+                }
+                return Ok(dock_ok_result("get_test_target", payload));
+            }
             BrowserAction::OpenTab { url, activate } => {
                 if let Some(url) = url.as_ref() {
                     self.validate_url(url, true)?;
@@ -1200,6 +1304,7 @@ impl BrowserTool {
                     let mut guard = self.preferred_tab.lock().await;
                     *guard = Some(*tab_id);
                 }
+                set_test_target_tab(*tab_id);
                 let owner = info.owner.clone();
                 let is_user_tab = owner.as_deref() == Some("user");
                 let mut payload = json!({
@@ -1208,6 +1313,7 @@ impl BrowserTool {
                     "url": info.url,
                     "title": info.title,
                     "owner": owner.clone().unwrap_or_else(|| "agent".to_string()),
+                    "pinned_as_test_target": true,
                 });
                 if is_user_tab {
                     payload["takeover"] = Value::Bool(true);
@@ -1395,7 +1501,38 @@ impl BrowserTool {
                 .await);
         }
 
-        if let BrowserAction::ClearStorage { scope } = action.clone() {
+        if let BrowserAction::ClearStorage { scope, force } = action.clone() {
+            if !force {
+                let pinned = current_test_target_tab();
+                let target = effective_tab_id;
+                let pin_hits = match (target, pinned) {
+                    (Some(t), Some(p)) => t == p,
+                    _ => false,
+                };
+                let owner_blocks = if let Some(tab_id) = target {
+                    matches!(
+                        lookup_tab_owner(controller.as_ref(), tab_id).await.as_deref(),
+                        Some("user")
+                    )
+                } else {
+                    false
+                };
+                if pin_hits || owner_blocks {
+                    let reason = if pin_hits {
+                        "tab is pinned as the QA test target"
+                    } else {
+                        "tab is owned by the user"
+                    };
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "clear_storage refused: {reason}. Pass force=true to override, \
+                             but this will wipe the user's login session and cookies."
+                        )),
+                    });
+                }
+            }
             let args_value =
                 inject_tab_id_into_args(json!({ "scope": scope }), effective_tab_id);
             let resp = controller
@@ -1600,6 +1737,11 @@ impl BrowserTool {
                 | BrowserAction::NetworkErrors { .. } => {
                     unreachable!("QA actions handled earlier")
                 }
+                BrowserAction::PinTestTarget { .. }
+                | BrowserAction::ClearTestTarget
+                | BrowserAction::GetTestTarget => {
+                    unreachable!("test-target actions handled earlier")
+                }
             };
 
         let args = inject_tab_id_into_args(args, effective_tab_id);
@@ -1613,13 +1755,13 @@ impl BrowserTool {
             .await?;
 
         if !resp.ok {
+            let raw_err = resp
+                .error
+                .unwrap_or_else(|| format!("dock backend reported failure for {kind}"));
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(
-                    resp.error
-                        .unwrap_or_else(|| format!("dock backend reported failure for {kind}")),
-                ),
+                error: Some(sanitize_browser_output(&raw_err)),
             });
         }
 
@@ -1674,7 +1816,10 @@ impl BrowserTool {
         if resp.success {
             let output = resp
                 .data
-                .map(|d| serde_json::to_string_pretty(&d).unwrap_or_default())
+                .map(|d| {
+                    let pretty = serde_json::to_string_pretty(&d).unwrap_or_default();
+                    sanitize_browser_output(&pretty)
+                })
                 .unwrap_or_default();
             Ok(ToolResult {
                 success: true,
@@ -1685,10 +1830,35 @@ impl BrowserTool {
             Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: resp.error,
+                error: resp
+                    .error
+                    .map(|err| sanitize_browser_output(&err)),
             })
         }
     }
+}
+
+fn sanitize_browser_output(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    let sanitizer = crate::services::pii_sanitizer::global_sanitizer();
+    if !sanitizer.enabled() {
+        return input.to_string();
+    }
+    let in_debug = crate::services::try_get_services()
+        .map(|svc| {
+            matches!(
+                *svc.coding_mode.read(),
+                crate::agent::coding_mode::CodingMode::Debug
+            )
+        })
+        .unwrap_or(false);
+    if !in_debug {
+        return input.to_string();
+    }
+    let (clean, _) = sanitizer.sanitize(input);
+    clean
 }
 
 #[async_trait]
@@ -1751,8 +1921,9 @@ impl Tool for BrowserTool {
                              "mouse_move", "mouse_click", "mouse_drag", "key_type",
                              "key_press", "screen_capture",
                              "assert", "console_logs", "network_idle", "clear_storage",
-                             "back", "forward", "reload"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_*/QA actions require backend=tauri_dock)"
+                             "back", "forward", "reload",
+                             "pin_test_target", "clear_test_target", "get_test_target"],
+                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_*/QA/test-target actions require backend=tauri_dock). Use pin_test_target/get_test_target/clear_test_target in Debug mode to lock automated testing onto a user-pre-authenticated tab."
                 },
                 "tab": {
                     "type": "integer",
@@ -1932,6 +2103,10 @@ impl Tool for BrowserTool {
                     "type": "string",
                     "enum": ["all", "cookies", "local", "session", "indexeddb", "cache"],
                     "description": "For clear_storage: which storage scope to wipe (default=all)"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "For clear_storage: required (`true`) to wipe storage on tabs that are user-owned or pinned as QA test target. Without `force`, the action is refused to protect the user's pre-authenticated session."
                 }
             },
             "required": ["action"]
@@ -2386,6 +2561,12 @@ mod native_backend {
                 | BrowserAction::Reload => anyhow::bail!(
                     "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload) require the \
                      embedded dock backend (tauri_dock). Run inside the SenAgentOS desktop app."
+                ),
+                BrowserAction::PinTestTarget { .. }
+                | BrowserAction::ClearTestTarget
+                | BrowserAction::GetTestTarget => anyhow::bail!(
+                    "Test-target actions (pin_test_target/clear_test_target/get_test_target) require the embedded dock backend (tauri_dock). \
+                     Run inside the SenAgentOS desktop app."
                 ),
             }
         }
@@ -2942,6 +3123,10 @@ fn parse_browser_action(action_str: &str, args: &Value) -> anyhow::Result<Browse
         }),
         "clear_storage" => Ok(BrowserAction::ClearStorage {
             scope: args.get("scope").and_then(|v| v.as_str()).map(String::from),
+            force: args
+                .get("force")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         }),
         "back" => Ok(BrowserAction::Back),
         "forward" => Ok(BrowserAction::Forward),
@@ -2966,6 +3151,18 @@ fn parse_browser_action(action_str: &str, args: &Value) -> anyhow::Result<Browse
             since_ms: args.get("since_ms").and_then(serde_json::Value::as_u64),
             limit: args.get("limit").and_then(serde_json::Value::as_u64),
         }),
+        "pin_test_target" => {
+            let tab_id = args
+                .get("tab_id")
+                .and_then(|v| v.as_u64())
+                .or_else(|| args.get("tab").and_then(|v| v.as_u64()))
+                .ok_or_else(|| anyhow::anyhow!("Missing 'tab_id' for pin_test_target"))?;
+            Ok(BrowserAction::PinTestTarget {
+                tab_id: tab_id as u32,
+            })
+        }
+        "clear_test_target" => Ok(BrowserAction::ClearTestTarget),
+        "get_test_target" => Ok(BrowserAction::GetTestTarget),
         other => anyhow::bail!("Unsupported browser action: {other}"),
     }
 }
@@ -3009,6 +3206,9 @@ fn is_supported_browser_action(action: &str) -> bool {
             | "attach_tab"
             | "collect_links"
             | "network_errors"
+            | "pin_test_target"
+            | "clear_test_target"
+            | "get_test_target"
     )
 }
 
@@ -3034,9 +3234,10 @@ fn dock_ok_result(action: &str, value: Value) -> ToolResult {
         "action": action,
         "data": value,
     });
+    let raw = serde_json::to_string_pretty(&payload).unwrap_or_default();
     ToolResult {
         success: true,
-        output: serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        output: sanitize_browser_output(&raw),
         error: None,
     }
 }
@@ -3321,13 +3522,13 @@ fn sanitize_path_segment(input: &str) -> String {
 
 fn dock_response_to_result(action: &str, resp: DockResponse) -> ToolResult {
     if !resp.ok {
+        let raw_err = resp
+            .error
+            .unwrap_or_else(|| format!("dock backend reported failure for {action}"));
         return ToolResult {
             success: false,
             output: String::new(),
-            error: Some(
-                resp.error
-                    .unwrap_or_else(|| format!("dock backend reported failure for {action}")),
-            ),
+            error: Some(sanitize_browser_output(&raw_err)),
         };
     }
     dock_ok_result(action, resp.value)

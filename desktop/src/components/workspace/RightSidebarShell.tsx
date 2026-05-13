@@ -8,6 +8,8 @@ import { MonacoEditorBoundary } from './MonacoEditorBoundary'
 import { FileTree } from './FileTree'
 import { WorkspaceSearchBar } from './WorkspaceSearchBar'
 import { WorkspaceSplit } from './WorkspaceSplit'
+import { OutlinePanel } from './OutlinePanel'
+import { ProblemsPanel } from './ProblemsPanel'
 
 const MonacoFileEditor = lazy(() =>
   import('./MonacoFileEditor').then((m) => ({ default: m.MonacoFileEditor })),
@@ -32,6 +34,7 @@ export function RightSidebarShell({
   const refreshRoot = useWorkspaceFilesStore((s) => s.refreshRoot)
   const selectFile = useWorkspaceFilesStore((s) => s.selectFile)
   const activeTab = useWorkspaceFilesStore((s) => s.activeTab)
+  const requestNavigation = useWorkspaceFilesStore((s) => s.requestNavigation)
   const addToast = useUIStore((s) => s.addToast)
 
   useEffect(() => {
@@ -68,6 +71,20 @@ export function RightSidebarShell({
     [addToast, selectFile],
   )
 
+  const handleNavigate = useCallback(
+    async (relPath: string, position: { line: number; character: number }) => {
+      try {
+        await requestNavigation(relPath, position.line, position.character)
+      } catch (err) {
+        addToast({
+          type: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    },
+    [addToast, requestNavigation],
+  )
+
   if (!workDir) {
     return (
       <div className="flex h-full min-h-0 flex-col">
@@ -85,7 +102,13 @@ export function RightSidebarShell({
       <WorkspaceSearchBar workDir={workDir} onSelect={handleSearchSelect} />
       <WorkspaceSplit
         left={
-          <FileTree workDir={workDir} onSelect={handleTreeSelect} />
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <FileTree workDir={workDir} onSelect={handleTreeSelect} />
+            </div>
+            <OutlinePanel workDir={workDir} onJump={handleNavigate} />
+            <ProblemsPanel workDir={workDir} onJump={handleNavigate} />
+          </div>
         }
         right={
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">

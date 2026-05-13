@@ -51,6 +51,7 @@ type Props = {
   node: FileTreeNode
   depth: number
   selectedRelPath: string | null
+  focusedRelPath?: string | null
 
   renameTarget: RenameTargetState | null
 
@@ -122,6 +123,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   node,
   depth,
   selectedRelPath,
+  focusedRelPath,
   renameTarget,
   createTarget,
   filter,
@@ -193,6 +195,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   }, [dirState, filter, filterActive, node.children, node.isDir, node.loaded])
 
   const isSelected = !node.isDir && selectedRelPath === node.relPath
+  const isFocused = focusedRelPath === node.relPath
 
   const sizeLabel = useMemo(() => {
     if (node.isDir) return ''
@@ -284,7 +287,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
           isSelected
             ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
             : 'hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
-        }`}
+        }${isFocused ? ' ring-1 ring-inset ring-[var(--color-accent)]/60' : ''}`}
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
         title={tooltip}
       >
@@ -409,6 +412,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
                 node={child}
                 depth={depth + 1}
                 selectedRelPath={selectedRelPath}
+                focusedRelPath={focusedRelPath}
                 renameTarget={renameTarget}
                 createTarget={createTarget}
                 filter={filter}
