@@ -24,7 +24,6 @@ import {
 import { resolveSessionTitle } from '../../utils/sessionTitle'
 
 const FILTER_TABS: Array<{ mode: AgentMonitorFilterMode; labelKey: TranslationKey }> = [
-  { mode: 'all', labelKey: 'agentMonitor.filter.all' },
   { mode: 'active', labelKey: 'agentMonitor.filter.active' },
   { mode: 'errors', labelKey: 'agentMonitor.filter.errors' },
 ]
@@ -174,11 +173,9 @@ export function AgentMonitorPanel() {
 
             {filtered.length === 0 ? (
               <div className="rounded-[8px] px-2.5 py-3 text-center text-[11px] text-[var(--color-text-tertiary)]">
-                {filterMode === 'active'
-                  ? t('agentMonitor.emptyActive')
-                  : filterMode === 'errors'
+                {filterMode === 'errors'
                   ? t('agentMonitor.emptyErrors')
-                  : t('agentMonitor.empty')}
+                  : t('agentMonitor.emptyActive')}
               </div>
             ) : (
               <div className="max-h-[260px] overflow-y-auto pr-0.5">

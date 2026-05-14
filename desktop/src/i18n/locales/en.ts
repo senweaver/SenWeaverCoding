@@ -2571,7 +2571,6 @@ export const en = {
   'agentMonitor.title': 'Agents monitor',
   'agentMonitor.expand': 'Expand agents monitor',
   'agentMonitor.collapse': 'Collapse agents monitor',
-  'agentMonitor.filter.all': 'All',
   'agentMonitor.filter.active': 'Active',
   'agentMonitor.filter.errors': 'Errors',
   'agentMonitor.groupBy.workspace': 'By workspace',
@@ -2579,7 +2578,7 @@ export const en = {
   'agentMonitor.groupBy.flat': 'Flat',
   'agentMonitor.groupBy.menuLabel': 'Group by',
   'agentMonitor.empty': 'No agents to display.',
-  'agentMonitor.emptyActive': 'No agents are currently active.',
+  'agentMonitor.emptyActive': 'No agents are currently running. See the history list below.',
   'agentMonitor.emptyErrors': 'No agents have errors or missing workspaces.',
   'agentMonitor.unknownWorkspace': 'Other',
   'agentMonitor.summary':

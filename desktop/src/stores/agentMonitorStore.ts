@@ -24,11 +24,24 @@ const EXPANDED_KEY = 'sen-agent-monitor-expanded'
 const FILTER_KEY = 'sen-agent-monitor-filter'
 const GROUP_KEY = 'sen-agent-monitor-group'
 
-export type AgentMonitorFilterMode = 'all' | 'active' | 'errors'
+export type AgentMonitorFilterMode = 'active' | 'errors'
 export type AgentMonitorGroupBy = 'workspace' | 'status' | 'flat'
 
-const VALID_FILTERS: AgentMonitorFilterMode[] = ['all', 'active', 'errors']
+const VALID_FILTERS: AgentMonitorFilterMode[] = ['active', 'errors']
 const VALID_GROUPS: AgentMonitorGroupBy[] = ['workspace', 'status', 'flat']
+
+function migrateLegacyFilter(key: string): void {
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === 'all') {
+      localStorage.setItem(key, 'active')
+    }
+  } catch {
+    /* noop */
+  }
+}
+
+migrateLegacyFilter(FILTER_KEY)
 
 function readBoolean(key: string, fallback: boolean): boolean {
   try {
@@ -71,7 +84,7 @@ type AgentMonitorStore = {
 
 export const useAgentMonitorStore = create<AgentMonitorStore>((set) => ({
   expanded: readBoolean(EXPANDED_KEY, true),
-  filterMode: readEnum<AgentMonitorFilterMode>(FILTER_KEY, VALID_FILTERS, 'all'),
+  filterMode: readEnum<AgentMonitorFilterMode>(FILTER_KEY, VALID_FILTERS, 'active'),
   groupBy: readEnum<AgentMonitorGroupBy>(GROUP_KEY, VALID_GROUPS, 'workspace'),
 
   toggleExpanded: () =>
@@ -244,7 +257,6 @@ export function filterAgentSnapshots(
   snapshots: AgentSnapshot[],
   filterMode: AgentMonitorFilterMode,
 ): AgentSnapshot[] {
-  if (filterMode === 'all') return snapshots
   if (filterMode === 'errors') {
     return snapshots.filter((s) => s.status === 'error' || s.status === 'missingWorkDir')
   }
