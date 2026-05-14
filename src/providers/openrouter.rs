@@ -21,6 +21,7 @@ pub struct OpenRouterProvider {
     timeout_secs: u64,
     max_tokens: Option<u32>,
     model_context_windows: std::collections::HashMap<String, u32>,
+    extra_headers: std::collections::HashMap<String, String>,
 }
 
 const DEFAULT_OPENROUTER_TIMEOUT_SECS: u64 = 120;
@@ -186,6 +187,7 @@ impl OpenRouterProvider {
                 .unwrap_or(DEFAULT_OPENROUTER_TIMEOUT_SECS),
             max_tokens: None,
             model_context_windows: std::collections::HashMap::new(),
+            extra_headers: std::collections::HashMap::new(),
         }
     }
 
@@ -204,6 +206,14 @@ impl OpenRouterProvider {
         windows: std::collections::HashMap<String, u32>,
     ) -> Self {
         self.model_context_windows = windows;
+        self
+    }
+
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
         self
     }
 
@@ -578,10 +588,11 @@ impl OpenRouterProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts(
+        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
             "provider.openrouter",
             self.timeout_secs,
             OPENROUTER_CONNECT_TIMEOUT_SECS,
+            &self.extra_headers,
         )
     }
 }

@@ -12,6 +12,7 @@ import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { QuestionStrip } from '../components/chat/QuestionStrip'
 import { ActivePlanStickyBar } from '../components/chat/ActivePlanStickyBar'
+import { ResourceWaitBanner } from '../components/chat/ResourceWaitBanner'
 
 const TASK_POLL_INTERVAL_MS = 1000
 
@@ -211,6 +212,10 @@ export function ActiveSession() {
       {!isMemberSession && <QuestionStrip />}
 
       <TeamStatusBar />
+
+      {!isMemberSession && activeTabId && (
+        <ResourceWaitBanner sessionId={activeTabId} />
+      )}
 
       <ChatInput variant={isEmpty && !isMemberSession ? 'hero' : 'default'} />
 

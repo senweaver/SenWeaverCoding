@@ -11,7 +11,13 @@ import { Input } from '../components/shared/Input'
 import { Button } from '../components/shared/Button'
 import type { EffortLevel, ThemeMode } from '../types/settings'
 import type { Locale } from '../i18n'
-import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ApiFormat } from '../types/provider'
+import type {
+  SavedProvider,
+  UpdateProviderInput,
+  ProviderTestResult,
+  ApiFormat,
+  CustomHttpHeader,
+} from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import { ApiError } from '../api/client'
 import { AdapterSettings } from './AdapterSettings'
@@ -138,7 +144,6 @@ function ProviderSettings() {
   )
 
   const handleDelete = async (provider: SavedProvider) => {
-    if (activeId === provider.id) return
     setPendingDeleteProvider(provider)
   }
 
@@ -147,6 +152,7 @@ function ProviderSettings() {
     setIsDeletingProvider(true)
     try {
       await deleteProvider(pendingDeleteProvider.id)
+      await fetchSettings()
       setPendingDeleteProvider(null)
     } catch (error) {
       console.error(error)
@@ -177,6 +183,7 @@ function ProviderSettings() {
   const removeModelFromProvider = async (provider: SavedProvider, modelId: string) => {
     const next = provider.models.filter((m) => m !== modelId)
     await updateProvider(provider.id, { models: next })
+    await fetchSettings()
   }
 
   return (
@@ -272,9 +279,7 @@ function ProviderSettings() {
                     )}
                     <Button variant="ghost" size="sm" onClick={() => handleTest(provider)} loading={test?.loading}>{t('settings.providers.test')}</Button>
                     <Button variant="ghost" size="sm" onClick={() => setEditingProvider(provider)}>{t('settings.providers.edit')}</Button>
-                    {!isActive && (
-                      <Button variant="ghost" size="sm" onClick={() => handleDelete(provider)} className="text-[var(--color-error)] hover:text-[var(--color-error)]">{t('common.delete')}</Button>
-                    )}
+                    <Button variant="ghost" size="sm" onClick={() => handleDelete(provider)} className="text-[var(--color-error)] hover:text-[var(--color-error)]">{t('common.delete')}</Button>
                   </div>
                 </div>
 
@@ -393,6 +398,35 @@ function readErrorCode(body: unknown): string | null {
   return null
 }
 
+function isCustomPresetId(id: string | null | undefined): boolean {
+  return (id ?? '').trim().toLowerCase() === 'custom'
+}
+
+function presetInitialName(preset: ProviderPreset): string {
+  return isCustomPresetId(preset.id) ? '' : preset.name
+}
+
+function generateProviderEntityId(presetId: string): string {
+  const sanitizedPresetSeed = (presetId || 'provider')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+  const seed = sanitizedPresetSeed.length > 0 ? sanitizedPresetSeed : 'provider'
+  let unique = ''
+  try {
+    const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined
+    if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+      unique = cryptoApi.randomUUID().replace(/-/g, '').slice(0, 12)
+    }
+  } catch {
+
+  }
+  if (!unique) {
+    unique = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`
+  }
+  return `${seed}-${unique}`
+}
+
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const createProvider = useProviderStore((s) => s.createProvider)
   const updateProvider = useProviderStore((s) => s.updateProvider)
@@ -412,7 +446,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   )
 
   const [selectedPreset, setSelectedPreset] = useState<ProviderPreset>(initialPreset)
-  const [name, setName] = useState(provider?.name ?? initialPreset.name)
+  const [name, setName] = useState(provider?.name ?? presetInitialName(initialPreset))
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? initialPreset.baseUrl)
   const [apiFormat, setApiFormat] = useState<ApiFormat>(provider?.apiFormat ?? initialPreset.apiFormat ?? 'openai_chat')
   const [apiKey, setApiKey] = useState('')
@@ -432,6 +466,18 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     }
     return initial
   })
+  const [customHeaders, setCustomHeaders] = useState<CustomHttpHeader[]>(() => {
+    if (!provider?.customHeaders) return []
+    return provider.customHeaders.map((header) => ({
+      name: header.name ?? '',
+      value: header.value ?? '',
+      enabled: typeof header.enabled === 'boolean' ? header.enabled : true,
+    }))
+  })
+  const [advancedExpanded, setAdvancedExpanded] = useState(() =>
+    (provider?.customHeaders?.length ?? 0) > 0,
+  )
+  const [visibleHeaderValues, setVisibleHeaderValues] = useState<Set<number>>(() => new Set())
   const [newModelDraft, setNewModelDraft] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -450,14 +496,19 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   }, [allProviders, normalizedName, mode, provider])
 
   const handlePresetChange = (preset: ProviderPreset) => {
+    if (preset.id === selectedPreset.id) {
+
+      return
+    }
     setSelectedPreset(preset)
-    setName(preset.name)
+    setName(presetInitialName(preset))
     setBaseUrl(preset.baseUrl)
     setApiFormat(preset.apiFormat ?? 'openai_chat')
     setModels([...preset.defaultModels])
 
     setModelContextWindows({})
     setTestResult(null)
+    setSubmitError(null)
   }
 
   const isCustom = selectedPreset.id === 'custom'
@@ -477,8 +528,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     name.trim().length > 0 &&
     baseUrl.trim().length > 0 &&
     (mode === 'edit' || apiKey.trim().length > 0) &&
-    trimmedModels.length > 0 &&
-    !duplicateProvider
+    trimmedModels.length > 0
 
   const addModel = (raw?: string) => {
     const candidate = (raw ?? newModelDraft).trim()
@@ -548,14 +598,77 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     return payload
   }
 
+  const buildCustomHeadersPayload = (): CustomHttpHeader[] => {
+    return customHeaders
+      .map((entry) => ({
+        name: entry.name.trim(),
+        value: entry.value,
+        enabled: entry.enabled,
+      }))
+      .filter((entry) => entry.name.length > 0)
+  }
+
+  const addCustomHeader = () => {
+    setCustomHeaders((prev) => [...prev, { name: '', value: '', enabled: true }])
+  }
+
+  const updateCustomHeaderField = (
+    index: number,
+    field: 'name' | 'value' | 'enabled',
+    nextValue: string | boolean,
+  ) => {
+    setCustomHeaders((prev) =>
+      prev.map((entry, i) => {
+        if (i !== index) return entry
+        if (field === 'enabled' && typeof nextValue === 'boolean') {
+          return { ...entry, enabled: nextValue }
+        }
+        if (field === 'name' && typeof nextValue === 'string') {
+          return { ...entry, name: nextValue }
+        }
+        if (field === 'value' && typeof nextValue === 'string') {
+          return { ...entry, value: nextValue }
+        }
+        return entry
+      }),
+    )
+  }
+
+  const removeCustomHeader = (index: number) => {
+    setCustomHeaders((prev) => prev.filter((_, i) => i !== index))
+    setVisibleHeaderValues((prev) => {
+      if (!prev.has(index)) return prev
+      const next = new Set<number>()
+      prev.forEach((idx) => {
+        if (idx < index) next.add(idx)
+        else if (idx > index) next.add(idx - 1)
+      })
+      return next
+    })
+  }
+
+  const toggleCustomHeaderValueVisibility = (index: number) => {
+    setVisibleHeaderValues((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) {
+        next.delete(index)
+      } else {
+        next.add(index)
+      }
+      return next
+    })
+  }
+
   const handleSubmit = async () => {
     if (!canSubmit) return
     setSubmitError(null)
     setIsSubmitting(true)
     try {
       const overridesPayload = buildContextWindowsPayload()
+      const customHeadersPayload = buildCustomHeadersPayload()
       if (mode === 'create') {
         await createProvider({
+          id: generateProviderEntityId(selectedPreset.id),
           presetId: selectedPreset.id,
           name: name.trim(),
           apiKey: apiKey.trim(),
@@ -563,6 +676,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           apiFormat,
           models: trimmedModels,
           modelContextWindows: overridesPayload,
+          customHeaders: customHeadersPayload,
           notes: notes.trim() || undefined,
         })
       } else if (provider) {
@@ -572,6 +686,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           apiFormat,
           models: trimmedModels,
           modelContextWindows: overridesPayload,
+          customHeaders: customHeadersPayload,
           notes: notes.trim() || undefined,
         }
         if (apiKey.trim()) input.apiKey = apiKey.trim()
@@ -794,6 +909,18 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           </div>
         </div>
 
+        <AdvancedSettingsSection
+          presetId={selectedPreset.id}
+          expanded={advancedExpanded}
+          onToggleExpanded={() => setAdvancedExpanded((v) => !v)}
+          customHeaders={customHeaders}
+          visibleHeaderValues={visibleHeaderValues}
+          onAddHeader={addCustomHeader}
+          onRemoveHeader={removeCustomHeader}
+          onUpdateHeader={updateCustomHeaderField}
+          onToggleHeaderVisibility={toggleCustomHeaderValueVisibility}
+        />
+
         {}
         <div className="flex items-center gap-3">
           <Button variant="secondary" size="md" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !primaryModel}>
@@ -818,6 +945,221 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         </div>
       </div>
     </Modal>
+  )
+}
+
+const DISALLOWED_CUSTOM_HEADER_NAMES = new Set([
+  'content-type',
+  'content-length',
+  'host',
+  'authorization',
+  'transfer-encoding',
+  'connection',
+  'proxy-authorization',
+])
+
+const VALID_HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/
+
+function validateHeaderName(raw: string): {
+  invalid: boolean
+  disallowed: boolean
+} {
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) {
+    return { invalid: false, disallowed: false }
+  }
+  if (DISALLOWED_CUSTOM_HEADER_NAMES.has(trimmed.toLowerCase())) {
+    return { invalid: false, disallowed: true }
+  }
+  if (!VALID_HEADER_NAME_RE.test(trimmed)) {
+    return { invalid: true, disallowed: false }
+  }
+  return { invalid: false, disallowed: false }
+}
+
+type CustomHeaderPlaceholder = { name: string; value: string }
+
+function customHeaderPlaceholdersForPreset(presetId: string): CustomHeaderPlaceholder {
+  switch (presetId) {
+    case 'openrouter':
+      return { name: 'HTTP-Referer', value: 'https://your-app.example' }
+    case 'anthropic':
+      return { name: 'anthropic-beta', value: 'prompt-caching-2024-07-31' }
+    case 'openai':
+    case 'openai-codex':
+      return { name: 'OpenAI-Beta', value: 'assistants=v2' }
+    case 'gemini':
+      return { name: 'x-goog-user-project', value: 'your-gcp-project' }
+    default:
+      return { name: 'x-custom-header', value: 'value' }
+  }
+}
+
+type AdvancedSettingsSectionProps = {
+  presetId: string
+  expanded: boolean
+  onToggleExpanded: () => void
+  customHeaders: CustomHttpHeader[]
+  visibleHeaderValues: Set<number>
+  onAddHeader: () => void
+  onRemoveHeader: (index: number) => void
+  onUpdateHeader: (
+    index: number,
+    field: 'name' | 'value' | 'enabled',
+    value: string | boolean,
+  ) => void
+  onToggleHeaderVisibility: (index: number) => void
+}
+
+function AdvancedSettingsSection({
+  presetId,
+  expanded,
+  onToggleExpanded,
+  customHeaders,
+  visibleHeaderValues,
+  onAddHeader,
+  onRemoveHeader,
+  onUpdateHeader,
+  onToggleHeaderVisibility,
+}: AdvancedSettingsSectionProps) {
+  const t = useTranslation()
+  const placeholder = customHeaderPlaceholdersForPreset(presetId)
+
+  const lowerNameCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const entry of customHeaders) {
+      const key = entry.name.trim().toLowerCase()
+      if (key.length === 0) continue
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }, [customHeaders])
+
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+      <button
+        type="button"
+        onClick={onToggleExpanded}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] rounded-t-[var(--radius-md)]"
+      >
+        <span className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-[16px]">
+            {expanded ? 'expand_more' : 'chevron_right'}
+          </span>
+          {t('settings.providers.advanced.title')}
+        </span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border-separator)] flex flex-col gap-3">
+          <div>
+            <div className="text-xs font-medium text-[var(--color-text-primary)]">
+              {t('settings.providers.advanced.customHeaders.title')}
+            </div>
+            <div className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">
+              {t('settings.providers.advanced.customHeaders.description')}
+            </div>
+          </div>
+
+          {customHeaders.length === 0 ? (
+            <div className="text-[11px] italic text-[var(--color-text-tertiary)] px-3 py-2 rounded-md border border-dashed border-[var(--color-border)]">
+              {t('settings.providers.advanced.customHeaders.empty')}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {customHeaders.map((entry, index) => {
+                const nameStatus = validateHeaderName(entry.name)
+                const trimmedLower = entry.name.trim().toLowerCase()
+                const isDuplicate =
+                  trimmedLower.length > 0 && (lowerNameCounts.get(trimmedLower) ?? 0) > 1
+                const showValue = visibleHeaderValues.has(index)
+                return (
+                  <div key={`header-${index}`} className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={entry.name}
+                        onChange={(e) => onUpdateHeader(index, 'name', e.target.value)}
+                        placeholder={
+                          placeholder.name ||
+                          t('settings.providers.advanced.customHeaders.nameLabel')
+                        }
+                        aria-label={t('settings.providers.advanced.customHeaders.nameLabel')}
+                        className="flex-1 min-w-0 text-xs font-mono px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+                      />
+                      <div className="relative flex-1 min-w-0">
+                        <input
+                          value={entry.value}
+                          onChange={(e) => onUpdateHeader(index, 'value', e.target.value)}
+                          type={showValue ? 'text' : 'password'}
+                          placeholder={
+                            placeholder.value ||
+                            t('settings.providers.advanced.customHeaders.valueLabel')
+                          }
+                          aria-label={t('settings.providers.advanced.customHeaders.valueLabel')}
+                          className="w-full text-xs font-mono pr-9 pl-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onToggleHeaderVisibility(index)}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+                          title={
+                            showValue
+                              ? t('settings.providers.advanced.customHeaders.hide')
+                              : t('settings.providers.advanced.customHeaders.show')
+                          }
+                          aria-label={
+                            showValue
+                              ? t('settings.providers.advanced.customHeaders.hide')
+                              : t('settings.providers.advanced.customHeaders.show')
+                          }
+                        >
+                          <span className="material-symbols-outlined text-[16px]">
+                            {showValue ? 'visibility_off' : 'visibility'}
+                          </span>
+                        </button>
+                      </div>
+                      <label className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] flex-shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={entry.enabled}
+                          onChange={(e) => onUpdateHeader(index, 'enabled', e.target.checked)}
+                          className="h-3.5 w-3.5"
+                        />
+                        {t('settings.providers.advanced.customHeaders.enabled')}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveHeader(index)}
+                        className="text-[var(--color-text-tertiary)] hover:text-[var(--color-error)] flex-shrink-0 p-1"
+                        title={t('settings.providers.advanced.customHeaders.remove')}
+                        aria-label={t('settings.providers.advanced.customHeaders.remove')}
+                      >
+                        <span className="material-symbols-outlined text-[18px]">delete</span>
+                      </button>
+                    </div>
+                    {(nameStatus.invalid || nameStatus.disallowed || isDuplicate) && (
+                      <div className="text-[11px] text-[var(--color-warning)] pl-1">
+                        {nameStatus.disallowed
+                          ? t('settings.providers.advanced.customHeaders.disallowed')
+                          : nameStatus.invalid
+                            ? t('settings.providers.advanced.customHeaders.invalidName')
+                            : t('settings.providers.advanced.customHeaders.duplicateName')}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          <div className="flex">
+            <Button variant="secondary" size="md" onClick={onAddHeader}>
+              <span className="material-symbols-outlined text-[16px]">add</span>
+              {t('settings.providers.advanced.customHeaders.add')}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 

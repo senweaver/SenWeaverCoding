@@ -744,11 +744,56 @@ pub fn provider_runtime_options_from_config(
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_effort: config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(config.provider_timeout_secs),
-        extra_headers: config.extra_headers.clone(),
+        extra_headers: merged_extra_headers_for_config(config),
         api_path: config.api_path.clone(),
         provider_max_tokens: config.provider_max_tokens,
         model_context_windows: config.model_context_windows.clone(),
     }
+}
+
+pub fn merged_extra_headers_for_config(
+    config: &crate::config::Config,
+) -> std::collections::HashMap<String, String> {
+    let mut merged: std::collections::HashMap<String, String> =
+        std::collections::HashMap::with_capacity(config.extra_headers.len());
+    for (name, value) in &config.extra_headers {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if crate::config::is_disallowed_custom_header(trimmed) {
+            tracing::warn!(
+                header_name = trimmed,
+                "global extra_headers entry uses a reserved/disallowed header name; ignoring"
+            );
+            continue;
+        }
+        if !crate::config::is_valid_http_header_name(trimmed) {
+            tracing::warn!(
+                header_name = trimmed,
+                "global extra_headers entry has invalid header name; ignoring"
+            );
+            continue;
+        }
+        if !crate::config::is_valid_http_header_value(value) {
+            tracing::warn!(
+                header_name = trimmed,
+                "global extra_headers value contains CR/LF; ignoring"
+            );
+            continue;
+        }
+        merged.insert(trimmed.to_string(), value.clone());
+    }
+
+    if let Some(active_id) = config.default_provider.as_deref() {
+        if let Some(profile) = config.model_providers.get(active_id) {
+            let profile_headers = crate::config::build_custom_headers_map(&profile.custom_headers);
+            for (name, value) in profile_headers {
+                merged.insert(name, value);
+            }
+        }
+    }
+    merged
 }
 
 fn is_secret_char(c: char) -> bool {
@@ -1194,12 +1239,18 @@ pub fn create_provider_with_url_and_options(
             if !options.model_context_windows.is_empty() {
                 p = p.with_model_context_windows(options.model_context_windows.clone());
             }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
             Ok(Box::new(p))
         }
         "anthropic" => {
             let mut p = anthropic::AnthropicProvider::new(key);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(mt);
+            }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
             }
             Ok(Box::new(p))
         }
@@ -1208,12 +1259,18 @@ pub fn create_provider_with_url_and_options(
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(Some(mt));
             }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
             Ok(Box::new(p))
         }
         "openai-responses" | "openai_responses" | "openai_responses_api" => {
             let mut p = openai_responses::OpenAiResponsesProvider::with_base_url(api_url, key);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_output_tokens(Some(mt));
+            }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
             }
             Ok(Box::new(p))
         }
@@ -1237,11 +1294,15 @@ pub fn create_provider_with_url_and_options(
                 )
             });
             let auth_service = AuthService::new(&state_dir, options.secrets_encrypt);
-            Ok(Box::new(gemini::GeminiProvider::new_with_auth(
+            let mut p = gemini::GeminiProvider::new_with_auth(
                 key,
                 auth_service,
                 options.auth_profile_override.clone(),
-            )))
+            );
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
+            Ok(Box::new(p))
         }
         "telnyx" => Ok(Box::new(telnyx::TelnyxProvider::new(key))),
 
@@ -1709,10 +1770,16 @@ pub fn create_provider_with_url_and_options(
             AuthStyle::Bearer,
         ))),
 
-        "ovhcloud" | "ovh" => Ok(Box::new(openai::OpenAiProvider::with_base_url(
-            Some("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"),
-            key,
-        ))),
+        "ovhcloud" | "ovh" => {
+            let mut p = openai::OpenAiProvider::with_base_url(
+                Some("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"),
+                key,
+            );
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
+            Ok(Box::new(p))
+        }
 
         name if name.starts_with("custom:") => {
             let base_url = parse_custom_provider_url(
@@ -1735,10 +1802,15 @@ pub fn create_provider_with_url_and_options(
                 "Anthropic-custom provider",
                 "anthropic-custom:https://your-api.com",
             )?;
-            Ok(Box::new(anthropic::AnthropicProvider::with_base_url(
-                key,
-                Some(&base_url),
-            )))
+            let mut p =
+                anthropic::AnthropicProvider::with_base_url(key, Some(&base_url));
+            if let Some(mt) = options.provider_max_tokens {
+                p = p.with_max_tokens(mt);
+            }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
+            Ok(Box::new(p))
         }
 
         _ => anyhow::bail!(

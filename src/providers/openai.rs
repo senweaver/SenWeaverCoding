@@ -15,6 +15,7 @@ pub struct OpenAiProvider {
     base_url: String,
     credential: Option<String>,
     max_tokens: Option<u32>,
+    extra_headers: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,11 +191,20 @@ impl OpenAiProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             credential: credential.map(ToString::to_string),
             max_tokens: None,
+            extra_headers: std::collections::HashMap::new(),
         }
     }
 
     pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
         self
     }
 
@@ -341,7 +351,12 @@ impl OpenAiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.openai", 120, 10)
+        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
+            "provider.openai",
+            120,
+            10,
+            &self.extra_headers,
+        )
     }
 }
 

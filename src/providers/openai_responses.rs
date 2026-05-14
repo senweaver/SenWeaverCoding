@@ -44,6 +44,7 @@ pub struct OpenAiResponsesProvider {
     base_url: String,
     credential: Option<String>,
     max_output_tokens: Option<u32>,
+    extra_headers: std::collections::HashMap<String, String>,
 }
 
 impl OpenAiResponsesProvider {
@@ -60,6 +61,7 @@ impl OpenAiResponsesProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             credential: credential.map(ToString::to_string),
             max_output_tokens: None,
+            extra_headers: std::collections::HashMap::new(),
         }
     }
 
@@ -69,10 +71,22 @@ impl OpenAiResponsesProvider {
         self
     }
 
+    #[must_use]
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
     fn http_client(&self) -> Client {
-        Client::builder()
-            .build()
-            .unwrap_or_else(|_| Client::new())
+        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
+            "provider.openai_responses",
+            120,
+            10,
+            &self.extra_headers,
+        )
     }
 
     fn adjust_temperature_for_model(model: &str, requested: f64) -> f64 {

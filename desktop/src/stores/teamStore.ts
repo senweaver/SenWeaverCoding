@@ -41,6 +41,7 @@ function createMemberSessionState() {
     activeTaskToolUseId: null,
     stopRequested: false,
     debugPiiStats: { total: 0, counts: {}, lastEventAt: null },
+    pendingResourceWaits: [],
   }
 }
 

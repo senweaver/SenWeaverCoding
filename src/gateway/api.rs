@@ -177,7 +177,7 @@ pub async fn handle_api_status(
 
     let body = serde_json::json!({
         "provider": config.default_provider,
-        "model": state.model,
+        "model": state.current_model(),
         "temperature": state.temperature,
         "uptime_seconds": health.uptime_seconds,
         "gateway_port": config.gateway.port,
@@ -265,6 +265,7 @@ pub async fn handle_api_config_put(
 
     *state.config.lock() = new_config.clone();
     state.push_live_config(new_config);
+    state.rebuild_runtime_from_config();
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -582,6 +583,7 @@ pub async fn handle_api_provider_put(
 
     *state.config.lock() = config.clone();
     state.push_live_config(config);
+    state.rebuild_runtime_from_config();
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }

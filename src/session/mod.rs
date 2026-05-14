@@ -34,10 +34,20 @@ pub mod translators;
 
 pub mod rpc;
 
+pub mod resource_lock;
 pub mod run_state;
 pub mod workspace_run;
 
 pub use bridge::SessionEventSink;
+pub use resource_lock::{
+    AcquireError as ResourceAcquireError, ResourceEvent, ResourceGuard, ResourceKind,
+    SessionContext, WorkspaceResourceManager, acquire_browser_for_current_session,
+    acquire_file_write_for_current_session, acquire_many_file_writes_for_current_session,
+    acquire_shell_for_current_session, current_session_context, global_workspace_resources,
+    install_global as install_global_workspace_resources, is_stale_for_current_session,
+    record_read_for_current_session, record_write_for_current_session, scope_session_context,
+    stale_file_error_message,
+};
 pub use run_state::{SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry};
 pub use workspace_run::{
     WorkspaceRunGuard, WorkspaceRunRegistry, normalize_workspace_key, workspace_key_from_path,

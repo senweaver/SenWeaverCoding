@@ -61,6 +61,7 @@ export function AppShell() {
   const [bootStatus, setBootStatus] = useState<ServerStatusSnapshot | null>(null)
   const [bootFailed, setBootFailed] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [copiedError, setCopiedError] = useState(false)
 
   const [isMaximized, setIsMaximized] = useState(false)
   const t = useTranslation()
@@ -123,11 +124,21 @@ export function AppShell() {
         startBackgroundShellMirror()
         useSessionRunStateStore.getState().start()
 
-        while (!abort.signal.aborted) {
+        const RESTORE_MAX_ATTEMPTS = 6
+        let restoreAttempts = 0
+        while (!abort.signal.aborted && restoreAttempts < RESTORE_MAX_ATTEMPTS) {
           try {
             await useTabStore.getState().restoreTabs()
             break
-          } catch {
+          } catch (err) {
+            restoreAttempts += 1
+            if (restoreAttempts >= RESTORE_MAX_ATTEMPTS) {
+              console.warn(
+                '[desktop] restoreTabs still failing after retries; rendering main UI without restored tabs so the user can recreate them',
+                err,
+              )
+              break
+            }
             await new Promise<void>((resolve) => setTimeout(resolve, 400))
           }
         }
@@ -298,6 +309,28 @@ export function AppShell() {
     const handleOpenLogDir = () => {
       void openLogDir()
     }
+    const handleCopyError = async () => {
+      const text = surfacedError ?? ''
+      if (!text) return
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text)
+        } else {
+          const ta = document.createElement('textarea')
+          ta.value = text
+          ta.style.position = 'fixed'
+          ta.style.opacity = '0'
+          document.body.appendChild(ta)
+          ta.select()
+          document.execCommand('copy')
+          document.body.removeChild(ta)
+        }
+        setCopiedError(true)
+        window.setTimeout(() => setCopiedError(false), 2_000)
+      } catch (err) {
+        console.warn('[desktop] copy launch error failed', err)
+      }
+    }
     const headerText = bootFailed
       ? t('app.launchingFailed')
       : t('app.launching')
@@ -354,6 +387,17 @@ export function AppShell() {
                 >
                   {t('app.openLogDir')}
                 </button>
+                {surfacedError && (
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyError()}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-1 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+                  >
+                    {copiedError
+                      ? t('app.copyLaunchErrorCopied')
+                      : t('app.copyLaunchError')}
+                  </button>
+                )}
               </div>
             )}
           </div>

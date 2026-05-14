@@ -156,58 +156,99 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   fetchAll: async () => {
     set({ isLoading: true, error: null })
-    try {
-      const [
-        { mode: legacyPermMode },
-        modelsRes,
-        { model },
-        { level },
-        userSettings,
-        codingCatalog,
-        codingCurrent,
-      ] = await Promise.all([
-        settingsApi.getPermissionMode(),
-        modelsApi.list(),
-        modelsApi.getCurrent(),
-        modelsApi.getEffort(),
-        settingsApi.getUser(),
-        codingModesApi.list(),
-        codingModesApi.getCurrent(),
-      ])
-      const theme = userSettings.theme === 'dark' ? 'dark' : 'light'
-      useUIStore.getState().setTheme(theme)
-      const initialMode: CodingModeId = isVisibleCodingMode(codingCurrent.mode)
-        ? codingCurrent.mode
-        : DEFAULT_CODING_MODE
-      set({
-        codingMode: initialMode,
-        codingModes: codingCatalog.modes,
-        permissionMode: legacyPermMode,
-        availableModels: modelsRes.models,
-        activeProviderName: modelsRes.provider?.name ?? null,
-        currentModel: model,
-        effortLevel: level,
-        theme,
-        isLoading: false,
-        error: null,
-      })
-      if (initialMode !== codingCurrent.mode) {
-        codingModesApi
-          .setCurrent(initialMode)
-          .then((res) => {
-            const derived =
-              (res.permissionMode as PermissionMode) || get().permissionMode
-            set({ permissionMode: derived })
-          })
-          .catch((err) => {
-            console.warn('[settings] normalize hidden coding mode failed', err)
-          })
+
+    const settled = await Promise.allSettled([
+      settingsApi.getPermissionMode(),
+      modelsApi.list(),
+      modelsApi.getCurrent(),
+      modelsApi.getEffort(),
+      settingsApi.getUser(),
+      codingModesApi.list(),
+      codingModesApi.getCurrent(),
+    ])
+
+    const [
+      permissionRes,
+      modelsListRes,
+      currentModelRes,
+      effortRes,
+      userSettingsRes,
+      codingCatalogRes,
+      codingCurrentRes,
+    ] = settled
+
+    const failures: string[] = []
+    const noteFailure = (label: string, result: PromiseSettledResult<unknown>) => {
+      if (result.status === 'rejected') {
+        const reason = result.reason
+        const detail =
+          reason instanceof Error ? reason.message : String(reason ?? 'unknown')
+        console.warn(`[settings] ${label} failed; using safe defaults:`, reason)
+        failures.push(`${label}: ${detail}`)
       }
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to load desktop settings'
-      set({ isLoading: false, error: message })
-      throw error
+    }
+
+    noteFailure('permission_mode', permissionRes)
+    noteFailure('models_list', modelsListRes)
+    noteFailure('current_model', currentModelRes)
+    noteFailure('effort', effortRes)
+    noteFailure('user_settings', userSettingsRes)
+    noteFailure('coding_modes_catalog', codingCatalogRes)
+    noteFailure('coding_modes_current', codingCurrentRes)
+
+    const previous = get()
+    const legacyPermMode =
+      permissionRes.status === 'fulfilled' ? permissionRes.value.mode : previous.permissionMode
+    const modelsRes =
+      modelsListRes.status === 'fulfilled'
+        ? modelsListRes.value
+        : { models: previous.availableModels, provider: { name: previous.activeProviderName ?? '' } }
+    const currentModel =
+      currentModelRes.status === 'fulfilled' ? currentModelRes.value.model : previous.currentModel
+    const effortLevel =
+      effortRes.status === 'fulfilled' ? effortRes.value.level : previous.effortLevel
+    const userSettings =
+      userSettingsRes.status === 'fulfilled' ? userSettingsRes.value : { theme: previous.theme }
+    const codingCatalog =
+      codingCatalogRes.status === 'fulfilled'
+        ? codingCatalogRes.value
+        : { modes: previous.codingModes }
+    const codingCurrent =
+      codingCurrentRes.status === 'fulfilled'
+        ? codingCurrentRes.value
+        : { mode: previous.codingMode, permissionMode: legacyPermMode as string }
+
+    const theme = userSettings.theme === 'dark' ? 'dark' : 'light'
+    useUIStore.getState().setTheme(theme)
+    const initialMode: CodingModeId = isVisibleCodingMode(codingCurrent.mode)
+      ? codingCurrent.mode
+      : DEFAULT_CODING_MODE
+    set({
+      codingMode: initialMode,
+      codingModes: codingCatalog.modes,
+      permissionMode: legacyPermMode,
+      availableModels: modelsRes.models,
+      activeProviderName: modelsRes.provider?.name ?? null,
+      currentModel,
+      effortLevel,
+      theme,
+      isLoading: false,
+      error: failures.length > 0 ? failures.join(' | ') : null,
+    })
+    if (
+      codingCurrentRes.status === 'fulfilled'
+      && initialMode !== codingCurrent.mode
+    ) {
+      codingModesApi
+        .setCurrent(initialMode)
+        .then((res) => {
+          const derived =
+            (res.permissionMode as PermissionMode) || get().permissionMode
+          set({ permissionMode: derived })
+        })
+        .catch((err) => {
+          console.warn('[settings] normalize hidden coding mode failed', err)
+        })
     }
   },
 

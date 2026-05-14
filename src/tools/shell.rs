@@ -356,6 +356,18 @@ impl Tool for ShellTool {
             });
         }
 
+        let _resource_guard = match crate::session::acquire_shell_for_current_session().await {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
         let mut cmd = match self
             .runtime
             .build_shell_command(command, &self.security.workspace_dir())

@@ -9,6 +9,7 @@ mod terminal;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::Arc,
     thread,
@@ -26,6 +27,7 @@ const EMBEDDED_GATEWAY_PENDING_MSG: &str = "desktop server is starting";
 const GATEWAY_HEALTH_DEADLINE_SECS: u64 = 90;
 const GATEWAY_HEALTH_PROBE_INTERVAL_MS: u64 = 250;
 const GATEWAY_HEALTH_PROBE_TIMEOUT_MS: u64 = 2_000;
+const GATEWAY_DIAGNOSTIC_HINT_AFTER_SECS: u64 = 30;
 const RESTART_DEBOUNCE_SECS: u64 = 45;
 const HEALTH_PROBE_HEADER: &str = "X-Sen-Ping";
 const HEALTH_PROBE_HEADER_VALUE: &str = "1";
@@ -621,7 +623,8 @@ pub fn run() {
             browser_dock::browser_dock_get_test_target,
         ]);
 
-    let app = builder
+    let app_build = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        builder
         .setup(|app| {
             if let Some(main) = app.get_webview_window("main") {
                 if let Err(err) = main.set_resizable(true) {
@@ -662,11 +665,50 @@ pub fn run() {
                 tracing::error!(
                     "[sen-desktop] giving up spawning gateway bootstrap after 128 attempts: {last_spawn_err}"
                 );
+                {
+                    let mut g = server_state.0.lock();
+                    g.bootstrap_in_progress = false;
+                    g.last_error = Some(format!(
+                        "could not spawn gateway bootstrap thread after 128 attempts: {last_spawn_err}"
+                    ));
+                }
+                emit_backend_state(&handle, &server_state);
             }
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+    }));
+
+    let app = match app_build {
+        Ok(Ok(app)) => app,
+        Ok(Err(err)) => {
+            tracing::error!(
+                "[sen-desktop] tauri builder.build() returned error: {err:#}; \
+                 the desktop UI cannot start without the Tauri runtime, exiting after writing diagnostic logs"
+            );
+            eprintln!(
+                "[sen-desktop] failed to build Tauri application: {err}. See {} for details.",
+                bootstrap_diag::current_log_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "<no log dir>".to_string()),
+            );
+            std::process::exit(2);
+        }
+        Err(payload) => {
+            let msg = format_panic_payload(payload);
+            tracing::error!(
+                "[sen-desktop] tauri builder.build() panicked: {msg}; \
+                 the desktop UI cannot start, exiting after writing diagnostic logs"
+            );
+            eprintln!(
+                "[sen-desktop] Tauri builder panicked: {msg}. See {} for details.",
+                bootstrap_diag::current_log_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "<no log dir>".to_string()),
+            );
+            std::process::exit(3);
+        }
+    };
 
     app.run(|app_handle, event| match event {
         RunEvent::ExitRequested { .. } => {
@@ -746,15 +788,19 @@ fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handl
             emit_backend_state(&handle, &server_state);
         }
         Err(err) => {
+            let combined = match bootstrap_diag::last_panic_message() {
+                Some(panic) => format!("{err}\n--- recent panic captured by panic hook ---\n{panic}"),
+                None => err,
+            };
             tracing::error!(
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "[sen-desktop] embedded gateway bootstrap failed; user can request restart via UI: {err}"
+                "[sen-desktop] embedded gateway bootstrap failed; user can request restart via UI: {combined}"
             );
             {
                 let mut g = server_state.0.lock();
                 if g.bootstrap_generation == generation {
                     g.bootstrap_in_progress = false;
-                    g.last_error = Some(err);
+                    g.last_error = Some(combined);
                 }
             }
             emit_backend_state(&handle, &server_state);
@@ -815,17 +861,36 @@ fn probe_health_once(addr: SocketAddr, timeout_ms: u64) -> bool {
     }
 }
 
+type GatewayExitChannel = Arc<Mutex<Option<String>>>;
+
+fn record_gateway_exit(channel: &GatewayExitChannel, err: String) {
+    let mut slot = channel.lock();
+    if slot.is_none() {
+        *slot = Some(err);
+    }
+}
+
+fn record_last_error(server_state: &ServerState, generation: u64, err: &str) {
+    let mut g = server_state.0.lock();
+    if g.bootstrap_generation == generation {
+        g.last_error = Some(err.to_string());
+    }
+}
+
 fn wait_for_server_until_ready(
+    handle: &AppHandle,
     server_state: &ServerState,
     generation: u64,
     host: &str,
     port: u16,
+    gateway_exit: &GatewayExitChannel,
 ) -> Result<(), String> {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|err| format!("parse server address: {err}"))?;
     let started = Instant::now();
     let mut last_log = Instant::now();
+    let mut diagnostic_pushed = false;
     let hard_deadline = started + Duration::from_secs(GATEWAY_HEALTH_DEADLINE_SECS);
     loop {
         {
@@ -833,6 +898,11 @@ fn wait_for_server_until_ready(
             if g.bootstrap_generation != generation {
                 return Err("bootstrap generation invalidated; abandoning wait".into());
             }
+        }
+        if let Some(early_err) = gateway_exit.lock().clone() {
+            return Err(format!(
+                "embedded gateway exited before /health became ready: {early_err}"
+            ));
         }
         if probe_health_once(addr, GATEWAY_HEALTH_PROBE_TIMEOUT_MS) {
             tracing::info!(
@@ -850,6 +920,24 @@ fn wait_for_server_until_ready(
             );
             last_log = Instant::now();
         }
+        if !diagnostic_pushed
+            && elapsed >= Duration::from_secs(GATEWAY_DIAGNOSTIC_HINT_AFTER_SECS)
+        {
+            diagnostic_pushed = true;
+            let log_dir_hint = sen_log_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "~/.senweavercoding/logs".to_string());
+            let hint = format!(
+                "embedded gateway has not responded to /health on {host}:{port} for {}s; \
+                 the local server may still be initializing. \
+                 If this persists, click \"Open log directory\" and inspect {} \
+                 (look for `run_gateway exited`, panic, port-bind error or antivirus interference).",
+                elapsed.as_secs(),
+                log_dir_hint
+            );
+            record_last_error(server_state, generation, &hint);
+            emit_backend_state(handle, server_state);
+        }
         if Instant::now() >= hard_deadline {
             return Err(format!(
                 "embedded gateway did not respond to /health on {host}:{port} within {}s; \
@@ -865,65 +953,125 @@ fn wait_for_server_until_ready(
 }
 
 fn start_embedded_gateway_once(
-    _handle: AppHandle,
+    handle: AppHandle,
     server_state: &ServerState,
     generation: u64,
 ) -> Result<String, String> {
     let host = "127.0.0.1";
-    let (port, std_listener) = reserve_local_port()?;
+    let (port, std_listener) = reserve_local_port()
+        .map_err(|err| format!("reserve local port for embedded gateway: {err}"))?;
     std_listener
         .set_nonblocking(true)
         .map_err(|err| format!("listen socket non-blocking: {err}"))?;
     let url = format!("http://{host}:{port}");
 
-    thread::Builder::new()
+    let gateway_exit: GatewayExitChannel = Arc::new(Mutex::new(None));
+    let exit_for_thread = Arc::clone(&gateway_exit);
+
+    let spawn_result = thread::Builder::new()
         .name("sen-gateway".into())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(err) => {
-                    tracing::error!("[sen-desktop] gateway runtime build failed: {err}");
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let load_started = Instant::now();
-                let mut config = senweavercoding::Config::load_or_init().await.unwrap_or_else(|err| {
-                    tracing::warn!(
-                        "[sen-desktop] config load failed ({err}); falling back to defaults"
-                    );
-                    senweavercoding::Config::default()
-                });
-                tracing::info!(
-                    elapsed_ms = load_started.elapsed().as_millis() as u64,
-                    "[sen-desktop] gateway: config loaded"
-                );
-                apply_embedded_gateway_overrides(&mut config, host, port);
-                let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
-                    Ok(l) => l,
+            let exit_for_panic = Arc::clone(&exit_for_thread);
+            let work = AssertUnwindSafe(|| {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
                     Err(err) => {
-                        tracing::error!("[sen-desktop] failed to convert std listener to tokio: {err}");
+                        let msg = format!("gateway tokio runtime build failed: {err}");
+                        tracing::error!("[sen-desktop] {msg}");
+                        record_gateway_exit(&exit_for_thread, msg);
                         return;
                     }
                 };
-                let serve_started = Instant::now();
-                if let Err(err) =
-                    senweavercoding::gateway::run_gateway_with_supervisors(host, port, config, Some(tokio_listener)).await
-                {
-                    tracing::error!(
-                        elapsed_ms = serve_started.elapsed().as_millis() as u64,
-                        "[sen-desktop] run_gateway exited: {err:#}"
+                runtime.block_on(async move {
+                    let load_started = Instant::now();
+                    let mut config = senweavercoding::Config::load_or_init().await.unwrap_or_else(|err| {
+                        tracing::warn!(
+                            "[sen-desktop] config load failed ({err}); falling back to defaults"
+                        );
+                        senweavercoding::Config::default()
+                    });
+                    tracing::info!(
+                        elapsed_ms = load_started.elapsed().as_millis() as u64,
+                        "[sen-desktop] gateway: config loaded"
                     );
-                }
+                    apply_embedded_gateway_overrides(&mut config, host, port);
+                    let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
+                        Ok(l) => l,
+                        Err(err) => {
+                            let msg = format!(
+                                "failed to convert std listener to tokio listener on {host}:{port}: {err}"
+                            );
+                            tracing::error!("[sen-desktop] {msg}");
+                            record_gateway_exit(&exit_for_thread, msg);
+                            return;
+                        }
+                    };
+                    let serve_started = Instant::now();
+                    if let Err(err) = senweavercoding::gateway::run_gateway_with_supervisors(
+                        host,
+                        port,
+                        config,
+                        Some(tokio_listener),
+                    )
+                    .await
+                    {
+                        let msg = format!("run_gateway exited: {err:#}");
+                        tracing::error!(
+                            elapsed_ms = serve_started.elapsed().as_millis() as u64,
+                            "[sen-desktop] {msg}"
+                        );
+                        record_gateway_exit(&exit_for_thread, msg);
+                    } else {
+                        record_gateway_exit(
+                            &exit_for_thread,
+                            "run_gateway returned Ok unexpectedly without serving \
+                             (this should not happen on a healthy boot)"
+                                .to_string(),
+                        );
+                    }
+                });
             });
-        })
-        .map_err(|err| format!("spawn gateway thread: {err}"))?;
+            if let Err(panic_payload) = std::panic::catch_unwind(work) {
+                let msg = format_panic_payload(panic_payload);
+                tracing::error!("[sen-desktop] gateway thread panicked: {msg}");
+                record_gateway_exit(&exit_for_panic, format!("gateway thread panicked: {msg}"));
+            }
+        });
 
-    wait_for_server_until_ready(server_state, generation, host, port)?;
-    Ok(url)
+    if let Err(err) = spawn_result {
+        return Err(format!("spawn gateway thread: {err}"));
+    }
+
+    match wait_for_server_until_ready(
+        &handle,
+        server_state,
+        generation,
+        host,
+        port,
+        &gateway_exit,
+    ) {
+        Ok(()) => Ok(url),
+        Err(err) => {
+            if let Some(early_err) = gateway_exit.lock().clone() {
+                Err(format!("{err}; gateway exit detail: {early_err}"))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+fn format_panic_payload(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
 }
 
 fn apply_embedded_gateway_overrides(

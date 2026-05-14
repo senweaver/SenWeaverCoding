@@ -114,6 +114,8 @@ impl Tool for FileReadTool {
             });
         }
 
+        crate::session::record_read_for_current_session(&resolved_path);
+
         match tokio::fs::metadata(&resolved_path).await {
             Ok(meta) => {
                 if meta.len() > MAX_FILE_SIZE_BYTES {

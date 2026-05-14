@@ -28,6 +28,7 @@ pub mod credential_routes;
 pub mod desktop_routes;
 pub mod evolution_routes;
 pub mod git_routes;
+pub mod mcp_live;
 pub mod python_env_routes;
 pub mod workspace_files;
 pub mod ws_desktop;
@@ -191,6 +192,12 @@ fn provider_runtime_options_for(
     profile: &crate::config::ModelProviderConfig,
     config: &crate::config::schema::Config,
 ) -> providers::ProviderRuntimeOptions {
+    let mut merged_headers = providers::merged_extra_headers_for_config(config);
+    let profile_headers =
+        crate::config::build_custom_headers_map(&profile.custom_headers);
+    for (k, v) in profile_headers {
+        merged_headers.insert(k, v);
+    }
     providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: profile.base_url.clone().or_else(|| config.api_url.clone()),
@@ -199,7 +206,7 @@ fn provider_runtime_options_for(
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_effort: config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(config.provider_timeout_secs),
-        extra_headers: config.extra_headers.clone(),
+        extra_headers: merged_headers,
         api_path: profile.api_path.clone().or_else(|| config.api_path.clone()),
         provider_max_tokens: profile.max_tokens.or(config.provider_max_tokens),
         model_context_windows: profile.model_context_windows.clone(),
@@ -499,8 +506,10 @@ pub struct AppState {
     pub config: Arc<Mutex<Config>>,
 
     pub live_config: crate::config::live::LiveConfig,
-    pub provider: Arc<dyn Provider>,
-    pub model: String,
+
+    pub provider: Arc<parking_lot::RwLock<Arc<dyn Provider>>>,
+
+    pub model: Arc<parking_lot::RwLock<String>>,
     pub temperature: f64,
     pub mem: Arc<dyn Memory>,
     pub auto_save: bool,
@@ -561,6 +570,8 @@ pub struct AppState {
 
     pub workspace_run_state: Arc<crate::session::WorkspaceRunRegistry>,
 
+    pub workspace_resources: Arc<crate::session::WorkspaceResourceManager>,
+
     pub git_status_cache: git_routes::GitStatusCache,
 }
 
@@ -568,6 +579,84 @@ impl AppState {
 
     pub fn push_live_config(&self, snapshot: Config) {
         self.live_config.store(snapshot);
+    }
+
+    pub fn current_provider(&self) -> Arc<dyn Provider> {
+        Arc::clone(&self.provider.read())
+    }
+
+    pub fn current_model(&self) -> String {
+        self.model.read().clone()
+    }
+
+    pub fn rebuild_runtime_from_config(&self) {
+        let cfg = self.config.lock().clone();
+        let resolved_default_provider = providers::resolve_runtime_provider_name(
+            cfg.default_provider.as_deref().unwrap_or("openrouter"),
+            &cfg,
+        );
+        let provider_runtime_options = providers::ProviderRuntimeOptions {
+            auth_profile_override: None,
+            provider_api_url: cfg.api_url.clone(),
+            sen_dir: cfg.config_path.parent().map(std::path::PathBuf::from),
+            secrets_encrypt: cfg.secrets.encrypt,
+            reasoning_enabled: cfg.runtime.reasoning_enabled,
+            reasoning_effort: cfg.runtime.reasoning_effort.clone(),
+            provider_timeout_secs: Some(cfg.provider_timeout_secs),
+            extra_headers: providers::merged_extra_headers_for_config(&cfg),
+            api_path: cfg.api_path.clone(),
+            provider_max_tokens: cfg.provider_max_tokens,
+            model_context_windows: cfg.model_context_windows.clone(),
+        };
+
+        let provider_arc: Arc<dyn Provider> =
+            match providers::create_resilient_provider_with_options(
+                &resolved_default_provider,
+                cfg.api_key.as_deref(),
+                cfg.api_url.as_deref(),
+                &cfg.reliability,
+                &provider_runtime_options,
+            ) {
+                Ok(p) => Arc::from(p),
+                Err(err) => {
+                    tracing::warn!(
+                        resolved_default_provider = %resolved_default_provider,
+                        error = %err,
+                        "gateway runtime hot-reload: failed to build provider for new config; \
+                         falling back to placeholder openrouter so the desktop shell stays alive. \
+                         The user can re-check their Provider settings."
+                    );
+                    match providers::create_resilient_provider_with_options(
+                        "openrouter",
+                        None,
+                        None,
+                        &Default::default(),
+                        &provider_runtime_options,
+                    ) {
+                        Ok(p) => Arc::from(p),
+                        Err(inner) => {
+                            tracing::error!(
+                                error = %inner,
+                                "gateway runtime hot-reload: placeholder provider build failed; \
+                                 keeping previous provider Arc to avoid breaking in-flight requests"
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+
+        let model_string = providers::resolve_default_model(&cfg).unwrap_or_default();
+
+        {
+            let mut guard = self.provider.write();
+            *guard = provider_arc;
+        }
+        {
+            let mut guard = self.model.write();
+            *guard = model_string;
+        }
+        self.push_live_config(cfg);
     }
 }
 
@@ -652,6 +741,7 @@ async fn run_gateway_inner(
         .unwrap_or_else(|| config.workspace_dir.join(".senweavercoding"));
     let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
         data_dir: svc_data_dir,
+        shared_config: Some(Arc::clone(live_config_state.shared())),
         ..Default::default()
     });
     if let Some(svc) = crate::services::try_get_services() {
@@ -743,47 +833,120 @@ async fn run_gateway_inner(
         config.default_provider.as_deref().unwrap_or("openrouter"),
         &config,
     );
-    let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
+    let provider_runtime_options = providers::ProviderRuntimeOptions {
+        auth_profile_override: None,
+        provider_api_url: config.api_url.clone(),
+        sen_dir: config.config_path.parent().map(std::path::PathBuf::from),
+        secrets_encrypt: config.secrets.encrypt,
+        reasoning_enabled: config.runtime.reasoning_enabled,
+        reasoning_effort: config.runtime.reasoning_effort.clone(),
+        provider_timeout_secs: Some(config.provider_timeout_secs),
+        extra_headers: providers::merged_extra_headers_for_config(&config),
+        api_path: config.api_path.clone(),
+        provider_max_tokens: config.provider_max_tokens,
+        model_context_windows: config.model_context_windows.clone(),
+    };
+    let provider_inner: Arc<dyn Provider> = match providers::create_resilient_provider_with_options(
         &resolved_default_provider,
         config.api_key.as_deref(),
         config.api_url.as_deref(),
         &config.reliability,
-        &providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            provider_api_url: config.api_url.clone(),
-            sen_dir: config.config_path.parent().map(std::path::PathBuf::from),
-            secrets_encrypt: config.secrets.encrypt,
-            reasoning_enabled: config.runtime.reasoning_enabled,
-            reasoning_effort: config.runtime.reasoning_effort.clone(),
-            provider_timeout_secs: Some(config.provider_timeout_secs),
-            extra_headers: config.extra_headers.clone(),
-            api_path: config.api_path.clone(),
-            provider_max_tokens: config.provider_max_tokens,
-            model_context_windows: config.model_context_windows.clone(),
-        },
-    )?);
-    let model = providers::resolve_default_model(&config)?;
+        &provider_runtime_options,
+    ) {
+        Ok(p) => Arc::from(p),
+        Err(err) => {
+            tracing::warn!(
+                resolved_default_provider = %resolved_default_provider,
+                error = %err,
+                "gateway startup: failed to instantiate default provider; \
+                 starting in degraded mode with a placeholder provider so the desktop \
+                 shell can render Provider settings page"
+            );
+            Arc::from(providers::create_resilient_provider_with_options(
+                "openrouter",
+                None,
+                None,
+                &Default::default(),
+                &provider_runtime_options,
+            )?)
+        }
+    };
+    let provider: Arc<parking_lot::RwLock<Arc<dyn Provider>>> =
+        Arc::new(parking_lot::RwLock::new(provider_inner));
+    let model_string = providers::resolve_default_model(&config).unwrap_or_else(|err| {
+        tracing::warn!(
+            "gateway startup: no default model configured ({err}); \
+             starting gateway in degraded mode  -  /health will respond OK \
+             so the user can enter Provider settings to add a model"
+        );
+        String::new()
+    });
+    let model: Arc<parking_lot::RwLock<String>> =
+        Arc::new(parking_lot::RwLock::new(model_string));
     let temperature = config.default_temperature;
-    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
+    let mem: Arc<dyn Memory> = match memory::create_memory_with_storage_and_routes(
         &config.memory,
         &config.embedding_routes,
         Some(&config.storage.provider.config),
         &config.workspace_dir,
         config.api_key.as_deref(),
-    )?);
-    let runtime: Arc<dyn runtime::RuntimeAdapter> =
-        Arc::from(runtime::create_runtime(&config.runtime)?);
+    ) {
+        Ok(m) => Arc::from(m),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "gateway startup: memory backend init failed; falling back to in-process \
+                 NoneMemory so the desktop shell can render. The user can fix storage \
+                 settings later (Settings > Memory)"
+            );
+            Arc::new(memory::NoneMemory::new()) as Arc<dyn Memory>
+        }
+    };
+    let runtime: Arc<dyn runtime::RuntimeAdapter> = match runtime::create_runtime(&config.runtime) {
+        Ok(rt) => Arc::from(rt),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "gateway startup: runtime adapter init failed; falling back to NativeRuntime \
+                 so the gateway can come up. Inspect [runtime] in config.toml later"
+            );
+            Arc::new(runtime::NativeRuntime::new()) as Arc<dyn runtime::RuntimeAdapter>
+        }
+    };
     let security = Arc::new(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
     ));
     if let Some(svc) = crate::services::try_get_services() {
         let security_for_sub = Arc::clone(&security);
+        let hooks_for_sub = std::sync::Arc::clone(&hooks);
+        let lsp_for_sub = std::sync::Arc::clone(&lsp_manager);
         let handle = svc.config_subscribe_filtered(
             vec!["".into()],
             move |cfg| {
                 security_for_sub
                     .set_command_policy_enabled(cfg.autonomy.enable_command_policy);
+                crate::token_saver::set_enabled(cfg.token_saver.enabled);
+                crate::token_saver::set_global(cfg.token_saver.to_runtime_ctx());
+                crate::guardrails::ensure_global_guardrails(cfg.guardrails.clone());
+                crate::config::schema::set_runtime_proxy_config(cfg.proxy.clone());
+                crate::agent::token_optimizer::ensure_global_optimizer_from_config(&cfg);
+                let workspace_anchor = if cfg.workspace_dir.as_os_str().is_empty() {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                } else {
+                    cfg.workspace_dir.clone()
+                };
+                hooks_for_sub.rebuild(&cfg, &workspace_anchor);
+                lsp_for_sub.set_workspace_root(workspace_anchor.clone());
+                let lsp_clone = std::sync::Arc::clone(&lsp_for_sub);
+                let cfg_clone = std::sync::Arc::clone(&cfg);
+                crate::runtime::task_manager::spawn_supervised(
+                    "gateway.hot_reload.lsp_reconcile",
+                    async move {
+                        lsp_clone.reconcile(&cfg_clone).await;
+                    },
+                );
             },
         );
         std::mem::forget(handle);
@@ -953,6 +1116,23 @@ async fn run_gateway_inner(
 
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
 
+    {
+        let live_mcp = crate::gateway::mcp_live::LiveMcpReconciler::new();
+        live_mcp.seed_from_config(&config);
+        if let Some(svc) = crate::services::try_get_services() {
+            let live_mcp_for_sub = std::sync::Arc::clone(&live_mcp);
+            let event_tx_for_sub = event_tx.clone();
+            let handle = svc.config_subscribe_filtered(
+                vec!["".into()],
+                move |cfg| {
+                    live_mcp_for_sub
+                        .schedule_reconcile(cfg, event_tx_for_sub.clone());
+                },
+            );
+            std::mem::forget(handle);
+        }
+    }
+
     let webhook_secret_hash: Option<Arc<str>> =
         config.channels_config.webhook.as_ref().and_then(|webhook| {
             webhook.secret.as_ref().and_then(|raw_secret| {
@@ -1120,7 +1300,18 @@ async fn run_gateway_inner(
         .as_deref()
         .filter(|p| !p.is_empty());
 
-    let tunnel = crate::tunnel::create_tunnel(&config.tunnel)?;
+    let tunnel = match crate::tunnel::create_tunnel(&config.tunnel) {
+        Ok(t) => t,
+        Err(err) => {
+            tracing::warn!(
+                provider = %config.tunnel.provider,
+                error = %err,
+                "gateway startup: tunnel construction failed; continuing in local-only mode \
+                 (the user can fix [tunnel] settings later without a restart-blocking error)"
+            );
+            None
+        }
+    };
     let mut tunnel_url: Option<String> = None;
 
     if let Some(ref tun) = tunnel {
@@ -1232,8 +1423,8 @@ async fn run_gateway_inner(
         ) {
             Ok(engine) => {
                 engine.set_judge_provider(crate::evolution::JudgeProviderRef {
-                    provider: Arc::clone(&provider),
-                    model: model.clone(),
+                    provider: Arc::clone(&provider.read()),
+                    model: model.read().clone(),
                 });
                 let registered_models = collect_registered_models_for_engine(&config);
                 engine.clear_reflection_providers();
@@ -1296,6 +1487,11 @@ async fn run_gateway_inner(
         lsp_events: lsp_broadcast.clone(),
         session_run_state: crate::session::SessionRunStateRegistry::new(),
         workspace_run_state: crate::session::WorkspaceRunRegistry::new(),
+        workspace_resources: {
+            let mgr = crate::session::WorkspaceResourceManager::new();
+            crate::session::install_global_workspace_resources(mgr.clone());
+            mgr
+        },
         git_status_cache: git_routes::new_git_status_cache(),
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
@@ -2012,7 +2208,20 @@ async fn run_gateway_inner(
             } else {
                 tracing::info!("TLS enabled (no client certificate requirement)");
             }
-            Some(tls::build_tls_acceptor(tls_cfg)?)
+            match tls::build_tls_acceptor(tls_cfg) {
+                Ok(acceptor) => Some(acceptor),
+                Err(err) => {
+                    tracing::warn!(
+                        cert_path = %tls_cfg.cert_path,
+                        key_path = %tls_cfg.key_path,
+                        error = %err,
+                        "gateway startup: TLS acceptor build failed (likely missing or unreadable cert/key); \
+                         continuing without TLS so the desktop can still reach the local gateway. \
+                         Provide valid cert paths in [gateway.tls] and restart to re-enable TLS"
+                    );
+                    None
+                }
+            }
         }
         _ => None,
     };
@@ -2289,11 +2498,12 @@ async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGua
 async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Result<String> {
     let user_messages = vec![ChatMessage::user(message)];
 
+    let current_model = state.current_model();
     let system_prompt = {
         let config_guard = state.config.lock();
         crate::channels::build_system_prompt(
             &config_guard.workspace_dir,
-            &state.model,
+            &current_model,
             &[],
             &[],
             Some(&config_guard.identity),
@@ -2309,9 +2519,9 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
     let prepared =
         crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config).await?;
 
-    state
-        .provider
-        .chat_with_history(&prepared.messages, &state.model, state.temperature)
+    let provider = state.current_provider();
+    provider
+        .chat_with_history(&prepared.messages, &current_model, state.temperature)
         .await
 }
 
@@ -2437,7 +2647,7 @@ async fn handle_webhook(
         .default_provider
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
-    let model_label = state.model.clone();
+    let model_label = state.current_model();
     let started_at = Instant::now();
 
     state
@@ -2481,7 +2691,7 @@ async fn handle_webhook(
                     cost_usd: None,
                 });
 
-            let body = serde_json::json!({"response": response, "model": state.model});
+            let body = serde_json::json!({"response": response, "model": state.current_model()});
             (StatusCode::OK, Json(body))
         }
         Err(e) => {

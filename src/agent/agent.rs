@@ -3768,11 +3768,14 @@ Use a read-only tool, or call `exit_plan_mode` first.",
 
         if config_change == ConfigChange::Hard {
             if let Err(e) = self.reload_provider().await {
-                let _ = event_tx
-                    .send(TurnEvent::Error {
-                        message: format!("Failed to reload provider: {}", e),
-                    })
-                    .await;
+                let msg = e.to_string();
+                if !crate::agent::error_classify::is_no_model_error(&msg) {
+                    let _ = event_tx
+                        .send(TurnEvent::Error {
+                            message: format!("Failed to reload provider: {msg}"),
+                        })
+                        .await;
+                }
                 return Err(e);
             }
         }

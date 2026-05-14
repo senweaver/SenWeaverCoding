@@ -49,7 +49,7 @@ fn default_output_ratio() -> f32 {
 fn default_compression_threshold() -> f32 {
     0.75
 }
-fn default_max_tool_result_tokens() -> usize {
+pub fn default_max_tool_result_tokens() -> usize {
     12_000
 }
 fn default_max_rag_tokens() -> usize {

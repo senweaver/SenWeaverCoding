@@ -134,7 +134,7 @@ pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle
     let api_key = config.api_key.clone();
     let api_url = config.api_url.clone();
     let provider_timeout_secs = config.provider_timeout_secs;
-    let extra_headers = config.extra_headers.clone();
+    let extra_headers = crate::providers::merged_extra_headers_for_config(config);
     let api_path = config.api_path.clone();
     let provider_max_tokens = config.provider_max_tokens;
     let model_context_windows = config.model_context_windows.clone();

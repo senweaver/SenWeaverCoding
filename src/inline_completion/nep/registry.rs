@@ -120,7 +120,7 @@ pub fn default_registry(config: &crate::config::Config) -> Arc<NepRegistry> {
             reasoning_enabled: None,
             reasoning_effort: None,
             provider_timeout_secs: Some(config.provider_timeout_secs),
-            extra_headers: config.extra_headers.clone(),
+            extra_headers: crate::providers::merged_extra_headers_for_config(config),
             api_path: config.api_path.clone(),
             provider_max_tokens: config.provider_max_tokens,
             model_context_windows: config.model_context_windows.clone(),

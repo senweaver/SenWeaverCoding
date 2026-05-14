@@ -47,6 +47,13 @@ pub enum CodingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceProfile {
+    pub browser: bool,
+    pub shell: bool,
+    pub may_write: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeApprovalPolicy {
 
     Default,
@@ -814,6 +821,37 @@ impl CodingMode {
             Self::Harness => Some(Self::harness_tools()),
             Self::Agent => None,
             _ => None,
+        }
+    }
+
+    pub fn resource_profile(&self) -> ResourceProfile {
+        match self {
+            Self::Ask | Self::Plan => ResourceProfile {
+                browser: false,
+                shell: false,
+                may_write: false,
+            },
+            Self::Debug => ResourceProfile {
+                browser: true,
+                shell: true,
+                may_write: false,
+            },
+            Self::Tdd | Self::Mvai => ResourceProfile {
+                browser: false,
+                shell: true,
+                may_write: true,
+            },
+            Self::Agent
+            | Self::Harness
+            | Self::Vibe
+            | Self::Spec
+            | Self::Architect
+            | Self::Pair
+            | Self::ContextEng => ResourceProfile {
+                browser: true,
+                shell: true,
+                may_write: true,
+            },
         }
     }
 

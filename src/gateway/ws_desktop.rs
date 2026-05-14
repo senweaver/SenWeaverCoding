@@ -107,7 +107,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     {
         Ok(a) => a,
         Err(e) => {
-            send_error(&mut sender, &format!("agent init failed: {e}"), "AGENT_INIT_FAILED").await;
+            let message = format!("agent init failed: {e}");
+            let code = if message.contains("no_model_configured")
+                || message.contains("未添加模型")
+            {
+                "NO_MODEL_CONFIGURED"
+            } else {
+                "AGENT_INIT_FAILED"
+            };
+            send_error(&mut sender, &message, code).await;
             return;
         }
     };
@@ -161,6 +169,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
     let inbound_tx_lsp = inbound_tx.clone();
     let inbound_tx_replay = inbound_tx.clone();
+    let inbound_tx_gateway = inbound_tx.clone();
+    let inbound_tx_resource = inbound_tx.clone();
 
     let cancel_signal_handle = agent.cancel_signal_handle();
     let cancelled_atomic = agent.cancel_token();
@@ -280,6 +290,62 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         })
     };
 
+    let gateway_event_forwarder = {
+        let mut rx = state.event_tx.subscribe();
+        let tx = inbound_tx_gateway;
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(payload) => {
+                        let is_forwardable = payload
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .map(|t| t == "system_notification")
+                            .unwrap_or(false);
+                        if !is_forwardable {
+                            continue;
+                        }
+                        let wrapped = serde_json::json!({
+                            "type": "__gateway_event__",
+                            "payload": payload,
+                        });
+                        if tx.send(InboundMsg::Json(wrapped)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
+    let resource_event_forwarder = {
+        let mut rx = state.workspace_resources.subscribe();
+        let tx = inbound_tx_resource;
+        let session_id_for_resource = session_id.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let payload =
+                            resource_event_to_system_notification(&event, &session_id_for_resource);
+                        let Some(payload) = payload else { continue };
+                        let wrapped = serde_json::json!({
+                            "type": "__gateway_event__",
+                            "payload": payload,
+                        });
+                        if tx.send(InboundMsg::Json(wrapped)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
     {
         let svc = state.lsp.service();
         let cached = svc.get_all_diagnostics().await;
@@ -361,6 +427,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             continue;
         }
 
+        if parsed.get("type").and_then(|v| v.as_str()) == Some("__gateway_event__") {
+            if let Some(payload) = parsed.get("payload") {
+                let _ = send_json(&mut sender, payload).await;
+            }
+            continue;
+        }
+
         let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match msg_type {
             "ping" => {
@@ -412,10 +485,53 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .get("scope")
                     .and_then(|v| v.as_str())
                     .unwrap_or("session");
+                let confirmed = parsed
+                    .get("confirmed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if let Some(parsed_mode) =
                     crate::agent::coding_mode::CodingMode::from_str_loose(mode_str)
                 {
-                    if let Some(svc) = crate::services::try_get_services() {
+                    let svc_opt = crate::services::try_get_services();
+                    let previous_mode = svc_opt
+                        .map(|svc| svc.resolve_coding_mode_for(Some(&session_key)))
+                        .unwrap_or_default();
+                    let cfg_for_gate = svc_opt
+                        .map(|svc| svc.config())
+                        .unwrap_or_else(|| std::sync::Arc::new(state.config.lock().clone()));
+                    let whitelist: &[String] =
+                        cfg_for_gate.autonomy.auto_approve_mode_transitions.as_slice();
+                    let needs_confirm = !confirmed
+                        && previous_mode != parsed_mode
+                        && !mode_transition_auto_approved(
+                            whitelist,
+                            previous_mode,
+                            parsed_mode,
+                        );
+                    if needs_confirm {
+                        let _ = send_json(
+                            &mut sender,
+                            &serde_json::json!({
+                                "type": "system_notification",
+                                "subtype": "coding_mode_transition_confirmation_required",
+                                "message": format!(
+                                    "Switching coding mode {} -> {} requires confirmation",
+                                    previous_mode.display_name(),
+                                    parsed_mode.display_name(),
+                                ),
+                                "data": {
+                                    "from": previous_mode.display_name(),
+                                    "to": parsed_mode.display_name(),
+                                    "scope": scope,
+                                    "whitelist": whitelist,
+                                },
+                            }),
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    if let Some(svc) = svc_opt {
                         svc.set_session_coding_mode(&session_key, parsed_mode);
                         if scope == "global" {
                             *svc.coding_mode.write() = parsed_mode;
@@ -435,6 +551,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 "label": parsed_mode.label(),
                                 "permissionMode": derived,
                                 "scope": scope,
+                                "from": previous_mode.display_name(),
+                                "autoApproved": !confirmed
+                                    || mode_transition_auto_approved(
+                                        whitelist,
+                                        previous_mode,
+                                        parsed_mode,
+                                    ),
                             },
                         }),
                     )
@@ -485,6 +608,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .and_then(|v| v.as_str())
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
+
+                let persist = parsed
+                    .get("persist")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 let snapshot = {
                     let mut cfg = state.config.lock();
 
@@ -503,12 +631,36 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     cfg.clone()
                 };
 
+                if persist {
+                    if let Err(e) = snapshot.save().await {
+                        tracing::warn!(
+                            target: "ws_desktop.runtime_config",
+                            error = %e,
+                            "set_runtime_config: failed to persist composer-initiated runtime config to disk; \
+                             change remains effective in-memory only until restart"
+                        );
+                        let _ = send_json(
+                            &mut sender,
+                            &serde_json::json!({
+                                "type": "system_notification",
+                                "subtype": "runtime_config_persist_failed",
+                                "message": format!("{e:#}"),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+
                 state.push_live_config(snapshot);
+                state.rebuild_runtime_from_config();
                 let _ = send_json(
                     &mut sender,
                     &serde_json::json!({
                         "type": "system_notification",
                         "subtype": "runtime_config_updated",
+                        "data": {
+                            "persisted": persist,
+                        },
                     }),
                 )
                 .await;
@@ -745,6 +897,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
     reader_handle.abort();
     lsp_forwarder.abort();
+    gateway_event_forwarder.abort();
+    resource_event_forwarder.abort();
 
     if let Some(svc) = crate::services::try_get_services() {
         svc.clear_session_coding_mode(&session_key);
@@ -1011,31 +1165,24 @@ async fn run_turn(
         agent.current_workspace_dir(),
         session_id,
     );
-    let _workspace_guard = match state
-        .workspace_run_state
-        .try_acquire(&workspace_key, session_id)
-    {
-        Some(g) => g,
-        None => {
-            let holder = state.workspace_run_state.current(&workspace_key);
-            tracing::warn!(
-                session_id,
-                workspace_key = %workspace_key,
-                holder = ?holder,
-                "run_turn rejected: workspace already busy",
-            );
-            let _ = send_json(
-                sender,
-                &serde_json::json!({
-                    "type": "workspace_busy",
-                    "workspaceKey": workspace_key,
-                    "currentSessionId": holder,
-                }),
-            )
-            .await;
-            return;
-        }
-    };
+
+    if state.session_run_state.is_running(session_id) {
+        tracing::warn!(
+            session_id,
+            workspace_key = %workspace_key,
+            "run_turn rejected: same session already running",
+        );
+        let _ = send_json(
+            sender,
+            &serde_json::json!({
+                "type": "workspace_busy",
+                "workspaceKey": workspace_key,
+                "currentSessionId": session_id,
+            }),
+        )
+        .await;
+        return;
+    }
 
     let _run_guard = state.session_run_state.guard(session_id.to_string());
 
@@ -1128,6 +1275,28 @@ async fn run_turn(
         Some(ctx)
     });
 
+    let session_title = if let Some(backend) = state.session_backend.clone() {
+        let session_key_for_title = session_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            backend
+                .get_session_name(&session_key_for_title)
+                .ok()
+                .flatten()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| session_id.to_string())
+    } else {
+        session_id.to_string()
+    };
+    let session_ctx = crate::session::SessionContext {
+        session_id: session_id.to_string(),
+        workspace_key: workspace_key.clone(),
+        title: session_title,
+    };
     let turn_fut = async {
         let inner = async {
             crate::agent::scope_tool_loop_cost_tracking(
@@ -1136,7 +1305,10 @@ async fn run_turn(
             )
             .await
         };
-        let result = crate::evolution::scope_evolution_ctx(evolution_ctx.clone(), inner).await;
+        let scoped =
+            crate::evolution::scope_evolution_ctx(evolution_ctx.clone(), inner);
+        let result =
+            crate::session::scope_session_context(session_ctx, scoped).await;
         if let Some(ref ctx) = evolution_ctx {
             let aborted = match &result {
                 Ok(_) => None,
@@ -1492,7 +1664,9 @@ async fn run_turn(
             .await;
         }
         Err(err) => {
-            send_error(sender, &format!("{err}"), "AGENT_TURN_FAILED").await;
+            let msg = format!("{err}");
+            let code = crate::agent::error_classify::classify_turn_error_code(&msg);
+            send_error(sender, &msg, code).await;
         }
     }
 
@@ -1544,6 +1718,63 @@ async fn run_turn(
 
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
+}
+
+fn resource_event_to_system_notification(
+    event: &crate::session::ResourceEvent,
+    current_session_id: &str,
+) -> Option<serde_json::Value> {
+    use crate::session::ResourceEvent;
+    match event {
+        ResourceEvent::WaitStarted {
+            session_id,
+            kind,
+            target,
+            holder_session_id,
+            holder_title,
+        } => {
+            if session_id != current_session_id {
+                return None;
+            }
+            Some(serde_json::json!({
+                "type": "system_notification",
+                "subtype": "resource_wait_started",
+                "sessionId": session_id,
+                "data": {
+                    "kind": kind,
+                    "target": target,
+                    "holderSessionId": holder_session_id,
+                    "holderTitle": holder_title,
+                },
+            }))
+        }
+        ResourceEvent::WaitResolved {
+            session_id,
+            kind,
+            target,
+        } => {
+            if session_id != current_session_id {
+                return None;
+            }
+            Some(serde_json::json!({
+                "type": "system_notification",
+                "subtype": "resource_wait_resolved",
+                "sessionId": session_id,
+                "data": {
+                    "kind": kind,
+                    "target": target,
+                },
+            }))
+        }
+    }
+}
+
+fn mode_transition_auto_approved(
+    whitelist: &[String],
+    from: crate::agent::coding_mode::CodingMode,
+    to: crate::agent::coding_mode::CodingMode,
+) -> bool {
+    crate::agent::mode_transition::is_auto_approved(whitelist, from, to)
 }
 
 fn is_legacy_default_title(name: &str) -> bool {

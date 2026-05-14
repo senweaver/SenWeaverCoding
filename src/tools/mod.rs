@@ -900,7 +900,7 @@ pub fn all_tools_with_runtime(
                     reasoning_enabled: root_config.runtime.reasoning_enabled,
                     reasoning_effort: root_config.runtime.reasoning_effort.clone(),
                     provider_timeout_secs: Some(root_config.provider_timeout_secs),
-                    extra_headers: root_config.extra_headers.clone(),
+                    extra_headers: crate::providers::merged_extra_headers_for_config(root_config),
                     api_path: root_config.api_path.clone(),
                     provider_max_tokens: root_config.provider_max_tokens,
                     model_context_windows: root_config.model_context_windows.clone(),
@@ -1327,7 +1327,7 @@ pub fn all_tools_with_runtime(
         reasoning_effort: root_config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(root_config.provider_timeout_secs),
         provider_max_tokens: root_config.provider_max_tokens,
-        extra_headers: root_config.extra_headers.clone(),
+        extra_headers: crate::providers::merged_extra_headers_for_config(root_config),
         api_path: root_config.api_path.clone(),
         model_context_windows: root_config.model_context_windows.clone(),
     };

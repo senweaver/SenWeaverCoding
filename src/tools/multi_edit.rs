@@ -133,6 +133,37 @@ impl Tool for MultiEditTool {
 
         let mut batch = EditBatch::new(EditOrigin::MultiEditTool).with_atomic(true);
         let mut summary_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut planned_paths: Vec<std::path::PathBuf> = Vec::new();
+        for edit in edits.iter() {
+            if let Some(p) = edit.get("path").and_then(|v| v.as_str()) {
+                planned_paths.push(std::path::PathBuf::from(p));
+            }
+        }
+        let _resource_guards = match crate::session::acquire_many_file_writes_for_current_session(
+            planned_paths.clone(),
+        )
+        .await
+        {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
+        for p in &planned_paths {
+            if crate::session::is_stale_for_current_session(p) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(crate::session::stale_file_error_message(p)),
+                });
+            }
+        }
 
         for (i, edit) in edits.iter().enumerate() {
             let path_str = edit
@@ -276,6 +307,9 @@ impl Tool for MultiEditTool {
 
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
+                for p in &summary_paths {
+                    crate::session::record_write_for_current_session(p);
+                }
                 let summary: Vec<String> = summary_paths
                     .iter()
                     .map(|p| format!("  \u{2713} {}", p.display()))

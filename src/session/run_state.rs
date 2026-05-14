@@ -79,6 +79,9 @@ impl SessionRunGuard {
 
 impl Drop for SessionRunGuard {
     fn drop(&mut self) {
+        if let Some(manager) = crate::session::global_workspace_resources() {
+            manager.release_all_for_session(&self.session_id);
+        }
         if !self.was_inserted {
             return;
         }

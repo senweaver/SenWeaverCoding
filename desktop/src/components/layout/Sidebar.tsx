@@ -12,6 +12,7 @@ import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { isPlaceholderTitle, resolveSessionTitle } from '../../utils/sessionTitle'
 import { Spinner } from '../shared/Spinner'
 import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
+import { AgentMonitorPanel } from './AgentMonitorPanel'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
@@ -379,6 +380,8 @@ export function Sidebar() {
           {t('sidebar.scheduled')}
         </NavItem>
       </div>
+
+      <AgentMonitorPanel />
 
       {sidebarOpen ? (
         <>

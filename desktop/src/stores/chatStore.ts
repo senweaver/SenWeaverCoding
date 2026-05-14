@@ -3,10 +3,8 @@ import { wsManager } from '../api/websocket'
 import { sessionsApi } from '../api/sessions'
 import { useTeamStore } from './teamStore'
 import { useSessionStore } from './sessionStore'
-import {
-  useWorkspaceQueueStore,
-  workspaceKeyFor,
-} from './workspaceQueueStore'
+import { useWorkspaceQueueStore } from './workspaceQueueStore'
+import { useSessionRunStateStore } from './sessionRunStateStore'
 import { useCLITaskStore } from './cliTaskStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useSettingsStore } from './settingsStore'
@@ -18,6 +16,10 @@ import { useUIStore } from './uiStore'
 import { t } from '../i18n'
 import type { LspBroadcastEvent } from '../types/lsp'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
+import {
+  hasUsableModelForSession,
+  isNoModelConfiguredError,
+} from '../utils/modelAvailability'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { MessageEntry, PendingRewindSummary } from '../types/session'
 import type { PermissionMode } from '../types/settings'
@@ -103,6 +105,19 @@ export type PerSessionState = {
   stopRequested: boolean
 
   debugPiiStats: DebugPiiStats
+
+  pendingResourceWaits: PendingResourceWait[]
+}
+
+export type ResourceWaitKind = 'file' | 'shell' | 'browser'
+
+export interface PendingResourceWait {
+  id: string
+  kind: ResourceWaitKind
+  target: string
+  holderSessionId: string
+  holderTitle: string
+  startedAt: number
 }
 
 export type DebugPiiKind =
@@ -154,6 +169,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   activeTaskToolUseId: null,
   stopRequested: false,
   debugPiiStats: { total: 0, counts: {}, lastEventAt: null },
+  pendingResourceWaits: [],
 }
 
 function createDefaultSessionState(): PerSessionState {
@@ -167,6 +183,7 @@ function createDefaultSessionState(): PerSessionState {
     pendingEdits: [],
     subagentTimelines: {},
     activeTaskToolUseId: null,
+    pendingResourceWaits: [],
   }
 }
 
@@ -211,6 +228,7 @@ function mergePendingEdit(
 
 type ChatStore = {
   sessions: Record<string, PerSessionState>
+  sessionCodingMode: Record<string, CodingModeId>
 
   getSession: (sessionId: string) => PerSessionState
   connectToSession: (sessionId: string) => void
@@ -840,6 +858,23 @@ const updatePlanInlineToolUseIds = new Set<string>()
 let msgCounter = 0
 const nextId = () => `msg-${++msgCounter}-${Date.now()}`
 
+function stripNoModelErrorMessages(messages: UIMessage[]): UIMessage[] {
+  let mutated = false
+  const next: UIMessage[] = []
+  for (const m of messages) {
+    if (m.type === 'error' && isNoModelConfiguredError(m.message, m.code)) {
+      mutated = true
+      continue
+    }
+    next.push(m)
+  }
+  return mutated ? next : messages
+}
+
+function emitNoModelWarning(): void {
+  return
+}
+
 const pendingDeltaBySession = new Map<string, string>()
 const flushTimerBySession = new Map<string, number>()
 const pendingThinkingBySession = new Map<string, string>()
@@ -1094,6 +1129,7 @@ async function fetchAndMapSessionHistory(sessionId: string) {
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: {},
+  sessionCodingMode: {},
 
   getSession: (sessionId) => get().sessions[sessionId] ?? createDefaultSessionState(),
 
@@ -1126,7 +1162,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
     if (runtimeSelection) {
-      wsManager.send(sessionId, { type: 'set_runtime_config', ...runtimeSelection })
+      wsManager.send(sessionId, {
+        type: 'set_runtime_config',
+        persist: false,
+        ...runtimeSelection,
+      })
     }
     if (!sessionId.startsWith('__') && !useTeamStore.getState().getMemberBySessionId(sessionId)) {
       wsManager.send(sessionId, { type: 'prewarm_session' })
@@ -1186,13 +1226,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const isMemberSession = !!useTeamStore.getState().getMemberBySessionId(sessionId)
 
     if (!isMemberSession && !options?.__internalDrain) {
-      const sessionMeta =
-        useSessionStore.getState().sessions.find((s) => s.id === sessionId) ?? null
-      const wsKey = workspaceKeyFor(sessionMeta, sessionId)
+      if (!hasUsableModelForSession(sessionId)) {
+        emitNoModelWarning()
+        set((s) => {
+          const session = s.sessions[sessionId]
+          if (!session) return s
+          const cleaned = stripNoModelErrorMessages(session.messages)
+          if (cleaned === session.messages) return s
+          return {
+            sessions: {
+              ...s.sessions,
+              [sessionId]: { ...session, messages: cleaned },
+            },
+          }
+        })
+        return
+      }
+    }
+
+    if (!isMemberSession && !options?.__internalDrain) {
       const queueState = useWorkspaceQueueStore.getState()
-      const busy = !!queueState.getRunningSessionInWorkspace(wsKey)
-      const queueLen = queueState.queues[wsKey]?.length ?? 0
-      if (busy || queueLen > 0) {
+      const sameSessionRunning = useSessionRunStateStore
+        .getState()
+        .running.has(sessionId)
+      const ownQueueLen = queueState.getQueueForSession(sessionId).length
+      if (sameSessionRunning || ownQueueLen > 0) {
         const passthroughOptions = options
           ? { displayContent: options.displayContent }
           : undefined
@@ -1360,6 +1418,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setSessionRuntime: (sessionId, selection) => {
     wsManager.send(sessionId, {
       type: 'set_runtime_config',
+      persist: true,
       ...selection,
     })
   },
@@ -1370,6 +1429,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setSessionCodingMode: (sessionId, mode) => {
     if (!get().sessions[sessionId]) return
+    set((s) => ({
+      sessionCodingMode: { ...s.sessionCodingMode, [sessionId]: mode },
+    }))
     wsManager.send(sessionId, { type: 'set_coding_mode', mode, scope: 'session' })
   },
 
@@ -1396,6 +1458,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             pendingPermission: null,
             pendingComputerUsePermission: null,
             elapsedTimer: null,
+            pendingResourceWaits: [],
           },
         },
       }
@@ -1764,6 +1827,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'connected':
 
         void hydrateCumulativeTokensFromUsage(sessionId)
+        set((s) => {
+          const session = s.sessions[sessionId]
+          if (!session) return s
+          const cleaned = stripNoModelErrorMessages(session.messages)
+          if (cleaned === session.messages) return s
+          return {
+            sessions: {
+              ...s.sessions,
+              [sessionId]: { ...session, messages: cleaned },
+            },
+          }
+        })
         break
 
       case 'status':
@@ -2267,21 +2342,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           pendingPermission: null,
           pendingComputerUsePermission: null,
           elapsedTimer: null,
+          pendingResourceWaits: [],
         }))
 
         void useUsageStore.getState().fetch()
         break
       }
 
-      case 'error':
+      case 'error': {
         consumePendingThinking(sessionId)
+        const isConfigError = isNoModelConfiguredError(msg.message, msg.code)
         update((s) => {
           const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
           let newMessages = sealThinkingFromState(s)
           if (pendingText.trim()) {
             newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
           }
-          newMessages = [...newMessages, { id: nextId(), type: 'error', message: msg.message, code: msg.code, timestamp: Date.now() }]
+          if (!isConfigError) {
+            newMessages = [...newMessages, { id: nextId(), type: 'error', message: msg.message, code: msg.code, timestamp: Date.now() }]
+          }
           return {
             messages: newMessages,
             chatState: 'idle',
@@ -2289,9 +2368,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             streamingText: '',
             pendingPermission: null,
             pendingComputerUsePermission: null,
+            pendingResourceWaits: [],
           }
         })
-        useTabStore.getState().updateTabStatus(sessionId, 'error')
+        if (isConfigError) {
+          emitNoModelWarning()
+          useTabStore.getState().updateTabStatus(sessionId, 'idle')
+        } else {
+          useTabStore.getState().updateTabStatus(sessionId, 'error')
+        }
         {
           const session = get().sessions[sessionId]
           if (session?.elapsedTimer) {
@@ -2300,6 +2385,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
         break
+      }
 
       case 'task_update': {
 
@@ -2378,7 +2464,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const data = msg.data as Record<string, unknown>
           const mode = typeof data.mode === 'string' ? data.mode : undefined
           const perm = typeof data.permissionMode === 'string' ? data.permissionMode : undefined
-          if (mode && perm) {
+          const explicitSessionId =
+            typeof data.sessionId === 'string' && data.sessionId.length > 0
+              ? data.sessionId
+              : undefined
+          const targetSessionId = explicitSessionId ?? sessionId
+          if (mode && targetSessionId) {
+            set((s) => ({
+              sessionCodingMode: {
+                ...s.sessionCodingMode,
+                [targetSessionId]: mode as CodingModeId,
+              },
+            }))
+          }
+          if (mode && perm && !explicitSessionId) {
             import('../stores/settingsStore').then(({ useSettingsStore }) => {
               useSettingsStore.getState().applyCodingMode(mode as CodingModeId, perm as PermissionMode)
             }).catch(() => {})
@@ -2397,6 +2496,58 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
         if (msg.subtype === 'slash_commands' && Array.isArray(msg.data)) {
           update(() => ({ slashCommands: msg.data as Array<{ name: string; description: string }> }))
+        }
+
+        if (msg.subtype === 'resource_wait_started' && msg.data && typeof msg.data === 'object') {
+          const data = msg.data as Record<string, unknown>
+          const kindRaw = typeof data.kind === 'string' ? data.kind : ''
+          const kind: ResourceWaitKind =
+            kindRaw === 'file' || kindRaw === 'shell' || kindRaw === 'browser'
+              ? (kindRaw as ResourceWaitKind)
+              : 'file'
+          const target = typeof data.target === 'string' ? data.target : ''
+          const holderSessionId =
+            typeof data.holderSessionId === 'string' ? data.holderSessionId : ''
+          const holderTitle =
+            typeof data.holderTitle === 'string' ? data.holderTitle : holderSessionId
+          update((session) => {
+            const existing = session.pendingResourceWaits ?? []
+            const filtered = existing.filter(
+              (w) => !(w.kind === kind && w.target === target),
+            )
+            const next: PendingResourceWait = {
+              id: `${kind}:${target}:${Date.now().toString(36)}`,
+              kind,
+              target,
+              holderSessionId,
+              holderTitle,
+              startedAt: Date.now(),
+            }
+            return { pendingResourceWaits: [...filtered, next] }
+          })
+        }
+
+        if (msg.subtype === 'resource_wait_resolved' && msg.data && typeof msg.data === 'object') {
+          const data = msg.data as Record<string, unknown>
+          const kind = typeof data.kind === 'string' ? data.kind : ''
+          const target = typeof data.target === 'string' ? data.target : ''
+          update((session) => {
+            const existing = session.pendingResourceWaits ?? []
+            const filtered = existing.filter(
+              (w) => !(w.kind === kind && w.target === target),
+            )
+            if (filtered.length === existing.length) return session
+            return { pendingResourceWaits: filtered }
+          })
+        }
+
+        if (msg.subtype === 'mcp_servers_updated') {
+          import('../stores/mcpStore').then((mod) => {
+            const store = mod.useMcpStore?.getState?.()
+            if (store && typeof store.fetchServers === 'function') {
+              void store.fetchServers()
+            }
+          }).catch(() => {})
         }
 
         if (msg.subtype === 'debug_pii_stats' && msg.data && typeof msg.data === 'object') {

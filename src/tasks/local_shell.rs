@@ -56,7 +56,28 @@ impl LocalShellTask {
         let command = input.command.clone();
         let timeout_ms = input.timeout_ms;
 
+        let session_ctx_for_task = crate::session::current_session_context();
         crate::runtime::spawn_supervised("tasks.local_shell.run", async move {
+            let _shell_guard = if let Some(ctx) = session_ctx_for_task.as_ref() {
+                if let Some(manager) = crate::session::global_workspace_resources() {
+                    match manager
+                        .acquire(
+                            &ctx.workspace_key,
+                            crate::session::ResourceKind::Shell,
+                            &ctx.session_id,
+                            &ctx.title,
+                        )
+                        .await
+                    {
+                        Ok(g) => Some(g),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let _ = run_shell_command(&command, &cwd, &output_file, cancel_rx, timeout_ms).await;
         });
 

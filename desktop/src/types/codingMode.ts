@@ -16,6 +16,12 @@ export type CodingModeId =
   | 'mvai'
   | 'harness'
 
+export type CodingModeResourceProfile = {
+  browser: boolean
+  shell: boolean
+  mayWrite: boolean
+}
+
 export type CodingModeInfo = {
   id: CodingModeId
 
@@ -28,6 +34,8 @@ export type CodingModeInfo = {
   permissionMode: PermissionMode
 
   allowedTools?: string[]
+
+  resourceProfile?: CodingModeResourceProfile
 }
 
 export const DEFAULT_CODING_MODE: CodingModeId = 'agent'

@@ -40,10 +40,13 @@ pub use schema::{
     StreamMode, SwarmConfig, SwarmStrategy, TelegramConfig, TextBrowserConfig, ToolFilterGroup,
     ToolFilterGroupMode, TranscriptionConfig, TtsConfig, TunnelConfig, VerifiableIntentConfig,
     WasmRuntimeConfig, WebFetchConfig, WebSearchConfig, WebhookConfig, WhatsAppChatPolicy,
-    WhatsAppWebMode, WorkspaceConfig, apply_channel_proxy_to_builder,
-    apply_runtime_proxy_to_builder, build_channel_proxy_client,
-    build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,
-    build_runtime_proxy_client_with_timeouts, default_agent_max_tool_iterations,
+    WhatsAppWebMode, WorkspaceConfig, CustomHttpHeader, DISALLOWED_CUSTOM_HEADER_NAMES,
+    apply_channel_proxy_to_builder, apply_runtime_proxy_to_builder,
+    build_channel_proxy_client, build_channel_proxy_client_with_timeouts,
+    build_custom_headers_map, build_runtime_proxy_client,
+    build_runtime_proxy_client_with_timeouts,
+    build_runtime_proxy_client_with_timeouts_and_headers, default_agent_max_tool_iterations,
+    is_disallowed_custom_header, is_valid_http_header_name, is_valid_http_header_value,
     runtime_proxy_config, set_runtime_proxy_config, ws_connect_with_proxy,
 };
 

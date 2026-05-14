@@ -2131,6 +2131,18 @@ impl Tool for BrowserTool {
             });
         }
 
+        let _resource_guard = match crate::session::acquire_browser_for_current_session().await {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
         let args = match crate::services::credential_vault::try_get_credential_vault() {
             Some(vault) => vault.resolve_json(&args),
             None => args,

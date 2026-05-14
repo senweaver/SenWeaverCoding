@@ -471,7 +471,7 @@ async fn process_chat_message(
     let _ = state.event_tx.send(serde_json::json!({
         "type": "agent_start",
         "provider": provider_label,
-        "model": state.model,
+        "model": state.current_model(),
     }));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
@@ -628,7 +628,7 @@ async fn process_chat_message(
             let _ = state.event_tx.send(serde_json::json!({
                 "type": "agent_end",
                 "provider": provider_label,
-                "model": state.model,
+                "model": state.current_model(),
             }));
 
             let auto_title_config = state.config.lock().auto_title.clone();
@@ -643,11 +643,13 @@ async fn process_chat_message(
                     .ok()
                     .flatten();
                     if existing_name.is_none() {
+                        let provider_for_title = state.current_provider();
+                        let model_for_title = state.current_model();
                         if let Some(title) = crate::agent::auto_title::generate_title(
-                            state.provider.as_ref(),
+                            provider_for_title.as_ref(),
                             content,
                             &response,
-                            &state.model,
+                            &model_for_title,
                             &auto_title_config,
                         )
                         .await

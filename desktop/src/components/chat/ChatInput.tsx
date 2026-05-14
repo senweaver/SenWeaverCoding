@@ -7,7 +7,10 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useTeamStore } from '../../stores/teamStore'
+import { useProviderStore } from '../../stores/providerStore'
 import { sessionsApi } from '../../api/sessions'
+import { anyProviderHasModel } from '../../utils/modelAvailability'
+import { isValidRuntimeSelection } from '../../utils/runtimeSelection'
 import { CodingModeSelector } from '../controls/CodingModeSelector'
 import { ModelSelector } from '../controls/ModelSelector'
 import type { AttachmentRef } from '../../types/chat'
@@ -82,9 +85,33 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const memberInfo = useTeamStore((s) => activeTabId ? s.getMemberBySessionId(activeTabId) : null)
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
   const hasMessages = useChatStore((s) => activeTabId ? (s.sessions[activeTabId]?.messages?.length ?? 0) > 0 : false)
+  const providers = useProviderStore((s) => s.providers)
+  const settingsCurrentModel = useSettingsStore((s) => s.currentModel)
+  const settingsAvailableModels = useSettingsStore((s) => s.availableModels)
+  const sessionRuntimeSelection = useSessionRuntimeStore((s) => activeTabId ? s.selections[activeTabId] : undefined)
+  const openSettingsOverlay = useUIStore((s) => s.openSettingsOverlay)
 
   const isMemberSession = !!memberInfo
   const isActive = chatState !== 'idle'
+  const hasModel = useMemo(() => {
+    if (isMemberSession) return true
+    if (
+      sessionRuntimeSelection &&
+      isValidRuntimeSelection(sessionRuntimeSelection, providers)
+    ) {
+      return true
+    }
+    if (anyProviderHasModel(providers)) return true
+    if ((settingsAvailableModels?.length ?? 0) > 0) return true
+    if (settingsCurrentModel) return true
+    return false
+  }, [
+    isMemberSession,
+    sessionRuntimeSelection,
+    providers,
+    settingsAvailableModels,
+    settingsCurrentModel,
+  ])
   const [stopCooldown, setStopCooldown] = useState(false)
   const stopCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -166,10 +193,14 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   }
   const showStopping = isActive && (stopRequested || stopCooldown)
   const isWorkspaceMissing = activeSession?.workDirExists === false
-  const canSubmit = !isWorkspaceMissing && (input.trim().length > 0 || (!isMemberSession && attachments.length > 0))
+  const canSubmit =
+    !isWorkspaceMissing &&
+    (isMemberSession || hasModel) &&
+    (input.trim().length > 0 || (!isMemberSession && attachments.length > 0))
   const actAsStopButton = !isMemberSession && isActive && !canSubmit
   const isHeroComposer = variant === 'hero' && !isMemberSession
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
+  const showNoModelBanner = !isMemberSession && !hasModel
 
   useEffect(() => {
     textareaRef.current?.focus()
@@ -600,6 +631,24 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
         {!isMemberSession && isDebugMode && (
           <PrivacyBanner sessionId={activeTabId ?? null} />
         )}
+        {showNoModelBanner && (
+          <div
+            role="status"
+            className="mb-1.5 flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-warning)]/35 bg-[var(--color-warning-container)]/25 px-3 py-2 text-[12px] text-[var(--color-text-primary)]"
+          >
+            <span className="material-symbols-outlined flex-shrink-0 text-[16px] text-[var(--color-warning)]">
+              info
+            </span>
+            <span className="flex-1 leading-snug">{t('chat.noModel.banner')}</span>
+            <button
+              type="button"
+              onClick={() => openSettingsOverlay('providers')}
+              className="flex-shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+            >
+              {t('chat.noModel.openSettings')}
+            </button>
+          </div>
+        )}
         {!isMemberSession && <ReviewCard />}
         {!isMemberSession && <WorkspaceQueuePanel sessionId={activeTabId} />}
         <div
@@ -805,14 +854,18 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                     ? showStopping
                       ? t('chat.stopping')
                       : t('chat.stopTitle')
-                    : isMemberSession ? t('common.send') : t('common.run')
+                    : showNoModelBanner
+                      ? t('chat.noModel.sendTooltip')
+                      : isMemberSession ? t('common.send') : t('common.run')
                 }
                 title={
                   actAsStopButton
                     ? showStopping
                       ? t('chat.stopping')
                       : t('chat.stopTitle')
-                    : isMemberSession ? t('common.send') : t('common.run')
+                    : showNoModelBanner
+                      ? t('chat.noModel.sendTooltip')
+                      : isMemberSession ? t('common.send') : t('common.run')
                 }
                 className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50 ${
                   actAsStopButton

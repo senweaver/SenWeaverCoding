@@ -165,13 +165,24 @@ pub fn create_optimizer(
     Arc::new(TokenOptimizer::new(compressor_config, budget_config))
 }
 
-static GLOBAL_OPTIMIZER: std::sync::OnceLock<Arc<TokenOptimizer>> = std::sync::OnceLock::new();
+static GLOBAL_OPTIMIZER: std::sync::LazyLock<arc_swap::ArcSwapOption<TokenOptimizer>> =
+    std::sync::LazyLock::new(arc_swap::ArcSwapOption::empty);
+
+static GLOBAL_PROJECT_LOC: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub fn ensure_global_optimizer(
     compressor_config: ToolOutputCompressorConfig,
-    budget_config: TokenBudgetConfig,
+    mut budget_config: TokenBudgetConfig,
 ) {
-    let _ = GLOBAL_OPTIMIZER.get_or_init(|| create_optimizer(compressor_config, budget_config));
+    let project_loc = GLOBAL_PROJECT_LOC.load(std::sync::atomic::Ordering::Relaxed);
+    if project_loc > 0 && budget_config.max_tool_result_tokens
+        == super::token_budget::default_max_tool_result_tokens()
+    {
+        budget_config.max_tool_result_tokens =
+            super::token_budget::dynamic_max_tool_result_tokens(project_loc as usize);
+    }
+    GLOBAL_OPTIMIZER.store(Some(create_optimizer(compressor_config, budget_config)));
 }
 
 pub fn ensure_global_optimizer_from_config(config: &crate::config::Config) {
@@ -183,22 +194,19 @@ pub fn ensure_global_optimizer_from_config(config: &crate::config::Config) {
 
 pub fn ensure_global_optimizer_with_loc(
     compressor_config: ToolOutputCompressorConfig,
-    mut budget_config: TokenBudgetConfig,
+    budget_config: TokenBudgetConfig,
     project_loc: u64,
 ) {
-    if project_loc > 0 {
-        budget_config.max_tool_result_tokens =
-            super::token_budget::dynamic_max_tool_result_tokens(project_loc as usize);
-    }
-    let _ = GLOBAL_OPTIMIZER.get_or_init(|| create_optimizer(compressor_config, budget_config));
+    GLOBAL_PROJECT_LOC.store(project_loc, std::sync::atomic::Ordering::Relaxed);
+    ensure_global_optimizer(compressor_config, budget_config);
 }
 
-pub fn global_optimizer() -> Option<&'static Arc<TokenOptimizer>> {
-    GLOBAL_OPTIMIZER.get()
+pub fn global_optimizer() -> Option<Arc<TokenOptimizer>> {
+    GLOBAL_OPTIMIZER.load_full()
 }
 
 pub fn compress_output(tool_name: &str, output: &str) -> String {
-    match GLOBAL_OPTIMIZER.get() {
+    match GLOBAL_OPTIMIZER.load_full() {
         Some(opt) => opt.compress_tool_output(tool_name, output),
         None => output.to_string(),
     }

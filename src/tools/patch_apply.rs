@@ -354,6 +354,40 @@ impl Tool for PatchApplyTool {
                     }
                 }
 
+                let planned_paths: Vec<std::path::PathBuf> =
+                    patch_files.iter().map(|f| f.path.clone()).collect();
+                let _resource_guards = if action == "apply" {
+                    match crate::session::acquire_many_file_writes_for_current_session(
+                        planned_paths.clone(),
+                    )
+                    .await
+                    {
+                        Some(Ok(g)) => Some(g),
+                        Some(Err(e)) => {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!("{e}")),
+                            });
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
+                if action == "apply" {
+                    for p in &planned_paths {
+                        if crate::session::is_stale_for_current_session(p) {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(crate::session::stale_file_error_message(p)),
+                            });
+                        }
+                    }
+                }
+
                 let mut batch = EditBatch::new(EditOrigin::PatchTool).with_atomic(atomic);
                 for file in &patch_files {
                     batch.push(EditOp::ApplyHunk {
@@ -406,6 +440,9 @@ impl Tool for PatchApplyTool {
                                     .unwrap_or_else(|| op.touched_path.display().to_string());
                                 if op.success {
                                     applied += 1;
+                                    crate::session::record_write_for_current_session(
+                                        &op.touched_path,
+                                    );
                                     details.push(format!(
                                         "  Successfully applied hunk(s) to {path}"
                                     ));

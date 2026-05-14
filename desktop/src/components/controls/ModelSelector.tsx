@@ -189,12 +189,20 @@ export function ModelSelector({
       }
     : null
 
-  const buttonModelLabel = isRuntimeScoped
-    ? selectedRuntimeModel?.name ?? t('model.selectModel')
-    : selectedModel?.name ?? t('model.selectModel')
-  const buttonProviderLabel = isRuntimeScoped
-    ? selectedProviderChoice?.providerName ?? null
-    : null
+  const noConfiguredModels = isRuntimeScoped
+    ? providerChoices.length === 0
+    : availableModels.length === 0
+  const buttonModelLabel = noConfiguredModels
+    ? t('model.unconfiguredPlaceholder')
+    : isRuntimeScoped
+      ? selectedRuntimeModel?.name ?? t('model.selectModel')
+      : selectedModel?.name ?? t('model.selectModel')
+  const buttonProviderLabel = noConfiguredModels
+    ? null
+    : isRuntimeScoped
+      ? selectedProviderChoice?.providerName ?? null
+      : null
+  const buttonDisabled = disabled || noConfiguredModels
 
   const handleRuntimeSelect = (selection: RuntimeSelection) => {
     if (!runtimeKey) return
@@ -210,8 +218,9 @@ export function ModelSelector({
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => !disabled && setOpen(!open)}
-        disabled={disabled}
+        onClick={() => !buttonDisabled && setOpen(!open)}
+        disabled={buttonDisabled}
+        title={noConfiguredModels ? t('model.unconfiguredPlaceholder') : undefined}
         className={`flex items-center gap-1.5 rounded-full bg-[var(--color-surface-container-low)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50 ${
           isRuntimeScoped ? 'w-[220px] shrink-0' : 'max-w-[260px]'
         }`}

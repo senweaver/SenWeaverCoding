@@ -9,6 +9,12 @@ export type ModelMapping = {
   opus: string
 }
 
+export type CustomHttpHeader = {
+  name: string
+  value: string
+  enabled: boolean
+}
+
 export type SavedProvider = {
   id: string
   presetId: string
@@ -20,10 +26,12 @@ export type SavedProvider = {
   models: string[]
 
   modelContextWindows?: Record<string, number>
+  customHeaders?: CustomHttpHeader[]
   notes?: string
 }
 
 export type CreateProviderInput = {
+  id?: string
   presetId: string
   name: string
   apiKey: string
@@ -31,6 +39,7 @@ export type CreateProviderInput = {
   apiFormat?: ApiFormat
   models: string[]
   modelContextWindows?: Record<string, number>
+  customHeaders?: CustomHttpHeader[]
   notes?: string
 }
 
@@ -41,6 +50,7 @@ export type UpdateProviderInput = {
   apiFormat?: ApiFormat
   models?: string[]
   modelContextWindows?: Record<string, number>
+  customHeaders?: CustomHttpHeader[]
   notes?: string
 }
 

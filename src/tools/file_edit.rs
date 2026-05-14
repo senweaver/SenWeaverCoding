@@ -279,6 +279,30 @@ impl Tool for FileEditTool {
             });
         }
 
+        let _resource_guard = match crate::session::acquire_file_write_for_current_session(
+            &resolved_target,
+        )
+        .await
+        {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
+        if crate::session::is_stale_for_current_session(&resolved_target) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(crate::session::stale_file_error_message(&resolved_target)),
+            });
+        }
+
         const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
         if let Ok(meta) = tokio::fs::metadata(&resolved_target).await {
             if meta.len() > MAX_FILE_SIZE {
@@ -360,7 +384,10 @@ impl FileEditTool {
             anchor: None,
         });
         match self.ops_applier.apply_batch(batch).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                crate::session::record_write_for_current_session(path);
+                Ok(())
+            }
             Err(e) => Err(format!("{e}")),
         }
     }

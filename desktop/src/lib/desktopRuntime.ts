@@ -89,24 +89,37 @@ async function waitForHealth(
   throw lastError instanceof Error ? lastError : new Error('Local server healthcheck failed')
 }
 
+const FETCH_SETTINGS_MAX_ATTEMPTS = 6
+const FETCH_SETTINGS_BUDGET_MS = 20_000
+
 export async function fetchSettingsWithRetry(
   fetchAll: () => Promise<void>,
   options?: { signal?: AbortSignal },
 ) {
-  let i = 0
+  let attempt = 0
   let delay = 300
-  for (;;) {
+  const startedAt = Date.now()
+  let lastError: unknown
+  while (attempt < FETCH_SETTINGS_MAX_ATTEMPTS) {
     options?.signal?.throwIfAborted()
     try {
       await fetchAll()
       return
     } catch (error) {
+      lastError = error
       console.warn('[desktop] fetchSettings failed, retrying', error)
-      i += 1
+      attempt += 1
+      if (Date.now() - startedAt >= FETCH_SETTINGS_BUDGET_MS) {
+        break
+      }
       await sleep(delay)
       delay = Math.min(10_000, Math.round(delay * 1.6))
     }
   }
+  console.warn(
+    '[desktop] fetchSettings still failing after retries; rendering main UI in degraded mode so the user can open Settings to configure',
+    lastError,
+  )
 }
 
 type TauriInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>

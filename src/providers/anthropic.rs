@@ -17,6 +17,7 @@ pub struct AnthropicProvider {
     credential: Option<String>,
     base_url: String,
     max_tokens: u32,
+    extra_headers: std::collections::HashMap<String, String>,
 }
 
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 4096;
@@ -200,11 +201,20 @@ impl AnthropicProvider {
                 .map(ToString::to_string),
             base_url,
             max_tokens: DEFAULT_ANTHROPIC_MAX_TOKENS,
+            extra_headers: std::collections::HashMap::new(),
         }
     }
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
         self
     }
 
@@ -586,7 +596,12 @@ impl AnthropicProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.anthropic", 120, 10)
+        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
+            "provider.anthropic",
+            120,
+            10,
+            &self.extra_headers,
+        )
     }
 
     fn build_streaming_request(request: &NativeChatRequest<'_>) -> serde_json::Value {

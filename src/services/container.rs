@@ -162,6 +162,8 @@ pub struct ServiceContainerConfig {
     pub team_sync_enabled: bool,
     pub policy_rules: Vec<PolicyRule>,
     pub conflict_strategy: ConflictStrategy,
+
+    pub shared_config: Option<Arc<crate::config::hot_reload::SharedConfig>>,
 }
 
 impl Default for ServiceContainerConfig {
@@ -172,6 +174,7 @@ impl Default for ServiceContainerConfig {
             team_sync_enabled: false,
             policy_rules: Vec::new(),
             conflict_strategy: ConflictStrategy::LastWriterWins,
+            shared_config: None,
         }
     }
 }
@@ -182,6 +185,12 @@ impl ServiceContainer {
         let sync_file = cfg.data_dir.join("settings_sync.json");
 
         let command_registry = register_all_commands();
+
+        let shared_config = cfg.shared_config.unwrap_or_else(|| {
+            Arc::new(crate::config::hot_reload::SharedConfig::new(
+                crate::config::schema::Config::default(),
+            ))
+        });
 
         Self {
             analytics: AnalyticsService::new(true),
@@ -214,9 +223,7 @@ impl ServiceContainer {
             todo_store: Arc::new(parking_lot::RwLock::new(Vec::new())),
             max_context_tokens: AtomicUsize::new(128_000),
             runtime_flags: Arc::new(RuntimeFlags::default()),
-            shared_config: Arc::new(crate::config::hot_reload::SharedConfig::new(
-                crate::config::schema::Config::default(),
-            )),
+            shared_config,
             agent_metrics: Arc::new(crate::observability::agent_metrics::AgentMetrics::new()),
             blackboard: Arc::new(crate::memory::blackboard::Blackboard::new()),
             health_broadcaster: crate::agent::health_signal::HealthBroadcaster::new(),

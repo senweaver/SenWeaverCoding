@@ -232,10 +232,20 @@ export function useQueueLengthForSession(sessionId: string | null | undefined): 
 
 export async function tryDrainWorkspace(workspaceKey: string): Promise<void> {
   const store = useWorkspaceQueueStore.getState()
-  const busy = store.getRunningSessionInWorkspace(workspaceKey)
-  if (busy) return
-  const head = store.popHead(workspaceKey)
+  const running = useSessionRunStateStore.getState().running
+  const list = store.queues[workspaceKey] ?? []
+  const headIdx = list.findIndex((item) => !running.has(item.sessionId))
+  if (headIdx < 0) return
+  const head = list[headIdx]
   if (!head) return
+  useWorkspaceQueueStore.setState((s) => {
+    const arr = s.queues[workspaceKey] ?? []
+    const next = arr.filter((item) => item.id !== head.id)
+    const queues = { ...s.queues }
+    if (next.length > 0) queues[workspaceKey] = next
+    else delete queues[workspaceKey]
+    return { queues }
+  })
   const { useChatStore } = await import('./chatStore')
   useChatStore.getState().sendMessage(head.sessionId, head.content, head.attachments, {
     ...(head.options ?? {}),

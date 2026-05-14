@@ -246,6 +246,7 @@ pub async fn handle_models_set_current(
             .into_response();
     }
     state.push_live_config(snapshot);
+    state.rebuild_runtime_from_config();
     Json(serde_json::json!({ "ok": true, "model": body.model_id })).into_response()
 }
 
@@ -298,6 +299,7 @@ pub async fn handle_effort_set(
             .into_response();
     }
     state.push_live_config(snapshot);
+    state.rebuild_runtime_from_config();
     Json(serde_json::json!({ "ok": true, "level": body.level })).into_response()
 }
 
@@ -474,6 +476,17 @@ fn provider_to_saved_provider(
         .filter(|(_, value)| **value > 0)
         .map(|(model, value)| (model.clone(), serde_json::Value::from(*value)))
         .collect();
+    let custom_headers: Vec<serde_json::Value> = profile
+        .custom_headers
+        .iter()
+        .map(|header| {
+            serde_json::json!({
+                "name": header.name,
+                "value": header.value,
+                "enabled": header.enabled,
+            })
+        })
+        .collect();
     serde_json::json!({
         "id": id,
         "presetId": profile.preset_id.clone().unwrap_or_else(|| id.to_string()),
@@ -483,6 +496,7 @@ fn provider_to_saved_provider(
         "apiFormat": wire_to_api_format(profile.wire_api.as_deref()),
         "models": models,
         "modelContextWindows": serde_json::Value::Object(model_context_windows),
+        "customHeaders": custom_headers,
         "notes": profile.notes.clone().unwrap_or_default(),
         "hasKey": api_key_present || env_present,
     })
@@ -550,6 +564,8 @@ pub struct CreateProviderBody {
 
     #[serde(default, rename = "modelContextWindows")]
     pub model_context_windows: Option<serde_json::Value>,
+    #[serde(default, rename = "customHeaders")]
+    pub custom_headers: Option<Vec<CustomHeaderInput>>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -568,8 +584,51 @@ pub struct UpdateProviderBody {
     pub models: Option<serde_json::Value>,
     #[serde(default, rename = "modelContextWindows")]
     pub model_context_windows: Option<serde_json::Value>,
+    #[serde(default, rename = "customHeaders")]
+    pub custom_headers: Option<Vec<CustomHeaderInput>>,
     #[serde(default)]
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CustomHeaderInput {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default = "default_custom_header_input_enabled")]
+    pub enabled: bool,
+}
+
+fn default_custom_header_input_enabled() -> bool {
+    true
+}
+
+fn sanitize_custom_headers_input(
+    input: &[CustomHeaderInput],
+) -> Vec<crate::config::CustomHttpHeader> {
+    let mut out: Vec<crate::config::CustomHttpHeader> = Vec::with_capacity(input.len());
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in input {
+        let trimmed_name = entry.name.trim().to_string();
+        if trimmed_name.is_empty() {
+            continue;
+        }
+        let dedupe_key = trimmed_name.to_ascii_lowercase();
+        if !seen_names.insert(dedupe_key) {
+            tracing::warn!(
+                header_name = trimmed_name.as_str(),
+                "custom_headers contains duplicate name; keeping the first entry only"
+            );
+            continue;
+        }
+        out.push(crate::config::CustomHttpHeader {
+            name: trimmed_name,
+            value: entry.value.clone(),
+            enabled: entry.enabled,
+        });
+    }
+    out
 }
 
 fn parse_model_names(value: &serde_json::Value) -> Vec<String> {
@@ -870,27 +929,34 @@ pub async fn handle_providers_create(
     let mut id = body
         .id
         .clone()
+        .filter(|raw| !raw.trim().is_empty())
         .unwrap_or_else(|| slugify_provider_id(&trimmed_name));
     {
         let cfg = state.config.lock();
-        if let Some(existing_id) = find_provider_id_by_display_name(&cfg, &trimmed_name, None) {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": format!(
-                        "provider name already in use by '{existing_id}': pick a unique display name"
-                    ),
-                    "code": "name_conflict",
-                    "conflictingId": existing_id,
-                })),
-            )
-                .into_response();
+        if let Some(existing_id) =
+            find_provider_id_by_display_name(&cfg, &trimmed_name, None)
+        {
+            tracing::info!(
+                requested_name = trimmed_name.as_str(),
+                existing_id = existing_id.as_str(),
+                "Provider create: display name reused; allowing per spec (name is for display only, id is the unique key)"
+            );
         }
         if cfg.model_providers.contains_key(&id) {
-            for n in 2..1000 {
-                let candidate = format!("{id}-{n}");
+            let mut suffix: u64 = 2;
+            loop {
+                let candidate = format!("{id}-{suffix}");
                 if !cfg.model_providers.contains_key(&candidate) {
                     id = candidate;
+                    break;
+                }
+                suffix = suffix.saturating_add(1);
+                if suffix > 1_000_000 {
+
+                    id = format!(
+                        "{id}-{}",
+                        uuid::Uuid::new_v4().simple().to_string().get(..12).unwrap_or("collision")
+                    );
                     break;
                 }
             }
@@ -931,6 +997,9 @@ pub async fn handle_providers_create(
     if let Some(ref overrides) = body.model_context_windows {
         apply_model_context_windows_to_profile(&mut profile, overrides);
     }
+    if let Some(ref custom_headers) = body.custom_headers {
+        profile.custom_headers = sanitize_custom_headers_input(custom_headers);
+    }
 
     let snapshot;
     {
@@ -947,6 +1016,7 @@ pub async fn handle_providers_create(
             .into_response();
     }
     state.push_live_config(snapshot);
+    state.rebuild_runtime_from_config();
 
     let config_snapshot = state.config.lock().clone();
     let saved = provider_to_saved_provider(&id, &profile, &config_snapshot);
@@ -969,17 +1039,12 @@ pub async fn handle_providers_update(
             if let Some(existing_id) =
                 find_provider_id_by_display_name(&cfg, name, Some(id.as_str()))
             {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!(
-                            "provider name already in use by '{existing_id}': pick a unique display name"
-                        ),
-                        "code": "name_conflict",
-                        "conflictingId": existing_id,
-                    })),
-                )
-                    .into_response();
+                tracing::info!(
+                    requested_name = name,
+                    existing_id = existing_id.as_str(),
+                    target_id = id.as_str(),
+                    "Provider update: display name shared with existing provider; allowing per spec (name is display-only, id is unique key)"
+                );
             }
         }
     }
@@ -1038,6 +1103,9 @@ pub async fn handle_providers_update(
                     .model_context_windows
                     .retain(|model, _| kept.contains(model));
             }
+            if let Some(ref custom_headers) = body.custom_headers {
+                profile.custom_headers = sanitize_custom_headers_input(custom_headers);
+            }
             profile.clone()
         };
 
@@ -1055,6 +1123,7 @@ pub async fn handle_providers_update(
             .into_response();
     }
     state.push_live_config(snapshot);
+    state.rebuild_runtime_from_config();
 
     let config_snapshot = state.config.lock().clone();
     let profile = config_snapshot
@@ -1083,9 +1152,18 @@ pub async fn handle_providers_delete(
             )
                 .into_response();
         }
-        if cfg.default_provider.as_deref() == Some(id.as_str()) {
+        let was_active = cfg.default_provider.as_deref() == Some(id.as_str());
+        if was_active {
             cfg.default_provider = None;
+            cfg.default_model = None;
+            cfg.api_key = None;
+            cfg.api_url = None;
+            cfg.api_path = None;
+            cfg.provider_max_tokens = None;
+            cfg.model_context_windows.clear();
         }
+
+        sanitize_active_profile_in_place(&mut cfg);
         cfg.clone()
     };
     if let Err(e) = snapshot.save().await {
@@ -1096,6 +1174,7 @@ pub async fn handle_providers_delete(
             .into_response();
     }
     state.push_live_config(snapshot);
+    state.rebuild_runtime_from_config();
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -1127,6 +1206,7 @@ pub async fn handle_providers_activate(
             .into_response();
     }
     state.push_live_config(snapshot);
+    state.rebuild_runtime_from_config();
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -4520,6 +4600,7 @@ pub async fn handle_coding_modes_list(
         .iter()
         .map(|m| {
             let allowed = build_allowed_tools_for_mode(m);
+            let profile = m.resource_profile();
             serde_json::json!({
                 "id": m.display_name(),
                 "label": m.label(),
@@ -4527,6 +4608,11 @@ pub async fn handle_coding_modes_list(
                 "icon": m.icon(),
                 "permissionMode": derive_permission_from_coding(m),
                 "allowedTools": allowed,
+                "resourceProfile": {
+                    "browser": profile.browser,
+                    "shell": profile.shell,
+                    "mayWrite": profile.may_write,
+                },
             })
         })
         .collect();
@@ -4544,6 +4630,7 @@ pub async fn handle_coding_mode_get(
         Some(svc) => *svc.coding_mode.read(),
         None => crate::agent::coding_mode::CodingMode::default(),
     };
+    let profile = mode.resource_profile();
     Json(serde_json::json!({
         "mode": mode.display_name(),
         "label": mode.label(),
@@ -4551,6 +4638,11 @@ pub async fn handle_coding_mode_get(
         "icon": mode.icon(),
         "permissionMode": derive_permission_from_coding(&mode),
         "allowedTools": build_allowed_tools_for_mode(&mode),
+        "resourceProfile": {
+            "browser": profile.browser,
+            "shell": profile.shell,
+            "mayWrite": profile.may_write,
+        },
     }))
     .into_response()
 }
@@ -4558,6 +4650,8 @@ pub async fn handle_coding_mode_get(
 #[derive(Debug, Deserialize)]
 pub struct SetCodingModeBody {
     pub mode: String,
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 pub async fn handle_coding_mode_put(
@@ -4577,7 +4671,39 @@ pub async fn handle_coding_mode_put(
         )
             .into_response();
     };
-    if let Some(svc) = crate::services::try_get_services() {
+    let svc_opt = crate::services::try_get_services();
+    let previous_mode = svc_opt
+        .map(|svc| *svc.coding_mode.read())
+        .unwrap_or_default();
+    let cfg = svc_opt
+        .map(|svc| svc.config())
+        .unwrap_or_else(|| std::sync::Arc::new(state.config.lock().clone()));
+    let whitelist: &[String] = cfg.autonomy.auto_approve_mode_transitions.as_slice();
+    let auto_approved = crate::agent::mode_transition::is_auto_approved(
+        whitelist,
+        previous_mode,
+        parsed,
+    );
+    let needs_confirm = !body.confirmed && previous_mode != parsed && !auto_approved;
+    if needs_confirm {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "confirmation_required",
+                "confirmationRequired": true,
+                "from": previous_mode.display_name(),
+                "to": parsed.display_name(),
+                "whitelist": whitelist,
+                "message": format!(
+                    "Switching coding mode {} -> {} is not in the autonomy auto-approve list; resubmit with `confirmed: true` to apply",
+                    previous_mode.display_name(),
+                    parsed.display_name(),
+                ),
+            })),
+        )
+            .into_response();
+    }
+    if let Some(svc) = svc_opt {
         *svc.coding_mode.write() = parsed;
     }
     let permission = derive_permission_from_coding(&parsed);
@@ -4585,8 +4711,10 @@ pub async fn handle_coding_mode_put(
     Json(serde_json::json!({
         "ok": true,
         "mode": parsed.display_name(),
+        "from": previous_mode.display_name(),
         "permissionMode": permission,
         "allowedTools": build_allowed_tools_for_mode(&parsed),
+        "autoApproved": previous_mode == parsed || auto_approved,
     }))
     .into_response()
 }

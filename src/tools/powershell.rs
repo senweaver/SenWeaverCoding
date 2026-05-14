@@ -86,6 +86,18 @@ impl Tool for PowerShellTool {
             });
         }
 
+        let _resource_guard = match crate::session::acquire_shell_for_current_session().await {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
         let mut cmd = crate::util::hidden_async_command("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", command]);
 

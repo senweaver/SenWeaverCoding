@@ -442,6 +442,65 @@ pub fn build_runtime_proxy_client_with_timeouts(
     set_runtime_proxy_cached_client(ck, c.clone());
     c
 }
+
+pub fn build_runtime_proxy_client_with_timeouts_and_headers(
+    service_key: &str,
+    timeout_secs: u64,
+    connect_timeout_secs: u64,
+    headers: &std::collections::HashMap<String, String>,
+) -> reqwest::Client {
+    if headers.is_empty() {
+        return build_runtime_proxy_client_with_timeouts(
+            service_key,
+            timeout_secs,
+            connect_timeout_secs,
+        );
+    }
+
+    let mut header_map = reqwest::header::HeaderMap::with_capacity(headers.len());
+    for (key, value) in headers {
+        let trimmed_key = key.trim();
+        if trimmed_key.is_empty() {
+            continue;
+        }
+        if is_disallowed_custom_header(trimmed_key) {
+            tracing::warn!(
+                service_key,
+                header_name = trimmed_key,
+                "skipping reserved/disallowed custom HTTP header when building HTTP client"
+            );
+            continue;
+        }
+        match (
+            reqwest::header::HeaderName::from_bytes(trimmed_key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            (Ok(name), Ok(val)) => {
+                header_map.insert(name, val);
+            }
+            _ => {
+                tracing::warn!(
+                    service_key,
+                    header_name = trimmed_key,
+                    "skipping invalid custom HTTP header name or value when building HTTP client"
+                );
+            }
+        }
+    }
+
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+        .default_headers(header_map);
+    let builder = apply_runtime_proxy_to_builder(builder, service_key);
+    builder.build().unwrap_or_else(|e| {
+        tracing::warn!(
+            service_key,
+            "Failed to build proxied timeout client with custom headers: {e}"
+        );
+        reqwest::Client::new()
+    })
+}
 pub fn build_channel_proxy_client(service_key: &str, proxy_url: Option<&str>) -> reqwest::Client {
     match normalize_proxy_url_option(proxy_url) {
         Some(u) => build_explicit_proxy_client(service_key, &u, None, None),
@@ -1317,6 +1376,105 @@ impl Default for WorkspaceConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CustomHttpHeader {
+    pub name: String,
+    pub value: String,
+    #[serde(default = "default_custom_http_header_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for CustomHttpHeader {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            value: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+fn default_custom_http_header_enabled() -> bool {
+    true
+}
+
+pub const DISALLOWED_CUSTOM_HEADER_NAMES: &[&str] = &[
+    "content-type",
+    "content-length",
+    "host",
+    "authorization",
+    "transfer-encoding",
+    "connection",
+    "proxy-authorization",
+];
+
+#[must_use]
+pub fn is_valid_http_header_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    name.bytes().all(|b| matches!(b,
+        b'A'..=b'Z'
+        | b'a'..=b'z'
+        | b'0'..=b'9'
+        | b'!' | b'#' | b'$' | b'%' | b'&' | b'\''
+        | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
+        | b'`' | b'|' | b'~'))
+}
+
+#[must_use]
+pub fn is_disallowed_custom_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    DISALLOWED_CUSTOM_HEADER_NAMES
+        .iter()
+        .any(|disallowed| *disallowed == lower)
+}
+
+#[must_use]
+pub fn is_valid_http_header_value(value: &str) -> bool {
+    !value.contains('\r') && !value.contains('\n')
+}
+
+#[must_use]
+pub fn build_custom_headers_map(
+    headers: &[CustomHttpHeader],
+) -> std::collections::HashMap<String, String> {
+    let mut out: std::collections::HashMap<String, String> =
+        std::collections::HashMap::with_capacity(headers.len());
+    for header in headers {
+        if !header.enabled {
+            continue;
+        }
+        let trimmed_name = header.name.trim();
+        if trimmed_name.is_empty() {
+            continue;
+        }
+        if !is_valid_http_header_name(trimmed_name) {
+            tracing::warn!(
+                header_name = trimmed_name,
+                "skipping invalid custom HTTP header name (contains characters outside RFC 7230 token set)"
+            );
+            continue;
+        }
+        if is_disallowed_custom_header(trimmed_name) {
+            tracing::warn!(
+                header_name = trimmed_name,
+                "skipping reserved/disallowed custom HTTP header (managed by the provider itself)"
+            );
+            continue;
+        }
+        if !is_valid_http_header_value(&header.value) {
+            tracing::warn!(
+                header_name = trimmed_name,
+                "skipping custom HTTP header whose value contains CR/LF (potential header injection)"
+            );
+            continue;
+        }
+        out.insert(trimmed_name.to_string(), header.value.clone());
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ModelProviderConfig {
 
@@ -1358,6 +1516,9 @@ pub struct ModelProviderConfig {
 
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub model_context_windows: std::collections::HashMap<String, u32>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_headers: Vec<CustomHttpHeader>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -6391,11 +6552,26 @@ fn default_config_dir() -> Result<PathBuf> {
             return Ok(PathBuf::from(home).join(".senweavercoding"));
         }
     }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() {
+            return Ok(PathBuf::from(profile).join(".senweavercoding"));
+        }
+    }
 
-    let home = UserDirs::new()
-        .map(|u| u.home_dir().to_path_buf())
-        .context("Could not find home directory")?;
-    Ok(home.join(".senweavercoding"))
+    if let Some(home) = UserDirs::new().map(|u| u.home_dir().to_path_buf()) {
+        return Ok(home.join(".senweavercoding"));
+    }
+
+    let mut fallback = std::env::temp_dir();
+    fallback.push("SenAgentOS");
+    fallback.push("home");
+    fallback.push(".senweavercoding");
+    tracing::warn!(
+        path = %fallback.display(),
+        "Could not resolve a home directory; falling back to %TEMP%/SenAgentOS so the desktop \
+         can still launch. Configure HOME/USERPROFILE for a stable config location."
+    );
+    Ok(fallback)
 }
 
 fn active_workspace_state_path(default_dir: &Path) -> PathBuf {
@@ -6717,11 +6893,18 @@ fn decrypt_optional_secret(
 ) -> Result<()> {
     if let Some(raw) = value.clone() {
         if crate::security::SecretStore::is_encrypted(&raw) {
-            *value = Some(
-                store
-                    .decrypt(&raw)
-                    .with_context(|| format!("Failed to decrypt {field_name}"))?,
-            );
+            match store.decrypt(&raw) {
+                Ok(plain) => *value = Some(plain),
+                Err(err) => {
+                    tracing::warn!(
+                        field = field_name,
+                        error = %err,
+                        "Failed to decrypt secret; clearing in-memory value so the desktop can boot. \
+                         Re-enter the credential in Settings to restore."
+                    );
+                    *value = None;
+                }
+            }
         }
     }
     Ok(())
@@ -6733,9 +6916,18 @@ fn decrypt_secret(
     field_name: &str,
 ) -> Result<()> {
     if crate::security::SecretStore::is_encrypted(value) {
-        *value = store
-            .decrypt(value)
-            .with_context(|| format!("Failed to decrypt {field_name}"))?;
+        match store.decrypt(value) {
+            Ok(plain) => *value = plain,
+            Err(err) => {
+                tracing::warn!(
+                    field = field_name,
+                    error = %err,
+                    "Failed to decrypt required secret; clearing in-memory value so the desktop can boot. \
+                     The associated channel/provider will require re-entering the credential."
+                );
+                value.clear();
+            }
+        }
     }
     Ok(())
 }
@@ -6897,21 +7089,87 @@ async fn ensure_bootstrap_files(workspace_dir: &Path) -> Result<()> {
 
 impl Config {
     pub async fn load_or_init() -> Result<Self> {
-        let (default_sen_dir, default_workspace_dir) = default_config_and_workspace_dirs()?;
+        let (default_sen_dir, default_workspace_dir) =
+            default_config_and_workspace_dirs().unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "default config dirs unresolved; using %TEMP% fallback so first launch can proceed"
+                );
+                let mut fallback = std::env::temp_dir();
+                fallback.push("SenAgentOS");
+                fallback.push(".senweavercoding");
+                let workspace = fallback.join("workspace");
+                (fallback, workspace)
+            });
 
-        let (sen_dir, workspace_dir, resolution_source) =
-            resolve_runtime_config_dirs(&default_sen_dir, &default_workspace_dir).await?;
+        let (mut sen_dir, mut workspace_dir, resolution_source) = match resolve_runtime_config_dirs(
+            &default_sen_dir,
+            &default_workspace_dir,
+        )
+        .await
+        {
+            Ok(triple) => triple,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "resolve_runtime_config_dirs failed; falling back to default sen_dir so first launch can proceed"
+                );
+                (
+                    default_sen_dir.clone(),
+                    default_workspace_dir.clone(),
+                    ConfigResolutionSource::DefaultConfigDir,
+                )
+            }
+        };
+
+        if let Err(err) = fs::create_dir_all(&sen_dir).await {
+            tracing::warn!(
+                error = %err,
+                path = %sen_dir.display(),
+                "{}; falling back to %TEMP%/SenAgentOS so the desktop can boot",
+                config_dir_creation_error(&sen_dir)
+            );
+            let mut temp_root = std::env::temp_dir();
+            temp_root.push("SenAgentOS");
+            temp_root.push(".senweavercoding");
+            sen_dir = temp_root.clone();
+            workspace_dir = temp_root.join("workspace");
+            if let Err(err2) = fs::create_dir_all(&sen_dir).await {
+                tracing::error!(
+                    error = %err2,
+                    path = %sen_dir.display(),
+                    "even %TEMP% config dir creation failed; running entirely in-memory"
+                );
+            }
+        }
+        if let Err(err) = fs::create_dir_all(&workspace_dir).await {
+            tracing::warn!(
+                error = %err,
+                path = %workspace_dir.display(),
+                "Failed to create workspace directory; falling back to %TEMP%/SenAgentOS/workspace"
+            );
+            let mut tmp = std::env::temp_dir();
+            tmp.push("SenAgentOS");
+            tmp.push("workspace");
+            if let Err(err2) = fs::create_dir_all(&tmp).await {
+                tracing::error!(
+                    error = %err2,
+                    path = %tmp.display(),
+                    "even %TEMP% workspace dir creation failed; entries written there will fail at runtime"
+                );
+            }
+            workspace_dir = tmp;
+        }
 
         let config_path = sen_dir.join("config.toml");
 
-        fs::create_dir_all(&sen_dir)
-            .await
-            .with_context(|| config_dir_creation_error(&sen_dir))?;
-        fs::create_dir_all(&workspace_dir)
-            .await
-            .context("Failed to create workspace directory")?;
-
-        ensure_bootstrap_files(&workspace_dir).await?;
+        if let Err(err) = ensure_bootstrap_files(&workspace_dir).await {
+            tracing::warn!(
+                error = %err,
+                workspace = %workspace_dir.display(),
+                "Failed to write bootstrap workspace files (IDENTITY.md/SOUL.md); continuing without them"
+            );
+        }
 
         if config_path.exists() {
 
@@ -6931,12 +7189,66 @@ impl Config {
                 }
             }
 
-            let contents = fs::read_to_string(&config_path)
-                .await
-                .context("Failed to read config file")?;
+            let contents = match fs::read_to_string(&config_path).await {
+                Ok(text) => text,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "Failed to read config file; falling back to defaults so the desktop can boot. \
+                         Use Settings page to recreate provider/model entries."
+                    );
+                    let mut config = Config::default();
+                    config.config_path = config_path.clone();
+                    config.workspace_dir = workspace_dir;
+                    config.apply_env_overrides();
+                    if let Err(verr) = config.validate() {
+                        tracing::warn!(error = %verr, "Default config validation warning (non-fatal)");
+                    }
+                    return Ok(config);
+                }
+            };
 
-            let mut config: Config =
-                toml::from_str(&contents).context("Failed to deserialize config file")?;
+            let mut config: Config = match toml::from_str(&contents) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    let backup_suffix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let backup_path =
+                        config_path.with_extension(format!("toml.bak-{backup_suffix}"));
+                    let backup_msg = match fs::rename(&config_path, &backup_path).await {
+                        Ok(()) => {
+                            format!("backed up corrupted config to {}", backup_path.display())
+                        }
+                        Err(rename_err) => format!(
+                            "could not back up corrupted config to {} ({rename_err}); leaving original in place",
+                            backup_path.display()
+                        ),
+                    };
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "Failed to deserialize config file; {backup_msg}. \
+                         Booting with defaults so the desktop can render Settings."
+                    );
+                    let mut config = Config::default();
+                    config.config_path = config_path.clone();
+                    config.workspace_dir = workspace_dir.clone();
+                    if let Err(save_err) = config.save().await {
+                        tracing::warn!(
+                            error = %save_err,
+                            "Could not persist replacement default config; running with in-memory defaults"
+                        );
+                    }
+                    config.apply_env_overrides();
+                    if let Err(verr) = config.validate() {
+                        tracing::warn!(error = %verr, "Default config validation warning (non-fatal)");
+                    }
+                    return Ok(config);
+                }
+            };
 
             config.autonomy.ensure_default_auto_approve();
 
@@ -7308,7 +7620,13 @@ impl Config {
             }
 
             config.apply_env_overrides();
-            config.validate()?;
+            if let Err(err) = config.validate() {
+                tracing::warn!(
+                    error = %err,
+                    "config validation surfaced an issue; continuing with loaded config so the desktop can boot. \
+                     Open Settings to fix any field highlighted in the warning."
+                );
+            }
 
             if migration_applied {
                 if let Err(err) = config.save().await {
@@ -7332,7 +7650,13 @@ impl Config {
             let mut config = Config::default();
             config.config_path = config_path.clone();
             config.workspace_dir = workspace_dir;
-            config.save().await?;
+            if let Err(err) = config.save().await {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "Could not write initial config file; running with in-memory defaults so the desktop can still launch"
+                );
+            }
 
             #[cfg(unix)]
             {
@@ -7341,7 +7665,12 @@ impl Config {
             }
 
             config.apply_env_overrides();
-            config.validate()?;
+            if let Err(err) = config.validate() {
+                tracing::warn!(
+                    error = %err,
+                    "default config validation surfaced an issue (non-fatal); desktop will still launch"
+                );
+            }
             tracing::info!(
                 path = %config.config_path.display(),
                 workspace = %config.workspace_dir.display(),
@@ -7718,6 +8047,38 @@ impl Config {
                 if !wire_api.is_empty() && normalize_wire_api(wire_api).is_none() {
                     anyhow::bail!(
                         "model_providers.{profile_name}.wire_api must be one of: responses, chat_completions"
+                    );
+                }
+            }
+
+            for header in &profile.custom_headers {
+                let trimmed = header.name.trim();
+                if trimmed.is_empty() {
+                    tracing::warn!(
+                        provider = profile_name,
+                        "model_providers.{profile_name}.custom_headers contains entry with empty name; will be ignored at runtime"
+                    );
+                    continue;
+                }
+                if !is_valid_http_header_name(trimmed) {
+                    tracing::warn!(
+                        provider = profile_name,
+                        header_name = trimmed,
+                        "model_providers.{profile_name}.custom_headers: name contains characters outside RFC 7230 token; entry will be skipped at runtime"
+                    );
+                }
+                if is_disallowed_custom_header(trimmed) {
+                    tracing::warn!(
+                        provider = profile_name,
+                        header_name = trimmed,
+                        "model_providers.{profile_name}.custom_headers: '{trimmed}' is managed by the provider itself and will be skipped at runtime"
+                    );
+                }
+                if !is_valid_http_header_value(&header.value) {
+                    tracing::warn!(
+                        provider = profile_name,
+                        header_name = trimmed,
+                        "model_providers.{profile_name}.custom_headers: value contains CR/LF for '{trimmed}'; entry will be skipped at runtime"
                     );
                 }
             }

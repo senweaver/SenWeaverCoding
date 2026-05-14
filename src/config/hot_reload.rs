@@ -65,7 +65,7 @@ impl LiveConfig {
 
     #[inline]
     pub fn store(&self, config: Config) {
-        self.inner.as_ref().store(config, Vec::new());
+        self.inner.as_ref().store(config, vec!["runtime_hot_reload".into()]);
     }
 
     #[inline]

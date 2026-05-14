@@ -229,6 +229,30 @@ impl Tool for FileWriteTool {
             });
         }
 
+        let _resource_guard = match crate::session::acquire_file_write_for_current_session(
+            &resolved_target,
+        )
+        .await
+        {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
+        if crate::session::is_stale_for_current_session(&resolved_target) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(crate::session::stale_file_error_message(&resolved_target)),
+            });
+        }
+
         if let Some(expected) = expected_mtime_ms {
             if let Ok(meta) = tokio::fs::metadata(&resolved_target).await {
                 if let Ok(modified) = meta.modified() {
@@ -273,6 +297,7 @@ impl Tool for FileWriteTool {
         let batch = EditBatch::new(EditOrigin::FileWriteTool).with_op(op);
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
+                crate::session::record_write_for_current_session(&resolved_target);
                 let preview_lines: Vec<&str> = content.lines().take(10).collect();
                 let suffix = if content.lines().count() > 10 {
                     format!("\n... ({} more lines)", content.lines().count() - 10)

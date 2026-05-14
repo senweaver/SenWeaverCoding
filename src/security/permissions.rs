@@ -137,50 +137,55 @@ pub fn gate_decision(
     }
 
     let read_only = is_read_only_tool(tool_name);
+    let is_edit = is_edit_tool(tool_name);
+    let is_system = is_system_tool(tool_name);
     let browser_protected = protect_browser && is_browser_tool(tool_name);
     let mcp_protected = protect_mcp && is_mcp_tool_name(tool_name);
+
+    if matches!(mode, ComposerPermissionMode::Bypass) {
+        return GateDecision::Auto;
+    }
+
+    if matches!(mode, ComposerPermissionMode::AskEveryTime) {
+        if read_only {
+            return GateDecision::Auto;
+        }
+        return GateDecision::Ask;
+    }
+
+    if matches!(mode, ComposerPermissionMode::Plan) {
+        if read_only || is_plan_mode_allowed_tool(tool_name) {
+            return GateDecision::Auto;
+        }
+        return GateDecision::Deny;
+    }
 
     if (browser_protected || mcp_protected) && !read_only {
         return GateDecision::Ask;
     }
 
-    let allowlist_eligible = !matches!(mode, ComposerPermissionMode::AskEveryTime);
-    if allowlist_eligible
-        && (auto_approve.contains("*") || auto_approve.contains(tool_name))
-    {
+    if auto_approve.contains("*") || auto_approve.contains(tool_name) {
         return GateDecision::Auto;
     }
 
     if read_only {
         return GateDecision::Auto;
     }
-    let is_edit = is_edit_tool(tool_name);
-    let is_system = is_system_tool(tool_name);
+
     match mode {
-        ComposerPermissionMode::Bypass => GateDecision::Auto,
-        ComposerPermissionMode::Plan => {
-
-            if is_edit || is_system {
-                GateDecision::Deny
-            } else if is_plan_mode_allowed_tool(tool_name) {
-                GateDecision::Auto
-            } else {
-
-                GateDecision::Deny
-            }
-        }
         ComposerPermissionMode::AcceptEdits => {
             if is_edit {
                 GateDecision::Auto
             } else if is_system {
                 GateDecision::Ask
             } else {
-
                 GateDecision::Auto
             }
         }
-        ComposerPermissionMode::AskEveryTime => GateDecision::Ask,
         ComposerPermissionMode::Default => GateDecision::Ask,
+        ComposerPermissionMode::Bypass
+        | ComposerPermissionMode::AskEveryTime
+        | ComposerPermissionMode::Plan => GateDecision::Ask,
     }
 }
 

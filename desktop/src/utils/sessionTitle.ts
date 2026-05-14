@@ -15,7 +15,11 @@ const LEGACY_PLACEHOLDER_LITERALS = new Set<string>([
   'Untitled',
   'New Session',
   'New conversation',
+  'New agent',
+  'New Agent',
   '新对话',
+  '新智能体',
+  '新建智能体',
   '未命名会话',
 ])
 

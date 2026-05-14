@@ -30,6 +30,8 @@ pub struct GeminiProvider {
     auth_service: Option<AuthService>,
 
     auth_profile_override: Option<String>,
+
+    extra_headers: std::collections::HashMap<String, String>,
 }
 
 struct OAuthTokenState {
@@ -539,7 +541,16 @@ impl GeminiProvider {
             oauth_index: Arc::new(tokio::sync::Mutex::new(0)),
             auth_service: None,
             auth_profile_override: None,
+            extra_headers: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     pub fn new_with_auth(
@@ -600,6 +611,7 @@ impl GeminiProvider {
                 None
             },
             auth_profile_override: profile_override,
+            extra_headers: std::collections::HashMap::new(),
         }
     }
 
@@ -845,7 +857,12 @@ impl GeminiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.gemini", 120, 10)
+        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
+            "provider.gemini",
+            120,
+            10,
+            &self.extra_headers,
+        )
     }
 
     async fn resolve_oauth_project(&self, token: &str) -> anyhow::Result<String> {
