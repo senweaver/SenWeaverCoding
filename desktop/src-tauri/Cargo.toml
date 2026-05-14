@@ -40,7 +40,7 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
 # per-webview navigation interception) used by the embedded browser
 # dock for parenting a wry/WebView2/WebKitGTK child to a placeholder
 # div directly above the chat composer.
-tauri = { version = "2", features = ["unstable"] }
+tauri = { version = "2.11", features = ["unstable"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
