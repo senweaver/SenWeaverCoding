@@ -317,8 +317,20 @@ export function AppShell() {
     const showHint = bootElapsedSecs >= 6
     const showActions = bootFailed || bootElapsedSecs >= 10
     const showLongHint = bootElapsedSecs >= 20 && !bootFailed
-    const lastEventDetail = bootLastEvent?.detail?.trim()
-    const statusError = bootStatus?.error?.trim()
+    const ERROR_EVENT_KINDS = new Set(['health-failed', 'bootstrap-failed'])
+    const isLikelyUrl = (value: string) =>
+      /^(https?|wss?|tauri):\/\//i.test(value) || /^127\.0\.0\.1[:/]/.test(value)
+    const rawEventDetail = bootLastEvent?.detail?.trim()
+    const lastEventDetail =
+      rawEventDetail &&
+      bootLastEvent &&
+      ERROR_EVENT_KINDS.has(bootLastEvent.kind) &&
+      !isLikelyUrl(rawEventDetail)
+        ? rawEventDetail
+        : null
+    const rawStatusError = bootStatus?.error?.trim()
+    const statusError =
+      rawStatusError && !isLikelyUrl(rawStatusError) ? rawStatusError : null
     const surfacedError = statusError || lastEventDetail || null
     const handleRetry = async () => {
       if (retrying) return

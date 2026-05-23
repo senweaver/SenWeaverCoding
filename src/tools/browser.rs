@@ -1,4 +1,4 @@
-﻿
+
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;

@@ -15,8 +15,11 @@ pub(crate) fn desktop_cors_layer() -> CorsLayer {
             || value.starts_with("http://tauri.localhost")
             || value.starts_with("https://tauri.localhost")
             || value.starts_with("http://localhost")
+            || value.starts_with("https://localhost")
             || value.starts_with("http://127.0.0.1")
-            || value.starts_with("http://[::1]");
+            || value.starts_with("https://127.0.0.1")
+            || value.starts_with("http://[::1]")
+            || value.starts_with("https://[::1]");
         if base_allowed {
             return true;
         }
@@ -37,33 +40,9 @@ pub(crate) fn desktop_cors_layer() -> CorsLayer {
         Method::OPTIONS,
     ]);
 
-    let headers = if cfg!(debug_assertions) {
-        AllowHeaders::any()
-    } else {
-        use axum::http::header::{
-            ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, CACHE_CONTROL, CONTENT_LANGUAGE, CONTENT_TYPE,
-            IF_MATCH, IF_NONE_MATCH,
-        };
-        AllowHeaders::list([
-            ACCEPT,
-            ACCEPT_LANGUAGE,
-            AUTHORIZATION,
-            CACHE_CONTROL,
-            CONTENT_LANGUAGE,
-            CONTENT_TYPE,
-            IF_MATCH,
-            IF_NONE_MATCH,
-            axum::http::HeaderName::from_static("x-session-id"),
-            axum::http::HeaderName::from_static("x-requested-with"),
-            axum::http::HeaderName::from_static("idempotency-key"),
-            axum::http::HeaderName::from_static("x-sen-pairing-token"),
-            axum::http::HeaderName::from_static("x-sen-client"),
-        ])
-    };
-
     CorsLayer::new()
         .allow_origin(allowed)
         .allow_methods(methods)
-        .allow_headers(headers)
+        .allow_headers(AllowHeaders::any())
         .allow_credentials(false)
 }

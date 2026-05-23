@@ -55,11 +55,13 @@ function healthFetchSignal(ms: number): AbortSignal | undefined {
 }
 
 async function probeHealthOnce(serverUrl: string): Promise<boolean> {
-  const response = await fetch(`${serverUrl.replace(/\/$/, '')}/health`, {
-    cache: 'no-store',
-    headers: { 'X-Sen-Ping': '1' },
-    signal: healthFetchSignal(HEALTH_FETCH_MS),
-  })
+  const response = await fetch(
+    `${serverUrl.replace(/\/$/, '')}/health?_=${Date.now()}`,
+    {
+      cache: 'no-store',
+      signal: healthFetchSignal(HEALTH_FETCH_MS),
+    },
+  )
   return response.ok
 }
 
