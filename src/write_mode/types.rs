@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Core data model for Write Mode.
-//!
-//! These types are intentionally small and serde-friendly so that the
-//! planner output can be rendered identically across CLI / TUI / GUI
-//! and compared byte-for-byte in parity tests.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

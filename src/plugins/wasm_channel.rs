@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Bridge between WASM plugins and the Channel trait.
 
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;

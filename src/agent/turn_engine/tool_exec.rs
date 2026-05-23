@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool execution building blocks.
-//!
-//! The hot path (`loop_::execute_one_tool`) remains the single
-//! canonical implementation.  D2.1 introduces the companions
-//! in this module — fingerprint lookup, cache-key derivation, outcome
-//! construction — so the follow-up sprint can move the body
-//! into this file without rewriting its helpers.
 
 use async_trait::async_trait;
 use futures_util::future::join_all;

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// LSP service — real Language Server Protocol client over stdio JSON-RPC.
-// Manages language server processes and provides a request/response API for
-// code-intelligence operations (definition, references, hover, symbols, etc.).
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -171,7 +166,10 @@ impl LspService {
         let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language, workspace_root);
         inner.ensure_started(&key, workspace_root).await?;
-        let handle = inner.servers.get_mut(&key).unwrap();
+        let handle = inner
+            .servers
+            .get_mut(&key)
+            .ok_or_else(|| anyhow::anyhow!("LSP server handle missing after ensure_started"))?;
         handle.send_notification(method, params).await
     }
 
@@ -187,7 +185,10 @@ impl LspService {
             return Ok(());
         }
         let uri = path_to_uri(path);
-        let handle = inner.servers.get_mut(&key).unwrap();
+        let Some(handle) = inner.servers.get_mut(&key) else {
+            tracing::warn!("LSP didChange: handle missing despite contains_key; skipping");
+            return Ok(());
+        };
         if !handle.opened_files.contains(&uri) {
             return Ok(());
         }
@@ -317,7 +318,10 @@ impl LspService {
             return Ok(());
         }
         let uri = path_to_uri(path);
-        let handle = inner.servers.get_mut(&key).unwrap();
+        let Some(handle) = inner.servers.get_mut(&key) else {
+            tracing::warn!("LSP didSave: handle missing despite contains_key; skipping");
+            return Ok(());
+        };
         if !handle.opened_files.contains(&uri) {
             return Ok(());
         }
@@ -341,7 +345,10 @@ impl LspService {
             return Ok(());
         }
         let uri = path_to_uri(path);
-        let handle = inner.servers.get_mut(&key).unwrap();
+        let Some(handle) = inner.servers.get_mut(&key) else {
+            tracing::warn!("LSP didClose: handle missing despite contains_key; skipping");
+            return Ok(());
+        };
         if !handle.opened_files.remove(&uri) {
             return Ok(());
         }
@@ -547,7 +554,10 @@ impl LspServiceInner {
     ) -> Result<serde_json::Value> {
         self.ensure_started(key, workspace_root).await?;
 
-        let mut handle = self.servers.remove(key).unwrap();
+        let mut handle = self
+            .servers
+            .remove(key)
+            .ok_or_else(|| anyhow::anyhow!("LSP server handle missing after ensure_started"))?;
 
         let result = handle
             .execute_with_open(file_path, &key.language_id, method, params)

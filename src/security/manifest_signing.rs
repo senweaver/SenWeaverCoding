@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Manifest signing and verification for tool/skill manifests.
-//!
-//! Provides Ed25519 signing and verification of TOML manifests using the `ring`
-//! crate. This ensures manifests haven't been tampered with and come from
-//! trusted sources.
 
 use ring::digest::{SHA256, digest};
 use ring::rand::SystemRandom;

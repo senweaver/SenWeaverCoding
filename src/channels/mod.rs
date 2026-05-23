@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Channel subsystem for messaging platform integrations.
-//!
-//! This module provides the multi-channel messaging infrastructure that connects
-//! SenWeaverCoding to external platforms. Each channel implements the [`Channel`] trait
-//! defined in [`traits`], which provides a uniform interface for sending messages,
-//! listening for incoming messages, health checking, and typing indicators.
-//!
-//! Channels are instantiated by [`start_channels`] based on the runtime configuration.
-//! The subsystem manages per-sender conversation history, concurrent message processing
-//! with configurable parallelism, and exponential-backoff reconnection for resilience.
-//!
-//! # Extension
-//!
-//! To add a new channel, implement [`Channel`] in a new submodule and wire it into
-//! [`start_channels`]. See `AGENTS.md` for the full change playbook.
 
 pub mod acp_server;
 pub mod agent_bridge;
@@ -35,6 +20,7 @@ pub mod irc;
 pub mod lark;
 pub mod link_enricher;
 pub mod linq;
+mod memory_keys;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 pub mod mattermost;
@@ -55,6 +41,7 @@ pub mod signal;
 pub mod slack;
 pub mod telegram;
 pub mod text_split;
+mod tool_tag_stripper;
 pub mod traits;
 pub mod transcription;
 pub mod tts;
@@ -111,8 +98,6 @@ pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
 pub use whatsapp_web::WhatsAppWebChannel;
-
-use crate::agent::loop_::run_tool_call_loop;
 
 use crate::approval::ApprovalManager;
 pub use crate::channels::agent_bridge::{AgentLoopCore, TurnEvent};
@@ -419,157 +404,9 @@ impl InFlightTaskCompletion {
     }
 }
 
-fn conversation_memory_key(msg: &traits::ChannelMessage) -> String {
+use crate::channels::memory_keys::conversation_history_key;
 
-    match &msg.thread_ts {
-        Some(tid) => format!("{}_{}_{}_{}", msg.channel, tid, msg.sender, msg.id),
-        None => format!("{}_{}_{}", msg.channel, msg.sender, msg.id),
-    }
-}
-
-fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
-
-    match &msg.thread_ts {
-        Some(tid) => format!(
-            "{}_{}_{}_{}",
-            msg.channel, msg.reply_target, tid, msg.sender
-        ),
-        None => format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender),
-    }
-}
-
-fn followup_thread_id(msg: &traits::ChannelMessage) -> Option<String> {
-    msg.thread_ts.clone().or_else(|| Some(msg.id.clone()))
-}
-
-fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
-    match &msg.interruption_scope_id {
-        Some(scope) => format!(
-            "{}_{}_{}_{}",
-            msg.channel, msg.reply_target, msg.sender, scope
-        ),
-        None => format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender),
-    }
-}
-
-fn is_stop_command(content: &str) -> bool {
-    let trimmed = content.trim();
-    if !trimmed.starts_with('/') {
-        return false;
-    }
-    let cmd = trimmed.split_whitespace().next().unwrap_or("");
-    let base = cmd.split('@').next().unwrap_or(cmd);
-    base.eq_ignore_ascii_case("/stop")
-}
-
-fn strip_tool_call_tags(message: &str) -> String {
-    const TOOL_CALL_OPEN_TAGS: [&str; 7] = [
-        "<function_calls>",
-        "<function_call>",
-        "<tool_call>",
-        "<toolcall>",
-        "<tool-call>",
-        "<tool>",
-        "<invoke>",
-    ];
-
-    fn find_first_tag<'a>(haystack: &str, tags: &'a [&'a str]) -> Option<(usize, &'a str)> {
-        tags.iter()
-            .filter_map(|tag| haystack.find(tag).map(|idx| (idx, *tag)))
-            .min_by_key(|(idx, _)| *idx)
-    }
-
-    fn matching_close_tag(open_tag: &str) -> Option<&'static str> {
-        match open_tag {
-            "<function_calls>" => Some("</function_calls>"),
-            "<function_call>" => Some("</function_call>"),
-            "<tool_call>" => Some("</tool_call>"),
-            "<toolcall>" => Some("</toolcall>"),
-            "<tool-call>" => Some("</tool-call>"),
-            "<tool>" => Some("</tool>"),
-            "<invoke>" => Some("</invoke>"),
-            _ => None,
-        }
-    }
-
-    fn extract_first_json_end(input: &str) -> Option<usize> {
-        let trimmed = input.trim_start();
-        let trim_offset = input.len().saturating_sub(trimmed.len());
-
-        for (byte_idx, ch) in trimmed.char_indices() {
-            if ch != '{' && ch != '[' {
-                continue;
-            }
-
-            let slice = &trimmed[byte_idx..];
-            let mut stream =
-                serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
-            if let Some(Ok(_value)) = stream.next() {
-                let consumed = stream.byte_offset();
-                if consumed > 0 {
-                    return Some(trim_offset + byte_idx + consumed);
-                }
-            }
-        }
-
-        None
-    }
-
-    fn strip_leading_close_tags(mut input: &str) -> &str {
-        loop {
-            let trimmed = input.trim_start();
-            if !trimmed.starts_with("</") {
-                return trimmed;
-            }
-
-            let Some(close_end) = trimmed.find('>') else {
-                return "";
-            };
-            input = &trimmed[close_end + 1..];
-        }
-    }
-
-    let mut kept_segments = Vec::new();
-    let mut remaining = message;
-
-    while let Some((start, open_tag)) = find_first_tag(remaining, &TOOL_CALL_OPEN_TAGS) {
-        let before = &remaining[..start];
-        if !before.is_empty() {
-            kept_segments.push(before.to_string());
-        }
-
-        let Some(close_tag) = matching_close_tag(open_tag) else {
-            break;
-        };
-        let after_open = &remaining[start + open_tag.len()..];
-
-        if let Some(close_idx) = after_open.find(close_tag) {
-            remaining = &after_open[close_idx + close_tag.len()..];
-            continue;
-        }
-
-        if let Some(consumed_end) = extract_first_json_end(after_open) {
-            remaining = strip_leading_close_tags(&after_open[consumed_end..]);
-            continue;
-        }
-
-        kept_segments.push(remaining[start..].to_string());
-        remaining = "";
-        break;
-    }
-
-    if !remaining.is_empty() {
-        kept_segments.push(remaining.to_string());
-    }
-
-    let mut result = kept_segments.concat();
-
-    while result.contains("\n\n\n") {
-        result = result.replace("\n\n\n", "\n\n");
-    }
-
-    result.trim().to_string()
-}
+use crate::channels::tool_tag_stripper::strip_tool_call_tags;
 
 fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     match channel_name {
@@ -688,7 +525,8 @@ fn normalize_cached_channel_turns(turns: Vec<ChatMessage>) -> Vec<ChatMessage> {
 
 fn strip_tool_result_content(text: &str) -> String {
     static TOOL_RESULT_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?s)<tool_result[^>]*>.*?</tool_result>").unwrap()
+        regex::Regex::new(r"(?s)<tool_result[^>]*>.*?</tool_result>")
+            .expect("tool_result strip regex must compile")
     });
 
     let cleaned = TOOL_RESULT_RE.replace_all(text, "");
@@ -1836,8 +1674,10 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     tools::register_skill_tools(&mut tools_vec, &skills_for_tools, Arc::clone(&security));
     let tools_registry: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools_vec);
 
-    let mem = memory::create_memory(
+    let mem = memory::create_memory_with_storage_and_routes(
         &config.memory,
+        &config.embedding_routes,
+        Some(&config.storage.provider.config),
         &workspace_dir,
         config.api_key.as_deref(),
     )
@@ -1869,7 +1709,8 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         runner.register(Box::new(
             crate::hooks::builtin::webhook_audit::WebhookAuditHook::new(
                 crate::config::schema::WebhookAuditConfig::default(),
-            ),
+            )
+            .expect("default WebhookAuditConfig has empty URL and must construct successfully"),
         ));
         Some(Arc::new(runner))
     } else {
@@ -1886,7 +1727,17 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
             None
         };
 
-    let approval_manager = Arc::new(ApprovalManager::from_config(&config.autonomy));
+    let approval_manager = Arc::new({
+        let audit_path = config
+            .config_path
+            .parent()
+            .map(|p| p.join("approval_audit.jsonl"));
+        let mut mgr = ApprovalManager::from_config(&config.autonomy);
+        if let Some(p) = audit_path {
+            mgr = mgr.with_audit_log_path(p);
+        }
+        mgr
+    });
 
     let skills_for_prompt = crate::skills::load_skills_with_config(&workspace_dir, &config);
     let bootstrap_max_chars = if config.agent.compact_context {
@@ -1916,6 +1767,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         let ch = Arc::new(CliChannel::new());
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-telegram")]
     if let Some(ref cfg) = config.channels_config.telegram {
         let ch = Arc::new(TelegramChannel::new(
             cfg.bot_token.clone(),
@@ -1924,6 +1776,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         ));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-slack")]
     if let Some(ref cfg) = config.channels_config.slack {
         let ch = Arc::new(SlackChannel::new(
             cfg.bot_token.clone(),
@@ -1934,6 +1787,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         ));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-discord")]
     if let Some(ref cfg) = config.channels_config.discord {
         let ch = Arc::new(DiscordChannel::new(
             cfg.bot_token.clone(),
@@ -1944,6 +1798,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         ));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-discord")]
     if let Some(ref cfg) = config.channels_config.discord_history {
         let ch = Arc::new(DiscordHistoryChannel::new(
             cfg.bot_token.clone(),
@@ -2006,6 +1861,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         ));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-dingtalk")]
     if let Some(ref cfg) = config.channels_config.dingtalk {
         let ch = Arc::new(DingTalkChannel::new(
             cfg.client_id.clone(),
@@ -2014,6 +1870,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         ));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-wechat")]
     if let Some(ref cfg) = config.channels_config.wecom {
         let ch = Arc::new(WeComChannel::new(
             cfg.webhook_key.clone(),
@@ -2060,10 +1917,12 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         }));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-email")]
     if let Some(ref cfg) = config.channels_config.email {
         let ch = Arc::new(EmailChannel::new(cfg.clone()));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    #[cfg(feature = "channel-email")]
     if let Some(ref cfg) = config.channels_config.gmail_push {
         let ch = Arc::new(GmailPushChannel::new(cfg.clone()));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
@@ -2321,34 +2180,31 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                 history.push(user_turn.clone());
                 append_sender_turn(&ctx_clone, &sender_key_clone, user_turn).await;
 
-                let result = run_tool_call_loop(
+                let channel_policy = crate::agent::loop_policy::PolicyBundle::channel(
+                    &msg_clone.channel,
+                    Some(msg_clone.reply_target.as_str()),
                     provider.as_ref(),
-                    &mut history,
                     ctx_clone.tools_registry.as_ref(),
                     ctx_clone.observer.as_ref(),
                     provider_name,
                     &model,
-                    ctx_clone.temperature,
-                    false,
-                    Some(ctx_clone.approval_manager.as_ref()),
-                    &msg_clone.channel,
-                    Some(msg_clone.reply_target.as_str()),
                     &ctx_clone.multimodal,
-                    ctx_clone.max_tool_iterations,
-                    None,
-                    None,
-                    ctx_clone.hooks.as_deref(),
+                    &ctx_clone.pacing,
                     &ctx_clone.non_cli_excluded_tools,
                     &ctx_clone.tool_call_dedup_exempt,
-                    ctx_clone.activated_tools.as_ref(),
-                    None,
-                    &ctx_clone.pacing,
-                    ctx_clone.rbac_engine.as_ref(),
-                    None,
-                    None,
-                    None,
                 )
-                .await;
+                .with_temperature(ctx_clone.temperature)
+                .with_silent(false)
+                .with_approval(Some(ctx_clone.approval_manager.as_ref()))
+                .with_max_iterations(ctx_clone.max_tool_iterations)
+                .with_hooks(ctx_clone.hooks.as_deref())
+                .with_activated_tools(ctx_clone.activated_tools.as_ref())
+                .with_rbac(ctx_clone.rbac_engine.as_ref(), None);
+
+                let result =
+                    crate::agent::loop_unified::UnifiedLoop::new(channel_policy)
+                        .run(&mut history)
+                        .await;
 
                 match result {
                     Ok(response) => {
@@ -2457,6 +2313,7 @@ pub async fn doctor_channels(config: Config) -> anyhow::Result<()> {
         },
     });
 
+    #[cfg(feature = "channel-telegram")]
     if let Some(ref tg) = cfg.telegram {
         let ch = Arc::new(TelegramChannel::new(
             tg.bot_token.clone(),
@@ -2479,6 +2336,7 @@ pub async fn doctor_channels(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    #[cfg(feature = "channel-slack")]
     if let Some(ref sl) = cfg.slack {
         let ch = Arc::new(SlackChannel::new(
             sl.bot_token.clone(),
@@ -2503,6 +2361,7 @@ pub async fn doctor_channels(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    #[cfg(feature = "channel-discord")]
     if let Some(ref dc) = cfg.discord {
         let ch = Arc::new(DiscordChannel::new(
             dc.bot_token.clone(),
@@ -2600,6 +2459,7 @@ pub async fn doctor_channels(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    #[cfg(feature = "channel-email")]
     if let Some(ref em) = cfg.email {
         let ch = Arc::new(EmailChannel::new(em.clone()));
         let healthy = ch.health_check().await;
@@ -2734,7 +2594,8 @@ pub async fn handle_command(
             recipient,
         } => channel_send(config, &channel_id, &recipient, &message).await,
         crate::ChannelCommands::Start | crate::ChannelCommands::Doctor => {
-            unreachable!("Start and Doctor are handled in main.rs")
+
+            unreachable!("invariant: ChannelCommands::Start/Doctor are dispatched in main.rs before reaching channel sub-router")
         }
     }
 }
@@ -2976,6 +2837,7 @@ async fn channel_send(
     let cfg = &config.channels_config;
 
     let channel: Arc<dyn Channel> = match channel_id {
+        #[cfg(feature = "channel-telegram")]
         "telegram" => {
             let tg = cfg
                 .telegram
@@ -2987,6 +2849,7 @@ async fn channel_send(
                 false,
             ))
         }
+        #[cfg(feature = "channel-slack")]
         "slack" => {
             let sl = cfg
                 .slack
@@ -3000,6 +2863,7 @@ async fn channel_send(
                 sl.allowed_users.clone(),
             ))
         }
+        #[cfg(feature = "channel-discord")]
         "discord" => {
             let dc = cfg
                 .discord
@@ -3067,6 +2931,7 @@ async fn channel_send(
                 wa.allowed_numbers.clone(),
             ))
         }
+        #[cfg(feature = "channel-email")]
         "email" => {
             let em = cfg
                 .email
@@ -3085,6 +2950,7 @@ async fn channel_send(
                 qq.allowed_users.clone(),
             ))
         }
+        #[cfg(feature = "channel-dingtalk")]
         "dingtalk" => {
             let dt = cfg
                 .dingtalk
@@ -3096,6 +2962,7 @@ async fn channel_send(
                 dt.allowed_users.clone(),
             ))
         }
+        #[cfg(feature = "channel-wechat")]
         "wecom" => {
             let wc = cfg
                 .wecom

@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Wraps a node capability as a sen [`Tool`] so it can be dispatched
-//! through the existing tool registry and agent loop.
-//!
-//! Tool names are prefixed with the node ID: `node:<node_id>:<capability_name>`.
 
 use std::sync::Arc;
 

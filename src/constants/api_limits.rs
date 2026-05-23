@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// API limits — mirrors claude-code-typescript-src`constants/apiLimits.ts`.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -44,6 +42,13 @@ pub static MODEL_CONTEXT_WINDOWS: LazyLock<HashMap<&'static str, u32>> = LazyLoc
     m.insert("kimi-k2", 128_000);
     m.insert("kimi-k2-0711-preview", 128_000);
     m.insert("kimi-k2-0905-preview", 256_000);
+    m.insert("kimi-k2-thinking", 256_000);
+    m.insert("kimi-k2.5", 1_000_000);
+    m.insert("kimi-k2.6", 1_000_000);
+    m.insert("kimi-k2.7", 1_000_000);
+    m.insert("moonshotai/kimi-k2.5", 1_000_000);
+    m.insert("moonshotai/kimi-k2.6", 1_000_000);
+    m.insert("kimi-for-coding", 256_000);
     m.insert("kimi-latest", 128_000);
     m.insert("kimi-thinking-preview", 128_000);
     m.insert("qwen-72b", 32_768);
@@ -78,14 +83,23 @@ fn infer_context_window_from_id(id: &str) -> Option<u32> {
     if id.contains("moonshot-v1-128k") || id.contains("moonshot-v1-auto") {
         return Some(128_000);
     }
+    if id.contains("kimi-k2.5")
+        || id.contains("kimi-k2.6")
+        || id.contains("kimi-k2.7")
+        || id.contains("kimi-k2-1m")
+    {
+        return Some(1_000_000);
+    }
+    if id.contains("kimi-k2-thinking") {
+        return Some(256_000);
+    }
     if id.contains("kimi-k2-0905") {
         return Some(256_000);
     }
     if id.contains("kimi") {
         return Some(128_000);
     }
-    if let Some(rest) = id.split_once("-128k").map(|(_, _)| ()) {
-        let _ = rest;
+    if id.contains("-128k") {
         return Some(128_000);
     }
     if id.contains("-32k") {

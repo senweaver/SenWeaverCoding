@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! O(1) tool registry using DashMap for fast name-based lookup.
-//!
-//! This module provides the [`ToolRegistry`] which replaces the previous
-//! `Vec<Box<dyn Tool>>` linear matching with `DashMap<String, Arc<dyn Tool>>`
-//! for constant-time lookups. It also maintains a lazily-computed schema cache
-//! for provider use.
 
 use std::sync::Arc;
 

@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Workflow Types - Multi-step agent orchestration.
-//!
-//! Workflows define sequences of steps that can run agents, with support for:
-//! - Sequential execution
-//! - Fan-out parallel execution
-//! - Conditional branching
-//! - Loop iteration
-//! - Error handling with retry
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -53,7 +45,7 @@ impl Workflow {
             id: format!(
                 "wf-{}-{}",
                 now.timestamp_millis(),
-                uuid::Uuid::new_v4().to_string()[..8].to_string()
+                &uuid::Uuid::new_v4().to_string()[..8]
             ),
             name: name.into(),
             description: String::new(),
@@ -296,7 +288,7 @@ impl WorkflowRun {
             id: format!(
                 "run-{}-{}",
                 now.timestamp_millis(),
-                uuid::Uuid::new_v4().to_string()[..8].to_string()
+                &uuid::Uuid::new_v4().to_string()[..8]
             ),
             workflow_id,
             status: WorkflowRunStatus::Pending,

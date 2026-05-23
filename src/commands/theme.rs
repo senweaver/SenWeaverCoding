@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /theme command — mirrors claude-code-typescript-src`commands/theme/`.
-// Change the output style / theme.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
 inventory::submit!(StaticSlashCommand {
@@ -21,7 +17,7 @@ inventory::submit!(StaticSlashCommand {
 
 pub async fn handle_theme(ctx: CommandContext) -> CommandResult {
     if ctx.args.is_empty() {
-        let current = std::env::var("SEN_THEME").unwrap_or_else(|_| "default".to_string());
+        let current = crate::util::get_env_var("SEN_THEME").unwrap_or_else(|| "default".to_string());
         return CommandResult::ok(format!(
             "Current theme: {current}\nAvailable themes: default, concise, detailed, formal, code-only\nUsage: /theme <name>"
         ));
@@ -35,9 +31,6 @@ pub async fn handle_theme(ctx: CommandContext) -> CommandResult {
         ));
     }
 
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("SEN_THEME", &theme);
-    }
+    crate::util::set_env_var("SEN_THEME", &theme);
     CommandResult::ok(format!("Theme set to: {theme}"))
 }

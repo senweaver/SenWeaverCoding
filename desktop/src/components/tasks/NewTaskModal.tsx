@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useTaskStore } from '../../stores/taskStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useAdapterStore } from '../../stores/adapterStore'
 import { Modal } from '../shared/Modal'
 import { Input } from '../shared/Input'
@@ -60,7 +61,7 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
   const createTask = useTaskStore((s) => s.createTask)
   const updateTask = useTaskStore((s) => s.updateTask)
   const sessions = useSessionStore((s) => s.sessions)
-  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const activeSessionId = useTabStore((s) => s.activeTabId)
   const activeSession = sessions.find((s) => s.id === activeSessionId)
   const defaultWorkDir = activeSession?.workDir || ''
   const adapterConfig = useAdapterStore((s) => s.config)

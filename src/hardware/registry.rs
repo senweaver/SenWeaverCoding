@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Board registry — maps USB VID/PID to known board names and architectures.
 
 #[derive(Debug, Clone)]
 pub struct BoardInfo {

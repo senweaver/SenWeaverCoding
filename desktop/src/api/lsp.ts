@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Thin REST wrappers for the `/api/lsp/*` routes.
 
 import { api } from './client'
 import type { LspListResponse, LspServerRecord, LspUpsertPayload } from '../types/lsp'

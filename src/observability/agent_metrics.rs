@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent-level metrics aggregator.
-//!
-//! Tracks the key counters the operations team needs to monitor:
-//!
-//! - `sen_turns_total{status}`
-//! - `sen_tool_calls_total{name, status}`
-//! - `sen_tokens_in_total{provider, model}`
-//! - `sen_tokens_out_total{provider, model}`
-//! - `sen_cost_usd_total{provider, model}`
-//! - `sen_active_agents` (gauge)
-//! - `sen_blackboard_entries` (gauge)
-//!
-//! The implementation uses `parking_lot::RwLock<HashMap>` so it works in
-//! both the `observability-prometheus` feature path and the bare build —
-//! the Prometheus observer (when enabled) walks these counters and
-//! exports them.
 
 use std::collections::HashMap;
 use std::sync::Arc;

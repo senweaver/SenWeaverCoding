@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! JSONL-based session persistence for channel conversations.
-//!
-//! Each session (keyed by `channel_sender` or `channel_thread_sender`) is stored
-//! as an append-only JSONL file in `{workspace}/sessions/`. Messages are appended
-//! one-per-line as JSON, never modifying old lines. On daemon restart, sessions
-//! are loaded from disk to restore conversation context.
 
 use crate::channels::session_backend::SessionBackend;
 use crate::providers::traits::ChatMessage;

@@ -1,15 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Prompt injection defense layer.
-//!
-//! Detects and blocks/warns about potential prompt injection attacks including:
-//! - System prompt override attempts
-//! - Role confusion attacks
-//! - Tool call JSON injection
-//! - Secret extraction attempts
-//! - Command injection patterns in tool arguments
-//! - Jailbreak attempts
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -38,7 +29,7 @@ pub enum GuardAction {
 }
 
 impl GuardAction {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_loose(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "block" => Self::Block,
             "sanitize" => Self::Sanitize,
@@ -133,12 +124,17 @@ impl PromptGuard {
                 Regex::new(
                     r"(?i)ignore\s+((all\s+)?(previous|above|prior)|all)\s+(instructions?|prompts?|commands?)",
                 )
-                .unwrap(),
-                Regex::new(r"(?i)disregard\s+(previous|all|above|prior)").unwrap(),
-                Regex::new(r"(?i)forget\s+(previous|all|everything|above)").unwrap(),
-                Regex::new(r"(?i)new\s+(instructions?|rules?|system\s+prompt)").unwrap(),
-                Regex::new(r"(?i)override\s+(system|instructions?|rules?)").unwrap(),
-                Regex::new(r"(?i)reset\s+(instructions?|context|system)").unwrap(),
+                .expect("system override 'ignore' regex must compile"),
+                Regex::new(r"(?i)disregard\s+(previous|all|above|prior)")
+                    .expect("system override 'disregard' regex must compile"),
+                Regex::new(r"(?i)forget\s+(previous|all|everything|above)")
+                    .expect("system override 'forget' regex must compile"),
+                Regex::new(r"(?i)new\s+(instructions?|rules?|system\s+prompt)")
+                    .expect("system override 'new instructions' regex must compile"),
+                Regex::new(r"(?i)override\s+(system|instructions?|rules?)")
+                    .expect("system override 'override' regex must compile"),
+                Regex::new(r"(?i)reset\s+(instructions?|context|system)")
+                    .expect("system override 'reset' regex must compile"),
             ]
         });
 
@@ -158,11 +154,13 @@ impl PromptGuard {
                 Regex::new(
                     r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(you're|to\s+be))\s+(a|an|the)?",
                 )
-                .unwrap(),
-                Regex::new(r"(?i)(your\s+new\s+role|you\s+have\s+become|you\s+must\s+be)").unwrap(),
-                Regex::new(r"(?i)from\s+now\s+on\s+(you\s+are|act\s+as|pretend)").unwrap(),
+                .expect("role confusion 'you are now' regex must compile"),
+                Regex::new(r"(?i)(your\s+new\s+role|you\s+have\s+become|you\s+must\s+be)")
+                    .expect("role confusion 'new role' regex must compile"),
+                Regex::new(r"(?i)from\s+now\s+on\s+(you\s+are|act\s+as|pretend)")
+                    .expect("role confusion 'from now on' regex must compile"),
                 Regex::new(r"(?i)(assistant|AI|system|model):\s*\[?(system|override|new\s+role)")
-                    .unwrap(),
+                    .expect("role confusion 'speaker prefix' regex must compile"),
             ]
         });
 
@@ -197,10 +195,14 @@ impl PromptGuard {
         static SECRET_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
         let regexes = SECRET_PATTERNS.get_or_init(|| {
             vec![
-                Regex::new(r"(?i)(list|show|print|display|reveal|tell\s+me)\s+(all\s+)?(secrets?|credentials?|passwords?|tokens?|keys?)").unwrap(),
-                Regex::new(r"(?i)(what|show)\s+(are|is|me)\s+(all\s+)?(your|the)\s+(api\s+)?(keys?|secrets?|credentials?)").unwrap(),
-                Regex::new(r"(?i)contents?\s+of\s+(vault|secrets?|credentials?)").unwrap(),
-                Regex::new(r"(?i)(dump|export)\s+(vault|secrets?|credentials?)").unwrap(),
+                Regex::new(r"(?i)(list|show|print|display|reveal|tell\s+me)\s+(all\s+)?(secrets?|credentials?|passwords?|tokens?|keys?)")
+                    .expect("secret extraction 'list/show' regex must compile"),
+                Regex::new(r"(?i)(what|show)\s+(are|is|me)\s+(all\s+)?(your|the)\s+(api\s+)?(keys?|secrets?|credentials?)")
+                    .expect("secret extraction 'what/show' regex must compile"),
+                Regex::new(r"(?i)contents?\s+of\s+(vault|secrets?|credentials?)")
+                    .expect("secret extraction 'contents of' regex must compile"),
+                Regex::new(r"(?i)(dump|export)\s+(vault|secrets?|credentials?)")
+                    .expect("secret extraction 'dump/export' regex must compile"),
             ]
         });
 
@@ -254,16 +256,22 @@ impl PromptGuard {
         let regexes = JAILBREAK_PATTERNS.get_or_init(|| {
             vec![
 
-                Regex::new(r"(?i)\bDAN\b.*mode").unwrap(),
-                Regex::new(r"(?i)do\s+anything\s+now").unwrap(),
+                Regex::new(r"(?i)\bDAN\b.*mode").expect("jailbreak 'DAN' regex must compile"),
+                Regex::new(r"(?i)do\s+anything\s+now")
+                    .expect("jailbreak 'do anything now' regex must compile"),
 
-                Regex::new(r"(?i)enter\s+(developer|debug|admin)\s+mode").unwrap(),
-                Regex::new(r"(?i)enable\s+(developer|debug|admin)\s+mode").unwrap(),
+                Regex::new(r"(?i)enter\s+(developer|debug|admin)\s+mode")
+                    .expect("jailbreak 'enter mode' regex must compile"),
+                Regex::new(r"(?i)enable\s+(developer|debug|admin)\s+mode")
+                    .expect("jailbreak 'enable mode' regex must compile"),
 
-                Regex::new(r"(?i)in\s+this\s+hypothetical").unwrap(),
-                Regex::new(r"(?i)imagine\s+you\s+(have\s+no|don't\s+have)\s+(restrictions?|rules?|limits?)").unwrap(),
+                Regex::new(r"(?i)in\s+this\s+hypothetical")
+                    .expect("jailbreak 'hypothetical' regex must compile"),
+                Regex::new(r"(?i)imagine\s+you\s+(have\s+no|don't\s+have)\s+(restrictions?|rules?|limits?)")
+                    .expect("jailbreak 'imagine no restrictions' regex must compile"),
 
-                Regex::new(r"(?i)decode\s+(this|the\s+following)\s+(base64|hex|rot13)").unwrap(),
+                Regex::new(r"(?i)decode\s+(this|the\s+following)\s+(base64|hex|rot13)")
+                    .expect("jailbreak 'decode payload' regex must compile"),
             ]
         });
 

@@ -117,8 +117,8 @@ fn parse_patch_with(
     let mut hunks_in_current: usize = 0;
     let mut current_hunk_starts: Vec<u32> = Vec::new();
 
-    let mut iter = patch_content.lines().peekable();
-    while let Some(line) = iter.next() {
+    let iter = patch_content.lines().peekable();
+    for line in iter {
         if line.starts_with("--- ") || line.starts_with("diff ") {
             if let Some(path) = current_path.take() {
                 files.push(PatchFile {
@@ -134,12 +134,12 @@ fn parse_patch_with(
             current_hunk_starts.clear();
             hunks_in_current = 0;
 
-            let file_path = if line.starts_with("--- ") {
-                line.strip_prefix("--- ").unwrap().trim_start_matches("a/")
+            let file_path = if let Some(rest) = line.strip_prefix("--- ") {
+                rest.trim_start_matches("a/")
+            } else if let Some(rest) = line.strip_prefix("diff ") {
+                rest.trim_start_matches("--- ")
             } else {
-                line.strip_prefix("diff ")
-                    .unwrap()
-                    .trim_start_matches("--- ")
+                continue;
             };
 
             current_path = Some(resolve_and_validate_path_sync_with(security, file_path)?);
@@ -253,7 +253,7 @@ impl Tool for PatchApplyTool {
             });
         }
 
-        let cli_dry_run = std::env::var("SEN_DRY_RUN").as_deref() == Ok("1");
+        let cli_dry_run = crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1");
         let dry_run = args
             .get("dry_run")
             .and_then(|v| v.as_bool())
@@ -427,8 +427,13 @@ impl Tool for PatchApplyTool {
                         }),
                     }
                 } else {
+                    let pre_contents: Vec<Option<Vec<u8>>> = patch_files
+                        .iter()
+                        .map(|f| std::fs::read(&f.path).ok())
+                        .collect();
                     match self.ops_applier.apply_batch(batch).await {
                         Ok(outcome) => {
+                            let batch_id = outcome.batch_id.clone();
                             let mut applied = 0usize;
                             let mut failed = 0usize;
                             let mut details: Vec<String> =
@@ -443,6 +448,17 @@ impl Tool for PatchApplyTool {
                                     crate::session::record_write_for_current_session(
                                         &op.touched_path,
                                     );
+                                    let after_bytes = std::fs::read(&op.touched_path).ok();
+                                    let before_bytes = pre_contents.get(idx).cloned().flatten();
+                                    if let Some(after) = after_bytes.as_deref() {
+                                        crate::agent::file_edit_emitter::emit_file_edit(
+                                            &op.touched_path,
+                                            before_bytes.as_deref(),
+                                            Some(after),
+                                            Some(batch_id.clone()),
+                                        )
+                                        .await;
+                                    }
                                     details.push(format!(
                                         "  Successfully applied hunk(s) to {path}"
                                     ));

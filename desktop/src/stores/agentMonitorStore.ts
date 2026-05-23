@@ -37,7 +37,6 @@ function migrateLegacyFilter(key: string): void {
       localStorage.setItem(key, 'active')
     }
   } catch {
-    /* noop */
   }
 }
 
@@ -49,7 +48,6 @@ function readBoolean(key: string, fallback: boolean): boolean {
     if (raw === 'true') return true
     if (raw === 'false') return false
   } catch {
-    /* noop */
   }
   return fallback
 }
@@ -59,7 +57,6 @@ function readEnum<T extends string>(key: string, allowed: T[], fallback: T): T {
     const raw = localStorage.getItem(key)
     if (raw && (allowed as string[]).includes(raw)) return raw as T
   } catch {
-    /* noop */
   }
   return fallback
 }
@@ -68,7 +65,6 @@ function writeString(key: string, value: string): void {
   try {
     localStorage.setItem(key, value)
   } catch {
-    /* noop */
   }
 }
 

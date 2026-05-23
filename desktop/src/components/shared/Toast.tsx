@@ -1,5 +1,9 @@
 import { useUIStore, type Toast as ToastType } from '../../stores/uiStore'
 import { useDockEdgeOffset } from '../../hooks/useDockEdgeOffset'
+import { useTabStore } from '../../stores/tabStore'
+import { useSessionStore } from '../../stores/sessionStore'
+import { focusSession } from '../../lib/focusSession'
+import { resolveSessionTitle } from '../../utils/sessionTitle'
 
 const typeStyles: Record<ToastType['type'], string> = {
   success: 'border-l-4 border-l-[var(--color-success)]',
@@ -10,37 +14,66 @@ const typeStyles: Record<ToastType['type'], string> = {
 
 function ToastItem({ toast }: { toast: ToastType }) {
   const removeToast = useUIStore((s) => s.removeToast)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const ownerSession = useSessionStore((s) =>
+    toast.sessionId ? s.sessions.find((session) => session.id === toast.sessionId) ?? null : null,
+  )
+
+  const isCrossSession =
+    Boolean(toast.sessionId) && toast.sessionId !== (activeTabId ?? undefined)
+  const ownerLabel = ownerSession
+    ? resolveSessionTitle(ownerSession.title, toast.sessionId ?? '')
+    : toast.sessionId
+  const displayMessage = isCrossSession
+    ? `[${ownerLabel ?? toast.sessionId ?? ''}] ${toast.message}`
+    : toast.message
+
+  const hasActions = isCrossSession || Boolean(toast.action)
 
   return (
     <div
       className={`
         bg-[var(--color-surface)] rounded-[var(--radius-md)] shadow-[var(--shadow-dropdown)]
-        px-4 py-3 text-sm text-[var(--color-text-primary)]
+        px-3 py-2 text-[12px] text-[var(--color-text-primary)]
         ${typeStyles[toast.type]}
         animate-in slide-in-from-right fade-in duration-200
       `}
     >
-      <div className="flex items-start justify-between gap-2">
-        <span className="flex-1">{toast.message}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex-1">{displayMessage}</span>
         <button
           onClick={() => removeToast(toast.id)}
-          className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] text-lg leading-none shrink-0"
+          className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] text-sm leading-none shrink-0"
         >
           ×
         </button>
       </div>
-      {toast.action && (
-        <div className="mt-2 flex justify-end">
-          <button
-            type="button"
-            onClick={() => {
-              toast.action?.onClick()
-              removeToast(toast.id)
-            }}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
-          >
-            {toast.action.label}
-          </button>
+      {hasActions && (
+        <div className="mt-1.5 flex flex-wrap justify-end gap-2">
+          {isCrossSession && toast.sessionId && (
+            <button
+              type="button"
+              onClick={() => {
+                focusSession(toast.sessionId!)
+                removeToast(toast.id)
+              }}
+              className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 py-0.5 text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+            >
+              切换到该会话
+            </button>
+          )}
+          {toast.action && (
+            <button
+              type="button"
+              onClick={() => {
+                toast.action?.onClick()
+                removeToast(toast.id)
+              }}
+              className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 py-0.5 text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
       )}
     </div>

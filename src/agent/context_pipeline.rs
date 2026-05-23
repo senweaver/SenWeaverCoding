@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Unified context-compression pipeline.
-//!
-//! Replaces the legacy four-stage cascade (ContextCompressor ??auto_compact_history
-//! ??trim_history ??QueryEngine::compact_messages) with a single declarative
-//! pipeline of `Stage`s, each with its own `should_run` guard and `apply`
-//! action.  Stages run in order; a stage that reduces the history below the
-//! target threshold short-circuits the pipeline.
-//!
-//! # Guarantees
-//!
-//! - **Bounded LLM calls**: the Summarize stage performs at most one LLM
-//!   invocation per turn, regardless of how many iterations the stage has
-//!   configured internally.
-//! - **Deterministic ordering**: stages always execute in the order the
-//!   pipeline was built; there is no implicit fallback chain.
-//! - **Graceful degradation**: every stage catches its own errors and logs;
-//!   the pipeline continues to the next stage.
 
 use async_trait::async_trait;
 
@@ -376,11 +359,65 @@ impl AsyncStage for LlmCompressStage {
                 }
             }
             Err(e) => {
-                tracing::warn!("llm_compress stage failed: {e}");
-                StageReport::skipped(self.name(), before)
+                tracing::warn!("llm_compress stage failed, applying hard-trim fallback: {e}");
+                let dropped = hard_trim_fallback(history, state);
+                let after_tokens = history.iter().map(|m| m.content.len() / 4).sum::<usize>();
+                state.current_tokens = after_tokens;
+                StageReport {
+                    stage_name: self.name(),
+                    executed: dropped > 0,
+                    tokens_before: before,
+                    tokens_after: after_tokens,
+                }
             }
         }
     }
+}
+
+fn hard_trim_fallback(history: &mut Vec<ChatMessage>, state: &PipelineState) -> usize {
+    if history.len() <= 2 {
+        return 0;
+    }
+    let has_system = history
+        .first()
+        .map(|m| m.role.as_str() == "system")
+        .unwrap_or(false);
+    let start = usize::from(has_system);
+    let total_non_system = history.len() - start;
+    if total_non_system <= 4 {
+        return 0;
+    }
+    let keep_tail = total_non_system / 2;
+    let drop_end = start + (total_non_system - keep_tail);
+
+    let preserved: std::collections::HashSet<usize> = state
+        .preserved
+        .iter()
+        .map(|p| p.index)
+        .filter(|i| *i >= start && *i < drop_end)
+        .collect();
+
+    let mut dropped: usize = 0;
+    let original = std::mem::take(history);
+    let mut kept: Vec<ChatMessage> = Vec::with_capacity(original.len());
+    for (i, msg) in original.into_iter().enumerate() {
+        if i < start || i >= drop_end || preserved.contains(&i) {
+            kept.push(msg);
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        let note = ChatMessage::system(format!(
+            "[Context truncated: {} earlier messages dropped after compression failed]",
+            dropped
+        ));
+        let insert_at = usize::from(has_system);
+        let safe_insert = insert_at.min(kept.len());
+        kept.insert(safe_insert, note);
+    }
+    *history = kept;
+    dropped
 }
 
 pub struct AsyncContextPipeline {

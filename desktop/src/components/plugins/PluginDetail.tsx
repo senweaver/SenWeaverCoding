@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { usePluginStore } from '../../stores/pluginStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { Button } from '../shared/Button'
@@ -25,7 +26,7 @@ export function PluginDetail() {
   const uninstallPlugin = usePluginStore((s) => s.uninstallPlugin)
   const reloadPlugins = usePluginStore((s) => s.reloadPlugins)
   const sessions = useSessionStore((s) => s.sessions)
-  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const activeSessionId = useTabStore((s) => s.activeTabId)
   const addToast = useUIStore((s) => s.addToast)
   const fetchSkillDetail = useSkillStore((s) => s.fetchSkillDetail)
   const fetchAgents = useAgentStore((s) => s.fetchAgents)

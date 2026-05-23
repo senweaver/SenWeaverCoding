@@ -23,6 +23,7 @@ const QUICK_MODE_GLYPH: Record<CodingModeId, string> = {
   context: 'data_object',
   mvai: 'hub',
   harness: 'precision_manufacturing',
+  curator: 'auto_stories',
 }
 
 const QUICK_MODE_ORDER: CodingModeId[] = [

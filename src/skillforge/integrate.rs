@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Integrator — generates SenWeaverCoding-standard SKILL.toml + SKILL.md from scout results.
 
 use std::fs;
 use std::path::PathBuf;

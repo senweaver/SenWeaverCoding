@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Provider subsystem for model inference backends.
-//!
-//! This module implements the factory pattern for AI model providers. Each provider
-//! implements the [`Provider`] trait defined in [`traits`], and is registered in the
-//! factory function [`create_provider`] by its canonical string key (e.g., `"openai"`,
-//! `"anthropic"`, `"ollama"`, `"gemini"`). Provider aliases are resolved internally
-//! so that user-facing keys remain stable.
-//!
-//! The subsystem supports resilient multi-provider configurations through the
-//! [`ReliableProvider`](reliable::ReliableProvider) wrapper, which handles fallback
-//! chains and automatic retry. Model routing across providers is available via
-//! [`create_routed_provider`].
-//!
-//! # Extension
-//!
-//! To add a new provider, implement [`Provider`] in a new submodule and register it
-//! in [`create_provider_with_url`]. See `AGENTS.md` for the full change playbook.
 
 pub mod anthropic;
 pub mod azure_openai;
@@ -36,6 +19,7 @@ pub mod openai_responses;
 pub mod openrouter;
 pub mod reliable;
 pub mod router;
+pub mod sanitize;
 pub mod telnyx;
 pub mod traits;
 
@@ -871,14 +855,107 @@ pub fn sanitize_api_error(input: &str) -> String {
     format!("{}...", &scrubbed[..end])
 }
 
-pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::Error {
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("{provider} API error ({status}): {sanitized_message}")]
+    Http {
+        provider: String,
+        status: u16,
+        body: String,
+        sanitized_message: String,
+    },
+
+    #[error("{provider} transport error: {source}")]
+    Transport {
+        provider: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("{provider} response decode error: {source}")]
+    Decode {
+        provider: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ProviderError {
+    #[must_use]
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            ProviderError::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn http_body(&self) -> Option<&str> {
+        match self {
+            ProviderError::Http { body, .. } => Some(body.as_str()),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn sanitized_message(&self) -> String {
+        match self {
+            ProviderError::Http {
+                sanitized_message, ..
+            } => sanitized_message.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn category(&self) -> crate::services::api::ApiErrorCategory {
+        match self {
+            ProviderError::Http { status, body, .. } => {
+                crate::services::api::categorize_api_error(*status, Some(body.as_str()))
+            }
+            ProviderError::Transport { .. } => crate::services::api::ApiErrorCategory::NetworkError,
+            ProviderError::Decode { .. } => crate::services::api::ApiErrorCategory::Unknown,
+            ProviderError::Other(_) => crate::services::api::ApiErrorCategory::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub fn is_auth_error(&self) -> bool {
+        matches!(
+            self.category(),
+            crate::services::api::ApiErrorCategory::AuthError
+        )
+    }
+
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        crate::services::api::is_retryable(self.category())
+    }
+}
+
+pub async fn api_error_structured(
+    provider: &str,
+    response: reqwest::Response,
+) -> ProviderError {
     let status = response.status();
     let body = response
         .text()
         .await
         .unwrap_or_else(|_| "<failed to read provider error body>".to_string());
     let sanitized = sanitize_api_error(&body);
-    anyhow::anyhow!("{provider} API error ({status}): {sanitized}")
+    ProviderError::Http {
+        provider: provider.to_string(),
+        status: status.as_u16(),
+        body,
+        sanitized_message: sanitized,
+    }
+}
+
+pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::Error {
+    anyhow::Error::new(api_error_structured(provider, response).await)
 }
 
 fn resolve_provider_credential(name: &str, credential_override: Option<&str>) -> Option<String> {
@@ -1337,12 +1414,14 @@ pub fn create_provider_with_url_and_options(
             key,
             AuthStyle::Bearer,
         ))),
-        name if moonshot_base_url(name).is_some() => Ok(compat(OpenAiCompatibleProvider::new(
-            "Moonshot",
-            moonshot_base_url(name).expect("checked in guard"),
-            key,
-            AuthStyle::Bearer,
-        ))),
+        name if moonshot_base_url(name).is_some() => Ok(compat(
+            OpenAiCompatibleProvider::new_no_responses_fallback(
+                "Moonshot",
+                moonshot_base_url(name).expect("checked in guard"),
+                key,
+                AuthStyle::Bearer,
+            ),
+        )),
         "kimi-code" | "kimi_coding" | "kimi_for_coding" => {
             Ok(compat(OpenAiCompatibleProvider::new_with_user_agent(
                 "Kimi Code",
@@ -2094,7 +2173,13 @@ pub fn create_resilient_provider_with_options(
         reliability.provider_backoff_ms,
     )
     .with_api_keys(reliability.api_keys.clone())
-    .with_model_fallbacks(reliability.model_fallbacks.clone());
+    .with_model_fallbacks(reliability.model_fallbacks.clone())
+    .with_retry_caps(
+        reliability.engine_overload_max_retries,
+        reliability.account_rate_limit_max_retries,
+    )
+    .with_transient_max_retries(reliability.transient_max_retries)
+    .with_client_rate_limit_enabled(reliability.client_llm_rate_limit_enabled);
 
     Ok(Box::new(reliable))
 }

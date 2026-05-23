@@ -30,7 +30,7 @@ export function ChannelDetailForm({ definition, value, onChange, disabled }: Pro
     <div className="space-y-4">
       {definition.i18nNotice && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-3 py-2">
-          <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">info</span>
+          <span className="material-symbols-outlined text-[16px] text-[var(--color-text-secondary)]">info</span>
           <p className="text-xs text-[var(--color-text-secondary)] whitespace-pre-line">
             {t(definition.i18nNotice as TranslationKey)}
           </p>
@@ -73,7 +73,7 @@ function FieldRenderer({ field, value, onChange, disabled }: FieldRendererProps)
     </label>
   )
   const hintEl = hint ? (
-    <p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">{hint}</p>
+    <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">{hint}</p>
   ) : null
 
   if (field.type === 'checkbox') {
@@ -89,7 +89,7 @@ function FieldRenderer({ field, value, onChange, disabled }: FieldRendererProps)
           />
           <div className="flex-1 min-w-0">
             <span className="text-xs text-[var(--color-text-primary)]">{label}</span>
-            {hint && <p className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">{hint}</p>}
+            {hint && <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">{hint}</p>}
           </div>
         </label>
       </div>
@@ -246,7 +246,7 @@ function FieldRenderer({ field, value, onChange, disabled }: FieldRendererProps)
 }
 
 const inputClass = `
-  h-9 w-full px-2.5 rounded-[var(--radius-md)] border text-sm
+  h-8 w-full px-2.5 rounded-[var(--radius-md)] border text-xs
   bg-[var(--color-surface)] text-[var(--color-text-primary)]
   placeholder:text-[var(--color-text-tertiary)]
   border-[var(--color-border)]
@@ -292,7 +292,7 @@ function PasswordField({
           className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] disabled:opacity-50"
           tabIndex={-1}
         >
-          <span className="material-symbols-outlined text-[16px]">{shown ? 'visibility_off' : 'visibility'}</span>
+          <span className="material-symbols-outlined text-[14px]">{shown ? 'visibility_off' : 'visibility'}</span>
         </button>
       </div>
       {hint}

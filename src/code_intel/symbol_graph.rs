@@ -1,27 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! M6-D6.1 ??the **SymbolGraph**.
-//!
-//! A whole-workspace graph of symbols and their relationships,
-//! intentionally layered on top of [`extract_outline`](super::extract_outline)
-//! so it picks up the tree-sitter accuracy when the `code-intel`
-//! feature is on and degrades cleanly to the regex fallback when
-//! it isn't.
-//!
-//! Three edge kinds are captured:
-//! - `calls`   ??identifier appears in the form `name(` in another
-//!               symbol's body.
-//! - `implements` ??`impl Trait for Struct`, `class Child(Parent)`,
-//!                  `class C implements I` (Rust / Python / TS/JS
-//!                  patterns, best-effort).
-//! - `uses`    ??weaker signal: identifier appears as a bare word in
-//!               another symbol's body; skipped for names that were
-//!               already captured as `calls`.
-//!
-//! The graph is persisted to `<workspace>/.sen/symbol_graph.json`
-//! so the M6 query tool and the cross-file refactor tool can
-//! pick it up without redoing the scan each invocation.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
@@ -167,7 +146,7 @@ impl SymbolGraph {
         let target = dir.join("symbol_graph.json");
         let tmp = dir.join("symbol_graph.json.tmp");
         let body =
-            serde_json::to_vec_pretty(self).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         fs::write(&tmp, &body)?;
         fs::rename(&tmp, &target)?;
         Ok(target)

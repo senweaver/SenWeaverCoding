@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Search and replace primitives for the editor core.
-//!
-//! Provides case-sensitive/insensitive literal and regex search over a
-//! `TextBuffer`, returning `Position` ranges suitable for highlighting or
-//! interactive replace flows.  Uses `memchr` for fast byte-pattern scanning
-//! on ASCII content and falls back to character-level scanning for
-//! case-insensitive patterns or Unicode text.
 
 use std::borrow::Cow;
 
@@ -136,7 +129,7 @@ pub fn replace_all(
         }
     }
 
-    let mut new_buf = TextBuffer::from_str(&new_rope.to_string());
+    let mut new_buf = TextBuffer::from_text(&new_rope.to_string());
     new_buf.set_buffer_id(buffer.buffer_id().to_string());
     (new_buf, matches.len())
 }

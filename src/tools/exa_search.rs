@@ -1,11 +1,11 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
+
 use super::traits::{Tool, ToolResult};
+use super::web_search_tool::WebSearchTool;
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::json;
-use std::time::Duration;
 
 pub struct ExaSearchTool {
     api_key: Option<String>,
@@ -17,38 +17,23 @@ impl ExaSearchTool {
     pub fn new(api_key: Option<String>, max_results: usize, timeout_secs: u64) -> Self {
         Self {
             api_key,
-            max_results: max_results.clamp(1, 10),
+            max_results: max_results.clamp(1, 30),
             timeout_secs: timeout_secs.max(5),
         }
     }
 
-    fn resolve_api_key(&self) -> Option<String> {
-        self.api_key
-            .clone()
-            .or_else(|| std::env::var("EXA_API_KEY").ok())
-            .filter(|k| !k.trim().is_empty())
+    fn build_inner(&self) -> WebSearchTool {
+        WebSearchTool::new_with_config(
+            "exa".to_string(),
+            None,
+            None,
+            self.max_results,
+            self.timeout_secs,
+            std::path::PathBuf::new(),
+            false,
+        )
+        .with_extra_api_keys(None, self.api_key.clone())
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ExaResponse {
-    #[serde(default)]
-    results: Vec<ExaResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExaResult {
-    #[serde(default)]
-    title: String,
-    url: String,
-    #[serde(default)]
-    score: f64,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    author: Option<String>,
-    #[serde(default, rename = "publishedDate")]
-    published_date: Option<String>,
 }
 
 #[async_trait]
@@ -58,64 +43,34 @@ impl Tool for ExaSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Semantic web search via Exa API. Finds pages by meaning using neural search, \
-         ideal for code and technical queries. Can return page content inline. Requires EXA_API_KEY."
+        "Neural / semantic web search via Exa (formerly Metaphor). Thin wrapper around the unified \
+         web_search Exa engine; requires EXA_API_KEY. Supports neural ranking, optional inline \
+         content fetch, and category/domain filters."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "query": {
+                "query": {"type": "string"},
+                "exa_type": {
                     "type": "string",
-                    "description": "The search query (natural language works best for neural search)"
+                    "enum": ["neural", "keyword", "auto"],
+                    "default": "auto"
                 },
-                "search_type": {
-                    "type": "string",
-                    "description": "Search type: 'neural' (semantic) or 'keyword' (traditional)",
-                    "enum": ["neural", "keyword"],
-                    "default": "neural"
-                },
-                "num_results": {
-                    "type": "integer",
-                    "description": "Number of results (1-10)",
-                    "default": 5
-                },
-                "get_contents": {
-                    "type": "boolean",
-                    "description": "Include page text in results (reduces need for web_fetch)",
-                    "default": false
-                },
-                "category": {
-                    "type": "string",
-                    "description": "Filter by content category",
-                    "enum": ["company", "research paper", "news", "github", "tweet", "movie", "song", "personal site", "pdf"]
-                }
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 30},
+                "get_contents": {"type": "boolean", "default": false},
+                "highlight_sentences": {"type": "integer", "minimum": 1, "maximum": 12},
+                "category_filter": {"type": "string"},
+                "include_domains": {"type": "array", "items": {"type": "string"}},
+                "exclude_domains": {"type": "array", "items": {"type": "string"}}
             },
             "required": ["query"]
         })
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let api_key = match self.resolve_api_key() {
-            Some(k) => k,
-            None => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(
-                        "Exa API key not configured. Set EXA_API_KEY environment variable \
-                         or add exa_api_key to [web_search] in config.toml"
-                            .into(),
-                    ),
-                });
-            }
-        };
-
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
         if query.is_empty() {
             return Ok(ToolResult {
                 success: false,
@@ -123,114 +78,12 @@ impl Tool for ExaSearchTool {
                 error: Some("query parameter is required".into()),
             });
         }
-
-        let search_type = args
-            .get("search_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("neural");
-        let num_results = args
-            .get("num_results")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
-            .unwrap_or(self.max_results)
-            .clamp(1, 10);
-        let get_contents = args
-            .get("get_contents")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let mut body = json!({
-            "query": query,
-            "type": search_type,
-            "numResults": num_results,
-        });
-
-        if get_contents {
-            body["contents"] = json!({
-                "text": true,
-            });
+        let mut delegated = args.clone();
+        if let Some(obj) = delegated.as_object_mut() {
+            obj.insert("engine".into(), json!("exa"));
+            obj.insert("engine_only".into(), json!(true));
+            obj.insert("multi".into(), json!(false));
         }
-
-        if let Some(category) = args.get("category").and_then(|v| v.as_str()) {
-            body["category"] = json!(category);
-        }
-
-        let client = reqwest::Client::new();
-        let resp = client
-            .post("https://api.exa.ai/search")
-            .header("x-api-key", &api_key)
-            .header("Content-Type", "application/json")
-            .timeout(Duration::from_secs(self.timeout_secs))
-            .json(&body)
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) => {
-                let status = r.status();
-                if !status.is_success() {
-                    let text = r.text().await.unwrap_or_default();
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Exa API error (HTTP {status}): {text}")),
-                    });
-                }
-
-                match r.json::<ExaResponse>().await {
-                    Ok(data) => {
-                        let mut output = String::new();
-                        if data.results.is_empty() {
-                            output = "No results found.".to_string();
-                        } else {
-                            output.push_str(&format!(
-                                "## Exa Search Results ({} mode)\n\n",
-                                search_type
-                            ));
-                            for (i, result) in data.results.iter().enumerate() {
-                                output.push_str(&format!(
-                                    "{}. **{}** (score: {:.2})\n   {}\n",
-                                    i + 1,
-                                    result.title,
-                                    result.score,
-                                    result.url,
-                                ));
-                                if let Some(ref author) = result.author {
-                                    output.push_str(&format!("   Author: {author}\n"));
-                                }
-                                if let Some(ref date) = result.published_date {
-                                    output.push_str(&format!("   Published: {date}\n"));
-                                }
-                                if let Some(ref text) = result.text {
-                                    let truncated = if text.len() > 500 {
-                                        format!("{}…", &text[..500])
-                                    } else {
-                                        text.clone()
-                                    };
-                                    output.push_str(&format!("   {truncated}\n"));
-                                }
-                                output.push('\n');
-                            }
-                        }
-
-                        Ok(ToolResult {
-                            success: true,
-                            output,
-                            error: None,
-                        })
-                    }
-                    Err(e) => Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Failed to parse Exa response: {e}")),
-                    }),
-                }
-            }
-            Err(e) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Exa request failed: {e}")),
-            }),
-        }
+        self.build_inner().execute(delegated).await
     }
 }

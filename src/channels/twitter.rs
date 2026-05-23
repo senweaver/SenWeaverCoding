@@ -30,7 +30,9 @@ impl TwitterChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("channel.twitter")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.twitter")
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {

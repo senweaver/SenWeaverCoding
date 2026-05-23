@@ -1,41 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Desktop-flavoured WebSocket chat handler.
-//!
-//! Mounts at `/ws/{session_id}` and speaks the cc-haha desktop wire
-//! protocol expected by the React frontend in `desktop/src/`:
-//!
-//! Client → Server (`ClientMessage`):
-//!  * `prewarm_session`
-//!  * `user_message { content, attachments? }`
-//!  * `permission_response { requestId, allowed, rule?, updatedInput? }`
-//!  * `computer_use_permission_response { requestId, response }`
-//!  * `set_permission_mode { mode }`        (legacy; derived from coding_mode)
-//!  * `set_coding_mode { mode }`            (12-mode programming workflow selector)
-//!  * `set_runtime_config { provider?, model?, ... }`
-//!  * `stop_generation`
-//!  * `ping`
-//!
-//! Server → Client (`ServerMessage`):
-//!  * `connected { sessionId }`
-//!  * `content_start { blockType, toolName?, toolUseId? }`
-//!  * `content_delta { text? | toolInput? }`
-//!  * `tool_use_complete { toolName, toolUseId, input }`
-//!  * `tool_result { toolUseId, content, isError }`
-//!  * `permission_request { requestId, toolName, input, description? }`
-//!  * `message_complete { usage }`
-//!  * `thinking { text }`
-//!  * `status { state, verb?, elapsed?, tokens? }`
-//!  * `error { message, code, retryable? }`
-//!  * `system_notification { subtype, message?, data? }`
-//!  * `pong`
-//!  * `session_title_updated { sessionId, title }`
-//!
-//! The legacy `/ws/chat?session_id=...` route in [`super::ws`] continues
-//! to serve clients that speak the older `chunk / done` protocol — the
-//! two routes co-exist because the agent loop is stateless across
-//! connections.
 
 use super::AppState;
 use axum::{
@@ -52,6 +17,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 const GW_SESSION_PREFIX: &str = "gw_";
+
+#[derive(Debug)]
+enum OutboundFrame {
+    Text(String),
+    Pong(Vec<u8>),
+}
+
+type OutboundSender = tokio::sync::mpsc::UnboundedSender<OutboundFrame>;
 
 pub async fn handle_ws_desktop(
     State(state): State<AppState>,
@@ -75,18 +48,51 @@ pub async fn handle_ws_desktop(
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
-    let (mut sender, mut receiver) = socket.split();
+    let (mut sink, mut receiver) = socket.split();
+
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::unbounded_channel::<OutboundFrame>();
+
+    let writer_handle = tokio::spawn(async move {
+        while let Some(frame) = outbound_rx.recv().await {
+            let result = match frame {
+                OutboundFrame::Text(s) => sink.send(Message::Text(s.into())).await,
+                OutboundFrame::Pong(p) => sink.send(Message::Pong(p.into())).await,
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+        let _ = sink.close().await;
+    });
 
     let session_key = format!("{GW_SESSION_PREFIX}{session_id}");
 
     let _ = send_json(
-        &mut sender,
+        &outbound_tx,
         &serde_json::json!({
             "type": "connected",
             "sessionId": session_id,
         }),
     )
     .await;
+
+    {
+        let initial_todos = if let Some(svc) = crate::services::try_get_services() {
+            crate::tools::todo_write::session_todos(&svc.todo_store, &session_id)
+        } else {
+            Vec::new()
+        };
+        let _ = send_json(
+            &outbound_tx,
+            &serde_json::json!({
+                "type": "todo_snapshot",
+                "sessionId": session_id,
+                "todos": initial_todos,
+            }),
+        )
+        .await;
+    }
 
     let config = {
         let mut cfg = state.config.lock();
@@ -115,7 +121,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             } else {
                 "AGENT_INIT_FAILED"
             };
-            send_error(&mut sender, &message, code).await;
+            send_error(&outbound_tx, &message, code).await;
+            drop(outbound_tx);
+            let _ = writer_handle.await;
             return;
         }
     };
@@ -160,12 +168,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         }
     }
 
-    enum InboundMsg {
-        Json(serde_json::Value),
-        Pong(Vec<u8>),
-    }
-
-    let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::unbounded_channel::<InboundMsg>();
+    let (inbound_tx, mut inbound_rx) =
+        tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
 
     let inbound_tx_lsp = inbound_tx.clone();
     let inbound_tx_replay = inbound_tx.clone();
@@ -176,6 +180,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let cancelled_atomic = agent.cancel_token();
     let cancel_signal_for_reader = std::sync::Arc::clone(&cancel_signal_handle);
     let cancelled_atomic_for_reader = std::sync::Arc::clone(&cancelled_atomic);
+    let outbound_tx_reader = outbound_tx.clone();
+    let session_id_for_reader = session_id.clone();
 
     let reader_handle = tokio::spawn(async move {
         while let Some(frame) = receiver.next().await {
@@ -190,7 +196,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 "type": "__invalid_json__",
                                 "raw": text_str.to_string(),
                             });
-                            if inbound_tx.send(InboundMsg::Json(v)).is_err() {
+                            if inbound_tx.send(v).is_err() {
                                 break;
                             }
                             continue;
@@ -201,6 +207,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+
+                    if msg_type.as_str() == "ping" {
+                        if outbound_tx_reader
+                            .send(OutboundFrame::Text(
+                                r#"{"type":"pong"}"#.to_string(),
+                            ))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     if msg_type.as_str() == "stop_generation" {
                         cancelled_atomic_for_reader
                             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -209,6 +227,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             target: "agent.cancel",
                             "stop_generation received: cancel signal fired (reader-side)"
                         );
+
+                        if let Some(sup) = crate::workers::supervisor::global_supervisor() {
+                            let cancelled = sup.cancel_for_parent(&session_id_for_reader);
+                            if cancelled > 0 {
+                                tracing::info!(
+                                    target: "agent.cancel",
+                                    parent_session = %session_id_for_reader,
+                                    cancelled,
+                                    "cascading stop_generation to child workers"
+                                );
+                            }
+                        }
                     }
                     match msg_type.as_str() {
 
@@ -247,14 +277,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         }
                         _ => {}
                     }
-                    if inbound_tx.send(InboundMsg::Json(parsed)).is_err() {
+                    if inbound_tx.send(parsed).is_err() {
                         break;
                     }
                 }
                 Ok(Message::Ping(payload)) => {
-
-                    if inbound_tx
-                        .send(InboundMsg::Pong(payload.to_vec()))
+                    if outbound_tx_reader
+                        .send(OutboundFrame::Pong(payload.to_vec()))
                         .is_err()
                     {
                         break;
@@ -278,7 +307,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 "type": "__lsp_forward__",
                                 "payload": payload,
                             });
-                            if tx.send(InboundMsg::Json(wrapped)).is_err() {
+                            if tx.send(wrapped).is_err() {
                                 break;
                             }
                         }
@@ -309,7 +338,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             "type": "__gateway_event__",
                             "payload": payload,
                         });
-                        if tx.send(InboundMsg::Json(wrapped)).is_err() {
+                        if tx.send(wrapped).is_err() {
                             break;
                         }
                     }
@@ -322,7 +351,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
     let resource_event_forwarder = {
         let mut rx = state.workspace_resources.subscribe();
-        let tx = inbound_tx_resource;
+        let tx = inbound_tx_resource.clone();
         let session_id_for_resource = session_id.clone();
         tokio::spawn(async move {
             loop {
@@ -335,7 +364,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             "type": "__gateway_event__",
                             "payload": payload,
                         });
-                        if tx.send(InboundMsg::Json(wrapped)).is_err() {
+                        if tx.send(wrapped).is_err() {
                             break;
                         }
                     }
@@ -345,6 +374,48 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             }
         })
     };
+
+    {
+        let workspace_key_resync = crate::session::workspace_key_from_path(
+            agent.current_workspace_dir(),
+            &session_id,
+        );
+        let waiters = state
+            .workspace_resources
+            .waiters_snapshot_for_session(&workspace_key_resync, &session_id);
+        for waiter in waiters {
+            let payload = serde_json::json!({
+                "type": "system_notification",
+                "subtype": "resource_wait_started",
+                "sessionId": session_id,
+                "data": {
+                    "kind": waiter.kind,
+                    "target": waiter.target,
+                    "holderSessionId": waiter.holder_session_id,
+                    "holderTitle": waiter.holder_title,
+                },
+            });
+            let wrapped = serde_json::json!({
+                "type": "__gateway_event__",
+                "payload": payload,
+            });
+            let _ = inbound_tx_resource.send(wrapped);
+        }
+    }
+
+    for warning in crate::gateway::snapshot_startup_warnings() {
+        let payload = serde_json::json!({
+            "type": "system_notification",
+            "subtype": warning.subtype,
+            "level": "warning",
+            "message": warning.message,
+        });
+        let wrapped = serde_json::json!({
+            "type": "__gateway_event__",
+            "payload": payload,
+        });
+        let _ = inbound_tx_resource.send(wrapped);
+    }
 
     {
         let svc = state.lsp.service();
@@ -390,29 +461,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     "type": "__lsp_forward__",
                     "payload": payload,
                 });
-                let _ = inbound_tx_replay.send(InboundMsg::Json(wrapped));
+                let _ = inbound_tx_replay.send(wrapped);
             }
         }
     }
 
-    while let Some(inbound) = inbound_rx.recv().await {
-        let parsed = match inbound {
-            InboundMsg::Pong(payload) => {
-
-                let _ = sender.send(Message::Pong(payload.into())).await;
-                continue;
-            }
-            InboundMsg::Json(v) => v,
-        };
-
+    while let Some(parsed) = inbound_rx.recv().await {
         if parsed.get("type").and_then(|v| v.as_str()) == Some("__invalid_json__") {
             let raw = parsed
                 .get("raw")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            tracing::debug!(
+                target: "ws_desktop.invalid_json",
+                raw_full = %raw,
+                "received malformed JSON from desktop ws client; preview sent to client",
+            );
             send_error(
-                &mut sender,
+                &outbound_tx,
                 &format!("invalid JSON: {} (...)", raw.chars().take(120).collect::<String>()),
                 "INVALID_JSON",
             )
@@ -422,27 +489,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
         if parsed.get("type").and_then(|v| v.as_str()) == Some("__lsp_forward__") {
             if let Some(payload) = parsed.get("payload") {
-                let _ = send_json(&mut sender, payload).await;
+                let _ = send_json(&outbound_tx, payload).await;
             }
             continue;
         }
 
         if parsed.get("type").and_then(|v| v.as_str()) == Some("__gateway_event__") {
             if let Some(payload) = parsed.get("payload") {
-                let _ = send_json(&mut sender, payload).await;
+                let _ = send_json(&outbound_tx, payload).await;
             }
             continue;
         }
 
         let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match msg_type {
-            "ping" => {
-                let _ = send_json(&mut sender, &serde_json::json!({ "type": "pong" })).await;
-            }
             "prewarm_session" => {
 
                 let _ = send_json(
-                    &mut sender,
+                    &outbound_tx,
                     &serde_json::json!({
                         "type": "status",
                         "state": "idle",
@@ -454,7 +518,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             "stop_generation" => {
 
                 let _ = send_json(
-                    &mut sender,
+                    &outbound_tx,
                     &serde_json::json!({
                         "type": "status",
                         "state": "idle",
@@ -470,7 +534,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .unwrap_or("ask");
                 desktop_runtime_state().set_permission_mode(mode);
                 let _ = send_json(
-                    &mut sender,
+                    &outbound_tx,
                     &serde_json::json!({
                         "type": "system_notification",
                         "subtype": "permission_mode_updated",
@@ -510,7 +574,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         );
                     if needs_confirm {
                         let _ = send_json(
-                            &mut sender,
+                            &outbound_tx,
                             &serde_json::json!({
                                 "type": "system_notification",
                                 "subtype": "coding_mode_transition_confirmation_required",
@@ -541,7 +605,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     let derived = super::desktop_routes::derive_permission_from_coding(&parsed_mode);
                     desktop_runtime_state().set_permission_mode(derived);
                     let _ = send_json(
-                        &mut sender,
+                        &outbound_tx,
                         &serde_json::json!({
                             "type": "system_notification",
                             "subtype": "coding_mode_updated",
@@ -564,7 +628,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .await;
                 } else {
                     send_error(
-                        &mut sender,
+                        &outbound_tx,
                         &format!("unknown coding mode: {mode_str}"),
                         "UNKNOWN_CODING_MODE",
                     )
@@ -582,7 +646,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .map(|k| k.label().to_string())
                     .collect();
                 let _ = send_json(
-                    &mut sender,
+                    &outbound_tx,
                     &serde_json::json!({
                         "type": "system_notification",
                         "subtype": "pii_config_updated",
@@ -640,7 +704,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                              change remains effective in-memory only until restart"
                         );
                         let _ = send_json(
-                            &mut sender,
+                            &outbound_tx,
                             &serde_json::json!({
                                 "type": "system_notification",
                                 "subtype": "runtime_config_persist_failed",
@@ -654,7 +718,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 state.push_live_config(snapshot);
                 state.rebuild_runtime_from_config();
                 let _ = send_json(
-                    &mut sender,
+                    &outbound_tx,
                     &serde_json::json!({
                         "type": "system_notification",
                         "subtype": "runtime_config_updated",
@@ -688,6 +752,119 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     let _ = super::ws::approval_sender_for_desktop().send(evt);
                 }
             }
+            "debug_bind_tab" => {
+                let tab_id = parsed
+                    .get("tab_id")
+                    .or_else(|| parsed.get("tabId"))
+                    .and_then(|v| v.as_u64());
+                let Some(tab_id) = tab_id else {
+                    send_error(
+                        &outbound_tx,
+                        "debug_bind_tab.tab_id is required",
+                        "EMPTY_TAB_ID",
+                    )
+                    .await;
+                    continue;
+                };
+                if let Some(ctl) = crate::tools::browser::dock_controller() {
+                    if let Err(err) = ctl
+                        .bind_tab_to_session(session_id.clone(), tab_id as u32)
+                        .await
+                    {
+                        send_error(
+                            &outbound_tx,
+                            &format!("debug_bind_tab failed: {err}"),
+                            "DOCK_BIND_FAILED",
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+                let _ = send_json(
+                    &outbound_tx,
+                    &serde_json::json!({
+                        "type": "system_notification",
+                        "subtype": "debug_tab_bound",
+                        "data": { "tab_id": tab_id },
+                    }),
+                )
+                .await;
+            }
+            "debug_unbind_tab" => {
+                let tab_id = parsed
+                    .get("tab_id")
+                    .or_else(|| parsed.get("tabId"))
+                    .and_then(|v| v.as_u64());
+                let Some(tab_id) = tab_id else {
+                    send_error(
+                        &outbound_tx,
+                        "debug_unbind_tab.tab_id is required",
+                        "EMPTY_TAB_ID",
+                    )
+                    .await;
+                    continue;
+                };
+                if let Some(ctl) = crate::tools::browser::dock_controller() {
+                    if let Err(err) = ctl
+                        .unbind_tab_from_session(session_id.clone(), tab_id as u32)
+                        .await
+                    {
+                        send_error(
+                            &outbound_tx,
+                            &format!("debug_unbind_tab failed: {err}"),
+                            "DOCK_UNBIND_FAILED",
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+                let _ = send_json(
+                    &outbound_tx,
+                    &serde_json::json!({
+                        "type": "system_notification",
+                        "subtype": "debug_tab_unbound",
+                        "data": { "tab_id": tab_id },
+                    }),
+                )
+                .await;
+            }
+            "debug_bind_prototype_ref" => {
+                let tab_id = parsed
+                    .get("tab_id")
+                    .or_else(|| parsed.get("tabId"))
+                    .and_then(|v| v.as_u64());
+                let Some(tab_id) = tab_id else {
+                    send_error(
+                        &outbound_tx,
+                        "debug_bind_prototype_ref.tab_id is required",
+                        "EMPTY_TAB_ID",
+                    )
+                    .await;
+                    continue;
+                };
+                crate::tools::browser::set_prototype_ref_tab(&session_key, tab_id as u32);
+                let _ = send_json(
+                    &outbound_tx,
+                    &serde_json::json!({
+                        "type": "system_notification",
+                        "subtype": "prototype_ref_bound",
+                        "data": { "tab_id": tab_id },
+                    }),
+                )
+                .await;
+            }
+            "debug_unbind_prototype_ref" => {
+                crate::tools::browser::clear_prototype_ref_tab(&session_key);
+                let _ = send_json(
+                    &outbound_tx,
+                    &serde_json::json!({
+                        "type": "system_notification",
+                        "subtype": "prototype_ref_unbound",
+                        "data": {},
+                    }),
+                )
+                .await;
+            }
             "user_message" => {
                 let content = parsed
                     .get("content")
@@ -695,7 +872,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .unwrap_or("")
                     .to_string();
                 if content.is_empty() {
-                    send_error(&mut sender, "empty user_message.content", "EMPTY_CONTENT").await;
+                    send_error(&outbound_tx, "empty user_message.content", "EMPTY_CONTENT").await;
                     continue;
                 }
 
@@ -720,7 +897,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 }
 
                 agent.reset_cancel();
-                run_turn(&state, &mut agent, &mut sender, &session_id, &session_key, &content).await;
+                run_turn(&state, &mut agent, &outbound_tx, &session_id, &session_key, &content).await;
             }
             "start_plan_execution" => {
 
@@ -736,7 +913,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .unwrap_or(false);
                 if plan_path.is_empty() {
                     send_error(
-                        &mut sender,
+                        &outbound_tx,
                         "empty start_plan_execution.planPath",
                         "EMPTY_PLAN_PATH",
                     )
@@ -755,7 +932,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     super::desktop_routes::derive_permission_from_coding(&agent_mode);
                 desktop_runtime_state().set_permission_mode(derived);
                 let _ = send_json(
-                    &mut sender,
+                    &outbound_tx,
                     &serde_json::json!({
                         "type": "system_notification",
                         "subtype": "coding_mode_updated",
@@ -877,7 +1054,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 run_turn(
                     &state,
                     &mut agent,
-                    &mut sender,
+                    &outbound_tx,
                     &session_id,
                     &session_key,
                     &trigger_content,
@@ -886,7 +1063,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             }
             other => {
                 send_error(
-                    &mut sender,
+                    &outbound_tx,
                     &format!("unsupported message type: {other}"),
                     "UNKNOWN_MESSAGE_TYPE",
                 )
@@ -899,9 +1076,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     lsp_forwarder.abort();
     gateway_event_forwarder.abort();
     resource_event_forwarder.abort();
+    drop(outbound_tx);
+    let _ = writer_handle.await;
 
     if let Some(svc) = crate::services::try_get_services() {
         svc.clear_session_coding_mode(&session_key);
+    }
+
+    let _ = crate::services::credential_vault::purge_session_ephemeral(&session_key);
+    if let Some(ctl) = crate::tools::browser::dock_controller() {
+        let session_key_for_release = session_key.clone();
+        tokio::spawn(async move {
+            if let Err(err) = ctl
+                .release_agent_tabs_for_session(session_key_for_release)
+                .await
+            {
+                tracing::warn!(
+                    "[ws_desktop] release_agent_tabs_for_session failed: {err}"
+                );
+            }
+        });
     }
 
     state.hooks.fire_session_end(&session_id, "ws_desktop").await;
@@ -1017,20 +1211,13 @@ pub fn desktop_runtime_state() -> &'static DesktopRuntimeState {
     STATE.get_or_init(DesktopRuntimeState::new)
 }
 
-async fn send_json(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    value: &serde_json::Value,
-) -> Result<(), axum::Error> {
-    sender.send(Message::Text(value.to_string().into())).await
+async fn send_json(outbound: &OutboundSender, value: &serde_json::Value) {
+    let _ = outbound.send(OutboundFrame::Text(value.to_string()));
 }
 
-async fn send_error(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    message: &str,
-    code: &str,
-) {
-    let _ = send_json(
-        sender,
+async fn send_error(outbound: &OutboundSender, message: &str, code: &str) {
+    send_json(
+        outbound,
         &serde_json::json!({
             "type": "error",
             "message": message,
@@ -1154,7 +1341,7 @@ fn next_tool_use_id() -> String {
 async fn run_turn(
     state: &AppState,
     agent: &mut crate::agent::Agent,
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: &OutboundSender,
     session_id: &str,
     session_key: &str,
     content: &str,
@@ -1173,7 +1360,7 @@ async fn run_turn(
             "run_turn rejected: same session already running",
         );
         let _ = send_json(
-            sender,
+            outbound,
             &serde_json::json!({
                 "type": "workspace_busy",
                 "workspaceKey": workspace_key,
@@ -1187,7 +1374,7 @@ async fn run_turn(
     let _run_guard = state.session_run_state.guard(session_id.to_string());
 
     let _ = send_json(
-        sender,
+        outbound,
         &serde_json::json!({
             "type": "status",
             "state": "thinking",
@@ -1233,7 +1420,7 @@ async fn run_turn(
             crate::services::try_get_services()
                 .map(|svc| svc.coding_mode.read().display_name().to_string())
         });
-    if let (Some(svc), Some(ref label)) = (
+    if let (Some(svc), Some(label)) = (
         crate::services::try_get_services(),
         coding_mode_label.as_ref(),
     ) {
@@ -1329,7 +1516,7 @@ async fn run_turn(
                     }
                     if !text_block_open {
                         let _ = send_json(
-                            sender,
+                            outbound,
                             &serde_json::json!({
                                 "type": "content_start",
                                 "blockType": "text",
@@ -1340,7 +1527,7 @@ async fn run_turn(
                     }
                     accumulated_text.push_str(&delta);
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "content_delta",
                             "text": delta,
@@ -1353,7 +1540,7 @@ async fn run_turn(
                         pg.on_thinking(&delta);
                     }
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "thinking",
                             "text": delta,
@@ -1361,9 +1548,15 @@ async fn run_turn(
                     )
                     .await;
                 }
-                TurnEvent::ToolCall { name, args } => {
+                TurnEvent::ToolCall {
+                    name,
+                    args,
+                    tool_call_id,
+                } => {
                     text_block_open = false;
-                    let id = next_tool_use_id();
+                    let id = tool_call_id
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(next_tool_use_id);
                     current_tool_use_id = Some(id.clone());
                     tool_use_id_for_name.insert(name.clone(), id.clone());
                     let safe_args = crate::services::credential_vault::redact_args_optional(&args);
@@ -1371,7 +1564,7 @@ async fn run_turn(
                         pg.on_tool_use(&name, &id, safe_args.clone());
                     }
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "content_start",
                             "blockType": "tool_use",
@@ -1381,19 +1574,52 @@ async fn run_turn(
                     )
                     .await;
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "tool_use_complete",
                             "toolName": name,
                             "toolUseId": id,
                             "input": safe_args,
+                            "sessionId": session_id,
                         }),
                     )
                     .await;
+                    if matches!(
+                        name.as_str(),
+                        "todo_write"
+                            | "TodoWrite"
+                            | "todowrite"
+                            | "tasks_write"
+                            | "TasksWrite"
+                    ) {
+                        let snapshot = if let Some(svc) = crate::services::try_get_services() {
+                            crate::tools::todo_write::session_todos(
+                                &svc.todo_store,
+                                session_id,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                        let _ = send_json(
+                            outbound,
+                            &serde_json::json!({
+                                "type": "todo_snapshot",
+                                "sessionId": session_id,
+                                "todos": snapshot,
+                            }),
+                        )
+                        .await;
+                    }
                 }
-                TurnEvent::ToolResult { name, output, success } => {
-                    let id = tool_use_id_for_name
-                        .remove(&name)
+                TurnEvent::ToolResult {
+                    name,
+                    output,
+                    success,
+                    tool_call_id,
+                } => {
+                    let id = tool_call_id
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| tool_use_id_for_name.remove(&name))
                         .or_else(|| current_tool_use_id.clone())
                         .unwrap_or_else(next_tool_use_id);
                     current_tool_use_id = None;
@@ -1405,7 +1631,7 @@ async fn run_turn(
                         pg.on_tool_result(&id, safe_output.clone(), is_error);
                     }
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "tool_result",
                             "toolUseId": id,
@@ -1442,7 +1668,7 @@ async fn run_turn(
                     }
 
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "system_notification",
                             "subtype": "file_edit",
@@ -1459,7 +1685,7 @@ async fn run_turn(
                 }
                 TurnEvent::StatusUpdate { action, detail } => {
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "status",
                             "state": "tool_executing",
@@ -1470,7 +1696,7 @@ async fn run_turn(
                     .await;
                     if !detail.is_empty() {
                         let _ = send_json(
-                            sender,
+                            outbound,
                             &serde_json::json!({
                                 "type": "system_notification",
                                 "subtype": "status_detail",
@@ -1486,7 +1712,7 @@ async fn run_turn(
                     tokens_used,
                 } => {
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "status",
                             "state": "thinking",
@@ -1499,7 +1725,7 @@ async fn run_turn(
                 }
                 TurnEvent::CommandPreview { tool_name, args, estimated_duration_ms: _ } => {
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "system_notification",
                             "subtype": "command_preview",
@@ -1513,7 +1739,7 @@ async fn run_turn(
                 }
                 TurnEvent::Cancelling { reason } => {
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "status",
                             "state": "idle",
@@ -1522,7 +1748,7 @@ async fn run_turn(
                     )
                     .await;
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "system_notification",
                             "subtype": "cancelling",
@@ -1560,7 +1786,7 @@ async fn run_turn(
                     if let Some(desc) = description {
                         frame["description"] = serde_json::Value::String(desc);
                     }
-                    let _ = send_json(sender, &frame).await;
+                    let _ = send_json(outbound, &frame).await;
                 }
                 TurnEvent::SubagentChunk {
                     task_id,
@@ -1583,7 +1809,7 @@ async fn run_turn(
                         );
                     }
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "system_notification",
                             "subtype": "subagent_chunk",
@@ -1593,7 +1819,7 @@ async fn run_turn(
                     .await;
                 }
                 TurnEvent::Error { message } => {
-                    send_error(sender, &message, "TURN_ERROR").await;
+                    send_error(outbound, &message, "TURN_ERROR").await;
                 }
                 TurnEvent::PiiSanitized { report } => {
                     let mut counts = serde_json::Map::new();
@@ -1609,7 +1835,7 @@ async fn run_turn(
                         continue;
                     }
                     let _ = send_json(
-                        sender,
+                        outbound,
                         &serde_json::json!({
                             "type": "system_notification",
                             "subtype": "debug_pii_stats",
@@ -1617,6 +1843,116 @@ async fn run_turn(
                                 "total": total,
                                 "counts": serde_json::Value::Object(counts),
                             }
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    wait_ms,
+                    class,
+                    provider,
+                    model,
+                    message,
+                } => {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "provider_retry",
+                            "attempt": attempt,
+                            "maxAttempts": max_attempts,
+                            "waitMs": wait_ms,
+                            "class": class,
+                            "provider": provider,
+                            "model": model,
+                            "message": message,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerSpawned {
+                    parent_tool_use_id,
+                    worker_id,
+                    title,
+                    model,
+                } => {
+                    let parent_id = if parent_tool_use_id.is_empty() {
+                        current_tool_use_id.clone().unwrap_or_default()
+                    } else {
+                        parent_tool_use_id
+                    };
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "worker_spawned",
+                            "sessionId": session_id,
+                            "parentToolUseId": parent_id,
+                            "workerId": worker_id,
+                            "title": title,
+                            "model": model,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerStatus { worker_id, status, detail } => {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "worker_status",
+                            "sessionId": session_id,
+                            "workerId": worker_id,
+                            "status": status,
+                            "detail": detail,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerProgress { worker_id, action, detail } => {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "worker_progress",
+                            "sessionId": session_id,
+                            "workerId": worker_id,
+                            "action": action,
+                            "detail": detail,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerCompleted { worker_id, success, summary } => {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "worker_completed",
+                            "sessionId": session_id,
+                            "workerId": worker_id,
+                            "success": success,
+                            "summary": summary,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerStopped { worker_id, reason } => {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "worker_stopped",
+                            "sessionId": session_id,
+                            "workerId": worker_id,
+                            "reason": reason,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::ParentResumed { reason } => {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "parent_resumed",
+                            "sessionId": session_id,
+                            "reason": reason,
                         }),
                     )
                     .await;
@@ -1648,9 +1984,23 @@ async fn run_turn(
                 })
                 .await;
             }
+            let final_todos = if let Some(svc) = crate::services::try_get_services() {
+                crate::tools::todo_write::session_todos(&svc.todo_store, session_id)
+            } else {
+                Vec::new()
+            };
+            let _ = send_json(
+                outbound,
+                &serde_json::json!({
+                    "type": "todo_snapshot",
+                    "sessionId": session_id,
+                    "todos": final_todos,
+                }),
+            )
+            .await;
             let usage = agent.last_usage();
             let _ = send_json(
-                sender,
+                outbound,
                 &serde_json::json!({
                     "type": "message_complete",
                     "usage": {
@@ -1666,12 +2016,26 @@ async fn run_turn(
         Err(err) => {
             let msg = format!("{err}");
             let code = crate::agent::error_classify::classify_turn_error_code(&msg);
-            send_error(sender, &msg, code).await;
+            send_error(outbound, &msg, code).await;
+            let final_todos = if let Some(svc) = crate::services::try_get_services() {
+                crate::tools::todo_write::session_todos(&svc.todo_store, session_id)
+            } else {
+                Vec::new()
+            };
+            let _ = send_json(
+                outbound,
+                &serde_json::json!({
+                    "type": "todo_snapshot",
+                    "sessionId": session_id,
+                    "todos": final_todos,
+                }),
+            )
+            .await;
         }
     }
 
     let _ = send_json(
-        sender,
+        outbound,
         &serde_json::json!({
             "type": "status",
             "state": "idle",
@@ -1703,7 +2067,7 @@ async fn run_turn(
                 })
                 .await;
                 let _ = send_json(
-                    sender,
+                    outbound,
                     &serde_json::json!({
                         "type": "session_title_updated",
                         "sessionId": session_id,

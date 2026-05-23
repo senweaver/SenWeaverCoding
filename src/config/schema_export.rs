@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! JSON Schema export for IDE autocompletion and validation.
-//!
-//! `export_config_schema()` walks the Config struct (annotated with
-//! `schemars::JsonSchema`) and returns a fully-qualified JSON Schema
-//! document suitable for IDE autocompletion, validation, and documentation
-//! generation.
 
 use schemars::{Schema, SchemaGenerator, generate::SchemaSettings};
 

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent listing handler — shows configured delegate agents.
 
 use anyhow::Result;
 use std::path::Path;

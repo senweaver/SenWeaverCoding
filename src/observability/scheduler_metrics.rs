@@ -1,38 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! scheduler + parallel-executor metrics.
-//!
-//! Exposes a process-global registry of [`AtomicU64`] / [`AtomicI64`]
-//! counters and gauges that the event-driven [`TaskScheduler`],
-//! [`TaskSchedulerRuntime`] and [`ParallelExecutor`] increment at
-//! state-transition points.  The layout mirrors
-//! [`super::coordination_metrics`] / [`super::subsystem_metrics`] so the
-//! Prometheus encoder can simply append
-//! [`SchedulerMetricsSnapshot::render_prometheus_text`] after the
-//! other phase blocks.
-//!
-//! Metric surface:
-//!
-//! * `sen_scheduler_dag_nodes_total` — cumulative DAG node count
-//!   added to any scheduler instance.
-//! * `sen_scheduler_task_duration_seconds_sum{status}` +
-//!   `sen_scheduler_task_duration_seconds_count{status}` — poor-man's
-//!   histogram exposing mean task latency per terminal status.
-//! * `sen_scheduler_task_started_total{priority}` — per-priority
-//!   claim success counter (`try_claim → Ok`).
-//! * `sen_scheduler_try_claim_miss_total` — claim lost to another
-//!   worker; useful for tuning worker count vs ready-queue depth.
-//! * `sen_scheduler_ready_queue_depth` — in-flight ready heap gauge.
-//! * `sen_scheduler_broadcast_lagged_total` — `broadcast::Receiver`
-//!   `Lagged(n)` fallbacks; non-zero values indicate workers missing
-//!   `TaskReady` events and falling back to heap-scan.
-//! * `sen_executor_steal_events_total` — Chase-Lev worker stole work
-//!   from a peer or the global [`Injector`] (see
-//!   [`crate::agent::parallel_executor`]).
-//! * `sen_executor_worker_utilization{worker}` — fraction of time
-//!   (`busy_ns / elapsed_ns`) each worker has spent running tasks
-//!   since process start.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -106,8 +74,6 @@ pub struct SchedulerMetrics {
 
 impl Default for SchedulerMetrics {
     fn default() -> Self {
-
-        const ZERO: AtomicU64 = AtomicU64::new(0);
         Self {
             dag_nodes_total: AtomicU64::new(0),
             try_claim_miss_total: AtomicU64::new(0),
@@ -125,7 +91,7 @@ impl Default for SchedulerMetrics {
             duration_count_cancelled: AtomicU64::new(0),
             ready_queue_depth: AtomicI64::new(0),
             steal_events_total: AtomicU64::new(0),
-            worker_busy_nanos: [ZERO; MAX_TRACKED_WORKERS],
+            worker_busy_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
             process_start: Instant::now(),
         }
     }

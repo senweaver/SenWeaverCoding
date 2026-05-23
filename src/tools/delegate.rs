@@ -2,7 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use super::traits::{Tool, ToolResult};
-use crate::agent::loop_::run_tool_call_loop;
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
 use crate::config::{DelegateAgentConfig, DelegateToolConfig};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
@@ -1141,7 +1140,12 @@ impl DelegateTool {
                                         delta: name,
                                     })
                                 }
-                                DraftEvent::ToolResult { name, output, success: _ } => {
+                                DraftEvent::ToolResult {
+                                    name,
+                                    output,
+                                    success: _,
+                                    tool_call_id: _,
+                                } => {
                                     let preview =
                                         output.chars().take(160).collect::<String>();
                                     Some(DraftEvent::Subagent {
@@ -1179,35 +1183,25 @@ impl DelegateTool {
             None
         };
 
+        let pacing_default = crate::config::PacingConfig::default();
+        let delegated_policy = crate::agent::loop_policy::PolicyBundle::delegated(
+            provider,
+            &sub_tools,
+            &noop_observer,
+            &agent_config.provider,
+            &agent_config.model,
+            &self.multimodal_config,
+            &pacing_default,
+            &[],
+            &[],
+        )
+        .with_temperature(temperature)
+        .with_max_iterations(agent_config.max_iterations)
+        .with_on_delta(on_delta_for_loop);
+
         let result = tokio::time::timeout(
             Duration::from_secs(agentic_timeout_secs),
-            run_tool_call_loop(
-                provider,
-                &mut history,
-                &sub_tools,
-                &noop_observer,
-                &agent_config.provider,
-                &agent_config.model,
-                temperature,
-                true,
-                None,
-                "delegate",
-                None,
-                &self.multimodal_config,
-                agent_config.max_iterations,
-                None,
-                on_delta_for_loop,
-                None,
-                &[],
-                &[],
-                None,
-                None,
-                &crate::config::PacingConfig::default(),
-                None,
-                None,
-                None,
-                None,
-            ),
+            crate::agent::loop_unified::UnifiedLoop::new(delegated_policy).run(&mut history),
         )
         .await;
         if let Some(h) = bridge_handle {

@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware peripherals — STM32, RPi GPIO, etc.
-//!
-//! Peripherals extend the agent with physical capabilities. See
-//! `docs/hardware-peripherals-design.md` for the full design.
 
 pub mod traits;
 

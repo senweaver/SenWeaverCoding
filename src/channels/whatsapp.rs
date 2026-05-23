@@ -127,7 +127,9 @@ impl WhatsAppChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client("channel.whatsapp", self.proxy_url.as_deref())
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client("channel.whatsapp", self.proxy_url.as_deref())
     }
 
     fn is_number_allowed(&self, phone: &str) -> bool {

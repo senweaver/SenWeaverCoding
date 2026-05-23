@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Approximate-Nearest-Neighbour index façade.
-//!
-//! C.7b — exposes the canonical name **`AnnIndex`** (aliased
-//! to [`crate::memory::vector_index::VectorIndex`]) plus a factory
-//! helper so external callers stabilise on one import path.  Under
-//! feature `vector-index-hnsw` a real in-memory HNSW implementation
-//! (`crate::memory::hnsw::HnswMemIndex`) becomes available through the
-//! same trait.
 
 pub use crate::memory::vector_index::{
     LinearIndex, VectorBackend, VectorIndex as AnnIndex, build_backend as build_vector_backend,

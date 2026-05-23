@@ -14,7 +14,7 @@ use std::{
 
 #[cfg(not(target_os = "windows"))]
 use std::{
-    process::{Command as StdCommand, Stdio},
+    process::Stdio,
     time::{Duration, Instant},
 };
 
@@ -359,7 +359,7 @@ fn default_utf8_locale() -> &'static str {
 
 #[cfg(not(target_os = "windows"))]
 fn login_shell_environment(shell: &str) -> HashMap<String, String> {
-    let Ok(mut child) = StdCommand::new(shell)
+    let Ok(mut child) = senweavercoding::util::hidden_sync_command(shell)
         .args(["-l", "-c", "env -0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

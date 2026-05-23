@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Multi-agent runtime introspection commands (`/agents`, `/tasks`, `/blackboard`).
-//!
-//! These commands surface the `MultiAgentRuntime` state to the CLI/TUI/GUI
-//! user in a read-only fashion.  They allow operators to observe the current
-//! agent roster, pending tasks, and shared blackboard contents without
-//! intrusive debugging tools.
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 

@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Unified event types emitted by `AgentSession`.
-//!
-//! All three UI layers (CLI, TUI, GUI) consume the same event stream.
-//! Presentation code pattern-matches on `SessionEventKind` and renders
-//! accordingly — no business logic belongs in the UI layer.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -108,4 +103,47 @@ pub enum SessionEventKind {
         cursor: Option<(u32, u32)>,
         source: String,
     },
+
+    ProviderRetry {
+        attempt: u32,
+        max_attempts: u32,
+        wait_ms: u64,
+        class: String,
+        provider: String,
+        model: String,
+        message: String,
+    },
+
+    WorkerSpawned {
+        parent_tool_use_id: String,
+        worker_id: String,
+        title: String,
+        model: String,
+    },
+
+    WorkerStatus {
+        worker_id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
+    WorkerProgress {
+        worker_id: String,
+        action: String,
+        detail: String,
+    },
+
+    WorkerCompleted {
+        worker_id: String,
+        success: bool,
+        summary: String,
+    },
+
+    WorkerStopped {
+        worker_id: String,
+        reason: String,
+    },
+
+    ParentResumed { reason: String },
 }

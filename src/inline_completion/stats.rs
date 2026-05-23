@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Acceptance / reject / partial statistics for inline completion.
 
 use parking_lot::Mutex;
 use std::sync::OnceLock;

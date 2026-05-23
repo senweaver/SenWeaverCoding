@@ -20,6 +20,10 @@ tauri-build = { version = "2", features = [] }
 senweavercoding = { path = "../..", package = "SenWeaverCoding", default-features = false, features = [
     "fs-watch",
     "sandbox",
+    "sandbox-windows-job",
+    "lsp-push-diagnostics",
+    "observability-prometheus",
+    "rag-pdf",
     "tool-cron",
     "tool-sop",
     "tool-team",
@@ -31,6 +35,9 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
     "tool-productivity",
     "tool-utility-misc",
     "tool-image",
+    "tool-search-broad",
+    "tool-workspace-deep",
+    "tool-curator",
     "skill-creation",
     "code-intel",
 ] }

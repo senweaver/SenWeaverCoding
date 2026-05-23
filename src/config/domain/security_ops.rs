@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Security-ops sub-schema — audit, PID ownership, rate-limit hardening.
-//!
-//! Third domain-split config module (P6.1).  Keeps cross-cutting security
-//! invariants (that aren't already in `SecurityConfig`) in one testable
-//! place.  Examples include PID verification policy, secret redaction
-//! log level, and the audit event retention window.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

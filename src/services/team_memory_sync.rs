@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Team memory sync service — mirrors claude-code-typescript-src`services/teamMemorySync/`.
-// Synchronizes shared memories across team members working on the same project.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

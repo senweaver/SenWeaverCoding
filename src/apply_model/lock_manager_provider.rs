@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! region-aware [`LockProvider`] implementation.
-//!
-//! `LockManagerProvider` is the production adapter that turns
-//! [`OpsApplier`](super::ops_applier::OpsApplier)'s region-lock
-//! request set into [`crate::agent::coordination::LockManager`]
-//! `acquire_multi` calls.  It is the only place where the apply-model
-//! layer touches the cross-agent coordinator, so swapping it out (for
-//! example with a CRDT-aware variant) only requires constructing a
-//! different `Arc<dyn LockProvider>`.
-//!
-//! The provider is constructed from a [`CoordinatorHandle`] and a
-//! `holder_id` string.  `holder_id` is the identity recorded on the
-//! resulting region locks; tools typically pass
-//! `"ops_applier:<batch_id>"` so the lock manager dashboard can
-//! attribute conflicts to the batch that produced them.
 
 use std::time::Duration;
 

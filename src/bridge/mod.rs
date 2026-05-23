@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge module — remote control bridge for WebSocket-based session management.
-// Mirrors claude-code's `bridge/` directory.
-//
-// Provides device pairing, JWT-based authentication, remote session creation,
-// message relay, and capacity/wake management for controlling agent sessions
-// from mobile/web clients.
-
 pub mod api;
 pub mod config;
 pub mod device;

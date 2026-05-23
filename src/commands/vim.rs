@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /vim command — toggle vim keybinding mode.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
 inventory::submit!(StaticSlashCommand {

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SkillForge — Skill auto-discovery, evaluation, and integration engine.
-//!
-//! Pipeline: Scout → Evaluate → Integrate
-//! Discovers skills from external sources, scores them, and generates
-//! SenWeaverCoding-compatible manifests for qualified candidates.
 
 pub mod evaluate;
 pub mod integrate;
@@ -126,7 +121,13 @@ impl SkillForge {
         let mut candidates: Vec<ScoutResult> = Vec::new();
 
         for src in &self.config.sources {
-            let source: ScoutSource = src.parse().unwrap();
+            let source = match src.parse() {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(source = %src, error = %e, "SkillForge: skipping invalid source");
+                    continue;
+                }
+            };
             match source {
                 ScoutSource::GitHub => {
                     let scout = GitHubScout::new(self.config.github_token.clone());

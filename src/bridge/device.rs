@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Trusted device management — mirrors claude-code-typescript-src`bridge/trustedDevice.ts`.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;

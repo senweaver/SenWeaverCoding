@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Aardvark hardware tools — I2C, SPI, and GPIO operations via the Total Phase
-//! Aardvark USB adapter.
-//!
-//! All tools follow the same pattern as the built-in GPIO tools:
-//! 1. Accept an optional `device` alias parameter.
-//! 2. Resolve the Aardvark device from the [`DeviceRegistry`].
-//! 3. Build a [`ZcCommand`] and send it through the registered transport.
-//! 4. Return a [`ToolResult`] with human-readable output.
-//!
-//! These tools are only registered when at least one Aardvark adapter is
-//! detected at startup (see [`DeviceRegistry::has_aardvark`]).
 
 use super::device::DeviceRegistry;
 use super::protocol::ZcCommand;

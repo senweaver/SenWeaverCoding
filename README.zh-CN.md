@@ -145,8 +145,6 @@ SenWeaverCoding/
 │   │                        #   直接嵌入，没有旁挂进程
 │   └── package.json
 │
-├── crates/                  # Workspace 子 crate（sen-core / sen-cli /
-│                            #   sen-tui / sen-channels）
 ├── tool_descriptions/       # 工具机读清单
 ├── benches/                 # Criterion 基准
 └── .github/workflows/       # CI / Release 流水线

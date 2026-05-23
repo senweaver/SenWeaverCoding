@@ -1,25 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Embedding-backed vector index for code chunks.
-//!
-//! Wraps an in-memory [`crate::memory::ivf_index::IvfVectorIndex`] and
-//! a pluggable [`super::embedding::EmbeddingProvider`] so the agent
-//! loop can run dense retrieval over the workspace.  Individual hits
-//! are returned as [`VectorCodeHit`] and merged with the existing
-//! lexical [`crate::code_intel::search::IncrementalIndex`] results
-//! through Reciprocal Rank Fusion inside
-//! [`crate::agent::loop_services::rag_source`].
-//!
-//! Intentional design points:
-//! - The index keeps only the chunk text + metadata (path, line);
-//!   no source-code copies live on the heap longer than necessary.
-//! - `upsert_chunk` is sync — embedding is performed lazily before
-//!   the underlying IVF call so callers can reuse the index across
-//!   tokio tasks without blocking the executor on a single chunk.
-//! - Search returns IDs + scores; the wrapper resolves IDs back to
-//!   their original chunk metadata so the caller doesn't need to
-//!   maintain its own bookkeeping.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

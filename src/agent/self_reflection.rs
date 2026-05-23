@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Post-turn self-reflection loop.
-//!
-//! The agent assesses its own performance after each turn and generates
-//! self-improvement insights that are fed back into the system prompt
-//! for subsequent turns.
 
 use crate::providers::traits::{ChatMessage, Provider};
 use parking_lot::RwLock;
@@ -139,7 +134,7 @@ impl ReflectionEngine {
         let turn = self
             .turn_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if self.config.reflect_interval > 0 && turn % self.config.reflect_interval != 0 {
+        if self.config.reflect_interval > 0 && !turn.is_multiple_of(self.config.reflect_interval) {
             return;
         }
 

@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Session events resource — `/events` Server-Sent Events stream.
-//!
-//! exposes the canonical `SessionEvent` broadcast as a
-//! live SSE endpoint so external UIs (web dashboards, downstream CLIs,
-//! test harnesses) can subscribe with a one-liner `fetch('/events')`.
-//!
-//! The route takes an `Arc<AgentSession>` from the gateway's
-//! application state and wraps `AgentSession::subscribe()` in an Axum
-//! [`Sse`] response.  Events are serialized as JSON, one per SSE data
-//! frame.  Broadcast lag (slow subscriber) is handled by skipping the
-//! lagged batch rather than dropping the connection.
-//!
-//! Anti-placeholder: this module is invoked by `events_router()` which
-//! is merged into the gateway router in `api.rs::build_router` (see
-//! D3.2 wiring).  An inline smoke-test (`tests` module below)
-//! verifies the JSON framing; a full-stack HTTP integration test is
-//! tracked under follow-up (see D4.3).
 
 use std::convert::Infallible;
 use std::sync::Arc;

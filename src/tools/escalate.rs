@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Human escalation tool with urgency-aware routing.
-//!
-//! Exposes `escalate_to_human` as an agent-callable tool that sends a structured
-//! escalation message to a messaging channel. High/critical urgency escalations
-//! additionally fire a Pushover mobile notification when credentials are available.
-//! Supports optional blocking mode to wait for a human response.
 
 use super::traits::{Tool, ToolResult};
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
@@ -140,11 +134,13 @@ impl EscalateToHumanTool {
             .text("title", "Agent Escalation")
             .text("priority", priority.to_string());
 
-        let client = crate::config::build_runtime_proxy_client_with_timeouts(
-            "tool.escalate_to_human",
-            PUSHOVER_REQUEST_TIMEOUT_SECS,
-            10,
-        );
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts(
+                "tool.escalate_to_human",
+                PUSHOVER_REQUEST_TIMEOUT_SECS,
+                10,
+            );
 
         match client.post(PUSHOVER_API_URL).multipart(form).send().await {
             Ok(resp) if resp.status().is_success() => {

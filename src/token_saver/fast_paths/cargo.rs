@@ -118,10 +118,7 @@ pub fn test(
                     continue;
                 }
             }
-            if let Some(_name) = &current_failure {
-                if line.trim().is_empty() && failure_buf.lines().count() > 0 {
-
-                }
+            if current_failure.is_some() {
                 failure_buf.push_str(line);
                 failure_buf.push('\n');
             }

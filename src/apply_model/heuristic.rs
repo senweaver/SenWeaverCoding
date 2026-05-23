@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Heuristic unified-diff applier with context-aware fuzzy matching.
-//!
-//! The implementation supports:
-//!   * standard `@@ -a,b +c,d @@` hunk headers,
-//!   * ` ` / `+` / `-` line prefixes (and `\ No newline at end of file`),
-//!   * relocating a hunk up to `opts.max_fuzz` lines away if the
-//!     surrounding context still matches.
-//!
-//! It intentionally does *not* rely on libgit2: the goal is to apply
-//! diffs produced by LLMs (which often cite inaccurate line numbers),
-//! so we locate hunks by matching their context lines rather than
-//! trusting the header.
 
 use std::ops::Range;
 
@@ -36,7 +24,7 @@ pub struct LocateContext<'a> {
     pub allow_full_scan: bool,
 }
 
-impl<'a> LocateContext<'a> {
+impl LocateContext<'_> {
 
     #[must_use]
     pub fn default_for(ideal_line: usize) -> Self {
@@ -389,8 +377,8 @@ fn matches_at(source_lines: &[&str], at: usize, old_lines: &[String]) -> bool {
     }
     for (i, expected) in old_lines.iter().enumerate() {
 
-        let actual = source_lines[at + i].trim_end_matches(|c: char| c == '\n' || c == '\r');
-        let exp = expected.trim_end_matches(|c: char| c == '\n' || c == '\r');
+        let actual = source_lines[at + i].trim_end_matches(['\n', '\r']);
+        let exp = expected.trim_end_matches(['\n', '\r']);
         if actual != exp {
             return false;
         }

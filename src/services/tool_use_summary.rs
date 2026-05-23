@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Tool use summary service — mirrors claude-code-typescript-src`services/toolUseSummary/`.
-// Tracks and summarizes tool usage per turn for context compaction
-// and user display.
-
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

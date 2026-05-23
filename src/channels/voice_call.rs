@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Real-time voice call channel for Twilio, Telnyx, and Plivo.
-//!
-//! Handles inbound/outbound phone calls with real-time STT/TTS streaming,
-//! call transcription logging, and approval workflows for outbound calls.
-//! Webhook endpoints receive call events from the telephony provider and
-//! translate them into `ChannelMessage`s for the agent loop.
 
 use std::collections::HashMap;
 use std::fmt;

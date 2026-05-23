@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Unified RBAC (Role-Based Access Control) engine for SenWeaverCoding.
-//!
-//! Wires together existing security components into a cohesive access control
-//! system suitable for an agent operating system:
-//!
-//! - **CallerIdentity**: Unified identity representation from any source
-//!   (Gateway JWT, Channel user, CLI operator, API key)
-//! - **RbacEngine**: Central authorization engine combining IamPolicy +
-//!   GuardrailsEngine + Capabilities
-//! - **UserStore**: Persistent user/role management (file-backed)
-//! - **AccessContext**: Request-scoped context propagated through the call chain
 
 use super::capabilities::{Capability, check_capabilities};
 use super::iam_policy::{IamPolicy, PolicyDecision, RoleMapping};
@@ -627,9 +616,7 @@ impl RbacEngine {
                 Ok(custom_roles) => {
                     for role in custom_roles {
                         let key = role.name.to_ascii_lowercase();
-                        if !self.roles.contains_key(&key) {
-                            self.roles.insert(key, role);
-                        }
+                        self.roles.entry(key).or_insert(role);
                     }
                     tracing::info!(
                         "RBAC: loaded roles from {}, total: {}",

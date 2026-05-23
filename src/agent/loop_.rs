@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -6,8 +6,6 @@ pub use crate::agent::loop_ctx::LoopContext;
 
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::Config;
-use crate::config::schema::ModelPricing;
-use crate::cost::CostTracker;
 use crate::cost::types::{BudgetCheck, TokenUsage as CostTokenUsage};
 use crate::i18n::ToolDescriptions;
 use crate::memory::{self, Memory, MemoryCategory, decay};
@@ -23,140 +21,21 @@ use crate::tools::{self, Tool, ToolRegistry};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use futures_util::StreamExt;
-use regex::{Regex, RegexSet};
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[derive(Clone)]
-pub struct ToolLoopCostTrackingContext {
-    pub tracker: Arc<CostTracker>,
-    pub prices: Arc<std::collections::HashMap<String, ModelPricing>>,
-
-    pub chat_session_id: Option<String>,
-
-    pub coding_mode: Option<String>,
-}
-
-impl ToolLoopCostTrackingContext {
-    pub fn new(
-        tracker: Arc<CostTracker>,
-        prices: Arc<std::collections::HashMap<String, ModelPricing>>,
-    ) -> Self {
-        Self {
-            tracker,
-            prices,
-            chat_session_id: None,
-            coding_mode: None,
-        }
-    }
-
-    pub fn with_chat_session_id(mut self, chat_session_id: impl Into<String>) -> Self {
-        self.chat_session_id = Some(chat_session_id.into());
-        self
-    }
-
-    pub fn with_coding_mode(mut self, coding_mode: impl Into<String>) -> Self {
-        self.coding_mode = Some(coding_mode.into());
-        self
-    }
-}
-
-tokio::task_local! {
-    pub static TOOL_LOOP_COST_TRACKING_CONTEXT: Option<ToolLoopCostTrackingContext>;
-}
-
-pub async fn scope_tool_loop_cost_tracking<F, R>(
-    ctx: Option<ToolLoopCostTrackingContext>,
-    f: F,
-) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    TOOL_LOOP_COST_TRACKING_CONTEXT.scope(ctx, f).await
-}
-
-fn lookup_model_pricing<'a>(
-    prices: &'a std::collections::HashMap<String, ModelPricing>,
-    provider_name: &str,
-    model: &str,
-) -> Option<&'a ModelPricing> {
-    prices
-        .get(model)
-        .or_else(|| prices.get(&format!("{provider_name}/{model}")))
-        .or_else(|| {
-            model
-                .rsplit_once('/')
-                .and_then(|(_, suffix)| prices.get(suffix))
-        })
-}
-
-pub(crate) fn record_tool_loop_cost_usage(
-    provider_name: &str,
-    model: &str,
-    usage: &crate::providers::traits::TokenUsage,
-) -> Option<(u64, f64)> {
-    let input_tokens = usage.input_tokens.unwrap_or(0);
-    let output_tokens = usage.output_tokens.unwrap_or(0);
-    let total_tokens = input_tokens.saturating_add(output_tokens);
-    if total_tokens == 0 {
-        return None;
-    }
-
-    let ctx = TOOL_LOOP_COST_TRACKING_CONTEXT
-        .try_with(Clone::clone)
-        .ok()
-        .flatten()?;
-    let pricing = lookup_model_pricing(&ctx.prices, provider_name, model);
-    let cost_usage = CostTokenUsage::new(
-        model,
-        input_tokens,
-        output_tokens,
-        pricing.map_or(0.0, |entry| entry.input),
-        pricing.map_or(0.0, |entry| entry.output),
-    );
-
-    if pricing.is_none() {
-        tracing::debug!(
-            provider = provider_name,
-            model,
-            "Cost tracking recorded token usage with zero pricing (no pricing entry found)"
-        );
-    }
-
-    if let Err(error) = ctx.tracker.record_usage_for_session_with_mode(
-        ctx.chat_session_id.as_deref(),
-        ctx.coding_mode.as_deref(),
-        cost_usage.clone(),
-    ) {
-        tracing::warn!(
-            provider = provider_name,
-            model,
-            "Failed to record cost tracking usage: {error}"
-        );
-    }
-
-    Some((cost_usage.total_tokens, cost_usage.cost_usd))
-}
-
-pub(crate) fn check_tool_loop_budget(estimated_cost_usd: Option<f64>) -> Option<BudgetCheck> {
-    TOOL_LOOP_COST_TRACKING_CONTEXT
-        .try_with(Clone::clone)
-        .ok()
-        .flatten()
-        .map(|ctx| {
-            let cost = estimated_cost_usd.unwrap_or(0.01);
-            ctx.tracker
-                .check_budget(cost)
-                .unwrap_or(BudgetCheck::Allowed)
-        })
-}
+pub use crate::agent::cost_tracking::{
+    TOOL_LOOP_COST_TRACKING_CONTEXT, ToolLoopCostTrackingContext, scope_tool_loop_cost_tracking,
+};
+pub(crate) use crate::agent::cost_tracking::{
+    check_tool_loop_budget, lookup_model_pricing, record_tool_loop_cost_usage,
+};
 
 const STREAM_CHUNK_MIN_CHARS: usize = 80;
 
@@ -166,417 +45,24 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 2000;
 
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
 
-#[allow(clippy::type_complexity)]
-pub type ModelSwitchCallback = Arc<parking_lot::Mutex<Option<(String, String)>>>;
+pub use crate::agent::model_switch::{
+    ModelSwitchCallback, clear_model_switch_request, get_model_switch_state, scope_model_switch,
+};
+pub(crate) use crate::agent::model_switch::{ModelSwitchRequested, is_model_switch_requested};
 
-#[derive(Clone, Default)]
-pub(crate) struct ModelSwitchState {
-    pub switch: Arc<parking_lot::Mutex<Option<(String, String)>>>,
-}
+use crate::agent::tool_call_parser::{
+    ParsedToolCall, detect_tool_call_parse_issue, parse_structured_tool_calls, parse_tool_calls,
+};
+use crate::agent::tool_filter::{compute_excluded_mcp_tools, is_plan_mode_allowed};
 
-tokio::task_local! {
-    static MODEL_SWITCH_STATE: ModelSwitchState;
-}
+pub(crate) use crate::agent::pii_sanitize::{
+    apply_outgoing_pii_sanitization, scrub_credentials,
+};
 
-pub fn get_model_switch_state() -> ModelSwitchCallback {
-    MODEL_SWITCH_STATE
-        .try_with(|s| Arc::clone(&s.switch))
-        .unwrap_or_else(|_| Arc::new(parking_lot::Mutex::new(None)))
-}
-
-pub fn clear_model_switch_request() {
-    if let Ok(state) = MODEL_SWITCH_STATE.try_with(|s| Arc::clone(&s.switch)) {
-        let mut guard = state.lock();
-        *guard = None;
-    }
-}
-
-pub async fn scope_model_switch<F, R>(f: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    let state = ModelSwitchState::default();
-    MODEL_SWITCH_STATE.scope(state, f).await
-}
-
-fn glob_match(pattern: &str, name: &str) -> bool {
-    match pattern.find('*') {
-        None => pattern == name,
-        Some(star) => {
-            let prefix = &pattern[..star];
-            let suffix = &pattern[star + 1..];
-            name.starts_with(prefix)
-                && name.ends_with(suffix)
-                && name.len() >= prefix.len() + suffix.len()
-        }
-    }
-}
-
-use crate::security::permissions::is_mcp_tool_name;
-
-pub(crate) fn filter_tool_specs_for_turn(
-    tool_specs: Vec<crate::tools::ToolSpec>,
-    groups: &[crate::config::schema::ToolFilterGroup],
-    user_message: &str,
-) -> Vec<crate::tools::ToolSpec> {
-    use crate::config::schema::ToolFilterGroupMode;
-
-    if groups.is_empty() {
-        return tool_specs;
-    }
-
-    let msg_lower = user_message.to_ascii_lowercase();
-
-    tool_specs
-        .into_iter()
-        .filter(|spec| {
-
-            if !is_mcp_tool_name(&spec.name) {
-                return true;
-            }
-
-            groups.iter().any(|group| {
-                let pattern_matches = group.tools.iter().any(|pat| glob_match(pat, &spec.name));
-                if !pattern_matches {
-                    return false;
-                }
-                match group.mode {
-                    ToolFilterGroupMode::Always => true,
-                    ToolFilterGroupMode::Dynamic => group
-                        .keywords
-                        .iter()
-                        .any(|kw| msg_lower.contains(&kw.to_ascii_lowercase())),
-                }
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn filter_by_allowed_tools(
-    specs: Vec<crate::tools::ToolSpec>,
-    allowed: Option<&[String]>,
-) -> Vec<crate::tools::ToolSpec> {
-    match allowed {
-        None => specs,
-        Some(list) => specs
-            .into_iter()
-            .filter(|spec| list.iter().any(|name| name == &spec.name))
-            .collect(),
-    }
-}
-
-fn is_plan_mode_allowed(tool_name: &str) -> bool {
-    crate::security::permissions::is_plan_mode_allowed_tool(tool_name)
-}
-
-fn compute_excluded_mcp_tools(
-    tools_registry: &[Box<dyn Tool>],
-    groups: &[crate::config::schema::ToolFilterGroup],
-    user_message: &str,
-) -> Vec<String> {
-    if groups.is_empty() {
-        return Vec::new();
-    }
-    let filtered_specs = filter_tool_specs_for_turn(
-        tools_registry.iter().map(|t| t.spec()).collect(),
-        groups,
-        user_message,
-    );
-    let included: HashSet<&str> = filtered_specs.iter().map(|s| s.name.as_str()).collect();
-    tools_registry
-        .iter()
-        .filter(|t| is_mcp_tool_name(t.name()) && !included.contains(t.name()))
-        .map(|t| t.name().to_string())
-        .collect()
-}
-
-static SENSITIVE_KEY_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new([
-        r"(?i)token",
-        r"(?i)api[_-]?key",
-        r"(?i)password",
-        r"(?i)secret",
-        r"(?i)user[_-]?key",
-        r"(?i)bearer",
-        r"(?i)credential",
-    ])
-    .unwrap()
-});
-
-static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#).unwrap()
-});
-
-pub(crate) fn pii_sanitize_text_outside_image_markers(
-    input: &str,
-) -> (String, crate::services::pii_sanitizer::SanitizationReport) {
-    let mut combined =
-        crate::services::pii_sanitizer::SanitizationReport::default();
-    if input.is_empty() {
-        return (String::new(), combined);
-    }
-
-    let marker = "[IMAGE:";
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0_usize;
-
-    while let Some(rel) = input[cursor..].find(marker) {
-        let start = cursor + rel;
-        let prefix = &input[cursor..start];
-        if !prefix.is_empty() {
-            let (clean, report) = crate::services::pii_sanitizer::sanitize_text(prefix);
-            combined.merge(&report);
-            output.push_str(&clean);
-        }
-
-        let marker_open = start + marker.len();
-        if let Some(rel_end) = input[marker_open..].find(']') {
-            let end = marker_open + rel_end;
-            output.push_str(&input[start..=end]);
-            cursor = end + 1;
-        } else {
-
-            output.push_str(&input[start..]);
-            cursor = input.len();
-            break;
-        }
-    }
-
-    if cursor < input.len() {
-        let (clean, report) = crate::services::pii_sanitizer::sanitize_text(&input[cursor..]);
-        combined.merge(&report);
-        output.push_str(&clean);
-    }
-
-    (output, combined)
-}
-
-fn pii_sanitize_assistant_content(
-    content: &str,
-    report: &mut crate::services::pii_sanitizer::SanitizationReport,
-) -> String {
-    let trimmed = content.trim_start();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
-        report.merge(&sub);
-        return clean;
-    }
-
-    let mut value = match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(v) => v,
-        Err(_) => {
-            let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
-            report.merge(&sub);
-            return clean;
-        }
-    };
-
-    let object = match value.as_object_mut() {
-        Some(obj) => obj,
-        None => {
-            let (clean_value, sub) =
-                crate::services::pii_sanitizer::sanitize_json(&value);
-            report.merge(&sub);
-            return clean_value.to_string();
-        }
-    };
-
-    if let Some(text_field) = object.get_mut("content") {
-        match text_field {
-            serde_json::Value::String(s) => {
-                let (clean, sub) = pii_sanitize_text_outside_image_markers(s);
-                report.merge(&sub);
-                *text_field = serde_json::Value::String(clean);
-            }
-            other => {
-                let (clean, sub) = crate::services::pii_sanitizer::sanitize_json(other);
-                report.merge(&sub);
-                *other = clean;
-            }
-        }
-    }
-
-    if let Some(reasoning) = object.get_mut("reasoning_content") {
-        if let serde_json::Value::String(s) = reasoning {
-            let (clean, sub) = pii_sanitize_text_outside_image_markers(s);
-            report.merge(&sub);
-            *reasoning = serde_json::Value::String(clean);
-        }
-    }
-
-    if let Some(serde_json::Value::Array(calls)) = object.get_mut("tool_calls") {
-        for call in calls.iter_mut() {
-            if let Some(arguments) = call.get_mut("arguments") {
-                match arguments.clone() {
-                    serde_json::Value::String(args_str) => {
-
-                        if let Ok(parsed) =
-                            serde_json::from_str::<serde_json::Value>(&args_str)
-                        {
-                            let (clean, sub) =
-                                crate::services::pii_sanitizer::sanitize_json(&parsed);
-                            report.merge(&sub);
-                            *arguments = serde_json::Value::String(clean.to_string());
-                        } else {
-                            let (clean, sub) =
-                                pii_sanitize_text_outside_image_markers(&args_str);
-                            report.merge(&sub);
-                            *arguments = serde_json::Value::String(clean);
-                        }
-                    }
-                    other => {
-                        let (clean, sub) =
-                            crate::services::pii_sanitizer::sanitize_json(&other);
-                        report.merge(&sub);
-                        *arguments = clean;
-                    }
-                }
-            }
-        }
-    }
-
-    value.to_string()
-}
-
-fn pii_sanitize_tool_envelope(
-    content: &str,
-    report: &mut crate::services::pii_sanitizer::SanitizationReport,
-) -> String {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with('{') {
-        let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
-        report.merge(&sub);
-        return clean;
-    }
-
-    let mut value = match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(v) => v,
-        Err(_) => {
-            let (clean, sub) = pii_sanitize_text_outside_image_markers(content);
-            report.merge(&sub);
-            return clean;
-        }
-    };
-
-    if let Some(obj) = value.as_object_mut() {
-        if let Some(inner) = obj.get_mut("content") {
-            match inner {
-                serde_json::Value::String(s) => {
-                    let (clean, sub) = pii_sanitize_text_outside_image_markers(s);
-                    report.merge(&sub);
-                    *inner = serde_json::Value::String(clean);
-                }
-                other => {
-                    let (clean, sub) = crate::services::pii_sanitizer::sanitize_json(other);
-                    report.merge(&sub);
-                    *other = clean;
-                }
-            }
-        }
-        return value.to_string();
-    }
-
-    let (clean, sub) = crate::services::pii_sanitizer::sanitize_json(&value);
-    report.merge(&sub);
-    clean.to_string()
-}
-
-pub(crate) fn apply_outgoing_pii_sanitization(
-    coding_mode: Option<crate::agent::coding_mode::CodingMode>,
-    messages: &mut [ChatMessage],
-) -> crate::services::pii_sanitizer::SanitizationReport {
-    let mut report = crate::services::pii_sanitizer::SanitizationReport::default();
-    if !matches!(coding_mode, Some(crate::agent::coding_mode::CodingMode::Debug)) {
-        return report;
-    }
-    if !crate::services::pii_sanitizer::global_sanitizer().enabled() {
-        return report;
-    }
-
-    for msg in messages.iter_mut() {
-        let original = std::mem::take(&mut msg.content);
-        let cleaned = match msg.role.as_str() {
-            "assistant" => pii_sanitize_assistant_content(&original, &mut report),
-            "tool" => pii_sanitize_tool_envelope(&original, &mut report),
-            _ => {
-                let (clean, sub) = pii_sanitize_text_outside_image_markers(&original);
-                report.merge(&sub);
-                clean
-            }
-        };
-        msg.content = cleaned;
-    }
-
-    report
-}
-
-pub(crate) fn scrub_credentials(input: &str) -> String {
-    let after_vault =
-        crate::services::credential_vault::redact_for_audit_optional(input);
-    SENSITIVE_KV_REGEX
-        .replace_all(&after_vault, |caps: &regex::Captures| {
-            let full_match = &caps[0];
-            let key = &caps[1];
-            let val = caps
-                .get(2)
-                .or(caps.get(3))
-                .or(caps.get(4))
-                .map(|m| m.as_str())
-                .unwrap_or("");
-
-            let prefix = if val.len() > 4 {
-                val.char_indices()
-                    .nth(4)
-                    .map(|(byte_idx, _)| &val[..byte_idx])
-                    .unwrap_or(val)
-            } else {
-                ""
-            };
-
-            if full_match.contains(':') {
-                if full_match.contains('"') {
-                    format!("\"{}\": \"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}: {}*[REDACTED]", key, prefix)
-                }
-            } else if full_match.contains('=') {
-                if full_match.contains('"') {
-                    format!("{}=\"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}={}*[REDACTED]", key, prefix)
-                }
-            } else {
-                format!("{}: {}*[REDACTED]", key, prefix)
-            }
-        })
-        .to_string()
-}
-
-const DEFAULT_MAX_HISTORY_MESSAGES: usize = 50;
-
-const COMPACTION_KEEP_RECENT_MESSAGES: usize = 20;
-
-const COMPACTION_MAX_SOURCE_CHARS: usize = 12_000;
-
-const COMPACTION_MAX_SUMMARY_CHARS: usize = 2_000;
-
-pub fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
-    history
-        .iter()
-        .map(|m| {
-
-            m.content.len().div_ceil(4) + 4
-        })
-        .sum()
-}
-
-fn estimate_tokens_filtered(history: &[ChatMessage], is_system: bool) -> usize {
-    history
-        .iter()
-        .filter(|m| (m.role == "system") == is_system)
-        .map(|m| m.content.len().div_ceil(4) + 4)
-        .sum()
-}
+pub use crate::agent::history_compaction::estimate_history_tokens;
+pub(crate) use crate::agent::history_compaction::{
+    load_interactive_session_history, save_interactive_session_history,
+};
 
 pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
 
@@ -595,9 +81,15 @@ pub enum DraftEvent {
     ToolCall {
         name: String,
         args: serde_json::Value,
+        tool_call_id: Option<String>,
     },
 
-    ToolResult { name: String, output: String, success: bool },
+    ToolResult {
+        name: String,
+        output: String,
+        success: bool,
+        tool_call_id: Option<String>,
+    },
 
     FileEdit {
         path: String,
@@ -638,6 +130,50 @@ pub enum DraftEvent {
     PiiSanitized {
         report: crate::services::pii_sanitizer::SanitizationReport,
     },
+
+    ProviderRetry {
+        attempt: u32,
+        max_attempts: u32,
+        wait_ms: u64,
+        class: String,
+        provider: String,
+        model: String,
+        message: String,
+    },
+
+    WorkerSpawned {
+        parent_tool_use_id: String,
+        worker_id: String,
+        title: String,
+        model: String,
+    },
+
+    WorkerStatus {
+        worker_id: String,
+        status: String,
+        detail: Option<String>,
+    },
+
+    WorkerProgress {
+        worker_id: String,
+        action: String,
+        detail: String,
+    },
+
+    WorkerCompleted {
+        worker_id: String,
+        success: bool,
+        summary: String,
+    },
+
+    WorkerStopped {
+        worker_id: String,
+        reason: String,
+    },
+
+    ParentResumed {
+        reason: String,
+    },
 }
 
 tokio::task_local! {
@@ -650,8 +186,16 @@ tokio::task_local! {
         Option<tokio::sync::mpsc::Sender<DraftEvent>>;
 }
 
+tokio::task_local! {
+    pub(crate) static CURRENT_TOOL_CALL_ID: Option<String>;
+}
+
 pub fn take_parent_draft_channel() -> Option<tokio::sync::mpsc::Sender<DraftEvent>> {
     PARENT_DRAFT_CHANNEL.try_with(|c| c.clone()).ok().flatten()
+}
+
+pub fn current_tool_call_id() -> Option<String> {
+    CURRENT_TOOL_CALL_ID.try_with(|c| c.clone()).ok().flatten()
 }
 
 fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len: usize) -> String {
@@ -699,89 +243,6 @@ fn memory_session_id_from_state_file(path: &Path) -> Option<String> {
     }
 
     Some(format!("cli:{raw}"))
-}
-
-fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize) {
-
-    let has_system = history.first().map_or(false, |m| m.role == "system");
-    let non_system_count = if has_system {
-        history.len() - 1
-    } else {
-        history.len()
-    };
-
-    if non_system_count <= max_history {
-        return;
-    }
-
-    let start = usize::from(has_system);
-    let to_remove = non_system_count - max_history;
-    history.drain(start..start + to_remove);
-}
-
-fn build_compaction_transcript(messages: &[ChatMessage]) -> String {
-    let mut transcript = String::new();
-    for msg in messages {
-        let role = msg.role.to_uppercase();
-        let _ = writeln!(transcript, "{role}: {}", msg.content.trim());
-    }
-
-    if transcript.chars().count() > COMPACTION_MAX_SOURCE_CHARS {
-        truncate_with_ellipsis(&transcript, COMPACTION_MAX_SOURCE_CHARS)
-    } else {
-        transcript
-    }
-}
-
-fn apply_compaction_summary(
-    history: &mut Vec<ChatMessage>,
-    start: usize,
-    compact_end: usize,
-    summary: &str,
-) {
-    let summary_msg = ChatMessage::assistant(format!("[Compaction summary]\n{}", summary.trim()));
-    history.splice(start..compact_end, std::iter::once(summary_msg));
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InteractiveSessionState {
-    version: u32,
-    history: Vec<ChatMessage>,
-}
-
-impl InteractiveSessionState {
-    fn from_history(history: &[ChatMessage]) -> Self {
-        Self {
-            version: 1,
-            history: history.to_vec(),
-        }
-    }
-}
-
-fn load_interactive_session_history(path: &Path, system_prompt: &str) -> Result<Vec<ChatMessage>> {
-    if !path.exists() {
-        return Ok(vec![ChatMessage::system(system_prompt)]);
-    }
-
-    let raw = std::fs::read_to_string(path)?;
-    let mut state: InteractiveSessionState = serde_json::from_str(&raw)?;
-    if state.history.is_empty() {
-        state.history.push(ChatMessage::system(system_prompt));
-    } else if state.history.first().map(|msg| msg.role.as_str()) != Some("system") {
-        state.history.insert(0, ChatMessage::system(system_prompt));
-    }
-
-    Ok(state.history)
-}
-
-fn save_interactive_session_history(path: &Path, history: &[ChatMessage]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let payload = serde_json::to_string_pretty(&InteractiveSessionState::from_history(history))?;
-    std::fs::write(path, payload)?;
-    Ok(())
 }
 
 fn apply_theme_formatting(text: &str) -> String {
@@ -833,134 +294,6 @@ fn apply_theme_formatting(text: &str) -> String {
             )
         }
         _ => text.to_string(),
-    }
-}
-
-#[deprecated(
-    since = "0.1.0",
-    note = "Use crate::agent::context_expansion::expand_input instead — the unified resolver handles @file:/@folder:/@symbol:/@codebase: and falls back here for legacy tokens."
-)]
-pub fn expand_at_file_references(input: &str, workspace: &std::path::Path) -> String {
-
-    let at_re =
-        regex::Regex::new(r#"@((?:\./|[a-zA-Z0-9_])[^\s,;!?'"()\[\]{}:]+)(?::(\d+)(?::(\d+))?)?"#)
-            .unwrap();
-
-    let mut result = input.to_string();
-    let mut replacements: Vec<(String, String)> = Vec::new();
-
-    for cap in at_re.captures_iter(input) {
-        let full_match = cap[0].to_string();
-        let path_str = &cap[1];
-        let line_num: Option<usize> = cap.get(2).and_then(|m| m.as_str().parse().ok());
-        let _col_num: Option<usize> = cap.get(3).and_then(|m| m.as_str().parse().ok());
-
-        if replacements.iter().any(|(m, _)| m == &full_match) {
-            continue;
-        }
-
-        let path = workspace.join(path_str);
-
-        if path_str.contains('*') || path_str.contains('?') {
-            if let Ok(entries) = glob::glob(&path.to_string_lossy()) {
-                let mut files_content = Vec::new();
-                for (i, entry) in entries.flatten().enumerate() {
-                    if i >= 10 {
-                        files_content.push("(... truncated, showing first 10 matches)".to_string());
-                        break;
-                    }
-                    if let Ok(content) = std::fs::read_to_string(&entry) {
-                        let rel = entry.strip_prefix(workspace).unwrap_or(&entry);
-                        let truncated = truncate_content(&content, 20_000);
-                        files_content.push(format!(
-                            "<file path=\"{path}\">\n{truncated}\n</file>",
-                            path = rel.display(),
-                        ));
-                    }
-                }
-                if !files_content.is_empty() {
-                    replacements.push((full_match, files_content.join("\n\n")));
-                }
-            }
-        } else if path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let expanded = if let Some(target_line) = line_num {
-
-                    extract_line_window(&content, path_str, target_line, 10)
-                } else {
-                    let truncated = truncate_content(&content, 50_000);
-                    format!("<file path=\"{path_str}\">\n{truncated}\n</file>")
-                };
-                replacements.push((full_match, expanded));
-            }
-        } else if path.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                let listing: Vec<String> = entries
-                    .flatten()
-                    .take(50)
-                    .map(|e| {
-                        let ft = if e.path().is_dir() { "dir" } else { "file" };
-                        format!("  [{ft}] {}", e.file_name().to_string_lossy())
-                    })
-                    .collect();
-                replacements.push((
-                    full_match,
-                    format!(
-                        "<directory path=\"{path_str}\">\n{listing}\n</directory>",
-                        listing = listing.join("\n")
-                    ),
-                ));
-            }
-        }
-    }
-
-    for (pattern, replacement) in replacements {
-        result = result.replacen(&pattern, &replacement, 1);
-    }
-
-    result
-}
-
-fn extract_line_window(content: &str, path: &str, target: usize, radius: usize) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-
-    if target == 0 || target > total {
-        return format!(
-            "<file path=\"{path}\" line=\"{target}\">\nLine {target} is out of range \
-             (file has {total} lines)\n</file>"
-        );
-    }
-
-    let start = target.saturating_sub(radius).max(1);
-    let end = (target + radius).min(total);
-
-    let numbered: Vec<String> = (start..=end)
-        .map(|i| {
-            let marker = if i == target { ">" } else { " " };
-            format!("{marker}{i:>6}| {}", lines[i - 1])
-        })
-        .collect();
-
-    format!(
-        "<file path=\"{path}\" line=\"{target}\" range=\"{start}-{end}\">\n{}\n</file>",
-        numbered.join("\n")
-    )
-}
-
-fn truncate_content(content: &str, max_bytes: usize) -> String {
-    if content.len() > max_bytes {
-        let mut end = max_bytes;
-        while end > 0 && !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{}...\n(truncated, {} bytes total)",
-            &content[..end],
-            content.len()
-        )
-    } else {
-        content.to_string()
     }
 }
 
@@ -1118,29 +451,7 @@ fn find_tool<'a>(
         .map(|t| crate::tools::handle::ToolHandle::Borrowed(t.as_ref()))
 }
 
-fn parse_arguments_value(raw: Option<&serde_json::Value>) -> serde_json::Value {
-    match raw {
-        Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s)
-            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-        Some(value) => value.clone(),
-        None => serde_json::Value::Object(serde_json::Map::new()),
-    }
-}
 
-fn parse_tool_call_id(
-    root: &serde_json::Value,
-    function: Option<&serde_json::Value>,
-) -> Option<String> {
-    function
-        .and_then(|func| func.get("id"))
-        .or_else(|| root.get("id"))
-        .or_else(|| root.get("tool_call_id"))
-        .or_else(|| root.get("call_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(ToString::to_string)
-}
 
 pub fn canonicalize_json_for_tool_signature(value: &serde_json::Value) -> serde_json::Value {
     match value {
@@ -1171,1337 +482,36 @@ pub fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String
     (name.trim().to_ascii_lowercase(), args_json)
 }
 
-fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
-    if let Some(function) = value.get("function") {
-        let tool_call_id = parse_tool_call_id(value, Some(function));
-        let name = function
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !name.is_empty() {
-            let arguments = parse_arguments_value(
-                function
-                    .get("arguments")
-                    .or_else(|| function.get("parameters")),
-            );
-            return Some(ParsedToolCall {
-                name,
-                arguments,
-                tool_call_id,
-                parse_error: false,
-            });
-        }
-    }
 
-    let tool_call_id = parse_tool_call_id(value, None);
-    let name = value
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
 
-    if name.is_empty() {
-        return None;
-    }
 
-    let arguments =
-        parse_arguments_value(value.get("arguments").or_else(|| value.get("parameters")));
-    Some(ParsedToolCall {
-        name,
-        arguments,
-        tool_call_id,
-        parse_error: false,
-    })
-}
 
-fn parse_tool_calls_from_json_value(value: &serde_json::Value) -> Vec<ParsedToolCall> {
-    let mut calls = Vec::new();
 
-    if let Some(tool_calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
-        for call in tool_calls {
-            if let Some(parsed) = parse_tool_call_value(call) {
-                calls.push(parsed);
-            }
-        }
 
-        if !calls.is_empty() {
-            return calls;
-        }
-    }
 
-    if let Some(array) = value.as_array() {
-        for item in array {
-            if let Some(parsed) = parse_tool_call_value(item) {
-                calls.push(parsed);
-            }
-        }
-        return calls;
-    }
 
-    if let Some(parsed) = parse_tool_call_value(value) {
-        calls.push(parsed);
-    }
 
-    calls
-}
 
-fn is_xml_meta_tag(tag: &str) -> bool {
-    let normalized = tag.to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "tool_call"
-            | "toolcall"
-            | "tool-call"
-            | "invoke"
-            | "thinking"
-            | "thought"
-            | "analysis"
-            | "reasoning"
-            | "reflection"
-    )
-}
 
-static XML_OPEN_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<([a-zA-Z_][a-zA-Z0-9_-]*)>").unwrap());
 
-static MINIMAX_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<invoke\b[^>]*\bname\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>(.*?)</invoke>"#)
-        .unwrap()
-});
 
-static MINIMAX_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?is)<parameter\b[^>]*\bname\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>(.*?)</parameter>"#,
-    )
-    .unwrap()
-});
 
-fn extract_xml_pairs(input: &str) -> Vec<(&str, &str)> {
-    let mut results = Vec::new();
-    let mut search_start = 0;
-    while let Some(open_cap) = XML_OPEN_TAG_RE.captures(&input[search_start..]) {
-        let Some(full_open) = open_cap.get(0) else {
-            break;
-        };
-        let Some(tag_match) = open_cap.get(1) else {
-            break;
-        };
-        let tag_name = tag_match.as_str();
-        let open_end = search_start + full_open.end();
 
-        let closing_tag = format!("</{tag_name}>");
-        if let Some(close_pos) = input[open_end..].find(&closing_tag) {
-            let inner = &input[open_end..open_end + close_pos];
-            results.push((tag_name, inner.trim()));
-            search_start = open_end + close_pos + closing_tag.len();
-        } else {
-            search_start = open_end;
-        }
-    }
-    results
-}
 
-fn parse_xml_tool_calls(xml_content: &str) -> Option<Vec<ParsedToolCall>> {
-    let mut calls = Vec::new();
-    let trimmed = xml_content.trim();
 
-    if !trimmed.starts_with('<') || !trimmed.contains('>') {
-        return None;
-    }
 
-    for (tool_name_str, inner_content) in extract_xml_pairs(trimmed) {
-        let tool_name = tool_name_str.to_string();
-        if is_xml_meta_tag(&tool_name) {
-            continue;
-        }
 
-        if inner_content.is_empty() {
-            continue;
-        }
 
-        let mut args = serde_json::Map::new();
 
-        if let Some(first_json) = extract_json_values(inner_content).into_iter().next() {
-            match first_json {
-                serde_json::Value::Object(object_args) => {
-                    args = object_args;
-                }
-                other => {
-                    args.insert("value".to_string(), other);
-                }
-            }
-        } else {
-            for (key_str, value) in extract_xml_pairs(inner_content) {
-                let key = key_str.to_string();
-                if is_xml_meta_tag(&key) {
-                    continue;
-                }
-                if !value.is_empty() {
-                    args.insert(key, serde_json::Value::String(value.to_string()));
-                }
-            }
 
-            if args.is_empty() {
-                args.insert(
-                    "content".to_string(),
-                    serde_json::Value::String(inner_content.to_string()),
-                );
-            }
-        }
 
-        calls.push(ParsedToolCall {
-            name: tool_name,
-            arguments: serde_json::Value::Object(args),
-            tool_call_id: None,
-            parse_error: false,
-        });
-    }
 
-    if calls.is_empty() { None } else { Some(calls) }
-}
 
-fn parse_minimax_invoke_calls(response: &str) -> Option<(String, Vec<ParsedToolCall>)> {
-    let mut calls = Vec::new();
-    let mut text_parts = Vec::new();
-    let mut last_end = 0usize;
 
-    for cap in MINIMAX_INVOKE_RE.captures_iter(response) {
-        let Some(full_match) = cap.get(0) else {
-            continue;
-        };
 
-        let before = response[last_end..full_match.start()].trim();
-        if !before.is_empty() {
-            text_parts.push(before.to_string());
-        }
 
-        let name = cap
-            .get(1)
-            .or_else(|| cap.get(2))
-            .map(|m| m.as_str().trim())
-            .filter(|v| !v.is_empty());
-        let body = cap.get(3).map(|m| m.as_str()).unwrap_or("").trim();
-        last_end = full_match.end();
 
-        let Some(name) = name else {
-            continue;
-        };
 
-        let mut args = serde_json::Map::new();
-        for param_cap in MINIMAX_PARAMETER_RE.captures_iter(body) {
-            let key = param_cap
-                .get(1)
-                .or_else(|| param_cap.get(2))
-                .map(|m| m.as_str().trim())
-                .unwrap_or_default();
-            if key.is_empty() {
-                continue;
-            }
-            let value = param_cap
-                .get(3)
-                .map(|m| m.as_str().trim())
-                .unwrap_or_default();
-            if value.is_empty() {
-                continue;
-            }
-
-            let parsed = extract_json_values(value).into_iter().next();
-            args.insert(
-                key.to_string(),
-                parsed.unwrap_or_else(|| serde_json::Value::String(value.to_string())),
-            );
-        }
-
-        if args.is_empty() {
-            if let Some(first_json) = extract_json_values(body).into_iter().next() {
-                match first_json {
-                    serde_json::Value::Object(obj) => args = obj,
-                    other => {
-                        args.insert("value".to_string(), other);
-                    }
-                }
-            } else if !body.is_empty() {
-                args.insert(
-                    "content".to_string(),
-                    serde_json::Value::String(body.to_string()),
-                );
-            }
-        }
-
-        calls.push(ParsedToolCall {
-            name: name.to_string(),
-            arguments: serde_json::Value::Object(args),
-            tool_call_id: None,
-            parse_error: false,
-        });
-    }
-
-    if calls.is_empty() {
-        return None;
-    }
-
-    let after = response[last_end..].trim();
-    if !after.is_empty() {
-        text_parts.push(after.to_string());
-    }
-
-    let text = text_parts
-        .join("\n")
-        .replace("<minimax:tool_call>", "")
-        .replace("</minimax:tool_call>", "")
-        .replace("<minimax:toolcall>", "")
-        .replace("</minimax:toolcall>", "")
-        .trim()
-        .to_string();
-
-    Some((text, calls))
-}
-
-const TOOL_CALL_OPEN_TAGS: [&str; 6] = [
-    "<tool_call>",
-    "<toolcall>",
-    "<tool-call>",
-    "<invoke>",
-    "<minimax:tool_call>",
-    "<minimax:toolcall>",
-];
-
-const TOOL_CALL_CLOSE_TAGS: [&str; 6] = [
-    "</tool_call>",
-    "</toolcall>",
-    "</tool-call>",
-    "</invoke>",
-    "</minimax:tool_call>",
-    "</minimax:toolcall>",
-];
-
-fn find_first_tag<'a>(haystack: &str, tags: &'a [&'a str]) -> Option<(usize, &'a str)> {
-    tags.iter()
-        .filter_map(|tag| haystack.find(tag).map(|idx| (idx, *tag)))
-        .min_by_key(|(idx, _)| *idx)
-}
-
-fn matching_tool_call_close_tag(open_tag: &str) -> Option<&'static str> {
-    match open_tag {
-        "<tool_call>" => Some("</tool_call>"),
-        "<toolcall>" => Some("</toolcall>"),
-        "<tool-call>" => Some("</tool-call>"),
-        "<invoke>" => Some("</invoke>"),
-        "<minimax:tool_call>" => Some("</minimax:tool_call>"),
-        "<minimax:toolcall>" => Some("</minimax:toolcall>"),
-        _ => None,
-    }
-}
-
-fn extract_first_json_value_with_end(input: &str) -> Option<(serde_json::Value, usize)> {
-    let trimmed = input.trim_start();
-    let trim_offset = input.len().saturating_sub(trimmed.len());
-
-    for (byte_idx, ch) in trimmed.char_indices() {
-        if ch != '{' && ch != '[' {
-            continue;
-        }
-
-        let slice = &trimmed[byte_idx..];
-        let mut stream = serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
-        if let Some(Ok(value)) = stream.next() {
-            let consumed = stream.byte_offset();
-            if consumed > 0 {
-                return Some((value, trim_offset + byte_idx + consumed));
-            }
-        }
-    }
-
-    None
-}
-
-fn strip_leading_close_tags(mut input: &str) -> &str {
-    loop {
-        let trimmed = input.trim_start();
-        if !trimmed.starts_with("</") {
-            return trimmed;
-        }
-
-        let Some(close_end) = trimmed.find('>') else {
-            return "";
-        };
-        input = &trimmed[close_end + 1..];
-    }
-}
-
-fn extract_json_values(input: &str) -> Vec<serde_json::Value> {
-    let mut values = Vec::new();
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return values;
-    }
-
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        values.push(value);
-        return values;
-    }
-
-    let char_positions: Vec<(usize, char)> = trimmed.char_indices().collect();
-    let mut idx = 0;
-    while idx < char_positions.len() {
-        let (byte_idx, ch) = char_positions[idx];
-        if ch == '{' || ch == '[' {
-            let slice = &trimmed[byte_idx..];
-            let mut stream =
-                serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
-            if let Some(Ok(value)) = stream.next() {
-                let consumed = stream.byte_offset();
-                if consumed > 0 {
-                    values.push(value);
-                    let next_byte = byte_idx + consumed;
-                    while idx < char_positions.len() && char_positions[idx].0 < next_byte {
-                        idx += 1;
-                    }
-                    continue;
-                }
-            }
-        }
-        idx += 1;
-    }
-
-    values
-}
-
-fn find_json_end(input: &str) -> Option<usize> {
-    let trimmed = input.trim_start();
-    let offset = input.len() - trimmed.len();
-
-    if !trimmed.starts_with('{') {
-        return None;
-    }
-
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut escape_next = false;
-
-    for (i, ch) in trimmed.char_indices() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if in_string => escape_next = true,
-            '"' => in_string = !in_string,
-            '{' if !in_string => depth += 1,
-            '}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(offset + i + ch.len_utf8());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn parse_xml_attribute_tool_calls(response: &str) -> Vec<ParsedToolCall> {
-    let mut calls = Vec::new();
-
-    static INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?s)<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>"#).unwrap()
-    });
-
-    static PARAM_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"<parameter\s+name="([^"]+)"[^>]*>([^<]*)</parameter>"#).unwrap()
-    });
-
-    for cap in INVOKE_RE.captures_iter(response) {
-        let tool_name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-
-        if tool_name.is_empty() {
-            continue;
-        }
-
-        let mut arguments = serde_json::Map::new();
-
-        for param_cap in PARAM_RE.captures_iter(inner) {
-            let param_name = param_cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            if !param_name.is_empty() {
-                arguments.insert(
-                    param_name.to_string(),
-                    serde_json::Value::String(param_value.to_string()),
-                );
-            }
-        }
-
-        if !arguments.is_empty() {
-            calls.push(ParsedToolCall {
-                name: map_tool_name_alias(tool_name).to_string(),
-                arguments: serde_json::Value::Object(arguments),
-                tool_call_id: None,
-                parse_error: false,
-            });
-        }
-    }
-
-    calls
-}
-
-fn parse_perl_style_tool_calls(response: &str) -> Vec<ParsedToolCall> {
-    let mut calls = Vec::new();
-
-    static PERL_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)(?:\[TOOL_CALL\]|TOOL_CALL)\s*\{(.+?)\}\}\s*(?:\[/TOOL_CALL\]|/TOOL_CALL)")
-            .unwrap()
-    });
-
-    static TOOL_NAME_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"tool\s*=>\s*"([^"]+)""#).unwrap());
-
-    static ARGS_BLOCK_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)args\s*=>\s*\{(.+?)(?:\}|$)").unwrap());
-
-    static ARGS_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"--(\w+)\s+"([^"]+)""#).unwrap());
-
-    for cap in PERL_RE.captures_iter(response) {
-        let content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-
-        let tool_name = TOOL_NAME_RE
-            .captures(content)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str())
-            .unwrap_or("");
-
-        if tool_name.is_empty() {
-            continue;
-        }
-
-        let args_block = ARGS_BLOCK_RE
-            .captures(content)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str())
-            .unwrap_or("");
-
-        let mut arguments = serde_json::Map::new();
-
-        for arg_cap in ARGS_RE.captures_iter(args_block) {
-            let key = arg_cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            let value = arg_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-
-            if !key.is_empty() {
-                arguments.insert(
-                    key.to_string(),
-                    serde_json::Value::String(value.to_string()),
-                );
-            }
-        }
-
-        if !arguments.is_empty() {
-            calls.push(ParsedToolCall {
-                name: map_tool_name_alias(tool_name).to_string(),
-                arguments: serde_json::Value::Object(arguments),
-                tool_call_id: None,
-                parse_error: false,
-            });
-        }
-    }
-
-    calls
-}
-
-fn parse_function_call_tool_calls(response: &str) -> Vec<ParsedToolCall> {
-    let mut calls = Vec::new();
-
-    static FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)<FunctionCall>\s*(\w+)\s*<code>([^<]+)</code>\s*</FunctionCall>").unwrap()
-    });
-
-    for cap in FUNC_RE.captures_iter(response) {
-        let tool_name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let args_text = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-
-        if tool_name.is_empty() {
-            continue;
-        }
-
-        let mut arguments = serde_json::Map::new();
-        for line in args_text.lines() {
-            let line = line.trim();
-            if let Some(pos) = line.find('>') {
-                let key = line[..pos].trim();
-                let value = line[pos + 1..].trim();
-                if !key.is_empty() && !value.is_empty() {
-                    arguments.insert(
-                        key.to_string(),
-                        serde_json::Value::String(value.to_string()),
-                    );
-                }
-            }
-        }
-
-        if !arguments.is_empty() {
-            calls.push(ParsedToolCall {
-                name: map_tool_name_alias(tool_name).to_string(),
-                arguments: serde_json::Value::Object(arguments),
-                tool_call_id: None,
-                parse_error: false,
-            });
-        }
-    }
-
-    calls
-}
-
-fn map_tool_name_alias(tool_name: &str) -> &str {
-    match tool_name {
-
-        "shell" | "bash" | "sh" | "exec" | "command" | "cmd" => "shell",
-
-        "browser_open" | "browser" | "web_search" => "http_request",
-
-        "send_message" | "sendmessage" => "message_send",
-
-        "fileread" | "file_read" | "readfile" | "read_file" | "file" => "file_read",
-        "filewrite" | "file_write" | "writefile" | "write_file" => "file_write",
-        "filelist" | "file_list" | "listfiles" | "list_files" => "file_list",
-
-        "memoryrecall" | "memory_recall" | "recall" | "memrecall" => "memory_recall",
-        "memorystore" | "memory_store" | "store" | "memstore" => "memory_store",
-        "memoryforget" | "memory_forget" | "forget" | "memforget" => "memory_forget",
-
-        "http_request" | "http" | "fetch" | "curl" | "wget" => "http_request",
-        _ => tool_name,
-    }
-}
-
-fn is_url_like(value: &str) -> bool {
-    value.starts_with("http://") || value.starts_with("https://")
-}
-
-fn parse_glm_style_tool_calls(text: &str) -> Vec<(String, serde_json::Value, Option<String>)> {
-    let mut calls = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some(pos) = line.find('/') {
-            let tool_part = &line[..pos];
-            let rest = &line[pos + 1..];
-
-            if tool_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                let tool_name = map_tool_name_alias(tool_part);
-
-                if let Some(gt_pos) = rest.find('>') {
-                    let param_name = rest[..gt_pos].trim();
-                    let value = rest[gt_pos + 1..].trim();
-
-                    let (final_tool, arguments) = match tool_name {
-                        "shell" => {
-                            if param_name == "url" || is_url_like(value) {
-                                (
-                                    "http_request",
-                                    serde_json::json!({"url": value, "method": "GET"}),
-                                )
-                            } else {
-                                ("shell", serde_json::json!({ "command": value }))
-                            }
-                        }
-                        "http_request" => (
-                            "http_request",
-                            serde_json::json!({"url": value, "method": "GET"}),
-                        ),
-                        _ => (tool_name, serde_json::json!({ param_name: value })),
-                    };
-
-                    calls.push((final_tool.to_string(), arguments, Some(line.to_string())));
-                    continue;
-                }
-
-                if rest.starts_with('{') {
-                    if let Ok(json_args) = serde_json::from_str::<serde_json::Value>(rest) {
-                        calls.push((tool_name.to_string(), json_args, Some(line.to_string())));
-                    }
-                }
-            }
-        }
-    }
-
-    calls
-}
-
-fn default_param_for_tool(tool: &str) -> &'static str {
-    match tool {
-        "shell" | "bash" | "sh" | "exec" | "command" | "cmd" => "command",
-
-        "file_read" | "fileread" | "readfile" | "read_file" | "file" | "file_write"
-        | "filewrite" | "writefile" | "write_file" | "file_edit" | "fileedit" | "editfile"
-        | "edit_file" | "file_list" | "filelist" | "listfiles" | "list_files" => "path",
-
-        "memory_recall" | "memoryrecall" | "recall" | "memrecall" | "memory_forget"
-        | "memoryforget" | "forget" | "memforget" | "web_search_tool" | "web_search"
-        | "websearch" | "search" => "query",
-        "memory_store" | "memorystore" | "store" | "memstore" => "content",
-
-        "http_request" | "http" | "fetch" | "curl" | "wget" | "browser_open" | "browser" => "url",
-        _ => "input",
-    }
-}
-
-fn parse_glm_shortened_body(body: &str) -> Option<ParsedToolCall> {
-    let body = body.trim();
-    if body.is_empty() {
-        return None;
-    }
-
-    let function_style = body.find('(').and_then(|open| {
-        if body.ends_with(')') && open > 0 {
-            Some((body[..open].trim(), body[open + 1..body.len() - 1].trim()))
-        } else {
-            None
-        }
-    });
-
-    let (tool_raw, value_part) = if let Some((tool, args)) = function_style {
-        (tool, args)
-    } else if body.contains("=\"") {
-
-        let split_pos = body.find(|c: char| c.is_whitespace()).unwrap_or(body.len());
-        let tool = body[..split_pos].trim();
-        let attrs = body[split_pos..]
-            .trim()
-            .trim_end_matches("/>")
-            .trim_end_matches('>')
-            .trim_end_matches('/')
-            .trim();
-        (tool, attrs)
-    } else if let Some(gt_pos) = body.find('>') {
-
-        let tool = body[..gt_pos].trim();
-        let value = body[gt_pos + 1..].trim();
-
-        let value = value.trim_end_matches("/>").trim_end_matches('/').trim();
-        (tool, value)
-    } else {
-        return None;
-    };
-
-    let tool_raw = tool_raw.trim_end_matches(|c: char| c.is_whitespace());
-    if tool_raw.is_empty() || !tool_raw.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-
-    let tool_name = map_tool_name_alias(tool_raw);
-
-    if value_part.contains("=\"") {
-        let mut args = serde_json::Map::new();
-
-        let mut rest = value_part;
-        while let Some(eq_pos) = rest.find("=\"") {
-            let key_start = rest[..eq_pos]
-                .rfind(|c: char| c.is_whitespace())
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            let key = rest[key_start..eq_pos]
-                .trim()
-                .trim_matches(|c: char| c == ',' || c == ';');
-            let after_quote = &rest[eq_pos + 2..];
-            if let Some(end_quote) = after_quote.find('"') {
-                let value = &after_quote[..end_quote];
-                if !key.is_empty() {
-                    args.insert(
-                        key.to_string(),
-                        serde_json::Value::String(value.to_string()),
-                    );
-                }
-                rest = &after_quote[end_quote + 1..];
-            } else {
-                break;
-            }
-        }
-        if !args.is_empty() {
-            return Some(ParsedToolCall {
-                name: tool_name.to_string(),
-                arguments: serde_json::Value::Object(args),
-                tool_call_id: None,
-                parse_error: false,
-            });
-        }
-    }
-
-    if value_part.contains('\n') {
-        let mut args = serde_json::Map::new();
-        for line in value_part.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(colon_pos) = line.find(':') {
-                let key = line[..colon_pos].trim();
-                let value = line[colon_pos + 1..].trim();
-                if !key.is_empty() && !value.is_empty() {
-
-                    let json_value = match value {
-                        "true" | "yes" => serde_json::Value::Bool(true),
-                        "false" | "no" => serde_json::Value::Bool(false),
-                        _ => serde_json::Value::String(value.to_string()),
-                    };
-                    args.insert(key.to_string(), json_value);
-                }
-            }
-        }
-        if !args.is_empty() {
-            return Some(ParsedToolCall {
-                name: tool_name.to_string(),
-                arguments: serde_json::Value::Object(args),
-                tool_call_id: None,
-                parse_error: false,
-            });
-        }
-    }
-
-    if !value_part.is_empty() {
-        let param = default_param_for_tool(tool_raw);
-        let arguments = match tool_name {
-            "shell" => {
-                if is_url_like(value_part) {
-                    return Some(ParsedToolCall {
-                        name: "http_request".to_string(),
-                        arguments: serde_json::json!({"url": value_part, "method": "GET"}),
-                        tool_call_id: None,
-                        parse_error: false,
-                    });
-                }
-                serde_json::json!({ "command": value_part })
-            }
-            "http_request" => serde_json::json!({"url": value_part, "method": "GET"}),
-            _ => serde_json::json!({ param: value_part }),
-        };
-        return Some(ParsedToolCall {
-            name: tool_name.to_string(),
-            arguments,
-            tool_call_id: None,
-            parse_error: false,
-        });
-    }
-
-    None
-}
-
-fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
-
-    let cleaned = strip_think_tags(response);
-    let response = cleaned.as_str();
-
-    let mut text_parts = Vec::new();
-    let mut calls = Vec::new();
-    let mut remaining = response;
-
-    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(response.trim()) {
-        calls = parse_tool_calls_from_json_value(&json_value);
-        if !calls.is_empty() {
-
-            if let Some(content) = json_value.get("content").and_then(|v| v.as_str()) {
-                if !content.trim().is_empty() {
-                    text_parts.push(content.trim().to_string());
-                }
-            }
-            return (text_parts.join("\n"), calls);
-        }
-    }
-
-    if let Some((minimax_text, minimax_calls)) = parse_minimax_invoke_calls(response) {
-        if !minimax_calls.is_empty() {
-            return (minimax_text, minimax_calls);
-        }
-    }
-
-    while let Some((start, open_tag)) = find_first_tag(remaining, &TOOL_CALL_OPEN_TAGS) {
-
-        let before = &remaining[..start];
-        if !before.trim().is_empty() {
-            text_parts.push(before.trim().to_string());
-        }
-
-        let Some(close_tag) = matching_tool_call_close_tag(open_tag) else {
-            break;
-        };
-
-        let after_open = &remaining[start + open_tag.len()..];
-        if let Some(close_idx) = after_open.find(close_tag) {
-            let inner = &after_open[..close_idx];
-            let mut parsed_any = false;
-
-            let json_values = extract_json_values(inner);
-            for value in json_values {
-                let parsed_calls = parse_tool_calls_from_json_value(&value);
-                if !parsed_calls.is_empty() {
-                    parsed_any = true;
-                    calls.extend(parsed_calls);
-                }
-            }
-
-            if !parsed_any {
-                if let Some(xml_calls) = parse_xml_tool_calls(inner) {
-                    calls.extend(xml_calls);
-                    parsed_any = true;
-                }
-            }
-
-            if !parsed_any {
-
-                if let Some(glm_call) = parse_glm_shortened_body(inner) {
-                    calls.push(glm_call);
-                    parsed_any = true;
-                }
-            }
-
-            if !parsed_any {
-                tracing::warn!(
-                    "Malformed <tool_call>: expected tool-call object in tag body (JSON/XML/GLM)"
-                );
-            }
-
-            remaining = &after_open[close_idx + close_tag.len()..];
-        } else {
-
-            let mut resolved = false;
-            if let Some((cross_idx, cross_tag)) = find_first_tag(after_open, &TOOL_CALL_CLOSE_TAGS)
-            {
-                let inner = &after_open[..cross_idx];
-                let mut parsed_any = false;
-
-                let json_values = extract_json_values(inner);
-                for value in json_values {
-                    let parsed_calls = parse_tool_calls_from_json_value(&value);
-                    if !parsed_calls.is_empty() {
-                        parsed_any = true;
-                        calls.extend(parsed_calls);
-                    }
-                }
-
-                if !parsed_any {
-                    if let Some(xml_calls) = parse_xml_tool_calls(inner) {
-                        calls.extend(xml_calls);
-                        parsed_any = true;
-                    }
-                }
-
-                if !parsed_any {
-                    if let Some(glm_call) = parse_glm_shortened_body(inner) {
-                        calls.push(glm_call);
-                        parsed_any = true;
-                    }
-                }
-
-                if parsed_any {
-                    remaining = &after_open[cross_idx + cross_tag.len()..];
-                    resolved = true;
-                }
-            }
-
-            if resolved {
-                continue;
-            }
-
-            if let Some(json_end) = find_json_end(after_open) {
-                if let Ok(value) =
-                    serde_json::from_str::<serde_json::Value>(&after_open[..json_end])
-                {
-                    let parsed_calls = parse_tool_calls_from_json_value(&value);
-                    if !parsed_calls.is_empty() {
-                        calls.extend(parsed_calls);
-                        remaining = strip_leading_close_tags(&after_open[json_end..]);
-                        continue;
-                    }
-                }
-            }
-
-            if let Some((value, consumed_end)) = extract_first_json_value_with_end(after_open) {
-                let parsed_calls = parse_tool_calls_from_json_value(&value);
-                if !parsed_calls.is_empty() {
-                    calls.extend(parsed_calls);
-                    remaining = strip_leading_close_tags(&after_open[consumed_end..]);
-                    continue;
-                }
-            }
-
-            let glm_input = after_open.trim();
-            if let Some(glm_call) = parse_glm_shortened_body(glm_input) {
-                calls.push(glm_call);
-                remaining = "";
-                continue;
-            }
-
-            remaining = &remaining[start..];
-            break;
-        }
-    }
-
-    if calls.is_empty() {
-        static MD_TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"(?s)```(?:tool[_-]?call|invoke)\s*\n(.*?)(?:```|</tool[_-]?call>|</toolcall>|</invoke>|</minimax:toolcall>)",
-            )
-            .unwrap()
-        });
-        let mut md_text_parts: Vec<String> = Vec::new();
-        let mut last_end = 0;
-
-        for cap in MD_TOOL_CALL_RE.captures_iter(response) {
-            let Some(full_match) = cap.get(0) else {
-                continue;
-            };
-            let before = &response[last_end..full_match.start()];
-            if !before.trim().is_empty() {
-                md_text_parts.push(before.trim().to_string());
-            }
-            let inner = &cap[1];
-            let json_values = extract_json_values(inner);
-            for value in json_values {
-                let parsed_calls = parse_tool_calls_from_json_value(&value);
-                calls.extend(parsed_calls);
-            }
-            last_end = full_match.end();
-        }
-
-        if !calls.is_empty() {
-            let after = &response[last_end..];
-            if !after.trim().is_empty() {
-                md_text_parts.push(after.trim().to_string());
-            }
-            text_parts = md_text_parts;
-            remaining = "";
-        }
-    }
-
-    if calls.is_empty() {
-        static MD_TOOL_NAME_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"(?s)```tool\s+(\w+)\s*\n(.*?)(?:```|$)").unwrap());
-        let mut md_text_parts: Vec<String> = Vec::new();
-        let mut last_end = 0;
-
-        for cap in MD_TOOL_NAME_RE.captures_iter(response) {
-            let Some(full_match) = cap.get(0) else {
-                continue;
-            };
-            let before = &response[last_end..full_match.start()];
-            if !before.trim().is_empty() {
-                md_text_parts.push(before.trim().to_string());
-            }
-            let tool_name = &cap[1];
-            let inner = &cap[2];
-
-            let json_values = extract_json_values(inner);
-            if json_values.is_empty() {
-
-                tracing::warn!(
-                    tool_name = %tool_name,
-                    inner = %inner.chars().take(100).collect::<String>(),
-                    "Found ```tool <name> block but could not parse JSON arguments"
-                );
-            } else {
-                for value in json_values {
-                    let arguments = if value.is_object() {
-                        value
-                    } else {
-                        serde_json::Value::Object(serde_json::Map::new())
-                    };
-                    calls.push(ParsedToolCall {
-                        name: tool_name.to_string(),
-                        arguments,
-                        tool_call_id: None,
-                        parse_error: false,
-                    });
-                }
-            }
-            last_end = full_match.end();
-        }
-
-        if !calls.is_empty() {
-            let after = &response[last_end..];
-            if !after.trim().is_empty() {
-                md_text_parts.push(after.trim().to_string());
-            }
-            text_parts = md_text_parts;
-            remaining = "";
-        }
-    }
-
-    if calls.is_empty() {
-        let xml_calls = parse_xml_attribute_tool_calls(remaining);
-        if !xml_calls.is_empty() {
-            let mut cleaned_text = remaining.to_string();
-            for call in xml_calls {
-                calls.push(call);
-
-                if let Some(start) = cleaned_text.find("<minimax:toolcall>") {
-                    if let Some(end) = cleaned_text.find("</minimax:toolcall>") {
-                        let end_pos = end + "</minimax:toolcall>".len();
-                        if end_pos <= cleaned_text.len() {
-                            cleaned_text =
-                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
-                        }
-                    }
-                }
-            }
-            if !cleaned_text.trim().is_empty() {
-                text_parts.push(cleaned_text.trim().to_string());
-            }
-            remaining = "";
-        }
-    }
-
-    if calls.is_empty() {
-        let perl_calls = parse_perl_style_tool_calls(remaining);
-        if !perl_calls.is_empty() {
-            let mut cleaned_text = remaining.to_string();
-            for call in perl_calls {
-                calls.push(call);
-
-                while let Some(start) = cleaned_text.find("TOOL_CALL") {
-                    if let Some(end) = cleaned_text.find("/TOOL_CALL") {
-                        let end_pos = end + "/TOOL_CALL".len();
-                        if end_pos <= cleaned_text.len() {
-                            cleaned_text =
-                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if !cleaned_text.trim().is_empty() {
-                text_parts.push(cleaned_text.trim().to_string());
-            }
-            remaining = "";
-        }
-    }
-
-    if calls.is_empty() {
-        let func_calls = parse_function_call_tool_calls(remaining);
-        if !func_calls.is_empty() {
-            let mut cleaned_text = remaining.to_string();
-            for call in func_calls {
-                calls.push(call);
-
-                while let Some(start) = cleaned_text.find("<FunctionCall>") {
-                    if let Some(end) = cleaned_text.find("</FunctionCall>") {
-                        let end_pos = end + "</FunctionCall>".len();
-                        if end_pos <= cleaned_text.len() {
-                            cleaned_text =
-                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if !cleaned_text.trim().is_empty() {
-                text_parts.push(cleaned_text.trim().to_string());
-            }
-            remaining = "";
-        }
-    }
-
-    if calls.is_empty() {
-        let glm_calls = parse_glm_style_tool_calls(remaining);
-        if !glm_calls.is_empty() {
-            let mut cleaned_text = remaining.to_string();
-            for (name, args, raw) in &glm_calls {
-                calls.push(ParsedToolCall {
-                    name: name.clone(),
-                    arguments: args.clone(),
-                    tool_call_id: None,
-                    parse_error: false,
-                });
-                if let Some(r) = raw {
-                    cleaned_text = cleaned_text.replace(r, "");
-                }
-            }
-            if !cleaned_text.trim().is_empty() {
-                text_parts.push(cleaned_text.trim().to_string());
-            }
-            remaining = "";
-        }
-    }
-
-    if calls.is_empty() {
-        let bare = scan_bare_json_tool_calls(remaining);
-        if !bare.is_empty() {
-            let mut cleaned_text = remaining.to_string();
-            for (call, raw) in &bare {
-                calls.push(call.clone());
-                cleaned_text = cleaned_text.replace(raw, "");
-            }
-            if !cleaned_text.trim().is_empty() {
-                text_parts.push(cleaned_text.trim().to_string());
-            }
-            remaining = "";
-        }
-    }
-
-    if !remaining.trim().is_empty() {
-        text_parts.push(remaining.trim().to_string());
-    }
-
-    if calls.len() > 1 {
-        let mut deduped: Vec<ParsedToolCall> = Vec::with_capacity(calls.len());
-        for call in calls.into_iter() {
-            let is_duplicate = deduped.last().is_some_and(|prev| {
-                prev.name == call.name
-                    && prev.tool_call_id == call.tool_call_id
-                    && prev.arguments == call.arguments
-            });
-            if !is_duplicate {
-                deduped.push(call);
-            }
-        }
-        calls = deduped;
-    }
-
-    (text_parts.join("\n"), calls)
-}
-
-fn scan_bare_json_tool_calls(input: &str) -> Vec<(ParsedToolCall, String)> {
-    let mut out: Vec<(ParsedToolCall, String)> = Vec::new();
-    if input.trim().is_empty() {
-        return out;
-    }
-
-    let bytes = input.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        if bytes[idx] != b'{' {
-            idx += 1;
-            continue;
-        }
-        let slice = &input[idx..];
-        let Some(end_rel) = find_json_end(slice) else {
-            idx += 1;
-            continue;
-        };
-        let raw = &slice[..end_rel];
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-            let looks_like_call = value
-                .as_object()
-                .map(|obj| {
-                    let has_name = obj.contains_key("name");
-                    let has_function = obj.contains_key("function");
-                    let has_args =
-                        obj.contains_key("arguments") || obj.contains_key("parameters");
-                    let has_tool_calls = obj.contains_key("tool_calls");
-                    has_tool_calls || ((has_name || has_function) && has_args)
-                })
-                .unwrap_or(false);
-            if looks_like_call {
-                let parsed_calls = parse_tool_calls_from_json_value(&value);
-                for parsed in parsed_calls {
-                    out.push((parsed, raw.to_string()));
-                }
-            }
-            idx += end_rel;
-            continue;
-        }
-        idx += 1;
-    }
-
-    out
-}
-
-fn strip_think_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut rest = s;
-    loop {
-        if let Some(start) = rest.find("<think>") {
-            result.push_str(&rest[..start]);
-            if let Some(end) = rest[start..].find("</think>") {
-                rest = &rest[start + end + "</think>".len()..];
-            } else {
-
-                break;
-            }
-        } else {
-            result.push_str(rest);
-            break;
-        }
-    }
-    result.trim().to_string()
-}
-
-fn strip_tool_result_blocks(text: &str) -> String {
-    static TOOL_RESULT_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)<tool_result[^>]*>.*?</tool_result>").unwrap());
-    static THINKING_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)<thinking>.*?</thinking>").unwrap());
-    static THINK_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)<think>.*?</think>").unwrap());
-    static TOOL_RESULTS_PREFIX_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^\[Tool results\]\s*\n?").unwrap());
-    static EXCESS_BLANK_LINES_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
-
-    let result = TOOL_RESULT_RE.replace_all(text, "");
-    let result = THINKING_RE.replace_all(&result, "");
-    let result = THINK_RE.replace_all(&result, "");
-    let result = TOOL_RESULTS_PREFIX_RE.replace_all(&result, "");
-    let result = EXCESS_BLANK_LINES_RE.replace_all(result.trim(), "\n\n");
-
-    result.trim().to_string()
-}
-
-fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall]) -> Option<String> {
-    if !parsed_calls.is_empty() {
-        return None;
-    }
-
-    let trimmed = response.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let looks_like_tool_payload = trimmed.contains("<tool_call")
-        || trimmed.contains("<toolcall")
-        || trimmed.contains("<tool-call")
-        || trimmed.contains("```tool_call")
-        || trimmed.contains("```toolcall")
-        || trimmed.contains("```tool-call")
-        || trimmed.contains("```tool file_")
-        || trimmed.contains("```tool shell")
-        || trimmed.contains("```tool web_")
-        || trimmed.contains("```tool memory_")
-        || trimmed.contains("```tool ")
-        || trimmed.contains("\"tool_calls\"")
-        || trimmed.contains("TOOL_CALL")
-        || trimmed.contains("[TOOL_CALL]")
-        || trimmed.contains("<FunctionCall>");
-
-    if looks_like_tool_payload {
-        Some("response resembled a tool-call payload but no valid tool call could be parsed".into())
-    } else {
-        None
-    }
-}
-
-fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
-    tool_calls
-        .iter()
-        .map(|call| ParsedToolCall {
-            name: call.name.clone(),
-            arguments: serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            tool_call_id: Some(call.id.clone()),
-            parse_error: serde_json::from_str::<serde_json::Value>(&call.arguments).is_err(),
-        })
-        .collect()
-}
 
 fn build_native_assistant_history(
     text: &str,
@@ -2531,10 +541,12 @@ fn build_native_assistant_history(
     });
 
     if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "reasoning_content".to_string(),
+                serde_json::Value::String(rc.to_string()),
+            );
+        }
     }
 
     obj.to_string()
@@ -2568,10 +580,12 @@ fn build_native_assistant_history_from_parsed_calls(
     });
 
     if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "reasoning_content".to_string(),
+                serde_json::Value::String(rc.to_string()),
+            );
+        }
     }
 
     Some(obj.to_string())
@@ -2621,53 +635,18 @@ fn resolve_display_text(
     }
 }
 
-#[derive(Debug, Clone)]
-struct ParsedToolCall {
-    name: String,
-    arguments: serde_json::Value,
-    tool_call_id: Option<String>,
 
-    parse_error: bool,
+pub(crate) fn tool_loop_cancelled() -> anyhow::Error {
+    anyhow::Error::new(crate::error::AgentError::TurnCancelled)
 }
-
-#[derive(Debug)]
-pub(crate) struct ToolLoopCancelled;
-
-impl std::fmt::Display for ToolLoopCancelled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("tool loop cancelled")
-    }
-}
-
-impl std::error::Error for ToolLoopCancelled {}
 
 pub(crate) fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
-    err.chain().any(|source| source.is::<ToolLoopCancelled>())
-}
-
-#[derive(Debug)]
-pub(crate) struct ModelSwitchRequested {
-    pub provider: String,
-    pub model: String,
-}
-
-impl std::fmt::Display for ModelSwitchRequested {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "model switch requested to {} {}",
-            self.provider, self.model
+    err.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<crate::error::AgentError>(),
+            Some(crate::error::AgentError::TurnCancelled)
         )
-    }
-}
-
-impl std::error::Error for ModelSwitchRequested {}
-
-pub(crate) fn is_model_switch_requested(err: &anyhow::Error) -> Option<(String, String)> {
-    err.chain()
-        .filter_map(|source| source.downcast_ref::<ModelSwitchRequested>())
-        .map(|e| (e.provider.clone(), e.model.clone()))
-        .next()
+    })
 }
 
 #[derive(Debug, Default)]
@@ -2683,6 +662,26 @@ struct StreamedChatOutcome {
 
 fn looks_like_streamed_tool_payload(window: &str) -> bool {
     crate::agent::streaming_markers::find_tool_marker(window).is_some()
+}
+
+fn retry_friendly_message(notice: &crate::providers::traits::RetryNotice) -> String {
+    use crate::providers::traits::RetryClass;
+    let provider = if notice.provider.is_empty() {
+        "upstream".to_string()
+    } else {
+        notice.provider.clone()
+    };
+    match notice.failure_class {
+        RetryClass::EngineOverloaded => format!(
+            "{provider} 服务器临时繁忙（engine overloaded），正在自动重试…"
+        ),
+        RetryClass::AccountRateLimited => format!(
+            "{provider} 账户配额限流（rate limit），等待恢复后重试…"
+        ),
+        RetryClass::Transient => format!(
+            "{provider} 网络瞬时错误，正在自动重试…"
+        ),
+    }
 }
 
 async fn call_provider_chat(
@@ -2704,7 +703,7 @@ async fn call_provider_chat(
 
     if let Some(token) = cancellation_token {
         tokio::select! {
-            () = token.cancelled() => Err(ToolLoopCancelled.into()),
+            () = token.cancelled() => Err(tool_loop_cancelled()),
             result = chat_future => result,
         }
     } else {
@@ -2721,15 +720,19 @@ async fn consume_provider_streaming_response(
     cancellation_token: Option<&CancellationToken>,
     on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
 ) -> Result<StreamedChatOutcome> {
-    let mut provider_stream = provider.stream_chat(
-        ChatRequest {
-            messages,
-            tools: request_tools,
-        },
-        model,
-        temperature,
-        crate::providers::traits::StreamOptions::new(true),
-    );
+    let cancel_for_provider = cancellation_token.cloned();
+    let mut provider_stream =
+        crate::providers::reliable::scope_stream_cancel_token_sync(cancel_for_provider, || {
+            provider.stream_chat(
+                ChatRequest {
+                    messages,
+                    tools: request_tools,
+                },
+                model,
+                temperature,
+                crate::providers::traits::StreamOptions::new(true),
+            )
+        });
     let mut outcome = StreamedChatOutcome::default();
     let mut delta_sender = on_delta;
     let mut suppress_forwarding = false;
@@ -2738,7 +741,7 @@ async fn consume_provider_streaming_response(
     loop {
         let next_chunk = if let Some(token) = cancellation_token {
             tokio::select! {
-                () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                () = token.cancelled() => return Err(tool_loop_cancelled()),
                 chunk = provider_stream.next() => chunk,
             }
         } else {
@@ -2749,7 +752,9 @@ async fn consume_provider_streaming_response(
             break;
         };
 
-        let event = event_result.map_err(|err| anyhow::anyhow!("provider stream error: {err}"))?;
+        let event = event_result.map_err(|err| {
+            anyhow::Error::new(crate::error::AgentError::StreamInterrupted(err.to_string()))
+        })?;
         match event {
             StreamEvent::Final => break,
             StreamEvent::ToolCall(tool_call) => {
@@ -2768,6 +773,48 @@ async fn consume_provider_streaming_response(
             StreamEvent::Usage(usage) => {
 
                 outcome.usage = Some(usage);
+            }
+            StreamEvent::Retry(notice) => {
+                let class_str = notice.failure_class.as_str();
+                let friendly = retry_friendly_message(&notice);
+                let session_label = crate::session::current_session_context()
+                    .map(|ctx| ctx.session_id)
+                    .unwrap_or_default();
+                tracing::warn!(
+                    target: "providers.reliable.retry",
+                    session_id = %session_label,
+                    provider = %notice.provider,
+                    model = %notice.model,
+                    attempt = notice.attempt,
+                    max_attempts = notice.max_attempts,
+                    wait_ms = notice.wait_ms,
+                    class = class_str,
+                    last_error = %notice.last_error_summary,
+                    "Upstream returned retryable failure; awaiting backoff before re-attempting"
+                );
+                if let Some(tx) = delta_sender {
+                    if outcome.forwarded_live_deltas {
+                        let _ = tx.send(DraftEvent::Clear).await;
+                        outcome.forwarded_live_deltas = false;
+                    }
+                    if tx
+                        .send(DraftEvent::ProviderRetry {
+                            attempt: notice.attempt,
+                            max_attempts: notice.max_attempts,
+                            wait_ms: notice.wait_ms,
+                            class: class_str.to_string(),
+                            provider: notice.provider.clone(),
+                            model: notice.model.clone(),
+                            message: friendly,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        delta_sender = None;
+                    }
+                }
+                marker_window.clear();
+                suppress_forwarding = false;
             }
             StreamEvent::TextDelta(chunk) => {
 
@@ -2834,56 +881,6 @@ async fn consume_provider_streaming_response(
     }
 
     Ok(outcome)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn agent_turn(
-    provider: &dyn Provider,
-    history: &mut Vec<ChatMessage>,
-    tools_registry: &[Box<dyn Tool>],
-    observer: &dyn Observer,
-    provider_name: &str,
-    model: &str,
-    temperature: f64,
-    silent: bool,
-    channel_name: &str,
-    channel_reply_target: Option<&str>,
-    multimodal_config: &crate::config::MultimodalConfig,
-    max_tool_iterations: usize,
-    approval: Option<&ApprovalManager>,
-    excluded_tools: &[String],
-    dedup_exempt_tools: &[String],
-    activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
-    model_switch_callback: Option<ModelSwitchCallback>,
-) -> Result<String> {
-    run_tool_call_loop(
-        provider,
-        history,
-        tools_registry,
-        observer,
-        provider_name,
-        model,
-        temperature,
-        silent,
-        approval,
-        channel_name,
-        channel_reply_target,
-        multimodal_config,
-        max_tool_iterations,
-        None,
-        None,
-        None,
-        excluded_tools,
-        dedup_exempt_tools,
-        activated_tools,
-        model_switch_callback,
-        &crate::config::PacingConfig::default(),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
 }
 
 fn maybe_inject_channel_delivery_defaults(
@@ -3154,7 +1151,7 @@ async fn execute_one_tool(
     let tool_future = tool.execute(call_arguments);
     let tool_result = if let Some(token) = cancellation_token {
         tokio::select! {
-            () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+            () = token.cancelled() => return Err(tool_loop_cancelled()),
             result = tool_future => result,
         }
     } else {
@@ -3405,26 +1402,30 @@ async fn execute_tools_parallel(
         .iter()
         .map(|call| {
             let sem = semaphore.clone();
+            let tool_call_id = call.tool_call_id.clone();
             async move {
-
                 let _permit = match sem.acquire_owned().await {
                     Ok(p) => p,
                     Err(e) => {
                         return Err(anyhow::anyhow!("semaphore closed: {e}"));
                     }
                 };
-                execute_one_tool(
-                    &call.name,
-                    call.arguments.clone(),
-                    tools_registry,
-                    tool_registry,
-                    activated_tools,
-                    observer,
-                    cancellation_token,
-                    rbac_engine,
-                    rbac_identity,
-                )
-                .await
+                CURRENT_TOOL_CALL_ID
+                    .scope(tool_call_id, async {
+                        execute_one_tool(
+                            &call.name,
+                            call.arguments.clone(),
+                            tools_registry,
+                            tool_registry,
+                            activated_tools,
+                            observer,
+                            cancellation_token,
+                            rbac_engine,
+                            rbac_identity,
+                        )
+                        .await
+                    })
+                    .await
             }
         })
         .collect();
@@ -3447,53 +1448,147 @@ async fn execute_tools_sequential(
 
     for call in tool_calls {
         outcomes.push(
-            execute_one_tool(
-                &call.name,
-                call.arguments.clone(),
-                tools_registry,
-                tool_registry,
-                activated_tools,
-                observer,
-                cancellation_token,
-                rbac_engine,
-                rbac_identity,
-            )
-            .await?,
+            CURRENT_TOOL_CALL_ID
+                .scope(call.tool_call_id.clone(), async {
+                    execute_one_tool(
+                        &call.name,
+                        call.arguments.clone(),
+                        tools_registry,
+                        tool_registry,
+                        activated_tools,
+                        observer,
+                        cancellation_token,
+                        rbac_engine,
+                        rbac_identity,
+                    )
+                    .await
+                })
+                .await?,
         );
     }
 
     Ok(outcomes)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_tool_call_loop(
-    provider: &dyn Provider,
-    history: &mut Vec<ChatMessage>,
-    tools_registry: &[Box<dyn Tool>],
-    observer: &dyn Observer,
-    provider_name: &str,
+async fn fire_post_turn_hooks(
+    response_cache_hook: Option<&std::sync::Arc<dyn crate::agent::loop_hooks::ResponseCacheHook>>,
+    experience_recorder_hook: Option<
+        &std::sync::Arc<dyn crate::agent::loop_hooks::ExperienceRecorderHook>,
+    >,
+    memory_session_hook: Option<&std::sync::Arc<dyn crate::agent::loop_hooks::MemorySessionHook>>,
+    cache_key: Option<&String>,
+    user_message: &str,
     model: &str,
-    temperature: f64,
-    silent: bool,
-    approval: Option<&ApprovalManager>,
-    channel_name: &str,
-    channel_reply_target: Option<&str>,
-    multimodal_config: &crate::config::MultimodalConfig,
-    max_tool_iterations: usize,
-    cancellation_token: Option<CancellationToken>,
-    on_delta: Option<tokio::sync::mpsc::Sender<DraftEvent>>,
-    hooks: Option<&crate::hooks::HookRunner>,
-    excluded_tools: &[String],
-    dedup_exempt_tools: &[String],
-    activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
-    model_switch_callback: Option<ModelSwitchCallback>,
-    pacing: &crate::config::PacingConfig,
-    rbac_engine: Option<&std::sync::Arc<crate::security::rbac::RbacEngine>>,
-    rbac_identity: Option<&crate::security::rbac::CallerIdentity>,
-    plan_mode_flag: Option<&crate::tools::PlanModeFlag>,
+    final_text: &str,
+    output_tokens: u32,
+    tools_used: &[String],
+    tool_results: &[(String, bool)],
+) {
+    if let (Some(hook), Some(key)) = (response_cache_hook, cache_key) {
+        hook.write_back(key, model, final_text, output_tokens).await;
+    }
+    if let Some(hook) = experience_recorder_hook {
+        let summary = crate::agent::loop_hooks::TurnExperienceSummary {
+            user_query: user_message.to_string(),
+            assistant_response: final_text.to_string(),
+            tools_used: tools_used.to_vec(),
+            tool_results: tool_results.to_vec(),
+        };
+        hook.record(&summary).await;
+    }
+    if let Some(hook) = memory_session_hook {
+        hook.on_turn_end(final_text, tools_used).await;
+    }
+}
 
-    tool_registry: Option<&ToolRegistry>,
+pub(crate) async fn run_unified_loop_impl(
+    policy: crate::agent::loop_policy::PolicyBundle<'_>,
+    history: &mut Vec<ChatMessage>,
 ) -> Result<String> {
+    let crate::agent::loop_policy::PolicyBundle {
+        origin: _,
+        provider,
+        tools_registry,
+        observer,
+        provider_name,
+        model,
+        temperature,
+        silent,
+        approval,
+        channel_name,
+        channel_reply_target,
+        multimodal_config,
+        max_tool_iterations,
+        cancellation_token,
+        on_delta,
+        event_sink,
+        hooks,
+        excluded_tools,
+        dedup_exempt_tools,
+        activated_tools,
+        model_switch_callback,
+        pacing,
+        rbac_engine,
+        rbac_identity,
+        plan_mode_flag,
+        tool_registry,
+        response_cache_hook,
+        memory_session_hook,
+        model_classifier_hook,
+        turn_preamble_hook,
+        gui_model_switch_hook,
+        iteration_context_budget_hook,
+        experience_recorder_hook,
+        plan_mode_nudge_hook,
+    } = policy;
+    let _ = &model_classifier_hook;
+
+    let user_msg_for_hooks: String = history
+        .iter()
+        .rfind(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let turn_event_tx_for_hooks: Option<tokio::sync::mpsc::Sender<crate::agent::agent::TurnEvent>> =
+        event_sink.turn_sender();
+
+    if let Some(hook) = &turn_preamble_hook {
+        if let Some(ref tx) = turn_event_tx_for_hooks {
+            if let Err(err) = hook.apply(&user_msg_for_hooks, tx).await {
+                tracing::debug!(
+                    target: "agent.hooks.turn_preamble",
+                    error = %err,
+                    "turn preamble hook returned error"
+                );
+            }
+        }
+    }
+    if let Some(hook) = &memory_session_hook {
+        hook.on_turn_start(&user_msg_for_hooks).await;
+    }
+
+    let response_cache_key: Option<String> = response_cache_hook
+        .as_ref()
+        .and_then(|h| h.build_key(history.as_slice(), model));
+    if let (Some(hook), Some(key)) = (&response_cache_hook, &response_cache_key) {
+        if let Some(cached) = hook.try_hit(key, &user_msg_for_hooks).await {
+            history.push(ChatMessage::assistant(cached.clone()));
+            fire_post_turn_hooks(
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &cached,
+                0,
+                &[],
+                &[],
+            )
+            .await;
+            return Ok(cached);
+        }
+    }
+
     let mode_max = if let Some(svc) = crate::services::try_get_services() {
         let mode = *svc.coding_mode.read();
         mode.max_iterations_override()
@@ -3526,23 +1621,13 @@ pub(crate) async fn run_tool_call_loop(
         .iter()
         .map(String::as_str)
         .collect();
-    let mut consecutive_identical_outputs: usize = 0;
-    let mut last_tool_output_hash: Option<u64> = None;
-    let identical_output_threshold: usize = {
-        let raw = pacing.loop_detection_identical_output_threshold;
-        if raw == 0 {
-            crate::agent::loop_control::DEFAULT_IDENTICAL_OUTPUT_THRESHOLD as usize
-        } else {
-            raw as usize
-        }
-    };
-
-    let mut loop_detector = crate::agent::loop_detector::LoopDetector::new(
+    let mut loop_state = crate::agent::loop_control::LoopControlState::new(
         crate::agent::loop_detector::LoopDetectorConfig {
             enabled: pacing.loop_detection_enabled,
             window_size: pacing.loop_detection_window_size,
             max_repeats: pacing.loop_detection_max_repeats,
         },
+        pacing.loop_detection_identical_output_threshold,
     );
 
     let mut cached_tool_specs: Option<std::sync::Arc<Vec<crate::tools::ToolSpec>>> = None;
@@ -3560,6 +1645,9 @@ pub(crate) async fn run_tool_call_loop(
 
     let mut plan_nudge_state =
         crate::agent::plan_mode_enforcement::PlanModeNudgeState::new();
+    #[cfg(feature = "tool-curator")]
+    let mut curator_nudge_state =
+        crate::agent::curator_mode_enforcement::CuratorModeNudgeState::new();
 
     let mut awaiting_user_input = false;
 
@@ -3574,6 +1662,9 @@ pub(crate) async fn run_tool_call_loop(
         if let Some(pinned) = crate::agent::mode_effects::pinned_test_target_reminder(mode) {
             crate::agent::mode_effects::replace_or_push_system_reminder(history, pinned);
         }
+        if let Some(proto) = crate::agent::mode_effects::prototype_ref_reminder(mode) {
+            crate::agent::mode_effects::replace_or_push_system_reminder(history, proto);
+        }
         let cfg = svc.config();
         if let Some(web_reminder) = crate::agent::mode_effects::web_research_disabled_reminder(
             mode,
@@ -3583,6 +1674,16 @@ pub(crate) async fn run_tool_call_loop(
             crate::agent::mode_effects::replace_or_push_system_reminder(
                 history,
                 web_reminder.to_string(),
+            );
+        }
+        if let Some(web_active) = crate::agent::mode_effects::web_research_active_reminder(
+            mode,
+            cfg.web_search.enabled,
+            cfg.web_fetch.enabled,
+        ) {
+            crate::agent::mode_effects::replace_or_push_system_reminder(
+                history,
+                web_active.to_string(),
             );
         }
     }
@@ -3606,12 +1707,38 @@ pub(crate) async fn run_tool_call_loop(
         let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
 
         let mut plan_finalized_this_iter: bool = false;
+        #[cfg(feature = "tool-curator")]
+        let mut curator_finalized_this_iter: bool = false;
 
         if cancellation_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
         {
-            return Err(ToolLoopCancelled.into());
+            return Err(tool_loop_cancelled());
+        }
+
+        if let Some(hook) = &iteration_context_budget_hook {
+            if let Some(ref tx) = turn_event_tx_for_hooks {
+                hook.prepare(iteration, tx).await;
+            }
+        }
+        if let Some(hook) = &gui_model_switch_hook {
+            if let Some(ref tx) = turn_event_tx_for_hooks {
+                if let Some(new_model) = hook.poll(tx).await {
+                    tracing::debug!(
+                        target: "agent.hooks.gui_model_switch",
+                        new_model = %new_model,
+                        "gui model switch hook signalled new model"
+                    );
+                }
+            }
+        }
+        if let Some(hook) = &plan_mode_nudge_hook {
+            if let Some(ref tx) = turn_event_tx_for_hooks {
+                if hook.try_inject(iteration, history, tx).await {
+                    continue;
+                }
+            }
         }
 
         if let Some(ref callback) = model_switch_callback {
@@ -3708,7 +1835,12 @@ pub(crate) async fn run_tool_call_loop(
             cached_tool_specs = Some(std::sync::Arc::new(specs));
         }
 
-        let tool_specs_arc = cached_tool_specs.as_ref().unwrap().clone();
+        let tool_specs_arc = cached_tool_specs
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!(
+                "tool spec cache should have been populated above (internal invariant violation)"
+            ))?
+            .clone();
         let mut tool_specs = (*tool_specs_arc).clone();
         if let Some(at) = activated_tools {
             for spec in at.lock().tool_specs() {
@@ -3846,12 +1978,12 @@ pub(crate) async fn run_tool_call_loop(
             period,
         }) = check_tool_loop_budget(None)
         {
-            return Err(anyhow::anyhow!(
-                "Budget exceeded: ${:.4} of ${:.2} {:?} limit. Cannot make further API calls until the budget resets.",
-                current_usd,
-                limit_usd,
-                period
-            ));
+            return Err(anyhow::Error::new(crate::error::AgentError::CostBudgetExceeded(
+                format!(
+                    "Budget exceeded: ${:.4} of ${:.2} {:?} limit. Cannot make further API calls until the budget resets.",
+                    current_usd, limit_usd, period
+                ),
+            )));
         }
 
         if let Some(svc) = crate::services::try_get_services() {
@@ -3916,7 +2048,7 @@ pub(crate) async fn run_tool_call_loop(
                     Ok(crate::providers::ChatResponse {
                         text: Some(streamed.response_text),
                         tool_calls: streamed.tool_calls,
-                        usage: None,
+                        usage: streamed.usage,
                         reasoning_content,
                     })
                 }
@@ -3970,7 +2102,7 @@ pub(crate) async fn run_tool_call_loop(
                     let step_timeout = Duration::from_secs(step_secs);
                     if let Some(token) = cancellation_token.as_ref() {
                         tokio::select! {
-                            () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                            () = token.cancelled() => return Err(tool_loop_cancelled()),
                             result = tokio::time::timeout(step_timeout, chat_future) => {
                                 match result {
                                     Ok(inner) => inner,
@@ -3992,7 +2124,7 @@ pub(crate) async fn run_tool_call_loop(
                 _ => {
                     if let Some(token) = cancellation_token.as_ref() {
                         tokio::select! {
-                            () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                            () = token.cancelled() => return Err(tool_loop_cancelled()),
                             result = chat_future => result,
                         }
                     } else {
@@ -4233,6 +2365,42 @@ pub(crate) async fn run_tool_call_loop(
                 continue;
             }
 
+            #[cfg(feature = "tool-curator")]
+            {
+                let curator_flag_opt = crate::services::try_get_services()
+                    .map(|svc| svc.curator_mode_flag.clone());
+                let in_curator_mode =
+                    crate::agent::curator_mode_enforcement::detect_curator_mode_active(
+                        curator_flag_opt.as_ref(),
+                    );
+                if matches!(
+                    crate::agent::curator_mode_enforcement::evaluate_curator_mode_exit(
+                        in_curator_mode,
+                        &curator_nudge_state,
+                        awaiting_user_input,
+                    ),
+                    crate::agent::curator_mode_enforcement::CuratorModeExitDecision::InjectNudge
+                ) {
+                    tracing::info!(
+                        target: "agent.curator_mode",
+                        turn_id = %turn_id,
+                        nudge_count = curator_nudge_state.nudge_count + 1,
+                        max_nudges =
+                            crate::agent::curator_mode_enforcement::MAX_CURATOR_NUDGES,
+                        "Curator mode: model exited without exit_curator_mode; injecting nudge"
+                    );
+                    if !response_text.trim().is_empty() {
+                        history.push(ChatMessage::assistant(&response_text));
+                    }
+                    let msg = crate::agent::curator_mode_enforcement::nudge_message(
+                        &curator_nudge_state,
+                    );
+                    history.push(ChatMessage::system(msg));
+                    curator_nudge_state.nudge_count += 1;
+                    continue;
+                }
+            }
+
             let sc_cfg = resolve_self_consistency_config();
             let (response_text, display_text) = if sc_cfg.should_engage() {
                 let (winner, _agreement, overridden, samples_used) =
@@ -4287,6 +2455,19 @@ pub(crate) async fn run_tool_call_loop(
                 if !should_emit_post_hoc_chunks {
                     history.push(ChatMessage::assistant(response_text.clone()));
                     _turn_metrics.mark_ok();
+                    fire_post_turn_hooks(
+                        response_cache_hook.as_ref(),
+                        experience_recorder_hook.as_ref(),
+                        memory_session_hook.as_ref(),
+                        response_cache_key.as_ref(),
+                        &user_msg_for_hooks,
+                        model,
+                        &display_text,
+                        0,
+                        &[],
+                        &[],
+                    )
+                    .await;
                     return Ok(display_text);
                 }
 
@@ -4298,7 +2479,7 @@ pub(crate) async fn run_tool_call_loop(
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled)
                     {
-                        return Err(ToolLoopCancelled.into());
+                        return Err(tool_loop_cancelled());
                     }
                     chunk.push_str(word);
                     if chunk.len() >= STREAM_CHUNK_MIN_CHARS
@@ -4316,6 +2497,19 @@ pub(crate) async fn run_tool_call_loop(
             }
             history.push(ChatMessage::assistant(response_text.clone()));
             _turn_metrics.mark_ok();
+            fire_post_turn_hooks(
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &display_text,
+                0,
+                &[],
+                &[],
+            )
+            .await;
             return Ok(display_text);
         }
 
@@ -4345,7 +2539,55 @@ pub(crate) async fn run_tool_call_loop(
 
         let mut deferred_system_after_tool_batch: Vec<String> = Vec::new();
 
+        let tool_burst_cap =
+            crate::constants::tool_limits::MAX_TOOL_CALLS_PER_TURN as usize;
+        let storm_truncated = tool_calls.len().saturating_sub(tool_burst_cap);
+        if storm_truncated > 0 {
+            tracing::warn!(
+                target: "agent.tool_storm",
+                turn_id = %turn_id,
+                iteration = iteration + 1,
+                requested = tool_calls.len(),
+                cap = tool_burst_cap,
+                "tool burst cap exceeded; truncating excess calls"
+            );
+            runtime_trace::record_event(
+                "tool_burst_capped",
+                Some(channel_name),
+                Some(provider_name),
+                Some(model),
+                Some(&turn_id),
+                Some(false),
+                Some("excess tool calls in single iteration"),
+                serde_json::json!({
+                    "iteration": iteration + 1,
+                    "requested": tool_calls.len(),
+                    "cap": tool_burst_cap,
+                    "dropped": storm_truncated,
+                }),
+            );
+        }
+
         for (idx, call) in tool_calls.iter().enumerate() {
+
+            if idx >= tool_burst_cap {
+                let capped = format!(
+                    "[Capped] Tool call '{}' rejected: per-iteration cap of {} exceeded ({} excess calls dropped). \
+                    Re-issue fewer tool calls or split the work across turns.",
+                    call.name, tool_burst_cap, storm_truncated
+                );
+                ordered_results[idx] = Some((
+                    call.name.clone(),
+                    call.tool_call_id.clone(),
+                    ToolExecutionOutcome {
+                        output: capped.clone(),
+                        success: false,
+                        error_reason: Some(capped),
+                        duration: Duration::ZERO,
+                    },
+                ));
+                continue;
+            }
 
             let mut tool_name = call.name.clone();
             let mut tool_args = call.arguments.clone();
@@ -4589,6 +2831,7 @@ pub(crate) async fn run_tool_call_loop(
                     .send(DraftEvent::ToolCall {
                         name: tool_name.clone(),
                         args: tool_args.clone(),
+                        tool_call_id: call.tool_call_id.clone(),
                     })
                     .await;
             }
@@ -4683,6 +2926,15 @@ pub(crate) async fn run_tool_call_loop(
                 let progress_msg = if outcome.success {
                     format!("\u{2705} {} ({secs}s)\n", call.name)
                 } else if let Some(ref reason) = outcome.error_reason {
+                    if reason.chars().count() > 200 {
+                        tracing::debug!(
+                            target: "loop.tool_error_truncated",
+                            tool = %call.name,
+                            seconds = secs,
+                            reason_full = %reason,
+                            "tool error reason truncated for progress draft; full content logged at debug",
+                        );
+                    }
                     format!(
                         "\u{274c} {} ({secs}s): {}\n",
                         call.name,
@@ -4699,6 +2951,7 @@ pub(crate) async fn run_tool_call_loop(
                         name: call.name.clone(),
                         output: outcome.output.clone(),
                         success: outcome.success,
+                        tool_call_id: call.tool_call_id.clone(),
                     })
                     .await;
             }
@@ -4719,6 +2972,11 @@ pub(crate) async fn run_tool_call_loop(
             if outcome.success && call.name == "exit_plan_mode" {
                 plan_nudge_state.note_exit_plan_mode_success();
                 plan_finalized_this_iter = true;
+            }
+            #[cfg(feature = "tool-curator")]
+            if outcome.success && call.name == "exit_curator_mode" {
+                curator_nudge_state.note_exit_curator_mode_success();
+                curator_finalized_this_iter = true;
             }
 
             let mut outcome = outcome;
@@ -4755,7 +3013,7 @@ pub(crate) async fn run_tool_call_loop(
                 crate::agent::loop_detector::canonicalise_args_string(args)
                     .hash(&mut detection_fingerprint_hasher);
                 outcome.output.hash(&mut detection_fingerprint_hasher);
-                let det_result = loop_detector.record(&tool_name, args, &outcome.output);
+                let det_result = loop_state.record_per_tool(&tool_name, args, &outcome.output);
                 match det_result {
                     crate::agent::loop_detector::LoopDetectionResult::Ok => {}
                     crate::agent::loop_detector::LoopDetectionResult::Warning(ref msg) => {
@@ -4784,7 +3042,9 @@ pub(crate) async fn run_tool_call_loop(
                                 "tool": tool_name,
                             }),
                         );
-                        anyhow::bail!("Agent loop aborted by loop detector: {msg}");
+                        return Err(anyhow::Error::new(crate::error::AgentError::LoopAborted(
+                            msg.to_string(),
+                        )));
                     }
                 }
             }
@@ -4849,11 +3109,28 @@ pub(crate) async fn run_tool_call_loop(
             deferred_system_after_tool_batch.push(msg.to_string());
         }
 
+        #[cfg(feature = "tool-curator")]
+        if !curator_finalized_this_iter && !awaiting_user_input {
+            let curator_flag_opt = crate::services::try_get_services()
+                .map(|svc| svc.curator_mode_flag.clone());
+            let in_curator_mode =
+                crate::agent::curator_mode_enforcement::detect_curator_mode_active(
+                    curator_flag_opt.as_ref(),
+                );
+            if in_curator_mode {
+                curator_nudge_state.nudge_count += 1;
+                let msg = crate::agent::curator_mode_enforcement::nudge_message(
+                    &curator_nudge_state,
+                );
+                deferred_system_after_tool_batch.push(msg.to_string());
+            }
+        }
+
         if plan_finalized_this_iter {
             tracing::info!(
                 target: "agent.plan_mode",
                 turn_id = %turn_id,
-                "Halting turn: exit_plan_mode succeeded; waiting for user's Build → Switch click"
+                "Halting turn: exit_plan_mode succeeded; waiting for user's Build —Switch click"
             );
             let halt_text = "_Plan finalised. Waiting for the user to click \
                 **Build** in the plan card to switch to Agent mode and start \
@@ -4862,10 +3139,51 @@ pub(crate) async fn run_tool_call_loop(
             _turn_metrics.mark_ok();
             if let Some(ref tx) = on_delta {
                 let _ = tx.send(DraftEvent::Clear).await;
-                let _ = tx
-                    .send(DraftEvent::Content(halt_text.clone()))
-                    .await;
             }
+            fire_post_turn_hooks(
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &halt_text,
+                0,
+                &[],
+                &[],
+            )
+            .await;
+            return Ok(halt_text);
+        }
+
+        #[cfg(feature = "tool-curator")]
+        if curator_finalized_this_iter {
+            tracing::info!(
+                target: "agent.curator_mode",
+                turn_id = %turn_id,
+                "Halting turn: exit_curator_mode succeeded; waiting for user's Build click"
+            );
+            let halt_text = "_Curator deliverable saved. Waiting for the user to click \
+                **Build** in the curator card to switch to Agent mode and execute \
+                `impl_blueprint.md` verbatim._"
+                .to_string();
+            _turn_metrics.mark_ok();
+            if let Some(ref tx) = on_delta {
+                let _ = tx.send(DraftEvent::Clear).await;
+            }
+            fire_post_turn_hooks(
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &halt_text,
+                0,
+                &[],
+                &[],
+            )
+            .await;
             return Ok(halt_text);
         }
 
@@ -4886,6 +3204,19 @@ pub(crate) async fn run_tool_call_loop(
                     .send(DraftEvent::Content(pause_text.clone()))
                     .await;
             }
+            fire_post_turn_hooks(
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &pause_text,
+                0,
+                &[],
+                &[],
+            )
+            .await;
             return Ok(pause_text);
         }
 
@@ -4896,20 +3227,7 @@ pub(crate) async fn run_tool_call_loop(
 
         if loop_detection_active && detection_has_payload {
             let current_hash = detection_fingerprint_hasher.finish();
-            let threshold = identical_output_threshold;
-
-            if last_tool_output_hash == Some(current_hash) {
-                consecutive_identical_outputs += 1;
-            } else {
-                consecutive_identical_outputs = 0;
-                last_tool_output_hash = Some(current_hash);
-            }
-
-            if consecutive_identical_outputs >= threshold {
-                let abort_msg = format!(
-                    "identical tool call (name + arguments + output) detected {} consecutive times",
-                    consecutive_identical_outputs
-                );
+            if let Err(abort_msg) = loop_state.check_iteration_fingerprint(current_hash) {
                 runtime_trace::record_event(
                     "tool_loop_identical_output_abort",
                     Some(channel_name),
@@ -4920,11 +3238,13 @@ pub(crate) async fn run_tool_call_loop(
                     Some(&abort_msg),
                     serde_json::json!({
                         "iteration": iteration + 1,
-                        "consecutive_identical": consecutive_identical_outputs,
-                        "threshold": threshold,
+                        "consecutive_identical": loop_state.consecutive_identical_outputs(),
+                        "threshold": loop_state.identical_output_threshold(),
                     }),
                 );
-                anyhow::bail!("Agent loop aborted: {abort_msg}");
+                return Err(anyhow::Error::new(crate::error::AgentError::LoopAborted(
+                    abort_msg.to_string(),
+                )));
             }
         }
 
@@ -5003,6 +3323,19 @@ pub(crate) async fn run_tool_call_loop(
                 "[Pair Checkpoint] Turn paused after tool batch. The runtime returned \
                  control to the user. The next user message will resume execution.",
             ));
+            fire_post_turn_hooks(
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &pair_text,
+                0,
+                &[],
+                &[],
+            )
+            .await;
             return Ok(pair_text);
         }
     }
@@ -5019,7 +3352,9 @@ pub(crate) async fn run_tool_call_loop(
             "max_iterations": max_iterations,
         }),
     );
-    anyhow::bail!("Agent exceeded maximum tool iterations ({max_iterations})")
+    Err(anyhow::Error::new(
+        crate::error::AgentError::LoopOverflow(max_iterations),
+    ))
 }
 
 pub(crate) fn build_tool_instructions(
@@ -5115,11 +3450,6 @@ pub async fn run(
 
     if let Some(svc) = crate::services::try_get_services() {
         svc.set_max_context_tokens(config.agent.max_context_tokens);
-        let rl = svc.rate_limiter.clone();
-        crate::runtime::spawn_supervised("agent.loop.rate_limiter", async move {
-            rl.register("llm", std::time::Duration::from_secs(60), 60)
-                .await;
-        });
     }
 
     crate::event_bus::integration::init_global_bus();
@@ -5194,7 +3524,7 @@ pub async fn run(
     > = None;
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
         tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
+            "Initializing MCP client —{} server(s) configured",
             config.mcp.servers.len()
         );
         match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
@@ -5504,7 +3834,7 @@ pub async fn run(
     if config.browser.enabled {
         tool_descs.push((
             "browser_open",
-            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
+            "Open approved HTTPS URLs in system browser (allowlist-only, no bulk content extraction)",
         ));
     }
     if config.composio.enabled {
@@ -5605,7 +3935,15 @@ pub async fn run(
     }
 
     let approval_manager = if interactive {
-        Some(ApprovalManager::from_config(&config.autonomy))
+        let audit_path = config
+            .config_path
+            .parent()
+            .map(|p| p.join("approval_audit.jsonl"));
+        let mut mgr = ApprovalManager::from_config(&config.autonomy);
+        if let Some(p) = audit_path {
+            mgr = mgr.with_audit_log_path(p);
+        }
+        Some(mgr)
     } else {
         None
     };
@@ -5720,34 +4058,29 @@ pub async fn run(
             let mut current_model_name = model_name.to_string();
 
             loop {
-                let result = run_tool_call_loop(
+                let policy = crate::agent::loop_policy::PolicyBundle::cli(
                     current_provider.as_ref(),
-                    &mut history,
                     &tools_registry,
                     observer.as_ref(),
                     &current_provider_name,
                     &current_model_name,
-                    effective_temperature,
-                    false,
-                    approval_manager.as_ref(),
-                    channel_name,
-                    None,
                     &config.multimodal,
-                    config.agent.max_tool_iterations,
-                    None,
-                    None,
-                    None,
+                    &config.pacing,
                     &excluded_tools,
                     &config.agent.tool_call_dedup_exempt,
-                    activated_handle.as_ref(),
-                    Some(model_switch_callback.clone()),
-                    &config.pacing,
-                    rbac_engine_ref,
-                    rbac_identity_ref,
-                    Some(&plan_mode_flag),
-                    None,
                 )
-                .await;
+                .with_temperature(effective_temperature)
+                .with_silent(false)
+                .with_approval(approval_manager.as_ref())
+                .with_channel_name(channel_name)
+                .with_max_iterations(config.agent.max_tool_iterations)
+                .with_activated_tools(activated_handle.as_ref())
+                .with_model_switch_callback(Some(model_switch_callback.clone()))
+                .with_rbac(rbac_engine_ref, rbac_identity_ref)
+                .with_plan_mode_flag(Some(&plan_mode_flag));
+                let result = crate::agent::loop_unified::UnifiedLoop::new(policy)
+                    .run(&mut history)
+                    .await;
 
                 match result {
                     Ok(resp) => return Ok::<String, anyhow::Error>(resp),
@@ -5823,7 +4156,7 @@ pub async fn run(
     }
 
     if message.is_none() {
-        println!("🦀 SenWeaverCoding Interactive Mode");
+        println!("🚀 SenWeaverCoding Interactive Mode");
         println!("Type /help for commands.\n");
         let _cli = crate::channels::CliChannel::new();
         let _command_registry = crate::services::container::register_all_commands();
@@ -5839,7 +4172,7 @@ pub async fn run(
         loop {
 
             let prompt_prefix = {
-                let model_hint = model_name.split('/').last().unwrap_or(&model_name);
+                let model_hint = model_name.split('/').next_back().unwrap_or(&model_name);
                 let cost_hint = if let Some(bs) = crate::bootstrap::try_get_state() {
                     let mut cost = 0.0f64;
                     bs.read(|state| cost = state.total_cost_usd);
@@ -6036,34 +4369,28 @@ pub async fn run(
 
             let model_switch_callback = get_model_switch_state();
             let response = loop {
-                match run_tool_call_loop(
+                let policy = crate::agent::loop_policy::PolicyBundle::cli(
                     provider.as_ref(),
-                    &mut history,
                     &tools_registry,
                     observer.as_ref(),
                     &provider_name,
                     &model_name,
-                    effective_temperature,
-                    true,
-                    None,
-                    channel_name,
-                    None,
                     &config.multimodal,
-                    config.agent.max_tool_iterations,
-                    None,
-                    Some(delta_tx.clone()),
-                    None,
+                    &config.pacing,
                     &excluded_tools,
                     &config.agent.tool_call_dedup_exempt,
-                    activated_handle.as_ref(),
-                    Some(model_switch_callback.clone()),
-                    &config.pacing,
-                    rbac_engine_ref,
-                    rbac_identity_ref,
-                    None,
-                    None,
                 )
-                .await
+                .with_temperature(effective_temperature)
+                .with_silent(true)
+                .with_channel_name(channel_name)
+                .with_max_iterations(config.agent.max_tool_iterations)
+                .with_on_delta(Some(delta_tx.clone()))
+                .with_activated_tools(activated_handle.as_ref())
+                .with_model_switch_callback(Some(model_switch_callback.clone()))
+                .with_rbac(rbac_engine_ref, rbac_identity_ref);
+                match crate::agent::loop_unified::UnifiedLoop::new(policy)
+                    .run(&mut history)
+                    .await
                 {
                     Ok(resp) => break resp,
                     Err(e) => {
@@ -6141,7 +4468,17 @@ pub async fn process_message(
         &config.autonomy,
         &config.workspace_dir,
     ));
-    let approval_manager = ApprovalManager::for_non_interactive(&config.autonomy);
+    let approval_manager = {
+        let audit_path = config
+            .config_path
+            .parent()
+            .map(|p| p.join("approval_audit.jsonl"));
+        let mut mgr = ApprovalManager::for_non_interactive(&config.autonomy);
+        if let Some(p) = audit_path {
+            mgr = mgr.with_audit_log_path(p);
+        }
+        mgr
+    };
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
         &config.memory,
         &config.embedding_routes,
@@ -6192,7 +4529,7 @@ pub async fn process_message(
     > = None;
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
         tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
+            "Initializing MCP client —{} server(s) configured",
             config.mcp.servers.len()
         );
         match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
@@ -6506,24 +4843,25 @@ pub async fn process_message(
         excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
     }
 
-    agent_turn(
+    let pacing_default = crate::config::PacingConfig::default();
+    let policy = crate::agent::loop_policy::PolicyBundle::cli(
         provider.as_ref(),
-        &mut history,
         &tools_registry,
         observer.as_ref(),
         provider_name,
         &model_name,
-        effective_temperature,
-        true,
-        "daemon",
-        None,
         &config.multimodal,
-        config.agent.max_tool_iterations,
-        Some(&approval_manager),
+        &pacing_default,
         &excluded_tools,
         &config.agent.tool_call_dedup_exempt,
-        activated_handle_pm.as_ref(),
-        None,
     )
-    .await
+    .with_temperature(effective_temperature)
+    .with_silent(true)
+    .with_approval(Some(&approval_manager))
+    .with_channel_name("daemon")
+    .with_max_iterations(config.agent.max_tool_iterations)
+    .with_activated_tools(activated_handle_pm.as_ref());
+    crate::agent::loop_unified::UnifiedLoop::new(policy)
+        .run(&mut history)
+        .await
 }

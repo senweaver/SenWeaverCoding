@@ -1,24 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Session-driven CLI shell: an alternative interactive mode that routes
-//! all output through `AgentSession` → `render_cli` → stdout.
-//!
-//! This is the reference thin-shell implementation promised by the
-//! architecture plan.  It proves the `AgentSession` event stream is
-//! sufficient to run a real conversation with zero UI-specific business
-//! logic leaking into the shell itself.
-//!
-//! # Design
-//!
-//! 1. Read user input line-by-line from stdin.
-//! 2. `session.submit(input)` drives the internal agent loop.
-//! 3. A detached task subscribes to `session.subscribe()` and renders
-//!    each `SessionEvent` via `render_cli(&event, CliFormat::Pretty)`.
-//! 4. Ctrl-C / empty input cleanly exits.
-//!
-//! Compared to the legacy REPL (`src/agent/run`), no rendering logic
-//! appears outside the shared renderer — the shell is 100% event-driven.
 
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
@@ -130,23 +112,18 @@ pub async fn run_session_driven(agent: Arc<Mutex<Agent>>, prompt_label: &str) ->
     let renderer = crate::runtime::spawn_supervised("entrypoints.session_renderer", async move {
         let mut rx = event_rx;
         let _ = renderer_session;
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let (text, newline) = render_cli(&event, CliFormat::Pretty);
-                    let mut stdout = io::stdout().lock();
-                    if newline {
-                        let _ = writeln!(stdout, "{text}");
-                    } else {
-                        let _ = write!(stdout, "{text}");
-                        let _ = stdout.flush();
-                    }
+        while let Ok(event) = rx.recv().await {
+            let (text, newline) = render_cli(&event, CliFormat::Pretty);
+            let mut stdout = io::stdout().lock();
+            if newline {
+                let _ = writeln!(stdout, "{text}");
+            } else {
+                let _ = write!(stdout, "{text}");
+                let _ = stdout.flush();
+            }
 
-                    if matches!(event.kind, SessionEventKind::TurnFinished { .. }) {
-                        let _ = writeln!(stdout);
-                    }
-                }
-                Err(_) => break,
+            if matches!(event.kind, SessionEventKind::TurnFinished { .. }) {
+                let _ = writeln!(stdout);
             }
         }
     });
@@ -190,7 +167,7 @@ pub async fn run_session_driven(agent: Arc<Mutex<Agent>>, prompt_label: &str) ->
     }
 
     drop(session);
-    renderer.into_inner().await;
+    let _ = renderer.into_inner().await;
     Ok(())
 }
 

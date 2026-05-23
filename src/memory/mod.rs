@@ -75,16 +75,14 @@ where
             let local = sqlite_builder()?;
             Ok(Box::new(LucidMemory::new(workspace_dir, local)))
         }
-        MemoryBackendKind::Qdrant | MemoryBackendKind::Markdown => {
-            Ok(Box::new(MarkdownMemory::new(workspace_dir)))
-        }
+        MemoryBackendKind::Markdown => Ok(Box::new(MarkdownMemory::new(workspace_dir))),
+        MemoryBackendKind::Qdrant => Err(anyhow::anyhow!(
+            "Qdrant backend must be constructed via the dedicated path in create_memory_with_storage_and_routes, not the sqlite/lucid/markdown fallback helper{unknown_context}"
+        )),
         MemoryBackendKind::None => Ok(Box::new(NoneMemory::new())),
-        MemoryBackendKind::Unknown => {
-            tracing::warn!(
-                "Unknown memory backend '{backend_name}'{unknown_context}, falling back to markdown"
-            );
-            Ok(Box::new(MarkdownMemory::new(workspace_dir)))
-        }
+        MemoryBackendKind::Unknown => Err(anyhow::anyhow!(
+            "Unknown memory backend '{backend_name}'{unknown_context}. Configure [memory].backend to one of: sqlite, lucid, markdown, qdrant, none.",
+        )),
     }
 }
 
@@ -120,25 +118,52 @@ pub fn should_skip_autosave_content(content: &str) -> bool {
         || lowered.contains("distilled_index_sig:")
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct ResolvedEmbeddingConfig {
-    provider: String,
-    model: String,
-    dimensions: usize,
-    api_key: Option<String>,
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum EmbeddingApiKeySource {
+
+    Route(String),
+
+    Env(String),
+
+    Caller,
+
+    None,
 }
 
-impl std::fmt::Debug for ResolvedEmbeddingConfig {
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum EmbeddingConfigSource {
+
+    Toml,
+
+    Route(String),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EmbeddingResolution {
+    pub provider: String,
+    pub model: String,
+    pub dimensions: usize,
+    pub api_key: Option<String>,
+    pub config_source: EmbeddingConfigSource,
+    pub api_key_source: EmbeddingApiKeySource,
+}
+
+impl std::fmt::Debug for EmbeddingResolution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedEmbeddingConfig")
+        f.debug_struct("EmbeddingResolution")
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("dimensions", &self.dimensions)
+            .field("config_source", &self.config_source)
+            .field("api_key_source", &self.api_key_source)
+            .field("api_key_present", &self.api_key.is_some())
             .finish_non_exhaustive()
     }
 }
 
-fn embedding_provider_env_key(provider: &str) -> Option<String> {
+type ResolvedEmbeddingConfig = EmbeddingResolution;
+
+fn embedding_provider_env_key(provider: &str) -> Option<(String, String)> {
     let env_var = match provider.trim() {
         "openai" => "OPENAI_API_KEY",
         "openrouter" => "OPENROUTER_API_KEY",
@@ -149,44 +174,67 @@ fn embedding_provider_env_key(provider: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .map(|v| (env_var.to_string(), v))
 }
 
 fn resolve_embedding_config(
     config: &MemoryConfig,
     embedding_routes: &[EmbeddingRouteConfig],
     api_key: Option<&str>,
-) -> ResolvedEmbeddingConfig {
+) -> EmbeddingResolution {
     let caller_api_key = api_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    let fallback_api_key =
-        embedding_provider_env_key(config.embedding_provider.trim()).or(caller_api_key);
-    let fallback = ResolvedEmbeddingConfig {
+    let env_pair = embedding_provider_env_key(config.embedding_provider.trim());
+    let (fallback_api_key, fallback_api_key_source) = match (env_pair.as_ref(), caller_api_key.as_ref()) {
+        (Some((var, val)), _) => (Some(val.clone()), EmbeddingApiKeySource::Env(var.clone())),
+        (None, Some(val)) => (Some(val.clone()), EmbeddingApiKeySource::Caller),
+        (None, None) => (None, EmbeddingApiKeySource::None),
+    };
+
+    let fallback = EmbeddingResolution {
         provider: config.embedding_provider.trim().to_string(),
         model: config.embedding_model.trim().to_string(),
         dimensions: config.embedding_dimensions,
         api_key: fallback_api_key.clone(),
+        config_source: EmbeddingConfigSource::Toml,
+        api_key_source: fallback_api_key_source.clone(),
     };
 
-    let Some(hint) = config
+    let route_hint = config
         .embedding_model
-        .strip_prefix("hint:")
+        .strip_prefix("route:")
+        .or_else(|| {
+            config
+                .embedding_model
+                .strip_prefix("hint:")
+                .inspect(|_| {
+                    tracing::warn!(
+                        deprecated = "hint:",
+                        replacement = "route:",
+                        "embedding_model uses deprecated `hint:` prefix; switch to `route:` (hint: still accepted for now)"
+                    );
+                })
+        })
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+        .filter(|value| !value.is_empty());
+
+    let Some(route_key) = route_hint else {
+        log_resolution(&fallback);
         return fallback;
     };
 
     let Some(route) = embedding_routes
         .iter()
-        .find(|route| route.hint.trim() == hint)
+        .find(|route| route.hint.trim() == route_key)
     else {
         tracing::warn!(
-            hint,
-            "Unknown embedding route hint; falling back to [memory] embedding settings"
+            route = route_key,
+            "Unknown embedding route; falling back to [memory] embedding settings"
         );
+        log_resolution(&fallback);
         return fallback;
     };
 
@@ -195,9 +243,10 @@ fn resolve_embedding_config(
     let dimensions = route.dimensions.unwrap_or(config.embedding_dimensions);
     if provider.is_empty() || model.is_empty() || dimensions == 0 {
         tracing::warn!(
-            hint,
+            route = route_key,
             "Invalid embedding route configuration; falling back to [memory] embedding settings"
         );
+        log_resolution(&fallback);
         return fallback;
     }
 
@@ -208,12 +257,33 @@ fn resolve_embedding_config(
         .filter(|value: &&str| !value.is_empty())
         .map(|value| value.to_string());
 
-    ResolvedEmbeddingConfig {
+    let (api_key, api_key_source) = match (routed_api_key, fallback_api_key) {
+        (Some(k), _) => (Some(k), EmbeddingApiKeySource::Route(route_key.to_string())),
+        (None, Some(k)) => (Some(k), fallback_api_key_source),
+        (None, None) => (None, EmbeddingApiKeySource::None),
+    };
+
+    let resolved = EmbeddingResolution {
         provider: provider.to_string(),
         model: model.to_string(),
         dimensions,
-        api_key: routed_api_key.or(fallback_api_key),
-    }
+        api_key,
+        config_source: EmbeddingConfigSource::Route(route_key.to_string()),
+        api_key_source,
+    };
+    log_resolution(&resolved);
+    resolved
+}
+
+fn log_resolution(r: &EmbeddingResolution) {
+    tracing::info!(
+        provider = %r.provider,
+        model = %r.model,
+        dimensions = r.dimensions,
+        config_source = ?r.config_source,
+        api_key_source = ?r.api_key_source,
+        "embedding configuration resolved",
+    );
 }
 
 pub fn create_memory(
@@ -344,7 +414,7 @@ pub fn create_memory_with_storage_and_routes(
             &collection,
             qdrant_api_key,
             embedder,
-        )));
+        )?));
     }
 
     let mem = create_memory_with_builders(
@@ -377,18 +447,25 @@ pub fn create_memory_for_migration(
     backend: &str,
     workspace_dir: &Path,
 ) -> anyhow::Result<Box<dyn Memory>> {
-    if matches!(classify_memory_backend(backend), MemoryBackendKind::None) {
-        anyhow::bail!(
+    match classify_memory_backend(backend) {
+        MemoryBackendKind::None => anyhow::bail!(
             "memory backend 'none' disables persistence; choose sqlite, lucid, or markdown before migration"
-        );
+        ),
+        MemoryBackendKind::Qdrant => anyhow::bail!(
+            "qdrant backend cannot be used as a migration source/target; use sqlite, lucid, or markdown for migration"
+        ),
+        MemoryBackendKind::Unknown => anyhow::bail!(
+            "unknown memory backend '{backend}' during migration; choose sqlite, lucid, or markdown"
+        ),
+        MemoryBackendKind::Sqlite | MemoryBackendKind::Lucid | MemoryBackendKind::Markdown => {
+            create_memory_with_builders(
+                backend,
+                workspace_dir,
+                || SqliteMemory::new(workspace_dir),
+                " during migration",
+            )
+        }
     }
-
-    create_memory_with_builders(
-        backend,
-        workspace_dir,
-        || SqliteMemory::new(workspace_dir),
-        " during migration",
-    )
 }
 
 pub fn create_response_cache(config: &MemoryConfig, workspace_dir: &Path) -> Option<ResponseCache> {

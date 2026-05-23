@@ -1,23 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared agent session kernel consumed by CLI, TUI, and GUI.
-//!
-//! `AgentSession` is the UI-agnostic façade: callers `submit()` user input
-//! and receive a stream of `SessionEvent`s that the presentation layer
-//! renders.  All business logic (provider calls, tool dispatch, context
-//! management) lives behind this interface ??UI code never touches the
-//! agent loop directly.
-//!
-//! Two modes are supported:
-//!
-//! 1. **Standalone** (`AgentSession::new`): events are emitted by the caller
-//!    (e.g. test code, `/session demo`).  Useful for wiring the shell
-//!    renderers without a real LLM provider.
-//! 2. **Agent-backed** (`AgentSession::with_agent`): `submit()` actually
-//!    calls `Agent::turn_streamed` on a shared `Agent` handle and bridges
-//!    the internal `TurnEvent` stream into `SessionEvent`.  This is the
-//!    production path used by CLI/TUI/GUI shells.
 
 #![allow(unused_imports)]
 pub mod bridge;
@@ -41,7 +24,7 @@ pub mod workspace_run;
 pub use bridge::SessionEventSink;
 pub use resource_lock::{
     AcquireError as ResourceAcquireError, ResourceEvent, ResourceGuard, ResourceKind,
-    SessionContext, WorkspaceResourceManager, acquire_browser_for_current_session,
+    SessionContext, WaiterSnapshot, WorkspaceResourceManager, acquire_browser_for_current_session,
     acquire_file_write_for_current_session, acquire_many_file_writes_for_current_session,
     acquire_shell_for_current_session, current_session_context, global_workspace_resources,
     install_global as install_global_workspace_resources, is_stale_for_current_session,
@@ -100,7 +83,6 @@ pub struct AgentSession {
     config: SessionConfig,
     event_tx: broadcast::Sender<SessionEvent>,
     cancel: CancellationToken,
-    _input_tx: mpsc::Sender<String>,
 
     agent: Option<Arc<Mutex<Agent>>>,
 
@@ -112,13 +94,11 @@ impl AgentSession {
     pub fn new(config: SessionConfig) -> (Self, broadcast::Receiver<SessionEvent>) {
         let (event_tx, event_rx) = broadcast::channel(256);
         let cancel = CancellationToken::new();
-        let (_input_tx, _input_rx) = mpsc::channel::<String>(16);
 
         let session = Self {
             config,
             event_tx,
             cancel,
-            _input_tx,
             agent: None,
             state: None,
         };
@@ -131,13 +111,11 @@ impl AgentSession {
     ) -> (Self, broadcast::Receiver<SessionEvent>) {
         let (event_tx, event_rx) = broadcast::channel(256);
         let cancel = CancellationToken::new();
-        let (_input_tx, _input_rx) = mpsc::channel::<String>(16);
 
         let session = Self {
             config,
             event_tx,
             cancel,
-            _input_tx,
             agent: Some(agent),
             state: None,
         };
@@ -246,6 +224,21 @@ impl AgentSession {
 
         let _ = bridge_task.await;
 
+        let tokens_used = if let Some(ref agent) = self.agent {
+            let guard = agent.lock().await;
+            guard
+                .last_usage()
+                .map(|usage| {
+                    usage
+                        .input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(usage.output_tokens.unwrap_or(0))
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         let final_output = match turn_result {
             Ok(text) => text,
             Err(msg) => {
@@ -258,7 +251,7 @@ impl AgentSession {
 
         self.publish_event(SessionEvent::new(SessionEventKind::TurnFinished {
             output: final_output,
-            tokens_used: 0,
+            tokens_used,
         }));
     }
 
@@ -322,22 +315,39 @@ fn is_first_token_trigger(event: &TurnEvent) -> bool {
     }
 }
 
-fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
+fn fallback_tool_call_id(name: &str) -> String {
+    format!("{name}_{}", uuid::Uuid::new_v4())
+}
+
+pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
     let kind = match event {
         TurnEvent::Chunk { delta } => SessionEventKind::Delta { text: delta },
         TurnEvent::Thinking { delta } => SessionEventKind::Delta {
             text: format!("[thinking] {}", delta),
         },
-        TurnEvent::ToolCall { name, args } => SessionEventKind::ToolCall {
+        TurnEvent::ToolCall {
+            name,
+            args,
+            tool_call_id,
+        } => SessionEventKind::ToolCall {
             tool_name: name.clone(),
-            tool_call_id: format!("{}_call", name),
+            tool_call_id: tool_call_id
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| fallback_tool_call_id(&name)),
             arguments: args,
         },
-        TurnEvent::ToolResult { name, output, success } => {
+        TurnEvent::ToolResult {
+            name,
+            output,
+            success,
+            tool_call_id,
+        } => {
             let is_error = !success
                 || crate::agent::tool_event_status::output_indicates_error(&output);
             SessionEventKind::ToolResult {
-                tool_call_id: format!("{}_call", name),
+                tool_call_id: tool_call_id
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| fallback_tool_call_id(&name)),
                 output,
                 is_error,
             }
@@ -376,6 +386,23 @@ fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
 
             return None;
         }
+        TurnEvent::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            class,
+            provider,
+            model,
+            message,
+        } => SessionEventKind::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            class,
+            provider,
+            model,
+            message,
+        },
         TurnEvent::ContextCompressed {
             tokens_before,
             tokens_after,
@@ -411,6 +438,48 @@ fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
                 },
             }
         }
+        TurnEvent::WorkerSpawned {
+            parent_tool_use_id,
+            worker_id,
+            title,
+            model,
+        } => SessionEventKind::WorkerSpawned {
+            parent_tool_use_id,
+            worker_id,
+            title,
+            model,
+        },
+        TurnEvent::WorkerStatus {
+            worker_id,
+            status,
+            detail,
+        } => SessionEventKind::WorkerStatus {
+            worker_id,
+            status,
+            detail,
+        },
+        TurnEvent::WorkerProgress {
+            worker_id,
+            action,
+            detail,
+        } => SessionEventKind::WorkerProgress {
+            worker_id,
+            action,
+            detail,
+        },
+        TurnEvent::WorkerCompleted {
+            worker_id,
+            success,
+            summary,
+        } => SessionEventKind::WorkerCompleted {
+            worker_id,
+            success,
+            summary,
+        },
+        TurnEvent::WorkerStopped { worker_id, reason } => {
+            SessionEventKind::WorkerStopped { worker_id, reason }
+        }
+        TurnEvent::ParentResumed { reason } => SessionEventKind::ParentResumed { reason },
     };
     Some(SessionEvent::new(kind))
 }

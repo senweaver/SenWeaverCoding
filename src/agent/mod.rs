@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 #[allow(clippy::module_inception)]
 mod sqlite_gateway_hydrate;
+#[allow(clippy::module_inception)]
 pub mod agent;
 pub mod auto_title;
 pub mod bridge_types;
@@ -18,6 +19,7 @@ pub mod context_expansion;
 pub mod context_manager;
 pub mod context_pipeline;
 pub mod coordination;
+pub mod cost_tracking;
 pub mod dangling_tool_repair;
 pub mod dispatcher;
 pub mod error_classify;
@@ -28,17 +30,25 @@ pub mod feedback;
 
 pub mod flows;
 pub mod health_signal;
+pub mod history_compaction;
 pub mod history_pruner;
+pub mod event_sink;
+pub mod file_edit_emitter;
 pub mod loop_;
+pub mod pii_sanitize;
 pub mod loop_control;
 pub mod loop_core;
 pub mod loop_ctx;
 pub mod loop_detector;
+pub mod loop_hooks;
+pub mod loop_policy;
 pub mod loop_services;
+pub mod loop_unified;
 pub mod streaming_markers;
 pub mod memory_loader;
 pub mod mode_effects;
 pub mod mode_transition;
+pub mod model_switch;
 pub mod model_switch_guard;
 pub mod multi_agent_runtime;
 pub mod parallel_executor;
@@ -47,6 +57,8 @@ pub mod pipeline;
 pub mod plan_mode;
 pub mod plan_mode_enforcement;
 pub mod plan_execution_enforcement;
+#[cfg(feature = "tool-curator")]
+pub mod curator_mode_enforcement;
 pub mod profiles;
 pub mod prompt;
 pub mod prompt_optimizer;
@@ -71,8 +83,10 @@ pub mod team_protocol;
 pub mod thinking;
 pub mod token_budget;
 pub mod token_optimizer;
+pub mod tool_call_parser;
 pub mod tool_error_handler;
 pub mod tool_event_status;
+pub mod tool_filter;
 pub mod tool_output_compressor;
 pub mod web_search_url_guard;
 pub mod turn_common;

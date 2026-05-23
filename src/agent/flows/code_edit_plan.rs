@@ -1,46 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! structured planner output for `CodeEditFlow`.
-//!
-//! The D5.2 planner returned a free-form list of
-//! `path :: description` lines.  That format made it impossible for
-//! the executor to:
-//!
-//! 1. understand step dependencies (so independent edits could run in
-//!    parallel — task 3.5);
-//! 2. honour token budgeting (no `est_tokens`, no risk hint);
-//! 3. distinguish create / modify / delete / rename / review steps
-//!    (the executor was forced to assume "modify").
-//!
-//! replaces the line-based prompt with a strict JSON contract
-//! validated by [`validate_planner_response`].  The shape is exposed
-//! to the LLM via `PLANNER_JSON_SCHEMA` (a literal embedded in the
-//! prompt) so the model can be told exactly what to emit.  The
-//! validator is used twice: once for the first response, and once
-//! after a self-correct retry.  A second failure degrades to a
-//! single catch-all step tagged with `planner_degraded=true` so
-//! downstream verification still has something to verify and the
-//! refine loop can attempt recovery.
-//!
-//! ## Data flow
-//!
-//! ```text
-//!   ctx.goal + workspace_root + focus_files + symbols
-//!     → CODE_EDIT_PLANNER_PROMPT_V2   (rendered with PLANNER_JSON_SCHEMA)
-//!     → LLM                            (must reply with JSON only)
-//!     → validate_planner_response      (parse + business rules)
-//!     → auto_expand_with_symbol_graph  (optional, default ON)
-//!     → PlanDependencyGraph::build     (validates depends_on, no cycles)
-//!     → topo_layers                    (Kahn — each layer is JoinSet-able)
-//!     → ctx.scratchpad["code_edit.plan_dag"] = JSON
-//!     → Vec<Step> for PlanExecVerifyFlow::run_layered
-//! ```
-//!
-//! The PlanDependencyGraph is intentionally tiny — we only need a
-//! validator + topo layer producer.  will lift the same
-//! shape into the multi-agent scheduler so the planner contract
-//! stays portable.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -555,12 +515,12 @@ Rules:
 - Use `kind = "review"` when an edit on another file *might* affect this file's compilation but you are not sure it does — the executor is allowed to return an empty diff for review steps.
 - Return valid JSON. No prose, no markdown fences."#;
 
-pub const CODE_EDIT_PLANNER_RETRY_PROMPT: &str = r#"Your previous JSON response failed validation:
+pub const CODE_EDIT_PLANNER_RETRY_PROMPT: &str = r"Your previous JSON response failed validation:
 error: {error}
 raw: {raw}
 
 Produce a corrected JSON that matches the schema below. Return JSON only — no prose, no markdown fences.
-{schema}"#;
+{schema}";
 
 pub fn render_planner_prompt(
     goal: &str,

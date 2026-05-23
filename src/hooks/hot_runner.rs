@@ -1,18 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hot-swappable hook runner.
-//!
-//! Wraps an `Arc<HookRunner>` in `arc_swap::ArcSwapOption` so that any
-//! settings PUT can rebuild the runner from the latest persisted
-//! [`crate::config::HooksConfig`] and atomically replace the active
-//! handler stack — without forcing a restart and without taking any
-//! lock on the hot path (tool execution).
-//!
-//! All event-firing methods are no-ops when hooks are globally
-//! disabled (`HooksConfig::enabled = false`) or no handler is
-//! currently registered.  Callers therefore never need to branch on
-//! whether a runner exists.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -194,11 +182,18 @@ pub fn build_runner(config: &Config, workspace_dir: &Path) -> Option<Arc<HookRun
         ));
     }
 
-    runner.register(Box::new(
-        super::builtin::webhook_audit::WebhookAuditHook::new(
-            config.hooks.builtin.webhook_audit.clone(),
-        ),
-    ));
+    match super::builtin::webhook_audit::WebhookAuditHook::new(
+        config.hooks.builtin.webhook_audit.clone(),
+    ) {
+        Ok(hook) => runner.register(Box::new(hook)),
+        Err(e) => {
+            tracing::error!(
+                hook = "webhook-audit",
+                error = %e,
+                "skipping webhook-audit hook registration due to invalid configuration"
+            );
+        }
+    }
 
     let script_runner =
         super::script_runner::ScriptHookRunner::load_default(workspace_dir.to_path_buf());

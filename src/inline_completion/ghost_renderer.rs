@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Surface-neutral ghost-text rendering abstraction.
-//!
-//! The GUI renders ghost text as a half-transparent overlay; the TUI
-//! renders it with a dim style; the CLI emits a JSON payload.  The
-//! shared data shape lives here so every surface agrees on what a
-//! ghost suggestion looks like, and how to truncate it for narrow
-//! columns.
 
 use serde::{Deserialize, Serialize};
 

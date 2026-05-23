@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { focusSession } from '../../lib/focusSession'
 import { useTranslation } from '../../i18n'
 import { Button } from '../shared/Button'
 
@@ -19,6 +20,7 @@ type Props = {
   toolUseId: string
   input: unknown
   result?: unknown
+  sessionId?: string | null
 }
 
 function parseInput(input: unknown): Question[] {
@@ -77,10 +79,14 @@ function parseInput(input: unknown): Question[] {
   return []
 }
 
-export function AskUserQuestion({ toolUseId, input, result }: Props) {
+export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSessionIdProp }: Props) {
   const respondToPermission = useChatStore((s) => s.respondToPermission)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const pendingPermission = useChatStore((s) => activeTabId ? s.sessions[activeTabId]?.pendingPermission : undefined)
+  const ownerSessionId = ownerSessionIdProp ?? activeTabId
+  const pendingPermission = useChatStore((s) =>
+    ownerSessionId ? s.sessions[ownerSessionId]?.pendingPermission : undefined,
+  )
+  const isCrossSession = Boolean(ownerSessionId && ownerSessionId !== activeTabId)
   const t = useTranslation()
   const questions = parseInput(input)
   const inputObject = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
@@ -137,7 +143,7 @@ export function AskUserQuestion({ toolUseId, input, result }: Props) {
     const response = freeText.trim() || parts.join('; ') || ''
     if (!response) return
 
-    if (!activeTabId || !pendingRequest) return
+    if (!ownerSessionId || !pendingRequest) return
 
     const answers = questions.reduce<Record<string, string>>((acc, question, index) => {
       if (freeText.trim()) {
@@ -149,7 +155,7 @@ export function AskUserQuestion({ toolUseId, input, result }: Props) {
     }, {})
 
     setHasSubmitted(true)
-    respondToPermission(activeTabId, pendingRequest.requestId, true, {
+    respondToPermission(ownerSessionId, pendingRequest.requestId, true, {
       updatedInput: {
         ...inputObject,
         answers,
@@ -317,17 +323,28 @@ export function AskUserQuestion({ toolUseId, input, result }: Props) {
       {}
       {!submitted && (
         <div className="flex items-center gap-2 px-4 py-3 border-t border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)]">
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={!allAnswered || !pendingRequest}
-            onClick={handleSubmit}
-            icon={
-              <span className="material-symbols-outlined text-[14px]">send</span>
-            }
-          >
-            {t('question.submit')}
-          </Button>
+          {isCrossSession ? (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => ownerSessionId && focusSession(ownerSessionId)}
+              icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
+            >
+              切换到该会话处理
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!allAnswered || !pendingRequest}
+              onClick={handleSubmit}
+              icon={
+                <span className="material-symbols-outlined text-[14px]">send</span>
+              }
+            >
+              {t('question.submit')}
+            </Button>
+          )}
         </div>
       )}
     </div>

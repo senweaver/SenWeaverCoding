@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// File constants — mirrors claude-code-typescript-src`constants/files.ts`.
 
 pub const CONFIG_DIR_NAME: &str = ".senweavercoding";
 

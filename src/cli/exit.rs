@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Centralized CLI exit helpers for subcommand handlers.
-//!
-//! Consolidates exit-with-message patterns used across CLI handlers.
-//! `cli_error` writes to stderr and exits with code 1; `cli_ok` writes
-//! to stdout and exits with code 0.
 
 use std::io::Write;
 

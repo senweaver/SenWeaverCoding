@@ -1,28 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! unified TOML keybindings loader.
-//!
-//! CLI, TUI, and GUI all call [`load_user_keybindings`] at startup so a
-//! single `~/.sen/keybindings.toml` (or workspace-scoped
-//! `./.sen/keybindings.toml`) drives the keymap across every surface.
-//!
-//! ## Config schema
-//!
-//! ```toml
-//! # `~/.sen/keybindings.toml`
-//! # Each entry is a `[[binding]]` table with the following keys:
-//! [[binding]]
-//! key = "Enter"
-//! modifiers = ["ctrl"]
-//! action = "submit"
-//! description = "Submit the current input"
-//! when = "input_focused"      # optional context filter
-//! ```
-//!
-//! Unknown `modifiers` or `action` values are reported back to the
-//! caller via [`LoadReport`] so the UI surface can warn the user;
-//! parsing errors do not prevent the default bindings from loading.
 
 use std::path::{Path, PathBuf};
 

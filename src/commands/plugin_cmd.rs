@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /plugin command — mirrors claude-code-typescript-src`commands/plugin/`.
-// Manage plugins: list, enable, disable, install.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
 inventory::submit!(StaticSlashCommand {

@@ -1,59 +1,7 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! JSON Schema cleaning and validation for LLM tool-calling compatibility.
-//!
-//! Different providers support different subsets of JSON Schema. This module
-//! normalizes tool schemas to improve cross-provider compatibility while
-//! preserving semantic intent.
-//!
-//! ## What this module does
-//!
-//! 1. Removes unsupported keywords per provider strategy
-//! 2. Resolves local `$ref` entries from `$defs` and `definitions`
-//! 3. Flattens literal `anyOf` / `oneOf` unions into `enum`
-//! 4. Strips nullable variants from unions and `type` arrays
-//! 5. Converts `const` to single-value `enum`
-//! 6. Detects circular references and stops recursion safely
-//!
-//! # Example
-//!
-//! ```rust
-//! use serde_json::json;
-//! use senweavercoding::tools::schema::SchemaCleanr;
-//!
-//! let dirty_schema = json!({
-//!     "type": "object",
-//!     "properties": {
-//!         "name": {
-//!             "type": "string",
-//!             "minLength": 1,  // Gemini rejects this
-//!             "pattern": "^[a-z]+$"  // Gemini rejects this
-//!         },
-//!         "age": {
-//!             "$ref": "#/$defs/Age"  // Needs resolution
-//!         }
-//!     },
-//!     "$defs": {
-//!         "Age": {
-//!             "type": "integer",
-//!             "minimum": 0  // Gemini rejects this
-//!         }
-//!     }
-//! });
-//!
-//! let cleaned = SchemaCleanr::clean_for_gemini(dirty_schema);
-//!
-//! // Result:
-//! // {
-//! //   "type": "object",
-//! //   "properties": {
-//! //     "name": { "type": "string" },
-//! //     "age": { "type": "integer" }
-//! //   }
-//! // }
-//! ```
-//!
+
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 

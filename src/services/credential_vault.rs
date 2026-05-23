@@ -340,10 +340,14 @@ impl CredentialVault {
         if !input.contains("${cred.") {
             return input.to_string();
         }
+        let ephemeral_lookup = current_session_ephemeral_entries();
         let state = self.state.read();
         let re = &self.placeholder_re;
         re.replace_all(input, |caps: &regex::Captures<'_>| {
             let name = &caps[1];
+            if let Some(value) = ephemeral_lookup.get(name) {
+                return value.clone();
+            }
             match state.entries.get(name) {
                 Some(e) => e.value.clone(),
                 None => caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
@@ -393,6 +397,14 @@ impl CredentialVault {
             }
             if redacted.contains(&entry.value) {
                 redacted = redacted.replace(&entry.value, &format!("[CRED:{}]", entry.name));
+            }
+        }
+        for (name, value) in current_session_ephemeral_entries() {
+            if value.is_empty() || value.len() < 4 {
+                continue;
+            }
+            if redacted.contains(&value) {
+                redacted = redacted.replace(&value, &format!("[CRED:{}]", name));
             }
         }
         redacted
@@ -470,4 +482,67 @@ pub fn redact_args_optional(value: &serde_json::Value) -> serde_json::Value {
         Some(v) => v.redact_args(value),
         None => value.clone(),
     }
+}
+
+#[derive(Default)]
+struct EphemeralStore {
+    by_session: HashMap<String, HashMap<String, String>>,
+}
+
+static EPHEMERAL_VAULT: OnceLock<RwLock<EphemeralStore>> = OnceLock::new();
+
+fn ephemeral_lock() -> &'static RwLock<EphemeralStore> {
+    EPHEMERAL_VAULT.get_or_init(|| RwLock::new(EphemeralStore::default()))
+}
+
+pub fn put_ephemeral_credential(session_id: &str, name: &str, value: &str) -> Result<()> {
+    validate_name(name)?;
+    let mut guard = ephemeral_lock().write();
+    let session_map = guard
+        .by_session
+        .entry(session_id.to_string())
+        .or_default();
+    session_map.insert(name.to_string(), value.to_string());
+    Ok(())
+}
+
+pub fn purge_session_ephemeral(session_id: &str) -> usize {
+    let mut guard = ephemeral_lock().write();
+    guard
+        .by_session
+        .remove(session_id)
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+pub fn list_ephemeral_names(session_id: &str) -> Vec<String> {
+    let guard = ephemeral_lock().read();
+    let mut names: Vec<String> = guard
+        .by_session
+        .get(session_id)
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+pub fn count_ephemeral(session_id: &str) -> usize {
+    let guard = ephemeral_lock().read();
+    guard
+        .by_session
+        .get(session_id)
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+fn current_session_ephemeral_entries() -> HashMap<String, String> {
+    let Some(ctx) = crate::session::current_session_context() else {
+        return HashMap::new();
+    };
+    let guard = ephemeral_lock().read();
+    guard
+        .by_session
+        .get(&ctx.session_id)
+        .cloned()
+        .unwrap_or_default()
 }

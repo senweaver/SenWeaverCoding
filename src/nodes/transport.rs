@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Corporate-friendly secure node transport using standard HTTPS + HMAC-SHA256 authentication.
-//!
-//! All inter-node traffic uses plain HTTPS on port 443 — no exotic protocols,
-//! no custom binary framing, no UDP tunneling.  This makes the transport
-//! compatible with corporate proxies, firewalls, and IT audit expectations.
 
 use anyhow::{Result, bail};
 use chrono::Utc;

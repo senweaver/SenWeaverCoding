@@ -1,30 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `inline_complete` tool — exposes the `inline_completion` registry to
-//! the agent loop, MCP clients, and the `sen complete` CLI front-end.
-//!
-//! Unlike most tools, `inline_complete` is intentionally **read-only**:
-//! it never edits the workspace.  Its sole responsibility is to take
-//! the user's current cursor context (prefix / suffix / language) and
-//! return one or more candidate insertion strings produced by the
-//! pluggable [`InlineCompletionRegistry`](crate::inline_completion::InlineCompletionRegistry).
-//!
-//! ## Wiring
-//!
-//! * The agent runtime registers an `Arc<InlineCompletionRegistry>`
-//!   on the [`InlineCompleteTool`] when the user has an LLM provider
-//!   configured.  Without a registry the tool degrades gracefully:
-//!   `execute` returns `success=false` with a descriptive message so
-//!   the LLM knows to fall back to the regular `file_edit` flow.
-//! * The CLI handler under `sen complete …` constructs the same
-//!   registry through [`crate::inline_completion::registry::default_provider`]
-//!   so both surfaces emit identical JSON.
-//! * GUI / TUI ghost-text overlays reuse the registry directly
-//!   (without the tool wrapper) but share the same observability /
-//!   throttle / cache infrastructure.
-//!
-//! See the M1.1 milestone in `senweaver_全方位深度对齐计划.plan.md`.
 
 use async_trait::async_trait;
 use serde::Deserialize;

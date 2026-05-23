@@ -1,4 +1,5 @@
 import { useCLITaskStore } from '../../stores/cliTaskStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import type { CLITask } from '../../types/cliTask'
 
@@ -8,14 +9,25 @@ const statusConfig: Record<CLITask['status'], { icon: string; color: string }> =
   completed: { icon: 'check_circle', color: 'var(--color-success)' },
 }
 
+const EMPTY_TASKS: readonly CLITask[] = Object.freeze([]) as readonly CLITask[]
+
 export function SessionTaskBar() {
-  const tasks = useCLITaskStore((s) => s.tasks)
-  const expanded = useCLITaskStore((s) => s.expanded)
+  const sessionId = useTabStore((s) => s.activeTabId)
+  const tasks = useCLITaskStore((s) => {
+    if (!sessionId) return EMPTY_TASKS
+    return s.tasksBySessionId[sessionId] ?? EMPTY_TASKS
+  }) as readonly CLITask[]
+  const expanded = useCLITaskStore((s) =>
+    sessionId ? s.expandedBySession[sessionId] ?? false : false,
+  )
   const toggleExpanded = useCLITaskStore((s) => s.toggleExpanded)
-  const completedAndDismissed = useCLITaskStore((s) => s.completedAndDismissed)
+  const completedAndDismissed = useCLITaskStore((s) =>
+    sessionId ? s.completedAndDismissedBySession[sessionId] ?? false : false,
+  )
   const resetCompletedTasks = useCLITaskStore((s) => s.resetCompletedTasks)
   const t = useTranslation()
 
+  if (!sessionId) return null
   if (tasks.length === 0) return null
 
   const allCompleted = tasks.every((tk) => tk.status === 'completed')
@@ -32,7 +44,7 @@ export function SessionTaskBar() {
         <div className="flex items-center gap-2 bg-[var(--color-surface-container)] px-2 py-1.5">
           <button
             type="button"
-            onClick={toggleExpanded}
+            onClick={() => toggleExpanded(sessionId)}
             className="flex min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-2 py-1 hover:bg-[var(--color-surface-container-low)] transition-colors"
           >
             <div className="flex items-center justify-center w-6 h-6 rounded-[var(--radius-md)] bg-[var(--color-secondary)]/10">
@@ -76,7 +88,7 @@ export function SessionTaskBar() {
             <button
               type="button"
               aria-label={t('tasks.dismissCompleted')}
-              onClick={() => { void resetCompletedTasks() }}
+              onClick={() => { void resetCompletedTasks(sessionId) }}
               className="flex shrink-0 items-center justify-center rounded-[var(--radius-md)] p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-container-low)] hover:text-[var(--color-text-primary)] transition-colors"
             >
               <span className="material-symbols-outlined text-[16px]">close</span>

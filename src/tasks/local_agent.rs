@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// LocalAgentTask — spawns a local sub-agent process.
-// Mirrors claude-code-typescript-src`tasks/LocalAgentTask/`.
-
 use std::path::PathBuf;
 
 use super::types::{Task, TaskHandle, TaskId, TaskState, TaskType, generate_task_id};

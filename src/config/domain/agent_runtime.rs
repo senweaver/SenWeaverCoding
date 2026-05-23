@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent runtime sub-schema — runtime loop knobs and safety limits.
-//!
-//! This is the second domain-split config module (P6.1 follow-up).  Fields
-//! related to the agent's execution loop, token budgets, and compression
-//! strategy live here so downstream code subscribing via
-//! `SharedConfig::subscribe_filtered(["agent_runtime."])` sees only agent
-//! changes.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

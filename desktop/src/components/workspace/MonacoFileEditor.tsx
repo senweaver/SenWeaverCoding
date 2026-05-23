@@ -1039,8 +1039,7 @@ export function MonacoFileEditor({ workDir }: Props) {
     void lspBridge.didOpen({ uri: fileUri, languageId, text })
     return () => {
       void lspBridge.didClose(fileUri)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }    
   }, [fileUri, buffer?.isBinary])
 
   useEffect(() => {
@@ -1049,8 +1048,7 @@ export function MonacoFileEditor({ workDir }: Props) {
       uri: fileUri,
       languageId,
       text: buffer.draft ?? '',
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    })    
   }, [fileUri, buffer?.draft, buffer?.isBinary])
 
   const runFormatBeforeSave = useCallback(async () => {
@@ -1144,9 +1142,14 @@ export function MonacoFileEditor({ workDir }: Props) {
     t,
   ])
 
-  const currentDiagnostics = useLspStore((s) =>
-    fileUri ? s.diagnosticsByUri[fileUri]?.diagnostics : undefined,
-  )
+  const currentDiagnostics = useLspStore((s) => {
+    if (!fileUri) return undefined
+    if (root && root.length > 0) {
+      const bucket = s.diagnosticsByWorkspace[root]
+      return bucket?.[fileUri]?.diagnostics
+    }
+    return s.diagnosticsByUri[fileUri]?.diagnostics
+  })
   useEffect(() => {
     const editor = editorRef.current
     const monaco = monacoRef.current

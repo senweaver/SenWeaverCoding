@@ -1,19 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared loop control state used by both [`AgentLoopCore::run_streamed`]
-//! and [`super::Agent::turn_streamed`] to ensure behavioural parity.
-//!
-//! ## Why shared state?
-//!
-//! Both the canonical `run_tool_call_loop` path and the agent's streaming
-//! path need identical loop-control logic: loop detection, identical-output
-//! hashing, seen-tool-signature tracking.  Previously this state was
-//! duplicated in both call sites, making it easy for one path to drift
-//! from the other.
-//!
-//! This module centralises that state so any future change to loop-control
-//! policy only needs to be made in one place.
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -195,5 +182,56 @@ impl LoopControlState {
         self.last_tool_output_hash = None;
         self.consecutive_identical_outputs = 0;
         self.seen_tool_signatures.clear();
+    }
+
+    pub fn record_per_tool(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+        output: &str,
+    ) -> crate::agent::loop_detector::LoopDetectionResult {
+        let result = self.loop_detector.record(name, args, output);
+        match &result {
+            crate::agent::loop_detector::LoopDetectionResult::Warning(msg) => {
+                self.notify(msg);
+            }
+            crate::agent::loop_detector::LoopDetectionResult::Block(msg) => {
+                self.notify(&format!("[Loop Detection — BLOCKED] {msg}"));
+            }
+            crate::agent::loop_detector::LoopDetectionResult::Break(msg) => {
+                self.notify(&format!("Agent loop aborted by loop detector: {msg}"));
+            }
+            _ => {}
+        }
+        result
+    }
+
+    pub fn check_iteration_fingerprint(
+        &mut self,
+        fingerprint: u64,
+    ) -> Result<(), String> {
+        if self.last_tool_output_hash == Some(fingerprint) {
+            self.consecutive_identical_outputs += 1;
+        } else {
+            self.consecutive_identical_outputs = 0;
+            self.last_tool_output_hash = Some(fingerprint);
+        }
+        if self.consecutive_identical_outputs >= self.identical_output_threshold {
+            return Err(format!(
+                "identical tool call (name + arguments + output) detected {} consecutive times",
+                self.consecutive_identical_outputs
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn identical_output_threshold(&self) -> u32 {
+        self.identical_output_threshold
+    }
+
+    #[must_use]
+    pub fn consecutive_identical_outputs(&self) -> u32 {
+        self.consecutive_identical_outputs
     }
 }

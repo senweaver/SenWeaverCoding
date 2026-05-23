@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// API service — mirrors claude-code-typescript-src`services/api/`.
-// Wraps model API calls with retry logic, error categorization,
-// usage accumulation, and streaming support.
-
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};

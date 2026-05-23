@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Terminal User Interface (TUI) for SenWeaverCoding.
-//!
-//! Provides a rich terminal dashboard with multiple tabs:
-//! - **Dashboard** - System status overview
-//! - **Chat** - Interactive agent conversation
-//! - **Memory** - Memory entries browser
-//! - **Channels** - Channel status and management
-//! - **Events** - Event bus monitor
-//! - **Logs** - Real-time log viewer
-//!
-//! Enable with `--features tui` and run with `sen tui`.
 
 pub mod agent_bridge;
 pub mod agents_panel;
@@ -959,8 +948,16 @@ impl App {
             if self.vim_state.pending_operator.is_some()
                 && (self.vim_state.command_buffer == "i" || self.vim_state.command_buffer == "a")
             {
-                let op = self.vim_state.pending_operator.unwrap();
-                let ia = self.vim_state.command_buffer.chars().next().unwrap();
+                let Some(op) = self.vim_state.pending_operator else {
+                    tracing::warn!("vim pending_operator went missing despite is_some() guard");
+                    return;
+                };
+                let Some(ia) = self.vim_state.command_buffer.chars().next() else {
+                    tracing::warn!(
+                        "vim command_buffer became empty despite i/a guard; ignoring key"
+                    );
+                    return;
+                };
                 let action = process_text_object_key(
                     &mut self.vim_state,
                     op,

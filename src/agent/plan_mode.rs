@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Plan Mode - structured planning and task tracking for agent sessions.
-//!
-//! When plan mode is active, the agent generates structured task lists
-//! before executing, providing visibility into multi-step operations.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -229,8 +225,7 @@ impl PlanModeState {
             old.is_active = false;
             self.completed_plans.push(old);
         }
-        self.active_plan = Some(Plan::new(title));
-        self.active_plan.as_ref().unwrap()
+        self.active_plan.insert(Plan::new(title))
     }
 
     pub fn active_plan(&self) -> Option<&Plan> {

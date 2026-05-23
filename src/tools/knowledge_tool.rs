@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Knowledge management tool for capturing, searching, and reusing expertise.
-//!
-//! Exposes the knowledge graph to the agent via the `Tool` trait with actions:
-//! capture, search, relate, suggest, expert_find, lessons_extract, graph_stats.
 
 use super::traits::{Tool, ToolResult};
 use crate::memory::knowledge_graph::{KnowledgeGraph, NodeType, Relation};

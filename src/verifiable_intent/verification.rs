@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Chain verification, constraint checking, and binding integrity validation.
-//!
-//! Implements the normative verification algorithms from the VI specification:
-//! - Full credential chain verification (L1 → L2 → L3)
-//! - Per-constraint validation against fulfillment data
-//! - Cross-reference and hash binding integrity checks
 
 use crate::verifiable_intent::error::{ViError, ViErrorKind};
 use crate::verifiable_intent::types::{

@@ -1,24 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridges the chat WebSocket's `file_edit` events into the workspace
-// file store so the right-sidebar Monaco editor can distinguish
-// AI-driven edits from out-of-band external changes.
-//
-// Wiring:
-//
-//   chatStore.sessions[*].messages    →  scan for new {type:'file_edit'}
-//                                        ↓
-//                                        normalizeRelPath(path, root)
-//                                        ↓
-//                                        workspaceFilesStore.registerAiPendingWrite
-//
-// The watcher is a no-op while no workspace root is mounted, so
-// running the agent without the right sidebar costs nothing.  It is
-// started once from `AppShell.tsx` on app boot and lives for the
-// lifetime of the renderer; the returned dispose closure is wired
-// into React's effect-cleanup path so HMR doesn't double-subscribe.
 
 import { useChatStore } from '../stores/chatStore'
 import { useWorkspaceFilesStore } from '../stores/workspaceFilesStore'

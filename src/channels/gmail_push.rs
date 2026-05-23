@@ -1,24 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Gmail Pub/Sub push notification channel.
-//!
-//! Instead of polling via IMAP, this channel uses Google's Gmail Pub/Sub push
-//! notifications.  Google sends a POST to our webhook endpoint whenever the
-//! user's mailbox changes.  The notification body contains a base64-encoded
-//! JSON payload with `emailAddress` and `historyId`; we then call the Gmail
-//! History API to fetch newly arrived messages.
-//!
-//! ## Setup
-//!
-//! 1. Create a Google Cloud Pub/Sub topic and grant `gmail-api-push@system.gserviceaccount.com`
-//!    the **Pub/Sub Publisher** role on that topic.
-//! 2. Create a push subscription pointing to `https://<your-domain>/webhook/gmail`.
-//! 3. Configure `[channels_config.gmail_push]` in `config.toml` with `topic` and
-//!    `oauth_token` (or set `GMAIL_PUSH_OAUTH_TOKEN` env var).
-//!
-//! The channel automatically calls `users.watch` to register the subscription
-//! and renews it before the 7-day expiry.
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use crate::config::Config;
@@ -179,7 +179,7 @@ fn start_linux(init_system: InitSystem) -> Result<()> {
         InitSystem::Openrc => {
             run_checked(crate::util::hidden_sync_command("rc-service").args(["sen", "start"]))?;
         }
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
     println!("Service started");
     Ok(())
@@ -220,7 +220,7 @@ fn stop_linux(init_system: InitSystem) -> Result<()> {
         InitSystem::Openrc => {
             let _ = run_checked(crate::util::hidden_sync_command("rc-service").args(["sen", "stop"]));
         }
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
     println!("Service stopped");
     Ok(())
@@ -255,7 +255,7 @@ fn restart_linux(init_system: InitSystem) -> Result<()> {
         InitSystem::Openrc => {
             run_checked(crate::util::hidden_sync_command("rc-service").args(["sen", "restart"]))?;
         }
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
     println!("Service restarted");
     Ok(())
@@ -318,7 +318,7 @@ fn status_linux(config: &Config, init_system: InitSystem) -> Result<()> {
             println!("Service state: {}", out.trim());
             println!("Unit: /etc/init.d/sen");
         }
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
     Ok(())
 }
@@ -419,7 +419,7 @@ fn logs_linux(config: &Config, init_system: InitSystem, lines: usize, follow: bo
             }
             tail_file(log_file, lines, follow)?;
         }
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
     let _ = config;
     Ok(())
@@ -550,7 +550,7 @@ fn uninstall_linux(config: &Config, init_system: InitSystem) -> Result<()> {
             }
             println!("Service uninstalled (/etc/init.d/sen)");
         }
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
     Ok(())
 }
@@ -674,7 +674,7 @@ fn install_linux(config: &Config, init_system: InitSystem) -> Result<()> {
     match init_system {
         InitSystem::Systemd => install_linux_systemd(config),
         InitSystem::Openrc => install_linux_openrc(config),
-        InitSystem::Auto => unreachable!("Auto should be resolved before this point"),
+        InitSystem::Auto => anyhow::bail!("InitSystem::Auto must be resolved to a concrete init system before reaching service control logic"),
     }
 }
 

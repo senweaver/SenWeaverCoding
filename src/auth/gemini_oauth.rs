@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Google/Gemini OAuth2 authentication flow.
-//!
-//! Supports:
-//! - Authorization code flow with PKCE (loopback redirect)
-//! - Device code flow for headless environments
-//!
-//! Uses the same client credentials as Gemini CLI for compatibility.
 
 use crate::auth::oauth_common::{parse_query_params, url_decode, url_encode};
 use crate::auth::profiles::TokenSet;

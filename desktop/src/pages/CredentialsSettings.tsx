@@ -89,18 +89,18 @@ export function CredentialsSettings() {
   }
 
   return (
-    <div className="max-w-2xl">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
+    <div>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div className="min-w-0">
+          <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('credentials.title')}
           </h2>
           <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5 max-w-xl">
             {t('credentials.description')}
           </p>
         </div>
-        <Button size="md" onClick={() => setShowAdd(true)}>
-          <span className="material-symbols-outlined text-[16px]">add</span>
+        <Button size="sm" className="shrink-0" onClick={() => setShowAdd(true)}>
+          <span className="material-symbols-outlined text-[14px]">add</span>
           {t('credentials.add')}
         </Button>
       </div>
@@ -126,7 +126,7 @@ export function CredentialsSettings() {
               key={cred.name}
               className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-[var(--color-border)] hover:border-[var(--color-border-focus)] transition-colors"
             >
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">
+              <span className="material-symbols-outlined text-[16px] text-[var(--color-text-secondary)]">
                 key
               </span>
               <div className="flex-1 min-w-0">
@@ -138,7 +138,7 @@ export function CredentialsSettings() {
                     {tKind(cred.kind)}
                   </span>
                 </div>
-                <div className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">
+                <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
                   {t('credentials.updated')}: {formatTimestamp(cred.updated_at)}
                 </div>
               </div>
@@ -247,16 +247,16 @@ function CredentialFormModal({ mode, existing, onClose, onSubmit }: FormProps) {
       width={520}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="secondary" size="sm" onClick={onClose}>
             {t('credentials.cancel')}
           </Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit} loading={submitting}>
+          <Button size="sm" onClick={handleSubmit} disabled={!canSubmit} loading={submitting}>
             {t('credentials.save')}
           </Button>
         </>
       }
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 text-xs">
         <Input
           label={t('credentials.name')}
           required
@@ -268,13 +268,13 @@ function CredentialFormModal({ mode, existing, onClose, onSubmit }: FormProps) {
         />
 
         <div>
-          <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">
+          <label className="text-xs font-medium text-[var(--color-text-primary)] mb-1 block">
             {t('credentials.kind')}
           </label>
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as CredentialKind)}
-            className="w-full h-10 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+            className="w-full h-8 px-2.5 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
           >
             {KIND_OPTIONS.map((opt) => (
               <option key={opt} value={opt}>
@@ -297,7 +297,7 @@ function CredentialFormModal({ mode, existing, onClose, onSubmit }: FormProps) {
           </div>
           <Button
             variant="ghost"
-            size="md"
+            size="sm"
             onClick={() => setShowValue((s) => !s)}
             type="button"
           >

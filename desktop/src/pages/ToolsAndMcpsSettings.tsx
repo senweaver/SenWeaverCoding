@@ -14,7 +14,7 @@ export function ToolsAndMcpsSettings() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+        <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.toolsAndMcps.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-1">
@@ -71,7 +71,7 @@ function SubTabButton({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-3 py-2 text-xs transition-colors border-b-2 -mb-[1px] ${
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs transition-colors border-b-2 -mb-[1px] ${
         active
           ? 'border-[var(--color-brand)] text-[var(--color-text-primary)] font-medium'
           : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'

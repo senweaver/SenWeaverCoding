@@ -45,8 +45,10 @@ pub fn harvest_turn(
     config: &ExperienceRecyclingConfig,
     workspace_dir: Option<&Path>,
 ) -> Result<RecyclingHarvestReport> {
-    let mut report = RecyclingHarvestReport::default();
-    report.considered = 1;
+    let mut report = RecyclingHarvestReport {
+        considered: 1,
+        ..RecyclingHarvestReport::default()
+    };
     if !config.enabled {
         return Ok(report);
     }

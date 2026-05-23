@@ -5,6 +5,7 @@ use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,58 @@ pub enum TodoStatus {
     Cancelled,
 }
 
-pub type TodoStore = Arc<RwLock<Vec<TodoItem>>>;
+pub const DEFAULT_SESSION_KEY: &str = "default";
+
+pub type TodoStore = Arc<RwLock<HashMap<String, Vec<TodoItem>>>>;
+
+pub fn new_todo_store() -> TodoStore {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+pub fn session_todos(store: &TodoStore, session_id: &str) -> Vec<TodoItem> {
+    store
+        .read()
+        .get(session_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub fn replace_session_todos(store: &TodoStore, session_id: &str, todos: Vec<TodoItem>) {
+    let mut guard = store.write();
+    if todos.is_empty() {
+        guard.remove(session_id);
+    } else {
+        guard.insert(session_id.to_string(), todos);
+    }
+}
+
+pub fn clear_session(store: &TodoStore, session_id: &str) {
+    store.write().remove(session_id);
+}
+
+pub fn session_ids(store: &TodoStore) -> Vec<String> {
+    store.read().keys().cloned().collect()
+}
+
+pub fn snapshot_all(store: &TodoStore) -> HashMap<String, Vec<TodoItem>> {
+    store.read().clone()
+}
+
+fn resolve_session_id(explicit: Option<&str>) -> String {
+    if let Some(id) = explicit {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(ctx) = crate::session::current_session_context() {
+        let trimmed = ctx.session_id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_SESSION_KEY.to_string()
+}
 
 pub struct TodoWriteTool {
     store: TodoStore,
@@ -189,11 +241,18 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
 
         let merge = args.get("merge").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        let session_id_arg = args
+            .get("session_id")
+            .or_else(|| args.get("list_id"))
+            .and_then(|v| v.as_str());
+        let session_id = resolve_session_id(session_id_arg);
+
         let mut guard = self.store.write();
-        let old_count = guard.len();
+        let existing = guard.get(&session_id).cloned().unwrap_or_default();
+        let old_count = existing.len();
 
         let mut next = if merge {
-            let mut base = guard.clone();
+            let mut base = existing;
             for item in incoming {
                 if let Some(pos) = base.iter().position(|t| t.id == item.id) {
                     base[pos] = item;
@@ -211,7 +270,11 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
         }
 
         let new_count = next.len();
-        *guard = next;
+        if next.is_empty() {
+            guard.remove(&session_id);
+        } else {
+            guard.insert(session_id.clone(), next);
+        }
         drop(guard);
 
         Ok(ToolResult {
@@ -219,6 +282,7 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
             output: json!({
                 "old_count": old_count,
                 "new_count": new_count,
+                "session_id": session_id,
             })
             .to_string(),
             error: None,

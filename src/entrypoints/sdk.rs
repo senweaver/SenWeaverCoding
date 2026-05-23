@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// SDK entrypoint — mirrors claude-code-typescript-src/entrypoints/sdk/.
-// Provides a programmatic API for embedding SenWeaverCoding in other applications.
 
 use std::collections::HashMap;
 use std::sync::Arc;

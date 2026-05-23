@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Standard node capability definitions for device nodes.
-//!
-//! These define the expected schemas that camera, screen, location, and
-//! notification nodes should advertise when they connect via WebSocket.
 
 use serde_json::json;
 

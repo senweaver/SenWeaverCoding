@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MIT
-// One-shot downloader for the search engine and common-host favicons used
-// by the WebSearch tool result UI.  Run with `bun desktop/scripts/fetch-engine-icons.mjs`
-// or `node desktop/scripts/fetch-engine-icons.mjs`.  Files that already exist
-// in `desktop/public/engine-icons/` are skipped, so the script is safe to
-// re-run.
 
 import { mkdir, writeFile, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -24,8 +19,7 @@ const targets = [
   { id: 'semanticscholar', file: 'semanticscholar.png', url: 'https://cdn.semanticscholar.org/d5a7fc2a8d2c90b9/img/favicon-32x32.png' },
   { id: 'dblp', file: 'dblp.png', url: 'https://dblp.org/img/dblp.icon.192x192.png' },
   { id: 'pubmed', file: 'pubmed.ico', url: 'https://www.ncbi.nlm.nih.gov/favicon.ico' },
-  { id: 'googlescholar', file: 'googlescholar.ico', url: 'https://scholar.google.com/favicon.ico' },
-  // Frequent hit-side hosts in mainland China search results
+  { id: 'googlescholar', file: 'googlescholar.ico', url: 'https://scholar.google.com/favicon.ico' },  
   { id: 'sogou', file: 'sogou.ico', url: 'https://www.sogou.com/favicon.ico' },
   { id: 'people', file: 'people.com.cn.ico', url: 'https://www.people.com.cn/favicon.ico' },
   { id: 'xinhuanet', file: 'xinhuanet.com.ico', url: 'https://www.xinhuanet.com/favicon.ico' },

@@ -287,10 +287,9 @@ impl MatrixChannel {
     }
 
     fn extract_room_id(recipient: &str, fallback_room_id: &str) -> String {
-        if recipient.contains("||") {
-            recipient.split_once("||").unwrap().1.to_string()
-        } else {
-            fallback_room_id.to_string()
+        match recipient.split_once("||") {
+            Some((_, room_id)) => room_id.to_string(),
+            None => fallback_room_id.to_string(),
         }
     }
 
@@ -791,10 +790,9 @@ impl Channel for MatrixChannel {
             anyhow::bail!("Matrix channel unavailable: E2EE one-time key conflict detected");
         }
         let client = self.matrix_client().await?;
-        let target_room_id = if message.recipient.contains("||") {
-            message.recipient.split_once("||").unwrap().1.to_string()
-        } else {
-            self.target_room_id().await?
+        let target_room_id = match message.recipient.split_once("||") {
+            Some((_, room_id)) => room_id.to_string(),
+            None => self.target_room_id().await?,
         };
         let target_room: OwnedRoomId = target_room_id.parse()?;
 

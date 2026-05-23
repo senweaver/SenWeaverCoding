@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! HTTP endpoints used by the cc-haha desktop frontend.
-//!
-//! These routes are namespaced under `/api/...` and live in this single
-//! module instead of a fan-out under `routes/` so the cc-haha-shaped
-//! adapter logic stays close together — most endpoints translate
-//! between the desktop's camelCase JSON contract and the internal
-//! Rust services (skills, providers, scheduled tasks, etc.).
-//!
-//! Endpoints that don't yet have a deep backing in the agent runtime
-//! return a structured "disabled / empty" payload so the React UI can
-//! render gracefully without 404 noise.
 
 use super::AppState;
 use axum::{
@@ -966,28 +955,30 @@ pub async fn handle_providers_create(
     let api_format = body.api_format.as_deref().unwrap_or("openai_chat");
     let wire_api = api_format_to_wire(api_format).to_string();
 
-    let mut profile = crate::config::ModelProviderConfig::default();
-    profile.name = Some(trimmed_name.clone());
-    profile.base_url = body
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    profile.wire_api = Some(wire_api);
-    profile.preset_id = Some(preset_id.clone());
-    profile.notes = body
-        .notes
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    profile.api_key = body
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let mut profile = crate::config::ModelProviderConfig {
+        name: Some(trimmed_name.clone()),
+        base_url: body
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        wire_api: Some(wire_api),
+        preset_id: Some(preset_id.clone()),
+        notes: body
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        api_key: body
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        ..crate::config::ModelProviderConfig::default()
+    };
     if preset_id == "openai-codex" {
         profile.requires_openai_auth = true;
     }
@@ -1469,10 +1460,13 @@ pub async fn handle_providers_test(
     if api_format.starts_with("openai") {
 
         let proxy = probe_provider(&base_url, api_key.as_deref(), &api_format).await;
-        result
-            .as_object_mut()
-            .unwrap()
-            .insert("proxy".to_string(), proxy);
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("proxy".to_string(), proxy);
+        } else {
+            tracing::warn!(
+                "providers/test: probe result is not a JSON object; skipping proxy field"
+            );
+        }
     }
 
     Json(serde_json::json!({ "result": result })).into_response()
@@ -1506,10 +1500,13 @@ pub async fn handle_providers_test_config(
     let mut result = serde_json::json!({ "connectivity": connectivity });
     if api_format.starts_with("openai") {
         let proxy = probe_provider(&base_url, api_key.as_deref(), &api_format).await;
-        result
-            .as_object_mut()
-            .unwrap()
-            .insert("proxy".to_string(), proxy);
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("proxy".to_string(), proxy);
+        } else {
+            tracing::warn!(
+                "providers/test-config: probe result is not a JSON object; skipping proxy field"
+            );
+        }
     }
     Json(serde_json::json!({ "result": result })).into_response()
 }
@@ -4599,7 +4596,7 @@ pub async fn handle_coding_modes_list(
     let modes: Vec<serde_json::Value> = crate::agent::coding_mode::CodingMode::visible()
         .iter()
         .map(|m| {
-            let allowed = build_allowed_tools_for_mode(m);
+            let allowed = build_allowed_tools_for_mode(*m);
             let profile = m.resource_profile();
             serde_json::json!({
                 "id": m.display_name(),
@@ -4637,7 +4634,7 @@ pub async fn handle_coding_mode_get(
         "description": mode.description(),
         "icon": mode.icon(),
         "permissionMode": derive_permission_from_coding(&mode),
-        "allowedTools": build_allowed_tools_for_mode(&mode),
+        "allowedTools": build_allowed_tools_for_mode(mode),
         "resourceProfile": {
             "browser": profile.browser,
             "shell": profile.shell,
@@ -4713,7 +4710,7 @@ pub async fn handle_coding_mode_put(
         "mode": parsed.display_name(),
         "from": previous_mode.display_name(),
         "permissionMode": permission,
-        "allowedTools": build_allowed_tools_for_mode(&parsed),
+        "allowedTools": build_allowed_tools_for_mode(parsed),
         "autoApproved": previous_mode == parsed || auto_approved,
     }))
     .into_response()
@@ -4729,7 +4726,7 @@ pub fn derive_permission_from_coding(mode: &crate::agent::coding_mode::CodingMod
 }
 
 fn build_allowed_tools_for_mode(
-    mode: &crate::agent::coding_mode::CodingMode,
+    mode: crate::agent::coding_mode::CodingMode,
 ) -> Vec<String> {
     if let Some(allow) = mode.allowed_tools() {
         let mut list: Vec<String> = allow.iter().map(|s| (*s).to_string()).collect();
@@ -5161,11 +5158,20 @@ pub async fn handle_scheduled_tasks_task_runs(
     Json(serde_json::json!({ "runs": runs_json })).into_response()
 }
 
-fn snapshot_global_todos() -> Vec<crate::tools::todo_write::TodoItem> {
+fn snapshot_session_todos(list_id: &str) -> Vec<crate::tools::todo_write::TodoItem> {
     if let Some(svc) = crate::services::try_get_services() {
-        svc.todo_store.read().clone()
+        crate::tools::todo_write::session_todos(&svc.todo_store, list_id)
     } else {
         Vec::new()
+    }
+}
+
+fn snapshot_all_sessions(
+) -> std::collections::HashMap<String, Vec<crate::tools::todo_write::TodoItem>> {
+    if let Some(svc) = crate::services::try_get_services() {
+        crate::tools::todo_write::snapshot_all(&svc.todo_store)
+    } else {
+        std::collections::HashMap::new()
     }
 }
 
@@ -5178,8 +5184,10 @@ fn todo_status_to_task_status(status: &crate::tools::todo_write::TodoStatus) -> 
     }
 }
 
-fn render_cli_tasks_for(list_id: &str) -> Vec<serde_json::Value> {
-    let todos = snapshot_global_todos();
+fn render_cli_tasks_from(
+    list_id: &str,
+    todos: &[crate::tools::todo_write::TodoItem],
+) -> Vec<serde_json::Value> {
     todos
         .iter()
         .enumerate()
@@ -5203,6 +5211,35 @@ fn render_cli_tasks_for(list_id: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn render_cli_tasks_for(list_id: &str) -> Vec<serde_json::Value> {
+    let todos = snapshot_session_todos(list_id);
+    render_cli_tasks_from(list_id, &todos)
+}
+
+fn summarize_todo_list(
+    list_id: &str,
+    todos: &[crate::tools::todo_write::TodoItem],
+) -> serde_json::Value {
+    use crate::tools::todo_write::TodoStatus;
+    let total = todos.len();
+    let completed = todos
+        .iter()
+        .filter(|t| matches!(t.status, TodoStatus::Completed | TodoStatus::Cancelled))
+        .count();
+    let in_progress = todos
+        .iter()
+        .filter(|t| matches!(t.status, TodoStatus::InProgress))
+        .count();
+    let pending = total.saturating_sub(completed).saturating_sub(in_progress);
+    serde_json::json!({
+        "id": list_id,
+        "taskCount": total,
+        "completedCount": completed,
+        "inProgressCount": in_progress,
+        "pendingCount": pending,
+    })
+}
+
 pub async fn handle_cli_task_lists(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5210,38 +5247,15 @@ pub async fn handle_cli_task_lists(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let todos = snapshot_global_todos();
-    if todos.is_empty() {
-        return Json(serde_json::json!({ "lists": [] })).into_response();
+    let by_session = snapshot_all_sessions();
+    let mut lists: Vec<serde_json::Value> = Vec::with_capacity(by_session.len());
+    for (list_id, todos) in by_session.iter() {
+        if todos.is_empty() {
+            continue;
+        }
+        lists.push(summarize_todo_list(list_id, todos));
     }
-    use crate::tools::todo_write::TodoStatus;
-    let total = todos.len();
-    let completed = todos
-        .iter()
-        .filter(|t| {
-            matches!(
-                t.status,
-                TodoStatus::Completed | TodoStatus::Cancelled
-            )
-        })
-        .count();
-    let in_progress = todos
-        .iter()
-        .filter(|t| matches!(t.status, TodoStatus::InProgress))
-        .count();
-    let pending = total.saturating_sub(completed).saturating_sub(in_progress);
-    Json(serde_json::json!({
-        "lists": [
-            {
-                "id": "default",
-                "taskCount": total,
-                "completedCount": completed,
-                "inProgressCount": in_progress,
-                "pendingCount": pending,
-            }
-        ]
-    }))
-    .into_response()
+    Json(serde_json::json!({ "lists": lists })).into_response()
 }
 
 pub async fn handle_cli_tasks_for_list(
@@ -5274,13 +5288,13 @@ pub async fn handle_cli_task_get(
 pub async fn handle_cli_tasks_reset(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_list_id): Path<String>,
+    Path(list_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
     if let Some(svc) = crate::services::try_get_services() {
-        svc.todo_store.write().clear();
+        crate::tools::todo_write::clear_session(&svc.todo_store, &list_id);
     }
     Json(serde_json::json!({ "ok": true })).into_response()
 }
@@ -5292,7 +5306,11 @@ pub async fn handle_cli_tasks_list_all(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let tasks = render_cli_tasks_for("default");
+    let by_session = snapshot_all_sessions();
+    let mut tasks: Vec<serde_json::Value> = Vec::new();
+    for (list_id, todos) in by_session.iter() {
+        tasks.extend(render_cli_tasks_from(list_id, todos));
+    }
     Json(serde_json::json!({ "tasks": tasks })).into_response()
 }
 
@@ -7730,7 +7748,10 @@ async fn handle_lsp_pathless_request(
                 return Json(serde_json::json!({"result": null})).into_response();
             }
             if candidates.len() == 1 {
-                candidates.into_iter().next().unwrap()
+                match candidates.into_iter().next() {
+                    Some(lang) => lang,
+                    None => return Json(serde_json::json!({"result": null})).into_response(),
+                }
             } else {
                 return Json(serde_json::json!({"result": null})).into_response();
             }
@@ -7820,7 +7841,10 @@ async fn handle_lsp_execute_command(
                 return Json(serde_json::json!({"result": null})).into_response();
             }
             if candidates.len() == 1 {
-                candidates.into_iter().next().unwrap()
+                match candidates.into_iter().next() {
+                    Some(lang) => lang,
+                    None => return Json(serde_json::json!({"result": null})).into_response(),
+                }
             } else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -7863,12 +7887,22 @@ fn background_signal_to_json(
 ) -> serde_json::Value {
     use crate::tools::background_registry::{BackgroundShellSignal, BgStream};
     match sig {
-        BackgroundShellSignal::Spawned { id, command } => serde_json::json!({
+        BackgroundShellSignal::Spawned {
+            id,
+            command,
+            session_id,
+        } => serde_json::json!({
             "type": "spawned",
             "id": id,
             "command": command,
+            "sessionId": session_id,
         }),
-        BackgroundShellSignal::Chunk { id, stream, line } => serde_json::json!({
+        BackgroundShellSignal::Chunk {
+            id,
+            stream,
+            line,
+            session_id,
+        } => serde_json::json!({
             "type": "chunk",
             "id": id,
             "stream": match stream {
@@ -7876,21 +7910,29 @@ fn background_signal_to_json(
                 BgStream::Stderr => "stderr",
             },
             "line": line,
+            "sessionId": session_id,
         }),
-        BackgroundShellSignal::Heartbeat { id, elapsed_secs } => serde_json::json!({
+        BackgroundShellSignal::Heartbeat {
+            id,
+            elapsed_secs,
+            session_id,
+        } => serde_json::json!({
             "type": "heartbeat",
             "id": id,
             "elapsedSecs": elapsed_secs,
+            "sessionId": session_id,
         }),
         BackgroundShellSignal::Exited {
             id,
             elapsed_secs,
             exit_code,
+            session_id,
         } => serde_json::json!({
             "type": "exited",
             "id": id,
             "elapsedSecs": elapsed_secs,
             "exitCode": exit_code,
+            "sessionId": session_id,
         }),
     }
 }

@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `file_write` tool — routes the actual byte write through
-//! [`crate::apply_model::OpsApplier`] so the journal / rollback /
-//! lock invariants are uniform across every editing surface.  The
-//! tool keeps every legacy security gate (path allowlist, parent
-//! canonicalization, symlink rejection, mtime guard).
+
 use super::edit_history::EditHistory;
 use super::traits::{Tool, ToolResult};
 use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
@@ -278,12 +274,22 @@ impl Tool for FileWriteTool {
         self.snapshot_before_write(&resolved_target).await;
 
         let existed = tokio::fs::metadata(&resolved_target).await.is_ok();
+        let original_bytes: Option<Vec<u8>> = if existed {
+            tokio::fs::read(&resolved_target).await.ok()
+        } else {
+            None
+        };
         let op = if existed {
-            let original = tokio::fs::read(&resolved_target).await.unwrap_or_default();
+            let original_text = original_bytes
+                .as_deref()
+                .map(String::from_utf8_lossy)
+                .map(|s| s.into_owned())
+                .unwrap_or_default();
+            let original_len = original_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
             EditOp::Replace {
                 path: resolved_target.clone(),
-                byte_range: 0..original.len(),
-                old_text: String::from_utf8_lossy(&original).to_string(),
+                byte_range: 0..original_len,
+                old_text: original_text,
                 new_text: content.to_string(),
                 anchor: None,
             }
@@ -295,9 +301,17 @@ impl Tool for FileWriteTool {
             }
         };
         let batch = EditBatch::new(EditOrigin::FileWriteTool).with_op(op);
+        let batch_id = batch.batch_id.clone();
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::session::record_write_for_current_session(&resolved_target);
+                crate::agent::file_edit_emitter::emit_file_edit(
+                    &resolved_target,
+                    original_bytes.as_deref(),
+                    Some(content.as_bytes()),
+                    Some(batch_id),
+                )
+                .await;
                 let preview_lines: Vec<&str> = content.lines().take(10).collect();
                 let suffix = if content.lines().count() > 10 {
                     format!("\n... ({} more lines)", content.lines().count() - 10)

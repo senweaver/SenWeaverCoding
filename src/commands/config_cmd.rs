@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /config command — mirrors claude-code-typescript-src`commands/config/`.
-// View or modify agent configuration.
-// Unified key schema: supports both short names (provider, model) and dotted
-// names (gateway.host, memory.backend) for parity with `sen config`.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
 inventory::submit!(StaticSlashCommand {
@@ -157,7 +151,7 @@ pub async fn handle_config(ctx: CommandContext) -> CommandResult {
                     }
                     Err(e) => CommandResult::err(format!("Failed to load config: {e}")),
                 },
-                _ => unreachable!(),
+                _ => unreachable!("invariant: outer match arm restricts subcommand to those listed above"),
             }
         }
         sub => CommandResult::err(format!("Unknown config subcommand: {sub}")),

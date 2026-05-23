@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WebAuthn gateway API handlers for hardware key registration and authentication.
-//!
-//! All endpoints require bearer token authentication (PairingGuard) and the
-//! `webauthn` feature flag.
 
 use super::AppState;
 use crate::gateway::api::require_auth;

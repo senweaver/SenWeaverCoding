@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Zeroizing secret string for API keys, tokens, and passwords.
-//!
-//! `SecretString` wraps a `String` and guarantees that the underlying memory
-//! is securely overwritten when the value is dropped, moved, or explicitly
-//! cleared.  Unlike `String`, it never exposes its contents via `Debug`,
-//! `Display`, `Serialize`, or other accidental leak vectors.
-//!
-//! # Guarantees
-//!
-//! 1. **Zero-on-drop**: the buffer is overwritten with zeroes before
-//!    deallocation using `zeroize`.  Even if heap memory is later reused,
-//!    the previous secret is unrecoverable.
-//! 2. **Opaque Debug**: `{:?}` prints only `<redacted>`.
-//! 3. **No default Serialize**: callers must use `expose_for_serialization()`
-//!    explicitly, making accidental logging impossible.
-//! 4. **Equality is constant-time**: timing-safe comparison prevents byte-by-byte
-//!    inference attacks.
 
 use std::fmt;
 

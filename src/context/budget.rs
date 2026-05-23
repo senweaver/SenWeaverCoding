@@ -1,24 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! .2 ??tiered context budget manager.
-//!
-//! [`ContextBudgetManager`] partitions the raw
-//! [`crate::context::builder::QueryContext`] into priority tiers and
-//! enforces a total-token cap.  When the raw context fits within the
-//! cap everything is kept; when it doesn't the manager drops tiers in
-//! reverse-priority order (Memory ??RAG ??OpenFiles ??Symbols ??//! FocusFiles) and reports which tier absorbed the final trim.
-//!
-//! The philosophy is "never throw away the edit target": `FocusFiles`
-//! is the highest user tier and is only degraded (outline only) when
-//! everything else is already empty, guaranteeing that the LLM always
-//! sees at least the skeleton of the file it is being asked to edit.
-//!
-//! The manager is intentionally decoupled from
-//! [`crate::agent::token_budget::TokenBudgetManager`]: the latter
-//! tracks cumulative turn-level usage; the former plans a single
-//! outgoing prompt.  `TokenBudgetManager::estimate_tokens` is the only
-//! coupling point ??we reuse its ~4 chars/token heuristic.
 
 use std::fmt;
 

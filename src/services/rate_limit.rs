@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Rate limiter — mirrors claude-code-typescript-src`services/claudeAiLimits.ts`,
-// `services/rateLimitMessages.ts`, `services/policyLimits/`.
-// Tracks API rate limits, policy limits, and displays user-facing messages.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

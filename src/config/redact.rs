@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Serde helpers for automatic secret redaction in `Config` serialization.
-//!
-//! These helpers provide the "secret serialization without type surgery"
-//! approach: fields stay as `Option<String>` / `Vec<String>` so existing
-//! code compiles unchanged, but the serde pipeline emits redacted values
-//! unless the caller explicitly opts in via `serialize_exposed_*` wrappers.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

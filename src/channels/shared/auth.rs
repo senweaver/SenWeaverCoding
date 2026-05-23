@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! HMAC / token verification helpers for channel webhooks.
-//!
-//! Multiple channels (Slack, GitHub, Mattermost, WeChat) verify
-//! inbound webhooks with SHA-256 HMAC over the raw request body.
-//! Centralising the constant-time comparison here prevents the
-//! subtle timing-leak bugs that appear when each adapter rolls its
-//! own.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

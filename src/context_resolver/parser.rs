@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Parse `@tag:value` tokens from user-typed text.
-//!
-//! The parser is intentionally tolerant: it recognises both
-//! `@file:path/to/foo.rs` and `@path/to/foo.rs` (the latter is a
-//! shortcut for `@file`).  Unknown prefixes are ignored and kept in
-//! the surrounding prose.
 
 use std::path::PathBuf;
 

@@ -1,35 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Parallel task scheduler with dependency graph support.
-//!
-//! `TaskScheduler` is the DAG-based parallel scheduler.  It is **distinct**
-//! from [`crate::agent::task_queue::TaskQueue`], which handles capability-matched
-//! agent claim and retry.  The two components coexist intentionally:
-//!
-//! - **TaskQueue** — agents poll for capability-matched work; supports priority,
-//!   retry, expiration, and per-capability indexing.
-//! - **TaskScheduler** — submits a batch of tasks with `depends_on` edges and
-//!   runs them to completion with bounded parallelism, writing results to the
-//!   blackboard under the `task_results` namespace.
-//!
-//! Both are exposed through [`super::multi_agent_runtime::MultiAgentRuntime`],
-//! which is the single unified runtime entry point.  The scheduler uses the
-//! same shared types ([`TaskId`], [`TaskPriority`], [`TaskStatus`]) as the
-//! queue, ensuring consistency across the system.
-//!
-//! ## — event-driven upgrade
-//!
-//! The scheduler now exposes a [`tokio::sync::broadcast`] event bus so
-//! multiple workers can subscribe and race on `TaskReady` events
-//! rather than polling a shared [`parking_lot::Mutex`] via
-//! [`TaskScheduler::claim_next`].  The legacy `claim_next()` entry
-//! point is preserved for benches / tests: it pops the next ready
-//! entry off the priority heap and CAS-claims it, returning `None`
-//! when the heap is empty.  New code should prefer the event-driven
-//! loop (`subscribe()` + `try_claim`) which the rewritten
-//! [`TaskSchedulerRuntime`] uses and which feeds the
-//! [`crate::observability::scheduler_metrics::global`] counters.
 
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;

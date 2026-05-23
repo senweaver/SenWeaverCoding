@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Axum-based HTTP gateway with proper HTTP/1.1 compliance, body limits, and timeouts.
-//!
-//! This module replaces the raw TCP implementation with axum for:
-//! - Proper HTTP/1.1 parsing and compliance
-//! - Content-Length validation (handled by hyper)
-//! - Request body size limits (64KB max)
-//! - Request timeouts (30s) to prevent slow-loris attacks
-//! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
 pub mod api_pairing;
@@ -34,55 +26,17 @@ pub mod workspace_files;
 pub mod ws_desktop;
 
 pub mod a2a;
+pub mod client_ip;
+pub mod cors;
 pub mod hardware_context;
+pub mod lifecycle;
+pub mod rate_limit;
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static GATEWAY_SHUTDOWN_SIGNAL: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
-static GATEWAY_RUNNING: AtomicBool = AtomicBool::new(false);
-static GATEWAY_FULLY_STOPPED: AtomicBool = AtomicBool::new(false);
-
-pub fn request_shutdown() -> bool {
-    if let Some(tx) = GATEWAY_SHUTDOWN_SIGNAL.get() {
-        let _ = tx.send(true);
-        true
-    } else {
-        false
-    }
-}
-
-pub fn is_shutdown_requested() -> bool {
-    GATEWAY_SHUTDOWN_SIGNAL
-        .get()
-        .map(|tx| *tx.borrow())
-        .unwrap_or(false)
-}
-
-pub fn is_running() -> bool {
-    GATEWAY_RUNNING.load(Ordering::SeqCst)
-}
-
-pub fn is_fully_stopped() -> bool {
-    GATEWAY_FULLY_STOPPED.load(Ordering::SeqCst)
-}
-
-struct GatewayRunningGuard;
-
-impl GatewayRunningGuard {
-    fn install() -> Self {
-        GATEWAY_FULLY_STOPPED.store(false, Ordering::SeqCst);
-        GATEWAY_RUNNING.store(true, Ordering::SeqCst);
-        Self
-    }
-}
-
-impl Drop for GatewayRunningGuard {
-    fn drop(&mut self) {
-        GATEWAY_RUNNING.store(false, Ordering::SeqCst);
-        GATEWAY_FULLY_STOPPED.store(true, Ordering::SeqCst);
-    }
-}
+pub use crate::gateway::lifecycle::{
+    StartupWarning, is_fully_stopped, is_running, is_shutdown_requested, push_startup_warning,
+    request_shutdown, snapshot_startup_warnings,
+};
+use crate::gateway::lifecycle::{GATEWAY_SHUTDOWN_SIGNAL, GatewayRunningGuard};
 
 use crate::channels::{
     Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
@@ -110,11 +64,9 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
@@ -130,25 +82,7 @@ pub fn gateway_request_timeout_secs() -> u64 {
         .unwrap_or(REQUEST_TIMEOUT_SECS)
 }
 
-fn desktop_cors_layer() -> CorsLayer {
-    let allowed = AllowOrigin::predicate(|origin, _| {
-        let Ok(value) = origin.to_str() else {
-            return false;
-        };
-        value.starts_with("tauri://")
-            || value.starts_with("http://tauri.localhost")
-            || value.starts_with("https://tauri.localhost")
-            || value.starts_with("http://localhost")
-            || value.starts_with("http://127.0.0.1")
-            || value.starts_with("http://[::1]")
-            || value == "null"
-    });
-    CorsLayer::new()
-        .allow_origin(allowed)
-        .allow_methods(AllowMethods::any())
-        .allow_headers(AllowHeaders::any())
-        .allow_credentials(false)
-}
+use crate::gateway::cors::desktop_cors_layer;
 
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
@@ -308,198 +242,9 @@ fn hash_webhook_secret(value: &str) -> String {
     hex::encode(digest)
 }
 
-const RATE_LIMITER_SWEEP_INTERVAL_SECS: u64 = 300;
+pub use crate::gateway::rate_limit::{GatewayRateLimiter, IdempotencyStore};
 
-#[derive(Debug)]
-struct SlidingWindowRateLimiter {
-    limit_per_window: u32,
-    window: Duration,
-    max_keys: usize,
-    requests: Mutex<(HashMap<String, Vec<Instant>>, Instant)>,
-}
-
-impl SlidingWindowRateLimiter {
-    fn new(limit_per_window: u32, window: Duration, max_keys: usize) -> Self {
-        Self {
-            limit_per_window,
-            window,
-            max_keys: max_keys.max(1),
-            requests: Mutex::new((HashMap::new(), Instant::now())),
-        }
-    }
-
-    fn prune_stale(requests: &mut HashMap<String, Vec<Instant>>, cutoff: Instant) {
-        requests.retain(|_, timestamps| {
-            timestamps.retain(|t| *t > cutoff);
-            !timestamps.is_empty()
-        });
-    }
-
-    fn allow(&self, key: &str) -> bool {
-        if self.limit_per_window == 0 {
-            return true;
-        }
-
-        let now = Instant::now();
-        let cutoff = now.checked_sub(self.window).unwrap_or_else(Instant::now);
-
-        let mut guard = self.requests.lock();
-        let (requests, last_sweep) = &mut *guard;
-
-        if last_sweep.elapsed() >= Duration::from_secs(RATE_LIMITER_SWEEP_INTERVAL_SECS) {
-            Self::prune_stale(requests, cutoff);
-            *last_sweep = now;
-        }
-
-        if !requests.contains_key(key) && requests.len() >= self.max_keys {
-
-            Self::prune_stale(requests, cutoff);
-            *last_sweep = now;
-
-            if requests.len() >= self.max_keys {
-                let evict_key = requests
-                    .iter()
-                    .min_by_key(|(_, timestamps)| timestamps.last().copied().unwrap_or(cutoff))
-                    .map(|(k, _)| k.clone());
-                if let Some(evict_key) = evict_key {
-                    requests.remove(&evict_key);
-                }
-            }
-        }
-
-        let entry = requests.entry(key.to_owned()).or_default();
-        entry.retain(|instant| *instant > cutoff);
-
-        if entry.len() >= self.limit_per_window as usize {
-            return false;
-        }
-
-        entry.push(now);
-        true
-    }
-}
-
-#[derive(Debug)]
-pub struct GatewayRateLimiter {
-    pair: SlidingWindowRateLimiter,
-    webhook: SlidingWindowRateLimiter,
-}
-
-impl GatewayRateLimiter {
-    fn new(pair_per_minute: u32, webhook_per_minute: u32, max_keys: usize) -> Self {
-        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-        Self {
-            pair: SlidingWindowRateLimiter::new(pair_per_minute, window, max_keys),
-            webhook: SlidingWindowRateLimiter::new(webhook_per_minute, window, max_keys),
-        }
-    }
-
-    fn allow_pair(&self, key: &str) -> bool {
-        self.pair.allow(key)
-    }
-
-    fn allow_webhook(&self, key: &str) -> bool {
-        self.webhook.allow(key)
-    }
-}
-
-#[derive(Debug)]
-pub struct IdempotencyStore {
-    ttl: Duration,
-    max_keys: usize,
-    keys: Mutex<HashMap<String, Instant>>,
-}
-
-impl IdempotencyStore {
-    fn new(ttl: Duration, max_keys: usize) -> Self {
-        Self {
-            ttl,
-            max_keys: max_keys.max(1),
-            keys: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn record_if_new(&self, key: &str) -> bool {
-        let now = Instant::now();
-        let mut keys = self.keys.lock();
-
-        keys.retain(|_, seen_at| now.duration_since(*seen_at) < self.ttl);
-
-        if keys.contains_key(key) {
-            return false;
-        }
-
-        if keys.len() >= self.max_keys {
-            let evict_key = keys
-                .iter()
-                .min_by_key(|(_, seen_at)| *seen_at)
-                .map(|(k, _)| k.clone());
-            if let Some(evict_key) = evict_key {
-                keys.remove(&evict_key);
-            }
-        }
-
-        keys.insert(key.to_owned(), now);
-        true
-    }
-}
-
-fn parse_client_ip(value: &str) -> Option<IpAddr> {
-    let value = value.trim().trim_matches('"').trim();
-    if value.is_empty() {
-        return None;
-    }
-
-    if let Ok(ip) = value.parse::<IpAddr>() {
-        return Some(ip);
-    }
-
-    if let Ok(addr) = value.parse::<SocketAddr>() {
-        return Some(addr.ip());
-    }
-
-    let value = value.trim_matches(['[', ']']);
-    value.parse::<IpAddr>().ok()
-}
-
-fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
-        for candidate in xff.split(',') {
-            if let Some(ip) = parse_client_ip(candidate) {
-                return Some(ip);
-            }
-        }
-    }
-
-    headers
-        .get("X-Real-IP")
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_client_ip)
-}
-
-fn client_key_from_request(
-    peer_addr: Option<SocketAddr>,
-    headers: &HeaderMap,
-    trust_forwarded_headers: bool,
-) -> String {
-    if trust_forwarded_headers {
-        if let Some(ip) = forwarded_client_ip(headers) {
-            return ip.to_string();
-        }
-    }
-
-    peer_addr
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn normalize_max_keys(configured: usize, fallback: usize) -> usize {
-    if configured == 0 {
-        fallback.max(1)
-    } else {
-        configured
-    }
-}
+use crate::gateway::client_ip::{client_key_from_request, normalize_max_keys};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -573,6 +318,8 @@ pub struct AppState {
     pub workspace_resources: Arc<crate::session::WorkspaceResourceManager>,
 
     pub git_status_cache: git_routes::GitStatusCache,
+
+    pub config_subscriptions: Arc<Vec<crate::runtime::TaskHandle>>,
 }
 
 impl AppState {
@@ -701,14 +448,24 @@ async fn run_gateway_inner(
         tracing::info!("Cron disabled; embedded scheduler not started");
     }
 
-    if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
-    {
-        tracing::warn!(
-            "????  Binding to {host}  -  gateway will be exposed to all network interfaces.\n\
-             Suggestion: use --host 127.0.0.1 (default), configure a tunnel, or set\n\
-             [gateway] allow_public_bind = true in config.toml to silence this warning.\n\n\
-             Docker/VM: if you are running inside a container or VM, this is expected."
-        );
+    if is_public_bind(host) && config.tunnel.provider == "none" {
+        if !config.gateway.allow_public_bind {
+            tracing::warn!(
+                "Binding to {host}: gateway will be exposed to all network interfaces.\n\
+                 Suggestion: use --host 127.0.0.1 (default), configure a tunnel, or set\n\
+                 [gateway] allow_public_bind = true in config.toml to silence this warning.\n\
+                 Docker/VM: if you are running inside a container or VM, this is expected."
+            );
+        }
+
+        if !config.gateway.require_pairing {
+            tracing::error!(
+                "SECURITY: gateway is binding to public address {host} with [gateway] require_pairing = false. \
+                 All endpoints will be reachable without authentication. \
+                 Strongly recommended to either: (1) bind to 127.0.0.1, (2) front with a tunnel/reverse proxy, \
+                 or (3) set [gateway] require_pairing = true and pair devices explicitly."
+            );
+        }
     }
 
     if crate::gateway::desktop_routes::sanitize_active_profile_in_place(&mut config) {
@@ -734,6 +491,16 @@ async fn run_gateway_inner(
 
     let _event_bus = crate::event_bus::integration::init_global_bus();
     let _multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
+
+    {
+        let workspace_root = if config.workspace_dir.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            config.workspace_dir.clone()
+        };
+        crate::workers::init_global_supervisor(workspace_root.clone());
+        crate::workers::scan_and_recover_at(&workspace_root);
+    }
     let svc_data_dir = config
         .config_path
         .parent()
@@ -899,6 +666,14 @@ async fn run_gateway_inner(
                  NoneMemory so the desktop shell can render. The user can fix storage \
                  settings later (Settings > Memory)"
             );
+            push_startup_warning(
+                "memory_backend_fallback",
+                format!(
+                    "memory backend '{backend}' initialization failed: {err}. Falling back to \
+                     in-memory (non-persistent) storage. Edit [memory] in Settings to fix.",
+                    backend = config.memory.backend
+                ),
+            );
             Arc::new(memory::NoneMemory::new()) as Arc<dyn Memory>
         }
     };
@@ -917,19 +692,20 @@ async fn run_gateway_inner(
         &config.autonomy,
         &config.workspace_dir,
     ));
+    let mut config_subscriptions: Vec<crate::runtime::TaskHandle> = Vec::new();
     if let Some(svc) = crate::services::try_get_services() {
         let security_for_sub = Arc::clone(&security);
         let hooks_for_sub = std::sync::Arc::clone(&hooks);
         let lsp_for_sub = std::sync::Arc::clone(&lsp_manager);
         let handle = svc.config_subscribe_filtered(
-            vec!["".into()],
+            vec![String::new()],
             move |cfg| {
                 security_for_sub
                     .set_command_policy_enabled(cfg.autonomy.enable_command_policy);
                 crate::token_saver::set_enabled(cfg.token_saver.enabled);
                 crate::token_saver::set_global(cfg.token_saver.to_runtime_ctx());
                 crate::guardrails::ensure_global_guardrails(cfg.guardrails.clone());
-                crate::config::schema::set_runtime_proxy_config(cfg.proxy.clone());
+                crate::services::proxy_runtime::ProxyRuntime::global().replace(cfg.proxy.clone());
                 crate::agent::token_optimizer::ensure_global_optimizer_from_config(&cfg);
                 let workspace_anchor = if cfg.workspace_dir.as_os_str().is_empty() {
                     std::env::current_dir()
@@ -949,7 +725,7 @@ async fn run_gateway_inner(
                 );
             },
         );
-        std::mem::forget(handle);
+        config_subscriptions.push(handle);
     }
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
@@ -1123,13 +899,13 @@ async fn run_gateway_inner(
             let live_mcp_for_sub = std::sync::Arc::clone(&live_mcp);
             let event_tx_for_sub = event_tx.clone();
             let handle = svc.config_subscribe_filtered(
-                vec!["".into()],
+                vec![String::new()],
                 move |cfg| {
                     live_mcp_for_sub
                         .schedule_reconcile(cfg, event_tx_for_sub.clone());
                 },
             );
-            std::mem::forget(handle);
+            config_subscriptions.push(handle);
         }
     }
 
@@ -1493,6 +1269,7 @@ async fn run_gateway_inner(
             mgr
         },
         git_status_cache: git_routes::new_git_status_cache(),
+        config_subscriptions: Arc::new(config_subscriptions),
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(crate::security::SecretStore::new(
@@ -1535,7 +1312,7 @@ async fn run_gateway_inner(
         )
         .layer(RequestBodyLimitLayer::new(16 * 1024 * 1024));
 
-    let a2a_state = a2a::build_a2a_state("sen", &format!("http://{}:{}", host, actual_port));
+    let a2a_state = a2a::build_a2a_state("sen", format!("http://{}:{}", host, actual_port));
     let a2a_router = a2a::create_a2a_router(a2a_state);
 
     let agent_turn_router = routes::agent::agent_router(state.clone());
@@ -2181,6 +1958,7 @@ async fn run_gateway_inner(
         .merge(workspace_files_writes_router)
         .with_state(state)
 
+        .merge(crate::workers::router::router())
         .merge(agent_turn_router)
         .merge(a2a_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))

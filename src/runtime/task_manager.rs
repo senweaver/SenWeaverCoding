@@ -1,46 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Supervised `tokio::spawn` wrapper with panic capture, tracing, and
-//! a process-global task registry.
-//!
-//! The default `tokio::spawn(async move { ... })` pattern silently
-//! drops `JoinHandle`s and swallows panics — once a fire-and-forget
-//! background task dies, nothing upstream is notified.  In a
-//! multi-agent runtime that runs MCP sync loops, channel event
-//! loops, rate-limiter refresh workers, and dozens of other
-//! long-running tasks, this is the difference between "degraded
-//! service" and "silent total failure".
-//!
-//! This module provides:
-//!
-//! - [`spawn_supervised`] — a drop-in replacement for
-//!   `tokio::spawn(fut)` that:
-//!     * wraps the future in [`FutureExt::catch_unwind`] so a panic
-//!       inside the task does **not** tear down the tokio runtime;
-//!     * emits a tracing `info_span!("task", name = ...)` around the
-//!       future so all log events inside inherit the task label;
-//!     * records the `JoinHandle` in a process-global registry keyed
-//!       by task name, so operators can enumerate every live
-//!       background task via [`snapshot`];
-//!     * emits `task.panic` / `task.completed` / `task.cancelled`
-//!       tracing events on termination.
-//!
-//! - [`TaskHandle`] — a thin `Arc<...>` wrapper around the underlying
-//!   `JoinHandle` that registers / deregisters automatically.
-//!
-//! - [`snapshot`] — returns a point-in-time list of all currently
-//!   tracked tasks (name + spawn timestamp) for observability tools.
-//!
-//! # Migration strategy
-//!
-//! Business-code `tokio::spawn(async move { ... })` calls should be
-//! migrated to `runtime::task_manager::spawn_supervised("descriptive-name", async move { ... })`.
-//!
-//! Framework-internal spawns inside `scheduler_runtime`, provider hot
-//! paths, and the tokio work-stealing pool itself **should not** be
-//! migrated — they are short-lived and their panics are already
-//! observed by callers.
 
 use std::future::Future;
 use std::time::Instant;

@@ -1,15 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Capability-based security system for fine-grained per-agent permissions.
-//!
-//! This module provides a capability model:
-//! - Fine-grained permissions per agent (file, network, tools, shell, etc.)
-//! - Capability inheritance validation to prevent privilege escalation
-//! - Runtime capability checking before sensitive operations
-//!
-//! Capabilities are granted to agents at spawn time and checked before
-//! tool execution or sensitive operations.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

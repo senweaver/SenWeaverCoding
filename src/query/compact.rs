@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Conversation compaction — reduces message history when token budget is exceeded.
 
 use serde::{Deserialize, Serialize};
 

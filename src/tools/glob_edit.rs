@@ -180,7 +180,7 @@ impl Tool for GlobEditTool {
             });
         }
 
-        let cli_dry_run = std::env::var("SEN_DRY_RUN").as_deref() == Ok("1");
+        let cli_dry_run = crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1");
         let dry_run = args
             .get("dry_run")
             .and_then(|v| v.as_bool())
@@ -256,9 +256,7 @@ impl Tool for GlobEditTool {
             .await
             .map_err(|e| anyhow::anyhow!("glob_edit join error: {e}"))?;
 
-        if let Err(e) = matches_outcome {
-            return Err(e);
-        }
+        matches_outcome?;
         if total_found == 0 {
             return Ok(ToolResult {
                 success: true,
@@ -340,8 +338,26 @@ impl Tool for GlobEditTool {
             });
         }
 
+        let _resource_guards =
+            match crate::session::acquire_many_file_writes_for_current_session(
+                resolved_paths.clone(),
+            )
+            .await
+            {
+                Some(Ok(g)) => Some(g),
+                Some(Err(e)) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("{e}")),
+                    });
+                }
+                None => None,
+            };
+
         let mut batch = EditBatch::new(EditOrigin::GlobEditTool).with_atomic(true);
         let mut planned_paths: Vec<PathBuf> = Vec::new();
+        let mut emit_records: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut size_skipped: Vec<String> = Vec::new();
         for resolved in &resolved_paths {
             if let Ok(meta) = tokio::fs::metadata(resolved).await
@@ -371,9 +387,13 @@ impl Tool for GlobEditTool {
                 continue;
             }
             let new_content = content.replace(old_string, new_string);
+            emit_records.push((
+                content.as_bytes().to_vec(),
+                new_content.as_bytes().to_vec(),
+            ));
             batch.push(EditOp::Replace {
                 path: resolved.clone(),
-                byte_range: 0..content.as_bytes().len(),
+                byte_range: 0..content.len(),
                 old_text: content,
                 new_text: new_content,
                 anchor: None,
@@ -391,9 +411,21 @@ impl Tool for GlobEditTool {
             });
         }
 
+        let batch_id_for_emit = batch.batch_id.clone();
+        let emit_records_for_apply = emit_records;
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
-                for path in &planned_paths {
+                for (path, (before, after)) in
+                    planned_paths.iter().zip(emit_records_for_apply.into_iter())
+                {
+                    crate::session::record_write_for_current_session(path);
+                    crate::agent::file_edit_emitter::emit_file_edit(
+                        path,
+                        Some(before.as_slice()),
+                        Some(after.as_slice()),
+                        Some(batch_id_for_emit.clone()),
+                    )
+                    .await;
                     results.push(format!("  \u{2713} Edited: {}", path.display()));
                 }
                 results.extend(size_skipped);
@@ -446,15 +478,27 @@ impl GlobEditTool {
         }
 
         let new_content = content.replace(old_string, new_string);
+        let before_bytes = content.as_bytes().to_vec();
+        let after_bytes = new_content.as_bytes().to_vec();
         let batch = EditBatch::new(EditOrigin::GlobEditTool).with_op(EditOp::Replace {
             path: resolved.clone(),
-            byte_range: 0..content.as_bytes().len(),
+            byte_range: 0..content.len(),
             old_text: content,
             new_text: new_content,
             anchor: None,
         });
+        let batch_id = batch.batch_id.clone();
         match self.ops_applier.apply_batch(batch).await {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                crate::agent::file_edit_emitter::emit_file_edit(
+                    &resolved,
+                    Some(before_bytes.as_slice()),
+                    Some(after_bytes.as_slice()),
+                    Some(batch_id),
+                )
+                .await;
+                Ok(true)
+            }
             Err(e) => Err(anyhow::anyhow!("OpsApplier failed: {e}")),
         }
     }

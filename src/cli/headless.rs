@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Headless / SDK driver — runs the agent loop without a terminal UI.
-//!
-//! Mirrors cc-typescript-src's `cli/print.ts`. Processes prompts, executes
-//! tools, handles permission prompts via the structured I/O control protocol,
-//! manages MCP server lifecycle, and batches tool calls.
 
 use super::structured_io::{ControlResponsePayload, StdinMessage, StdoutMessage, StructuredIO};
 use anyhow::Result;

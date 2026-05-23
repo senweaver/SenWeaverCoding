@@ -55,7 +55,9 @@ impl OpenAiEmbedding {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("memory.embeddings")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("memory.embeddings")
     }
 
     fn has_explicit_api_path(&self) -> bool {
@@ -108,14 +110,36 @@ impl EmbeddingProvider for OpenAiEmbedding {
             "input": texts,
         });
 
-        let resp = self
-            .http_client()
-            .post(self.embeddings_url())
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let policy = crate::util::retry::RetryPolicy::embedding();
+        let resp = crate::util::retry::retry(&policy, |attempt| {
+            let body = body.clone();
+            let client = self.http_client();
+            let url = self.embeddings_url();
+            let api_key = self.api_key.clone();
+            async move {
+                let resp = client
+                    .post(url)
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        anyhow::Error::new(e)
+                            .context(format!("embedding request failed on attempt {attempt}"))
+                    })?;
+                let status = resp.status();
+                if status.is_server_error() || status.as_u16() == 429 {
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!(
+                        "Embedding API transient {status} on attempt {attempt}: {}",
+                        text.chars().take(200).collect::<String>()
+                    );
+                }
+                Ok::<reqwest::Response, anyhow::Error>(resp)
+            }
+        })
+        .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

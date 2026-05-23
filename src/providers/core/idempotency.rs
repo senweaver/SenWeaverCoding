@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Idempotency key generation for provider requests.
-//!
-//! Two requests with the same provider, model, normalised messages, and
-//! tool surface should resolve to the same `IdempotencyKey` so upstream
-//! caches / replay layers can detect duplicates.
 
 use sha2::{Digest, Sha256};
 

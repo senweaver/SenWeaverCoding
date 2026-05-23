@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Entrypoints module — mirrors claude-code's `entrypoints/` directory.
-//
-// Provides multiple entry points for the agent runtime:
-// - CLI: interactive terminal REPL
-// - MCP: Model Context Protocol server mode
-// - SDK: programmatic embedding API
-// - Init: project initialization and setup
 
 pub mod cli;
 pub mod init;

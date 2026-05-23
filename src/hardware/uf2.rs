@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! UF2 flashing support — detect BOOTSEL-mode Pico and deploy firmware.
-//!
-//! # Workflow
-//! 1. [`find_rpi_rp2_mount`] — check well-known mount points for the RPI-RP2 volume
-//!    that appears when a Pico is held in BOOTSEL mode.
-//! 2. [`ensure_firmware_dir`] — extract the bundled firmware files to
-//!    `~/.senweavercoding/firmware/pico/` if they aren't there yet.
-//! 3. [`flash_uf2`] — copy the UF2 to the mount point; the Pico reboots automatically.
-//!
-//! # Embedded assets
-//! Both firmware files are compiled into the binary with `include_bytes!` so
-//! users never need to download them separately.
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Project delivery intelligence tool.
-//!
-//! Provides read-only analysis and generation for project management:
-//! status reports, risk detection, client communication drafting,
-//! sprint summaries, and effort estimation.
 
 #[cfg(feature = "tool-reports")]
 use super::report_templates;

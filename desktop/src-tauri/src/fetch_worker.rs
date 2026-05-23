@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: MIT
-//
-//! Hidden fetch worker — a second wry/WebView2/WebKitGTK surface attached to
-//! the main window at an off-screen position.  Its sole job is to load
-//! arbitrary URLs as a real browser, then hand the rendered text back to
-//! the agent's `web_fetch` tool, bypassing HTTP-level anti-bot pages
-//! (e.g. mainland China sites' "网络不给力" placeholders).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -675,10 +668,6 @@ fn dispatch_fetch_event(app: &AppHandle, kind: &str, data_raw: Option<&str>) {
     }
 }
 
-/// Called by the shared `senbridge://` URI scheme handler when the
-/// first path segment is `fetch_event`.  Returns `true` if the path
-/// was claimed (so the shared handler does not also dispatch it as a
-/// dock event).
 pub fn handle_protocol_path(
     app: &AppHandle,
     segment: &str,

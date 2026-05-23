@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Gateway networking sub-schema.
-//!
-//! This is the **first** domain-split config module (P6.1).  The canonical
-//! `GatewayConfig` still lives in `schema.rs` for backward compatibility,
-//! but new gateway fields should be added to `GatewayNetExtras` here and
-//! aggregated at the top level once the full split is complete.
-//!
-//! `validate()` runs all built-in gateway invariants and returns a list
-//! of human-readable errors, which the loader can present to the user
-//! before applying the new config.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

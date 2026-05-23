@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Token estimation service — mirrors claude-code-typescript-src`services/tokenEstimation.ts`.
-// Fast approximate token counting for budget management without a full tokenizer.
-
 pub fn estimate_tokens(text: &str) -> u64 {
 
     let chars = text.len() as f64;

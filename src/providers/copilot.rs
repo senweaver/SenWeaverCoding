@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! GitHub Copilot provider with OAuth device-flow authentication.
-//!
-//! Authenticates via GitHub's device code flow (same as VS Code Copilot),
-//! then exchanges the OAuth token for short-lived Copilot API keys.
-//! Tokens are cached to disk and auto-refreshed.
-//!
-//! **Note:** This uses VS Code's OAuth client ID (`Iv1.b507a08c87ecfe98`) and
-//! editor headers. This is the same approach used by LiteLLM, Codex CLI,
-//! and other third-party Copilot integrations. The Copilot token endpoint is
-//! private; there is no public OAuth scope or app registration for it.
-//! GitHub could change or revoke this at any time, which would break all
-//! third-party integrations simultaneously.
 
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
@@ -96,7 +84,7 @@ struct ApiMessage {
     content: Option<ApiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "crate::providers::sanitize::skip_serializing_tool_calls")]
     tool_calls: Option<Vec<NativeToolCall>>,
 }
 
@@ -228,7 +216,9 @@ impl CopilotProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.copilot", 120, 10)
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.copilot", 120, 10)
     }
 
     const COPILOT_HEADERS: [(&str, &str); 4] = [
@@ -665,8 +655,15 @@ impl Provider for CopilotProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            0,
+            None,
+        );
         let response = self
-            .send_chat_request(Self::convert_messages(messages), None, model, temperature)
+            .send_chat_request(Self::convert_messages(&sanitized), None, model, temperature)
             .await?;
         Ok(response.text.unwrap_or_default())
     }
@@ -677,8 +674,15 @@ impl Provider for CopilotProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            0,
+            None,
+        );
         self.send_chat_request(
-            Self::convert_messages(request.messages),
+            Self::convert_messages(&sanitized_messages),
             request.tools,
             model,
             temperature,

@@ -4,7 +4,6 @@
 use crate::agent::dispatcher::{
     NativeToolDispatcher, ParsedToolCall, ToolDispatcher, ToolExecutionResult, XmlToolDispatcher,
 };
-use crate::agent::loop_control::LoopControlState;
 use crate::agent::memory_loader::{DefaultMemoryLoader, MemoryLoader};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
 use crate::config::Config;
@@ -12,7 +11,7 @@ use crate::error::AgentError;
 use crate::i18n::ToolDescriptions;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::observability::{self, Observer, ObserverEvent};
-use crate::providers::{self, ChatMessage, ChatRequest, ConversationMessage, Provider, ToolCall};
+use crate::providers::{self, ChatMessage, ConversationMessage, Provider, ToolCall};
 use crate::runtime;
 use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool, ToolSpec};
@@ -35,9 +34,15 @@ pub enum TurnEvent {
     ToolCall {
         name: String,
         args: serde_json::Value,
+        tool_call_id: Option<String>,
     },
 
-    ToolResult { name: String, output: String, success: bool },
+    ToolResult {
+        name: String,
+        output: String,
+        success: bool,
+        tool_call_id: Option<String>,
+    },
 
     Error { message: String },
 
@@ -86,6 +91,50 @@ pub enum TurnEvent {
 
     PiiSanitized {
         report: crate::services::pii_sanitizer::SanitizationReport,
+    },
+
+    ProviderRetry {
+        attempt: u32,
+        max_attempts: u32,
+        wait_ms: u64,
+        class: String,
+        provider: String,
+        model: String,
+        message: String,
+    },
+
+    WorkerSpawned {
+        parent_tool_use_id: String,
+        worker_id: String,
+        title: String,
+        model: String,
+    },
+
+    WorkerStatus {
+        worker_id: String,
+        status: String,
+        detail: Option<String>,
+    },
+
+    WorkerProgress {
+        worker_id: String,
+        action: String,
+        detail: String,
+    },
+
+    WorkerCompleted {
+        worker_id: String,
+        success: bool,
+        summary: String,
+    },
+
+    WorkerStopped {
+        worker_id: String,
+        reason: String,
+    },
+
+    ParentResumed {
+        reason: String,
     },
 }
 
@@ -631,25 +680,6 @@ impl Agent {
         self.last_usage.as_ref()
     }
 
-    fn merge_token_usage_into(
-        acc: &mut Option<crate::providers::traits::TokenUsage>,
-        delta: &crate::providers::traits::TokenUsage,
-    ) {
-        let entry = acc.get_or_insert_with(crate::providers::traits::TokenUsage::default);
-        let merge_field = |dst: &mut Option<u64>, src: Option<u64>| {
-            if let Some(v) = src {
-                *dst = Some(dst.unwrap_or(0).saturating_add(v));
-            }
-        };
-        merge_field(&mut entry.input_tokens, delta.input_tokens);
-        merge_field(&mut entry.output_tokens, delta.output_tokens);
-        merge_field(&mut entry.cached_input_tokens, delta.cached_input_tokens);
-        merge_field(
-            &mut entry.cache_creation_input_tokens,
-            delta.cache_creation_input_tokens,
-        );
-    }
-
     fn current_tool_specs_with_activated(&self) -> std::sync::Arc<Vec<ToolSpec>> {
         let Some(ref activated_arc) = self.activated_tools else {
             return std::sync::Arc::clone(&self.tool_specs);
@@ -665,17 +695,16 @@ impl Agent {
 
         let base_ptr = std::sync::Arc::as_ptr(&self.tool_specs) as usize;
 
-        {
-            let cache = self.merged_specs_cache.lock();
-            if let Some(entry) = cache.as_ref() {
-                if entry.activation_revision == revision && entry.base_ptr == base_ptr {
-                    return std::sync::Arc::clone(&entry.merged);
-                }
+        let mut cache = self.merged_specs_cache.lock();
+        if let Some(entry) = cache.as_ref() {
+            if entry.activation_revision == revision && entry.base_ptr == base_ptr {
+                return std::sync::Arc::clone(&entry.merged);
             }
         }
 
         let extra = activated_arc.lock().tool_specs();
         if extra.is_empty() {
+            *cache = None;
             return std::sync::Arc::clone(&self.tool_specs);
         }
         let base = self.tool_specs.as_ref();
@@ -694,7 +723,6 @@ impl Agent {
         }
         let merged_arc = std::sync::Arc::new(merged);
 
-        let mut cache = self.merged_specs_cache.lock();
         *cache = Some(MergedSpecsCacheEntry {
             activation_revision: revision,
             base_ptr,
@@ -709,7 +737,6 @@ impl Agent {
         user_message: &str,
         event_tx: tokio::sync::mpsc::Sender<TurnEvent>,
     ) -> Result<String, AgentError> {
-
         self.sync_tools_from_config_if_changed().await;
 
         let user_message_owned = user_message.to_string();
@@ -731,7 +758,7 @@ impl Agent {
         };
         let user_message: &str = user_message_for_turn.as_str();
 
-        let mut _turn_metrics_n1v2 = crate::agent::executor_core::TurnMetricsGuard::start();
+        let mut _turn_metrics = crate::agent::executor_core::TurnMetricsGuard::start();
 
         let _ = event_tx
             .send(TurnEvent::ProgressTick {
@@ -742,808 +769,162 @@ impl Agent {
             .await;
 
         self.apply_turn_preamble(user_message, &event_tx).await?;
-
-        let mut tools_used_this_turn: Vec<String> = Vec::new();
-        let mut tool_results_this_turn: Vec<(String, bool)> = Vec::new();
-
         self.apply_gui_model_switch(&event_tx).await;
-
         let effective_model = self.classify_model(user_message);
 
-        let pacing_snapshot = self.shared_config.load().pacing.clone();
-        let loop_detector_cfg = crate::agent::loop_detector::LoopDetectorConfig {
-            enabled: pacing_snapshot.loop_detection_enabled,
-            window_size: pacing_snapshot.loop_detection_window_size,
-            max_repeats: pacing_snapshot.loop_detection_max_repeats,
-        };
-        let mut loop_state = LoopControlState::new(
-            loop_detector_cfg,
-            pacing_snapshot.loop_detection_identical_output_threshold,
-        )
-        .with_callback(Box::new(|msg: &str| {
-            tracing::info!(
-                target: "agent.loop_detection",
-                notification = msg,
-                "loop detector notification"
-            );
-
-            if let Some(svc) = crate::services::try_get_services() {
-                svc.agent_metrics.inc(
-                    "sen_loop_detection_notifications_total",
-                    crate::observability::agent_metrics::LabelSet::new(vec![]),
-                );
-            }
-        }));
+        let mut history_chat = self.tool_dispatcher.to_provider_messages(&self.history);
 
         let cancel = self.cancel_signal.load_full().as_ref().clone();
+        let live_cfg = self.shared_config.load_ref();
+        let multimodal = live_cfg.multimodal.clone();
+        let pacing = live_cfg.pacing.clone();
+        let dedup_exempt = live_cfg.agent.tool_call_dedup_exempt.clone();
+        drop(live_cfg);
+        let excluded_tools: Vec<String> = Vec::new();
+        let provider_name = self.cached_provider.clone();
 
-        let mut _pacing_gov = crate::agent::executor_core::PacingGovernor::new(
-            self.config.max_tool_iterations.max(1),
-            None,
-            None,
-        );
+        let hook_runner_arc = self.hook_runner.as_ref().and_then(|h| h.current());
+        let hook_runner_ref = hook_runner_arc.as_deref();
 
-        let mut plan_nudge_state =
-            crate::agent::plan_mode_enforcement::PlanModeNudgeState::new();
+        let gui_hooks: Arc<GuiHooksFromAgent> = Arc::new(GuiHooksFromAgent::from_agent(self));
 
-        let mut plan_exec_state = match self.take_plan_execution_arm() {
-            Some(path) => {
-                crate::agent::plan_execution_enforcement::PlanExecutionNudgeState::armed(path)
+        let final_text = {
+            let policy = crate::agent::loop_policy::PolicyBundle::gui(
+                self.provider.as_ref(),
+                &self.tools,
+                self.observer.as_ref(),
+                provider_name.as_str(),
+                effective_model.as_str(),
+                &multimodal,
+                &pacing,
+                &excluded_tools,
+                &dedup_exempt,
+            )
+            .with_temperature(self.temperature)
+            .with_max_iterations(self.config.max_tool_iterations)
+            .with_cancellation(Some(cancel))
+            .with_event_sink(crate::agent::event_sink::EventSink::turn(event_tx.clone()))
+            .with_activated_tools(self.activated_tools.as_ref())
+            .with_hooks(hook_runner_ref)
+            .with_rbac(self.rbac_engine.as_ref(), self.rbac_identity.as_ref())
+            .with_model_switch_callback(Some(crate::agent::loop_::get_model_switch_state()))
+            .with_response_cache_hook(Some(gui_hooks.clone()))
+            .with_memory_session_hook(Some(gui_hooks.clone()))
+            .with_model_classifier_hook(Some(gui_hooks.clone()))
+            .with_turn_preamble_hook(Some(gui_hooks.clone()))
+            .with_gui_model_switch_hook(Some(gui_hooks.clone()))
+            .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
+            .with_experience_recorder_hook(Some(gui_hooks.clone()))
+            .with_plan_mode_nudge_hook(Some(gui_hooks.clone()));
+
+            match crate::agent::loop_unified::UnifiedLoop::new(policy)
+                .run(&mut history_chat)
+                .await
+            {
+                Ok(text) => text,
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = event_tx
+                        .send(TurnEvent::Error {
+                            message: msg.clone(),
+                        })
+                        .await;
+                    return Err(AgentError::ToolDispatchFailed(msg));
+                }
             }
-            None => crate::agent::plan_execution_enforcement::PlanExecutionNudgeState::new(),
         };
 
-        let mut awaiting_user_input = false;
+        Self::replace_history_from_flat(&mut self.history, history_chat);
+        self.trim_history();
 
-        let mut turn_aggregated_usage: Option<crate::providers::traits::TokenUsage> = None;
+        crate::evolution::record_provider_model(
+            Some(self.cached_provider.as_str()),
+            Some(effective_model.as_str()),
+        );
+        crate::evolution::set_response_text(&final_text);
 
-        for iteration in 0..self.config.max_tool_iterations {
+        _turn_metrics.mark_ok();
+        Ok(final_text)
+    }
 
-            let _ = event_tx
-                .send(TurnEvent::ProgressTick {
-                    iteration: iteration + 1,
-                    max_iterations: self.config.max_tool_iterations,
-                    tokens_used: 0,
-                })
-                .await;
-
-            if self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                || cancel.is_cancelled()
-            {
-
-                let _ = event_tx
-                    .send(TurnEvent::Cancelling {
-                        reason: "user_requested".into(),
-                    })
-                    .await;
-                return Ok(String::new());
+    fn replace_history_from_flat(
+        history: &mut Vec<ConversationMessage>,
+        flat: Vec<ChatMessage>,
+    ) {
+        let mut out: Vec<ConversationMessage> = Vec::with_capacity(flat.len());
+        let mut tool_batch: Vec<crate::providers::traits::ToolResultMessage> = Vec::new();
+        for msg in flat {
+            if msg.role != "tool" && !tool_batch.is_empty() {
+                out.push(ConversationMessage::ToolResults(std::mem::take(
+                    &mut tool_batch,
+                )));
             }
-
-            if let Some(crate::cost::types::BudgetCheck::Exceeded {
-                current_usd,
-                limit_usd,
-                period,
-            }) = crate::agent::loop_::check_tool_loop_budget(None)
-            {
-                let reason = format!(
-                    "cost {:.4} USD exceeded {:.4} USD limit ({:?})",
-                    current_usd, limit_usd, period
-                );
-                let _ = event_tx
-                    .send(TurnEvent::Cancelling {
-                        reason: format!("budget_exceeded: {reason}"),
-                    })
-                    .await;
-                return Ok(format!("[Budget exceeded: {reason}]"));
-            }
-
-            if let Err(exceeded) = _pacing_gov.tick() {
-                let _ = event_tx
-                    .send(TurnEvent::Cancelling {
-                        reason: format!("pacing_exceeded: {exceeded}"),
-                    })
-                    .await;
-                return Ok(format!("[Pacing exceeded: {exceeded}]"));
-            }
-
-            self.prepare_iteration_context_budget(iteration, &event_tx)
-                .await;
-
-            if plan_exec_state.inline_progress_reminder_due(iteration) {
-                let msg =
-                    crate::agent::plan_execution_enforcement::inline_progress_reminder_message(
-                        &plan_exec_state,
-                    );
-                tracing::info!(
-                    target: "agent.plan_execution",
-                    iteration = iteration,
-                    reminder_count = plan_exec_state.inline_reminder_count + 1,
-                    done = plan_exec_state.terminal_count,
-                    total = plan_exec_state.total_steps,
-                    "injecting inline plan-progress reminder mid-turn"
-                );
-                self.history.push(ConversationMessage::Chat(
-                    ChatMessage::system(msg),
-                ));
-                plan_exec_state.last_update_iter = Some(iteration);
-                plan_exec_state.inline_reminder_count =
-                    plan_exec_state.inline_reminder_count.saturating_add(1);
-            }
-
-            let messages = self.tool_dispatcher.to_provider_messages(&self.history);
-            let merged_tool_specs = self.current_tool_specs_with_activated();
-
-            let cache_key = self.build_response_cache_key(&messages, &effective_model);
-            if let Some(cached) = self.try_response_cache_hit(&cache_key, user_message).await {
-                _turn_metrics_n1v2.mark_ok();
-                return Ok(cached);
-            }
-
-            use futures_util::StreamExt;
-
-            let stream_opts = crate::providers::traits::StreamOptions::new(true);
-            let mut stream = self.provider.stream_chat(
-                crate::providers::ChatRequest {
-                    messages: &messages,
-                    tools: if self.tool_dispatcher.should_send_tool_specs() {
-                        Some(merged_tool_specs.as_slice())
-                    } else {
-                        None
-                    },
-                },
-                &effective_model,
-                self.temperature,
-                stream_opts,
-            );
-
-            let mut streamed_text = String::new();
-            let mut streamed_reasoning = String::new();
-            let mut streamed_tool_calls: Vec<crate::providers::traits::ToolCall> = Vec::new();
-
-            let mut streamed_usage: Option<crate::providers::traits::TokenUsage> = None;
-            let mut got_stream = false;
-
-            let mut seen_streaming_tool_sigs: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-
-            let mut cancelled_during_stream = false;
-
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        cancelled_during_stream = true;
-                        break;
+            match msg.role.as_str() {
+                "tool" => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        if let (Some(id), Some(content_v)) = (
+                            v.get("tool_call_id").and_then(|x| x.as_str()),
+                            v.get("content"),
+                        ) {
+                            let content_str = match content_v {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            tool_batch.push(crate::providers::traits::ToolResultMessage {
+                                tool_call_id: id.to_string(),
+                                content: content_str,
+                            });
+                            continue;
+                        }
                     }
-                    next = stream.next() => {
-                        let Some(item) = next else { break };
-                        match item {
-                            Ok(event) => match event {
-                                crate::providers::traits::StreamEvent::TextDelta(chunk) => {
-                                    if let Some(reasoning) = chunk.reasoning {
-                                        if !reasoning.is_empty() {
-
-                                            streamed_reasoning.push_str(&reasoning);
-                                            let _ = event_tx
-                                                .send(TurnEvent::Thinking { delta: reasoning })
-                                                .await;
-                                        }
-                                    }
-                                    if !chunk.delta.is_empty() {
-                                        got_stream = true;
-                                        streamed_text.push_str(&chunk.delta);
-                                        let _ = event_tx
-                                            .send(TurnEvent::Chunk { delta: chunk.delta })
-                                            .await;
-                                    }
-                                }
-                                crate::providers::traits::StreamEvent::ToolCall(tc) => {
-                                    got_stream = true;
-                                    let sig = format!("{}|{}", tc.name, tc.arguments);
-                                    if seen_streaming_tool_sigs.insert(sig) {
-                                        let _ = event_tx
-                                            .send(TurnEvent::ToolCall {
-                                                name: tc.name.clone(),
-                                                args: serde_json::from_str(&tc.arguments)
-                                                    .unwrap_or_default(),
-                                            })
-                                            .await;
-                                        streamed_tool_calls.push(tc);
-                                    } else {
-                                        tracing::debug!(
-                                            target: "agent.stream",
-                                            tool = %tc.name,
-                                            "suppressed duplicate streaming tool_call (model emitted identical signature in same turn)"
-                                        );
-                                    }
-                                }
-                                crate::providers::traits::StreamEvent::PreExecutedToolCall {
-                                    name,
-                                    args,
-                                } => {
-                                    let _ = event_tx
-                                        .send(TurnEvent::ToolCall {
-                                            name,
-                                            args: serde_json::from_str(&args).unwrap_or_default(),
-                                        })
-                                        .await;
-                                }
-                                crate::providers::traits::StreamEvent::PreExecutedToolResult {
-                                    name,
-                                    output,
-                                } => {
-                                    let success = !crate::agent::tool_event_status::output_indicates_error(&output);
-                                    let _ = event_tx
-                                        .send(TurnEvent::ToolResult { name, output, success })
-                                        .await;
-                                }
-                                crate::providers::traits::StreamEvent::Usage(usage) => {
-
-                                    streamed_usage = Some(usage);
-                                }
-                                crate::providers::traits::StreamEvent::Final => break,
-                            },
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Stream error from provider; ending stream"
-                                );
-                                break;
+                    out.push(ConversationMessage::Chat(msg));
+                }
+                "assistant" => {
+                    if let Ok(v) =
+                        serde_json::from_str::<serde_json::Value>(msg.content.trim())
+                    {
+                        if let Some(tc_arr) =
+                            v.get("tool_calls").and_then(|x| x.as_array())
+                        {
+                            if !tc_arr.is_empty() {
+                                let text = v
+                                    .get("content")
+                                    .and_then(|x| x.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .map(String::from);
+                                let reasoning = v
+                                    .get("reasoning_content")
+                                    .and_then(|x| x.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .map(String::from);
+                                let tool_calls: Vec<
+                                    crate::providers::traits::ToolCall,
+                                > = tc_arr
+                                    .iter()
+                                    .filter_map(|tc| {
+                                        serde_json::from_value(tc.clone()).ok()
+                                    })
+                                    .collect();
+                                out.push(ConversationMessage::AssistantToolCalls {
+                                    text,
+                                    tool_calls,
+                                    reasoning_content: reasoning,
+                                });
+                                continue;
                             }
                         }
                     }
+                    out.push(ConversationMessage::Chat(msg));
                 }
-            }
-            drop(stream);
-
-            if cancelled_during_stream
-                || cancel.is_cancelled()
-                || self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                let trimmed = streamed_text.trim();
-                if !trimmed.is_empty() {
-                    self.history.push(ConversationMessage::Chat(
-                        ChatMessage::assistant(streamed_text.clone()),
-                    ));
+                _ => {
+                    out.push(ConversationMessage::Chat(msg));
                 }
-                let _ = event_tx
-                    .send(TurnEvent::Cancelling {
-                        reason: "user_requested".into(),
-                    })
-                    .await;
-                return Ok(streamed_text);
-            }
-
-            let response = if got_stream {
-
-                let reasoning_content = if !streamed_reasoning.is_empty() {
-                    Some(streamed_reasoning)
-                } else if !streamed_tool_calls.is_empty() {
-                    Some(
-                        "(chain-of-thought unavailable — model emitted tool calls without a CoT stream)"
-                            .to_string(),
-                    )
-                } else {
-                    None
-                };
-                crate::providers::ChatResponse {
-                    text: Some(streamed_text),
-                    tool_calls: streamed_tool_calls,
-
-                    usage: streamed_usage.take(),
-                    reasoning_content,
-                }
-            } else {
-                let chat_future = self.provider.chat(
-                    ChatRequest {
-                        messages: &messages,
-                        tools: if self.tool_dispatcher.should_send_tool_specs() {
-                            Some(merged_tool_specs.as_slice())
-                        } else {
-                            None
-                        },
-                    },
-                    &effective_model,
-                    self.temperature,
-                );
-                let timeout_secs: u64 = pacing_snapshot
-                    .step_timeout_secs
-                    .filter(|s| *s > 0)
-                    .unwrap_or(600);
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(timeout_secs),
-                    chat_future,
-                )
-                .await
-                {
-                    Ok(Ok(resp)) => resp,
-                    Ok(Err(err)) => return Err(err.into()),
-                    Err(_) => {
-                        return Err(AgentError::LoopOverflow(timeout_secs as usize));
-                    }
-                }
-            };
-
-            if let Some(usage) = response.usage.as_ref() {
-                let provider_name = self.cached_provider.as_str();
-                let _ = crate::agent::scope_record_tool_loop_cost_usage(
-                    provider_name,
-                    &effective_model,
-                    usage,
-                );
-                Self::merge_token_usage_into(&mut turn_aggregated_usage, usage);
-            }
-
-            let (text, calls) = self.tool_dispatcher.parse_response(&response);
-            if calls.is_empty() {
-                let final_text = if text.is_empty() {
-                    response.text.unwrap_or_default()
-                } else {
-                    text
-                };
-
-                let in_plan_mode =
-                    crate::agent::plan_mode_enforcement::detect_plan_mode_active(None);
-
-                if matches!(
-                    crate::agent::plan_mode_enforcement::evaluate_plan_mode_exit(
-                        in_plan_mode,
-                        &plan_nudge_state,
-                        awaiting_user_input,
-                    ),
-                    crate::agent::plan_mode_enforcement::PlanModeExitDecision::InjectNudge
-                ) {
-                    let nudge_n = plan_nudge_state.nudge_count + 1;
-                    tracing::info!(
-                        target: "agent.plan_mode",
-                        nudge_count = nudge_n,
-                        "Plan mode (turn_streamed): model exited without exit_plan_mode; injecting nudge"
-                    );
-
-                    let _ = event_tx
-                        .send(TurnEvent::StatusUpdate {
-                            action: "Plan reminder".to_string(),
-                            detail: format!(
-                                "nudge {nudge_n} — asking model to call exit_plan_mode"
-                            ),
-                        })
-                        .await;
-
-                    Self::push_terminal_assistant_message(
-                        &mut self.history,
-                        final_text.clone(),
-                        response.reasoning_content.clone(),
-                    );
-                    let msg = crate::agent::plan_mode_enforcement::nudge_message(
-                        &plan_nudge_state,
-                    );
-                    self.history.push(ConversationMessage::Chat(
-                        ChatMessage::system(msg),
-                    ));
-                    plan_nudge_state.nudge_count += 1;
-                    continue;
-                }
-
-                if matches!(
-                    crate::agent::plan_execution_enforcement::evaluate_plan_execution_exit(
-                        &plan_exec_state,
-                        awaiting_user_input,
-                    ),
-                    crate::agent::plan_execution_enforcement::PlanExecutionExitDecision::InjectNudge
-                ) {
-                    let nudge_n = plan_exec_state.nudge_count + 1;
-                    tracing::info!(
-                        target: "agent.plan_execution",
-                        nudge_count = nudge_n,
-                        total_steps = plan_exec_state.total_steps,
-                        terminal_count = plan_exec_state.terminal_count,
-                        "plan execution turn_streamed: model tried to exit with \
-                         pending steps; injecting continuation nudge"
-                    );
-
-                    let _ = event_tx
-                        .send(TurnEvent::StatusUpdate {
-                            action: "Plan reminder".to_string(),
-                            detail: format!(
-                                "nudge {nudge_n} — {done}/{total} done, \
-                                 {remaining} still pending",
-                                done = plan_exec_state.terminal_count,
-                                total = plan_exec_state.total_steps,
-                                remaining = plan_exec_state.remaining(),
-                            ),
-                        })
-                        .await;
-
-                    Self::push_terminal_assistant_message(
-                        &mut self.history,
-                        final_text.clone(),
-                        response.reasoning_content.clone(),
-                    );
-                    let msg = crate::agent::plan_execution_enforcement::nudge_message(
-                        &plan_exec_state,
-                    );
-                    self.history.push(ConversationMessage::Chat(
-                        ChatMessage::system(msg),
-                    ));
-                    plan_exec_state.nudge_count += 1;
-                    continue;
-                }
-
-                if let (Some(cache), Some(key)) = (&self.response_cache, &cache_key) {
-                    let token_count = response
-                        .usage
-                        .as_ref()
-                        .and_then(|u| u.output_tokens)
-                        .unwrap_or(0);
-                    #[allow(clippy::cast_possible_truncation)]
-                    let _ = cache.put(key, &effective_model, &final_text, token_count as u32);
-                }
-
-                if !got_stream && !final_text.is_empty() {
-                    let _ = event_tx
-                        .send(TurnEvent::Chunk {
-                            delta: final_text.clone(),
-                        })
-                        .await;
-                }
-
-                Self::push_terminal_assistant_message(
-                    &mut self.history,
-                    final_text.clone(),
-                    response.reasoning_content.clone(),
-                );
-                self.trim_history();
-
-                self.finish_turn_experience(
-                    user_message,
-                    &final_text,
-                    &tools_used_this_turn,
-                    &tool_results_this_turn,
-                );
-
-                self.last_usage = turn_aggregated_usage
-                    .clone()
-                    .or_else(|| response.usage.clone());
-
-                crate::evolution::record_provider_model(
-                    Some(self.cached_provider.as_str()),
-                    Some(effective_model.as_str()),
-                );
-                crate::evolution::set_response_text(&final_text);
-                if let Some(ref reasoning) = response.reasoning_content {
-                    crate::evolution::set_thinking_text(reasoning);
-                }
-                if let Some(ref usage) = self.last_usage {
-                    let input = usage.input_tokens.unwrap_or(0);
-                    let output = usage.output_tokens.unwrap_or(0);
-                    crate::evolution::record_cost(
-                        input,
-                        output,
-                        input.saturating_add(output),
-                        0.0,
-                    );
-                }
-
-                _turn_metrics_n1v2.mark_ok();
-                return Ok(final_text);
-            }
-
-            self.history.push(ConversationMessage::AssistantToolCalls {
-                text: response.text.clone(),
-                tool_calls: response.tool_calls.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-            });
-
-            let mut deduped_calls = Vec::new();
-            for call in &calls {
-                let sig_args = call.arguments.to_string();
-                if loop_state.record_tool_signature(&call.name, &sig_args) {
-                    let _ = event_tx
-                        .send(TurnEvent::ToolResult {
-                            name: call.name.clone(),
-                            output: "[Deduplicated] Already executed with identical arguments."
-                                .into(),
-                            success: true,
-                        })
-                        .await;
-                } else {
-                    deduped_calls.push(call.clone());
-                }
-            }
-
-            if !got_stream {
-                for call in &deduped_calls {
-                    let _ = event_tx
-                        .send(TurnEvent::ToolCall {
-                            name: call.name.clone(),
-                            args: call.arguments.clone(),
-                        })
-                        .await;
-                }
-            }
-
-            let (calls_to_execute, prefab_denials) =
-                Self::gate_tool_calls(&deduped_calls, &event_tx).await;
-
-            let exec_results = self.execute_tools(&calls_to_execute).await;
-
-            let mut results: Vec<ToolExecutionResult> =
-                Vec::with_capacity(deduped_calls.len());
-            let mut exec_iter = exec_results.into_iter();
-            for (i, _call) in deduped_calls.iter().enumerate() {
-                if let Some(denial) =
-                    prefab_denials.iter().find(|(idx, _)| *idx == i).map(|(_, r)| r.clone())
-                {
-                    results.push(denial);
-                } else if let Some(r) = exec_iter.next() {
-                    results.push(r);
-                }
-            }
-            let mut results = results;
-
-            let mut pending_post_tool_system_messages: Vec<String> = Vec::new();
-
-            for r in results.iter_mut() {
-                if crate::agent::plan_mode_enforcement::is_ask_question_pause(&r.name, &r.output) {
-                    awaiting_user_input = true;
-                    r.output = crate::agent::plan_mode_enforcement::ASK_QUESTION_PAUSE_NOTICE
-                        .to_string();
-                }
-            }
-
-            let mut plan_finalized_this_iter = false;
-            for (idx, r) in results.iter().enumerate() {
-                tools_used_this_turn.push(r.name.clone());
-                tool_results_this_turn.push((r.name.clone(), r.success));
-                if r.success && r.name == "exit_plan_mode" {
-                    plan_nudge_state.note_exit_plan_mode_success();
-                    plan_finalized_this_iter = true;
-                }
-
-                if let Some(call) = deduped_calls.get(idx) {
-                    plan_exec_state.observe_update_plan_call_at(
-                        &r.name,
-                        &call.arguments,
-                        &r.output,
-                        r.success,
-                        Some(iteration),
-                    );
-                }
-            }
-
-            if !plan_finalized_this_iter
-                && crate::agent::plan_mode_enforcement::detect_plan_mode_active(None)
-                && !awaiting_user_input
-            {
-                plan_nudge_state.nudge_count += 1;
-                let msg = crate::agent::plan_mode_enforcement::nudge_message(
-                    &plan_nudge_state,
-                );
-                pending_post_tool_system_messages.push(msg.to_string());
-            }
-
-            for (idx, result) in results.iter().enumerate() {
-                let args = deduped_calls.get(idx).map(|c| &c.arguments);
-                let error_excerpt = if result.success {
-                    None
-                } else {
-                    Some(result.output.as_str())
-                };
-                crate::evolution::record_tool_outcome(
-                    &result.name,
-                    result.success,
-                    None,
-                    None,
-                    args,
-                    Some(result.output.as_str()),
-                    error_excerpt,
-                );
-                let _ = event_tx
-                    .send(TurnEvent::ToolResult {
-                        name: result.name.clone(),
-                        output: result.output.clone(),
-                        success: result.success,
-                    })
-                    .await;
-            }
-
-            {
-                let results_with_args: Vec<(String, serde_json::Value, String)> = results
-                    .iter()
-                    .zip(deduped_calls.iter())
-                    .map(|(r, c)| (r.name.clone(), c.arguments.clone(), r.output.clone()))
-                    .collect();
-
-                let loop_result = loop_state.record_tool_results_with_args(&results_with_args);
-                match loop_result {
-                    Err(msg) => {
-                        return Err(AgentError::ToolDispatchFailed(msg));
-                    }
-                    Ok(Some(msg)) => {
-                        pending_post_tool_system_messages.push(msg);
-                    }
-                    Ok(None) => {}
-                }
-            }
-
-            {
-                let had_file_edit = results.iter().any(|r| {
-                    r.success
-                        && crate::agent::mode_effects::is_file_mutation_tool(r.name.as_str())
-                });
-                if had_file_edit {
-                    for r in results.iter().filter(|r| {
-                        r.success
-                            && crate::agent::mode_effects::is_file_mutation_tool(r.name.as_str())
-                    }) {
-                        let path = extract_file_edit_path(&r.name, &r.output);
-                        if !path.is_empty() {
-                            let (additions, deletions) = count_diff_lines(&r.output);
-                            let diff = if r.output.len() < 4_096 {
-                                Some(r.output.clone())
-                            } else {
-                                None
-                            };
-
-                            let edit_batch_id = {
-                                let history =
-                                    crate::tools::edit_history::EditHistory::new(
-                                        self.workspace_dir.clone(),
-                                    );
-                                history.latest_batch_id_for(std::path::Path::new(&path))
-                            };
-                            let _ = event_tx
-                                .send(TurnEvent::FileEdit {
-                                    path,
-                                    additions,
-                                    deletions,
-                                    diff,
-                                    edit_batch_id,
-                                })
-                                .await;
-                        }
-                    }
-
-                    if let Some(mode) = self.current_coding_mode {
-                        if let Some(nudge) =
-                            crate::agent::mode_effects::file_mod_auto_verify_nudge(mode)
-                        {
-                            pending_post_tool_system_messages.push(nudge.to_string());
-                        }
-                    }
-                }
-            }
-
-            let formatted = self.tool_dispatcher.format_results(&results);
-            self.history.push(formatted);
-
-            if cancel.is_cancelled()
-                || self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                let _ = event_tx
-                    .send(TurnEvent::Cancelling {
-                        reason: "user_requested".into(),
-                    })
-                    .await;
-                return Ok(String::new());
-            }
-
-            for body in pending_post_tool_system_messages.drain(..) {
-                self.history
-                    .push(ConversationMessage::Chat(ChatMessage::system(body)));
-            }
-
-            if let Some(mode) = self.current_coding_mode {
-                if let Some(msg) = crate::agent::mode_effects::post_tool_batch_message(mode) {
-                    self.history
-                        .push(ConversationMessage::Chat(ChatMessage::system(
-                            msg.to_string(),
-                        )));
-                }
-            }
-
-            self.trim_history();
-
-            let pair_break_mode = self
-                .current_coding_mode
-                .filter(|m| m.breaks_turn_after_tool_batch());
-            if let Some(intercepted_mode) = pair_break_mode {
-                tracing::info!(
-                    target: "agent.pair_mode",
-                    "turn_streamed pausing: Pair Checkpoint after tool batch"
-                );
-                let pair_text = "_Pair Checkpoint: tool batch complete. Pausing for your \
-                    input — type to continue or redirect, or send the next instruction._"
-                    .to_string();
-                crate::agent::mode_effects::record_mode_intercept(
-                    crate::agent::mode_effects::ModeInterceptReason::PairCheckpoint,
-                    &crate::agent::mode_effects::ModeInterceptContext {
-                        mode: intercepted_mode,
-                        channel: Some("desktop"),
-                        provider: Some(self.cached_provider.as_str()),
-                        model: None,
-                        turn_id: None,
-                        tool: None,
-                        tool_call_id: None,
-                        iteration: None,
-                        message: Some("Pair Checkpoint pause"),
-                    },
-                );
-                self.history
-                    .push(ConversationMessage::Chat(ChatMessage::system(
-                        "[Pair Checkpoint] Turn paused after tool batch. The runtime returned \
-                         control to the user. The next user message will resume execution."
-                            .to_string(),
-                    )));
-                let _ = event_tx
-                    .send(TurnEvent::StatusUpdate {
-                        action: "Pair Checkpoint".to_string(),
-                        detail: pair_text.clone(),
-                    })
-                    .await;
-                self.finish_turn_experience(
-                    user_message,
-                    &pair_text,
-                    &tools_used_this_turn,
-                    &tool_results_this_turn,
-                );
-                _turn_metrics_n1v2.mark_ok();
-                return Ok(pair_text);
-            }
-
-            if plan_finalized_this_iter {
-                tracing::info!(
-                    target: "agent.plan_mode",
-                    "turn_streamed halting: exit_plan_mode succeeded; \
-                     waiting for user's Build → Switch click"
-                );
-                let halt_text = "_Plan finalised. Waiting for the user to click \
-                    **Build** in the plan card to switch to Agent mode and start \
-                    executing._"
-                    .to_string();
-                let _ = event_tx
-                    .send(TurnEvent::StatusUpdate {
-                        action: "Plan ready".to_string(),
-                        detail: halt_text.clone(),
-                    })
-                    .await;
-                self.finish_turn_experience(
-                    user_message,
-                    &halt_text,
-                    &tools_used_this_turn,
-                    &tool_results_this_turn,
-                );
-                _turn_metrics_n1v2.mark_ok();
-                return Ok(halt_text);
-            }
-
-            if awaiting_user_input {
-                tracing::info!(
-                    target: "agent.plan_mode",
-                    "turn_streamed pausing: ask_question is awaiting user reply (plan nudge suppressed)"
-                );
-                let pause_text =
-                    "_Waiting for the user's reply to the clarifying question(s) above._"
-                        .to_string();
-
-                let _ = event_tx
-                    .send(TurnEvent::StatusUpdate {
-                        action: "Awaiting answer".to_string(),
-                        detail: pause_text.clone(),
-                    })
-                    .await;
-                self.finish_turn_experience(
-                    user_message,
-                    &pause_text,
-                    &tools_used_this_turn,
-                    &tool_results_this_turn,
-                );
-                _turn_metrics_n1v2.mark_ok();
-                return Ok(pause_text);
             }
         }
-
-        Err(AgentError::LoopOverflow(self.config.max_tool_iterations))
+        if !tool_batch.is_empty() {
+            out.push(ConversationMessage::ToolResults(tool_batch));
+        }
+        *history = out;
     }
 
     pub fn history(&self) -> &[ConversationMessage] {
@@ -1727,7 +1108,9 @@ impl Agent {
                 self.temperature
             );
             ConfigChange::Hard
-        } else if model_changed || self.temperature != config.default_temperature {
+        } else if model_changed
+            || (self.temperature - config.default_temperature).abs() > f64::EPSILON
+        {
             if let Some(new_model) = new_model_opt {
                 self.model_name = new_model;
             }
@@ -2177,8 +1560,12 @@ impl Agent {
                     .push(ConversationMessage::Chat(ChatMessage::system(sys)));
             }
         }
+        let mirrored =
+            crate::providers::sanitize::mirror_tool_ids_in_chat_messages(messages.to_vec());
+        let cleaned =
+            crate::providers::sanitize::clean_empty_assistant_tool_calls_in_chat_messages(mirrored);
         let mut expanded =
-            super::sqlite_gateway_hydrate::hydrate_gateway_sqlite_messages(messages);
+            super::sqlite_gateway_hydrate::hydrate_gateway_sqlite_messages(&cleaned);
         Self::repair_orphan_tool_result_messages(&mut expanded);
         self.activate_deferred_tools_from_history(&expanded);
         self.history.extend(expanded);
@@ -2590,31 +1977,6 @@ impl Agent {
         Self::repair_orphan_tool_result_messages(&mut self.history);
     }
 
-    fn push_terminal_assistant_message(
-        history: &mut Vec<ConversationMessage>,
-        body: String,
-        reasoning_content: Option<String>,
-    ) {
-        let reasoning_trimmed = reasoning_content
-            .map(|s| s.trim_end().to_string())
-            .filter(|s| !s.is_empty());
-        let has_reasoning = reasoning_trimmed.is_some();
-        let text_trimmed = body.trim_end().to_string();
-        let text_opt = (!text_trimmed.is_empty()).then_some(text_trimmed);
-
-        if has_reasoning {
-            history.push(ConversationMessage::AssistantToolCalls {
-                text: text_opt,
-                tool_calls: Vec::new(),
-                reasoning_content: reasoning_trimmed,
-            });
-            return;
-        }
-        if let Some(t) = text_opt {
-            history.push(ConversationMessage::Chat(ChatMessage::assistant(t)));
-        }
-    }
-
     fn repair_orphan_tool_result_messages(history: &mut Vec<ConversationMessage>) {
         Self::upgrade_native_json_assistants_in_place(history);
         Self::collapse_empty_assistant_tool_calls(history);
@@ -2660,7 +2022,7 @@ impl Agent {
         crate::agent::dangling_tool_repair::ensure_assistant_tool_replies_inplace(history);
     }
 
-    fn collapse_empty_assistant_tool_calls(history: &mut Vec<ConversationMessage>) {
+    fn collapse_empty_assistant_tool_calls(history: &mut [ConversationMessage]) {
         for m in history.iter_mut() {
             let collapsed = match &*m {
                 ConversationMessage::AssistantToolCalls {
@@ -2746,7 +2108,7 @@ impl Agent {
         ConversationMessage::Chat(ChatMessage::user(msg))
     }
 
-    fn upgrade_native_json_assistants_in_place(history: &mut Vec<ConversationMessage>) {
+    fn upgrade_native_json_assistants_in_place(history: &mut [ConversationMessage]) {
         for m in history.iter_mut() {
             if let ConversationMessage::Chat(c) = m {
                 if c.role != "assistant" {
@@ -2797,24 +2159,6 @@ impl Agent {
             ConversationMessage::Chat(chat) => chat.content.len(),
             _ => 200,
         }
-    }
-
-    fn estimate_history_tokens_internal(&self) -> usize {
-        self.history
-            .iter()
-            .map(|m| Self::msg_char_len(m).div_ceil(4) + 4)
-            .sum()
-    }
-
-    fn estimate_history_tokens_filtered(&self, system_only: bool) -> usize {
-        self.history
-            .iter()
-            .filter(|m| {
-                let is_sys = matches!(m, ConversationMessage::Chat(c) if c.role == "system");
-                if system_only { is_sys } else { !is_sys }
-            })
-            .map(|m| Self::msg_char_len(m).div_ceil(4) + 4)
-            .sum()
     }
 
     fn build_system_prompt(&self) -> Result<String> {
@@ -2882,42 +2226,6 @@ impl Agent {
         }
 
         Ok(prompt)
-    }
-
-    fn finish_turn_experience(
-        &self,
-        user_query: &str,
-        assistant_response: &str,
-        tools_used: &[String],
-        tool_results: &[(String, bool)],
-    ) {
-        let Some(ref replay) = self.experience_replay else {
-            return;
-        };
-        if !replay.collection_enabled() {
-            return;
-        }
-        let refs: Vec<(&str, bool)> = tool_results.iter().map(|(n, s)| (n.as_str(), *s)).collect();
-        let dims = crate::agent::self_eval::heuristic_eval(user_query, assistant_response, &refs);
-        let reward = (dims.aggregate() * 2.0) - 1.0;
-
-        let query_category =
-            crate::agent::classifier::classify(&self.classification_config, user_query)
-                .unwrap_or_else(|| "general".to_string());
-
-        let experience = crate::agent::experience::Experience {
-            id: uuid::Uuid::new_v4().to_string(),
-            session_id: self.memory_session_id.clone().unwrap_or_default(),
-            timestamp: chrono::Utc::now(),
-            user_query: user_query.to_string(),
-            assistant_response: assistant_response.to_string(),
-            tools_used: tools_used.to_vec(),
-            model: self.model_name.clone(),
-            reward,
-            query_category,
-            replay_count: 0,
-        };
-        replay.store(experience);
     }
 
     async fn execute_tool_call(&self, call: &ParsedToolCall) -> ToolExecutionResult {
@@ -3156,7 +2464,7 @@ impl Agent {
                         success: r.success,
                     });
                     if r.success {
-                        let scrubbed = crate::agent::loop_::scrub_credentials(&r.output);
+                        let scrubbed = crate::agent::pii_sanitize::scrub_credentials(&r.output);
                         let call_name_owned = call.name.clone();
                         let out = tokio::task::spawn_blocking(move || {
                             crate::agent::token_optimizer::compress_output(
@@ -3170,7 +2478,7 @@ impl Agent {
                     } else {
                         let reason = r.error.unwrap_or(r.output);
                         (
-                            format!("Error: {}", crate::agent::loop_::scrub_credentials(&reason)),
+                            format!("Error: {}", crate::agent::pii_sanitize::scrub_credentials(&reason)),
                             false,
                         )
                     }
@@ -3258,273 +2566,6 @@ impl Agent {
         }
     }
 
-    async fn gate_tool_calls(
-        deduped_calls: &[ParsedToolCall],
-        event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
-    ) -> (Vec<ParsedToolCall>, Vec<(usize, ToolExecutionResult)>) {
-        use crate::security::permissions::{
-            gate_decision, ComposerPermissionMode, GateDecision,
-        };
-
-        let mode_str = crate::gateway::ws_desktop::desktop_runtime_state().permission_mode();
-        let mode = ComposerPermissionMode::from_wire(&mode_str);
-
-        let (auto_approve, protect_browser, protect_mcp) =
-            crate::services::try_get_services()
-                .map(|svc| {
-                    let cfg = svc.config();
-                    let approve: std::collections::HashSet<String> =
-                        cfg.autonomy.auto_approve.iter().cloned().collect();
-                    (
-                        approve,
-                        cfg.autonomy.protect_browser_tools,
-                        cfg.autonomy.protect_mcp_tools,
-                    )
-                })
-                .unwrap_or_else(|| (std::collections::HashSet::new(), true, true));
-
-        let coding_allowed: Option<std::collections::HashSet<String>> =
-            crate::services::try_get_services().and_then(|svc| {
-                let mode = *svc.coding_mode.read();
-                mode.allowed_tools()
-                    .map(|set| set.into_iter().map(String::from).collect())
-            });
-
-        let mut to_execute: Vec<ParsedToolCall> = Vec::new();
-        let mut denials: Vec<(usize, ToolExecutionResult)> = Vec::new();
-
-        let mut approval_rx: Option<
-            tokio::sync::broadcast::Receiver<crate::session::SessionEvent>,
-        > = None;
-
-        for (idx, call) in deduped_calls.iter().enumerate() {
-
-            if let Some(ref allowed) = coding_allowed {
-                if !allowed.contains(call.name.as_str()) {
-                    let coding_mode_label = crate::services::try_get_services()
-                        .map(|svc| svc.coding_mode.read().label().to_string())
-                        .unwrap_or_else(|| "current".to_string());
-
-                    let allowed_sorted = {
-                        let mut v: Vec<&str> = allowed.iter().map(|s| s.as_str()).collect();
-                        v.sort_unstable();
-                        v
-                    };
-                    let allowed_list = allowed_sorted.join(", ");
-                    let denial_msg = format!(
-                        "Tool '{tool}' is NOT permitted in {mode} mode. The runtime refused \
-                         this call before any side effect occurred — no files were touched, \
-                         no commands ran.\n\n\
-                         In Plan mode the deliverable is a saved `.plan.md`, NOT direct \
-                         edits.  Your immediate next step is to GATHER INFORMATION with \
-                         read-only tools so you can write a real plan.  DO NOT jump \
-                         straight to `exit_plan_mode` with a stub — `exit_plan_mode` \
-                         enforces a hard quality gate (≥600 chars, ≥3 concrete todos, \
-                         `## ` sections, file-path links, ```bash``` verification block) \
-                         and will reject a thin submission too.\n\n\
-                         Recommended exploration sequence for a multi-file change:\n\
-                           1. `dir_list` / `glob_search` to enumerate every affected file.\n\
-                           2. `content_search` (or `grep`) to count occurrences of the \
-                              identifier you're changing.\n\
-                           3. `file_read` on the entry points (e.g. `go.mod`, `README.md`, \
-                              `Dockerfile`, top-level configs) to capture the exact \
-                              current values.\n\
-                           4. `update_plan(action=\"set\", steps=[…])` to draft.\n\
-                           5. `exit_plan_mode(plan_content=…)` with the full Cursor-style \
-                              markdown.\n\n\
-                         The {n} tools available in this mode are:\n\n  {list}\n\n\
-                         Use `ask_question` when the user's intent is genuinely ambiguous.  \
-                         Do NOT retry '{tool}' — it will keep being denied until the user \
-                         clicks Build → Switch.",
-                        tool = call.name,
-                        mode = coding_mode_label,
-                        n = allowed_sorted.len(),
-                        list = allowed_list,
-                    );
-                    tracing::info!(
-                        target: "agent.gate",
-                        tool = %call.name,
-                        coding_mode = %coding_mode_label,
-                        "coding-mode allowlist refused tool BEFORE permission UI"
-                    );
-                    denials.push((
-                        idx,
-                        ToolExecutionResult {
-                            name: call.name.clone(),
-                            output: denial_msg,
-                            success: false,
-                            tool_call_id: call.tool_call_id.clone(),
-                        },
-                    ));
-                    continue;
-                }
-            }
-
-            let mut decision = gate_decision(
-                mode,
-                &call.name,
-                &auto_approve,
-                protect_browser,
-                protect_mcp,
-            );
-            if matches!(decision, GateDecision::Ask) {
-                if approval_rx.is_none() {
-                    approval_rx =
-                        Some(crate::gateway::ws::subscribe_gateway_approval_events());
-                }
-                let request_id = format!("perm_{}", uuid::Uuid::new_v4());
-
-                tracing::info!(
-                    target: "agent.gate",
-                    %request_id,
-                    tool = %call.name,
-                    mode = ?mode,
-                    "emitting permission request to UI"
-                );
-                let send_start = std::time::Instant::now();
-                if let Err(e) = event_tx
-                    .send(TurnEvent::PermissionRequest {
-                        request_id: request_id.clone(),
-                        tool_name: call.name.clone(),
-                        input: call.arguments.clone(),
-                        description: Some(format!("Run tool `{}`", call.name)),
-                    })
-                    .await
-                {
-
-                    tracing::warn!(
-                        target: "agent.gate",
-                        %request_id,
-                        tool = %call.name,
-                        error = %e,
-                        "permission request send failed; turning into deny"
-                    );
-                    decision = GateDecision::Deny;
-                } else {
-                    tracing::debug!(
-                        target: "agent.gate",
-                        %request_id,
-                        send_ms = send_start.elapsed().as_millis() as u64,
-                        "permission request delivered; awaiting user response"
-                    );
-
-                    let wait_start = std::time::Instant::now();
-                    let (approved, updated_input) = Self::wait_for_permission_response(
-                        approval_rx.as_mut().expect("subscribed above"),
-                        &request_id,
-                        std::time::Duration::from_secs(600),
-                    )
-                    .await;
-
-                    tracing::info!(
-                        target: "agent.gate",
-                        %request_id,
-                        tool = %call.name,
-                        approved,
-                        has_updated_input = updated_input.is_some(),
-                        waited_ms = wait_start.elapsed().as_millis() as u64,
-                        "permission response received"
-                    );
-
-                    decision = if approved {
-
-                        if let Some(extra) = updated_input {
-                            let mut merged = call.clone();
-                            merge_tool_arguments(&mut merged.arguments, &extra);
-                            to_execute.push(merged);
-                            continue;
-                        }
-                        GateDecision::Auto
-                    } else {
-                        GateDecision::Deny
-                    };
-                }
-            }
-
-            match decision {
-                GateDecision::Auto => to_execute.push(call.clone()),
-                GateDecision::Deny => {
-                    let denial_msg = match mode {
-                        ComposerPermissionMode::Plan => format!(
-                            "Plan mode is active — '{}' is a write/act tool and cannot run. \
-Use a read-only tool, or call `exit_plan_mode` first.",
-                            call.name
-                        ),
-                        _ => format!(
-                            "Denied by user: '{}' was not permitted under the current permission policy.",
-                            call.name
-                        ),
-                    };
-                    let denial = ToolExecutionResult {
-                        name: call.name.clone(),
-                        output: denial_msg.clone(),
-                        success: false,
-                        tool_call_id: call.tool_call_id.clone(),
-                    };
-                    denials.push((idx, denial));
-                }
-                GateDecision::Ask => {
-
-                }
-            }
-        }
-
-        (to_execute, denials)
-    }
-
-    async fn wait_for_permission_response(
-        rx: &mut tokio::sync::broadcast::Receiver<crate::session::SessionEvent>,
-        request_id: &str,
-        timeout: std::time::Duration,
-    ) -> (bool, Option<serde_json::Value>) {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return (false, None);
-            }
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(evt)) => {
-                    if let crate::session::SessionEventKind::ApprovalResponded {
-                        id,
-                        decision,
-                        updated_input,
-                        ..
-                    } = &evt.kind
-                    {
-                        if id == request_id {
-                            let approved = matches!(
-                                decision.to_ascii_lowercase().as_str(),
-                                "yes" | "always" | "approved" | "allow"
-                            );
-                            return (approved, updated_input.clone());
-                        }
-                    }
-                }
-                Ok(Err(_recv_err)) => return (false, None),
-                Err(_timeout) => return (false, None),
-            }
-        }
-    }
-
-    async fn execute_tools(&self, calls: &[ParsedToolCall]) -> Vec<ToolExecutionResult> {
-
-        let has_tool_search = calls.iter().any(|c| c.name == "tool_search");
-        if !self.config.parallel_tools || has_tool_search {
-            let mut results = Vec::with_capacity(calls.len());
-            for call in calls {
-                results.push(self.execute_tool_call(call).await);
-            }
-            return results;
-        }
-
-        let futs: Vec<_> = calls
-            .iter()
-            .map(|call| self.execute_tool_call(call))
-            .collect();
-        futures_util::future::join_all(futs).await
-    }
-
     fn build_user_envelope(user_message: &str, context: &str) -> String {
         let now = chrono::Local::now();
         let (year, month, day) = (now.year(), now.month(), now.day());
@@ -3538,101 +2579,6 @@ Use a read-only tool, or call `exit_plan_mode` first.",
         } else {
             format!("[CURRENT DATE & TIME: {date_str}]\n\n{context}\n\n{user_message}")
         }
-    }
-
-    fn try_response_cache_lookup(
-        &mut self,
-        messages: &[ChatMessage],
-        effective_model: &str,
-        user_message: &str,
-    ) -> Option<String> {
-        if self.temperature != 0.0 {
-            return None;
-        }
-        let cache = self.response_cache.as_ref()?;
-        let last_user = messages
-            .iter()
-            .rfind(|m| m.role == "user")
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-        let system = messages
-            .iter()
-            .find(|m| m.role == "system")
-            .map(|m| m.content.as_str());
-        let key = crate::memory::response_cache::ResponseCache::cache_key(
-            effective_model,
-            system,
-            last_user,
-        );
-
-        let provider_label = self.cached_provider.clone();
-        let model_label = effective_model.to_string();
-        match cache.get(&key) {
-            Ok(Some(cached)) => {
-                self.observer.record_event(&ObserverEvent::CacheHit {
-                    cache_type: "response".into(),
-                    tokens_saved: 0,
-                });
-                self.observer.record_metric(
-                    &crate::observability::traits::ObserverMetric::ResponseCacheOutcome {
-                        provider: provider_label,
-                        model: model_label,
-                        hit: true,
-                    },
-                );
-                self.history
-                    .push(ConversationMessage::Chat(ChatMessage::assistant(
-                        cached.clone(),
-                    )));
-                self.trim_history();
-                self.finish_turn_experience(user_message, &cached, &[], &[]);
-                Some(cached)
-            }
-            _ => {
-                self.observer.record_event(&ObserverEvent::CacheMiss {
-                    cache_type: "response".into(),
-                });
-                self.observer.record_metric(
-                    &crate::observability::traits::ObserverMetric::ResponseCacheOutcome {
-                        provider: provider_label,
-                        model: model_label,
-                        hit: false,
-                    },
-                );
-                None
-            }
-        }
-    }
-
-    fn try_response_cache_store(
-        &self,
-        messages: &[ChatMessage],
-        effective_model: &str,
-        final_text: &str,
-        token_count: u64,
-    ) {
-        if self.temperature != 0.0 {
-            return;
-        }
-        let Some(cache) = self.response_cache.as_ref() else {
-            return;
-        };
-        let last_user = messages
-            .iter()
-            .rfind(|m| m.role == "user")
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-        let system = messages
-            .iter()
-            .find(|m| m.role == "system")
-            .map(|m| m.content.as_str());
-        let key = crate::memory::response_cache::ResponseCache::cache_key(
-            effective_model,
-            system,
-            last_user,
-        );
-        #[allow(clippy::cast_possible_truncation)]
-        let _ = cache.put(&key, effective_model, final_text, token_count as u32);
     }
 
     fn classify_model(&self, user_message: &str) -> String {
@@ -3653,7 +2599,7 @@ Use a read-only tool, or call `exit_plan_mode` first.",
                     message_length = user_message.len(),
                     "Classified message route"
                 );
-                return format!("hint:{}", decision.hint);
+                return format!("route:{}", decision.hint);
             }
         }
 
@@ -3668,7 +2614,7 @@ Use a read-only tool, or call `exit_plan_mode` first.",
                         message_length = user_message.len(),
                         "Auto-classified by complexity"
                     );
-                    return format!("hint:{hint}");
+                    return format!("route:{hint}");
                 }
             }
         }
@@ -3828,6 +2774,14 @@ Use a read-only tool, or call `exit_plan_mode` first.",
                 enriched.push_str("\n\n");
                 enriched.push_str(web_reminder);
             }
+            if let Some(web_active) = crate::agent::mode_effects::web_research_active_reminder(
+                mode,
+                cfg.web_search.enabled,
+                cfg.web_fetch.enabled,
+            ) {
+                enriched.push_str("\n\n");
+                enriched.push_str(web_active);
+            }
         }
 
         self.history
@@ -3891,135 +2845,6 @@ Use a read-only tool, or call `exit_plan_mode` first.",
         crate::agent::loop_::clear_model_switch_request();
     }
 
-    fn build_response_cache_key(
-        &self,
-        messages: &[crate::providers::traits::ChatMessage],
-        effective_model: &str,
-    ) -> Option<String> {
-        if self.temperature != 0.0 {
-            return None;
-        }
-        self.response_cache.as_ref().map(|_| {
-            let last_user = messages
-                .iter()
-                .rfind(|m| m.role == "user")
-                .map(|m| m.content.as_str())
-                .unwrap_or("");
-            let system = messages
-                .iter()
-                .find(|m| m.role == "system")
-                .map(|m| m.content.as_str());
-            crate::memory::response_cache::ResponseCache::cache_key(
-                effective_model,
-                system,
-                last_user,
-            )
-        })
-    }
-
-    async fn try_response_cache_hit(
-        &mut self,
-        cache_key: &Option<String>,
-        user_message: &str,
-    ) -> Option<String> {
-        let (Some(cache), Some(key)) = (&self.response_cache, cache_key) else {
-            return None;
-        };
-
-        let provider_label = self.cached_provider.clone();
-        let model_label = self.model_name.clone();
-        match cache.get(key) {
-            Ok(Some(cached)) => {
-                self.observer.record_event(&ObserverEvent::CacheHit {
-                    cache_type: "response".into(),
-                    tokens_saved: 0,
-                });
-                self.observer.record_metric(
-                    &crate::observability::traits::ObserverMetric::ResponseCacheOutcome {
-                        provider: provider_label,
-                        model: model_label,
-                        hit: true,
-                    },
-                );
-                self.history
-                    .push(ConversationMessage::Chat(ChatMessage::assistant(
-                        cached.clone(),
-                    )));
-                self.trim_history();
-                self.finish_turn_experience(user_message, &cached, &[], &[]);
-                Some(cached)
-            }
-            _ => {
-                self.observer.record_event(&ObserverEvent::CacheMiss {
-                    cache_type: "response".into(),
-                });
-                self.observer.record_metric(
-                    &crate::observability::traits::ObserverMetric::ResponseCacheOutcome {
-                        provider: provider_label,
-                        model: model_label,
-                        hit: false,
-                    },
-                );
-                None
-            }
-        }
-    }
-
-    async fn prepare_iteration_context_budget(
-        &mut self,
-        iteration: usize,
-        event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
-    ) {
-        let est_tokens = self.estimate_history_tokens_internal();
-        let max_ctx: usize = self.config.max_context_tokens;
-        if est_tokens > max_ctx * 80 / 100 {
-            let tokens_before = est_tokens;
-            self.trim_history();
-            let tokens_after = self.estimate_history_tokens_internal();
-
-            let _ = event_tx
-                .send(TurnEvent::ContextCompressed {
-                    tokens_before,
-                    tokens_after,
-                })
-                .await;
-        }
-        let sys_tokens = self.estimate_history_tokens_filtered(true);
-        let hist_tokens = self.estimate_history_tokens_filtered(false);
-        let total = sys_tokens + hist_tokens;
-        let remaining = max_ctx.saturating_sub(total);
-        let pct = if max_ctx > 0 {
-            remaining * 100 / max_ctx
-        } else {
-            0
-        };
-        if iteration > 0 || pct < 50 {
-            let warning = if pct < 20 {
-                " WARNING: context nearly full, prioritize essential information."
-            } else {
-                ""
-            };
-            let budget_msg = format!(
-                "[Context Budget] System: ~{}k tokens. History: ~{}k tokens. \
-                 Remaining: ~{}k tokens ({}% free).{}",
-                sys_tokens / 1000,
-                hist_tokens / 1000,
-                remaining / 1000,
-                pct,
-                warning
-            );
-            self.history.retain(|m| {
-                !matches!(
-                    m,
-                    ConversationMessage::Chat(c)
-                        if c.role == "system" && c.content.trim_start().starts_with("[Context Budget]")
-                )
-            });
-            self.history
-                .push(ConversationMessage::Chat(ChatMessage::system(budget_msg)));
-        }
-    }
-
     pub async fn run_single(&mut self, message: &str) -> Result<String> {
         self.turn(message).await.map_err(|e| e.into())
     }
@@ -4053,75 +2878,258 @@ Use a read-only tool, or call `exit_plan_mode` first.",
     }
 }
 
-fn merge_tool_arguments(arguments: &mut serde_json::Value, extra: &serde_json::Value) {
-    let extra_obj = match extra.as_object() {
-        Some(obj) => obj,
-        None => {
-            tracing::debug!(
-                target: "agent.gate",
-                "permission_response.updated_input was not an object; ignoring"
-            );
+pub(crate) struct GuiHooksFromAgent {
+    response_cache: Option<Arc<crate::memory::response_cache::ResponseCache>>,
+    memory: Arc<dyn Memory>,
+    memory_session_id: Option<String>,
+    auto_save: bool,
+    classification_config: crate::config::QueryClassificationConfig,
+    available_hints: Vec<String>,
+    route_model_by_hint: HashMap<String, String>,
+    auto_classify: Option<crate::agent::eval::AutoClassifyConfig>,
+    default_model: String,
+    temperature: f64,
+    experience_replay: Option<crate::agent::experience::ExperienceReplay>,
+    observer: Arc<dyn Observer>,
+    cached_provider: String,
+}
+
+impl GuiHooksFromAgent {
+    pub fn from_agent(agent: &Agent) -> Self {
+        Self {
+            response_cache: agent.response_cache.clone(),
+            memory: agent.memory.clone(),
+            memory_session_id: agent.memory_session_id.clone(),
+            auto_save: agent.auto_save,
+            classification_config: agent.classification_config.clone(),
+            available_hints: agent.available_hints.clone(),
+            route_model_by_hint: agent.route_model_by_hint.clone(),
+            auto_classify: agent.config.auto_classify.clone(),
+            default_model: agent.model_name.clone(),
+            temperature: agent.temperature,
+            experience_replay: agent.experience_replay.clone(),
+            observer: agent.observer.clone(),
+            cached_provider: agent.cached_provider.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::ResponseCacheHook for GuiHooksFromAgent {
+    fn build_key(&self, messages: &[ChatMessage], model: &str) -> Option<String> {
+        if self.temperature != 0.0 {
+            return None;
+        }
+        self.response_cache.as_ref().map(|_| {
+            let last_user = messages
+                .iter()
+                .rfind(|m| m.role == "user")
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let system = messages
+                .iter()
+                .find(|m| m.role == "system")
+                .map(|m| m.content.as_str());
+            crate::memory::response_cache::ResponseCache::cache_key(model, system, last_user)
+        })
+    }
+
+    async fn try_hit(&self, key: &str, _user_message: &str) -> Option<String> {
+        let cache = self.response_cache.as_ref()?;
+        let provider_label = self.cached_provider.clone();
+        let model_label = self.default_model.clone();
+        match cache.get(key) {
+            Ok(Some(cached)) => {
+                self.observer.record_event(&ObserverEvent::CacheHit {
+                    cache_type: "response".into(),
+                    tokens_saved: 0,
+                });
+                self.observer.record_metric(
+                    &crate::observability::traits::ObserverMetric::ResponseCacheOutcome {
+                        provider: provider_label,
+                        model: model_label,
+                        hit: true,
+                    },
+                );
+                Some(cached)
+            }
+            _ => {
+                self.observer.record_event(&ObserverEvent::CacheMiss {
+                    cache_type: "response".into(),
+                });
+                self.observer.record_metric(
+                    &crate::observability::traits::ObserverMetric::ResponseCacheOutcome {
+                        provider: provider_label,
+                        model: model_label,
+                        hit: false,
+                    },
+                );
+                None
+            }
+        }
+    }
+
+    async fn write_back(&self, key: &str, model: &str, response: &str, output_tokens: u32) {
+        if let Some(cache) = &self.response_cache {
+            let _ = cache.put(key, model, response, output_tokens);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::MemorySessionHook for GuiHooksFromAgent {
+    async fn on_turn_start(&self, user_message: &str) {
+        if !self.auto_save {
             return;
         }
-    };
-    if !arguments.is_object() {
-        *arguments = serde_json::Value::Object(extra_obj.clone());
-        return;
+        let key = format!("user_msg_{}", Uuid::new_v4());
+        let _ = self
+            .memory
+            .store(
+                &key,
+                user_message,
+                MemoryCategory::Conversation,
+                self.memory_session_id.as_deref(),
+            )
+            .await;
     }
-    let target = arguments
-        .as_object_mut()
-        .expect("checked is_object above");
-    for (k, v) in extra_obj.iter() {
-        target.insert(k.clone(), v.clone());
+
+    async fn on_turn_end(&self, assistant_message: &str, _tools_used: &[String]) {
+        if !self.auto_save {
+            return;
+        }
+        let key = format!("assistant_msg_{}", Uuid::new_v4());
+        let _ = self
+            .memory
+            .store(
+                &key,
+                assistant_message,
+                MemoryCategory::Conversation,
+                self.memory_session_id.as_deref(),
+            )
+            .await;
     }
 }
 
-fn extract_file_edit_path(tool_name: &str, output: &str) -> String {
-
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
-        for key in ["path", "file_path", "filename", "file"] {
-            if let Some(s) = value.get(key).and_then(|v| v.as_str()) {
-                if !s.is_empty() {
-                    return s.to_string();
+impl crate::agent::loop_hooks::ModelClassifierHook for GuiHooksFromAgent {
+    fn classify(&self, user_message: &str) -> Option<String> {
+        if let Some(decision) = crate::agent::classifier::classify_with_decision(
+            &self.classification_config,
+            user_message,
+        ) {
+            if self.available_hints.contains(&decision.hint) {
+                let resolved_model = self
+                    .route_model_by_hint
+                    .get(&decision.hint)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                tracing::info!(
+                    target: "query_classification",
+                    hint = decision.hint.as_str(),
+                    model = resolved_model,
+                    rule_priority = decision.priority,
+                    message_length = user_message.len(),
+                    "Classified message route via hook"
+                );
+                return Some(format!("route:{}", decision.hint));
+            }
+        }
+        if let Some(ref ac) = self.auto_classify {
+            let tier = crate::agent::eval::estimate_complexity(user_message);
+            if let Some(hint) = ac.hint_for(tier) {
+                if self.available_hints.contains(&hint.to_string()) {
+                    tracing::info!(
+                        target: "query_classification",
+                        hint = hint,
+                        complexity = ?tier,
+                        message_length = user_message.len(),
+                        "Auto-classified by complexity via hook"
+                    );
+                    return Some(format!("route:{hint}"));
                 }
             }
         }
+        None
     }
-
-    for line in output.lines().take(4) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        for token in trimmed.split_whitespace() {
-            if token.len() > 2 && (token.contains('/') || token.contains('\\')) {
-
-                let cleaned = token.trim_matches(|c: char| c.is_ascii_punctuation());
-                if !cleaned.is_empty() {
-                    return cleaned.to_string();
-                }
-            }
-        }
-    }
-    let _ = tool_name;
-    String::new()
 }
 
-fn count_diff_lines(output: &str) -> (i32, i32) {
-    let mut adds = 0i32;
-    let mut dels = 0i32;
-    for line in output.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            adds += 1;
-        } else if line.starts_with('-') {
-            dels += 1;
-        }
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::TurnPreambleHook for GuiHooksFromAgent {
+    async fn apply(
+        &self,
+        _user_message: &str,
+        _event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
+    ) -> Result<()> {
+        Ok(())
     }
-    (adds, dels)
+}
+
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::GuiModelSwitchHook for GuiHooksFromAgent {
+    async fn poll(&self, _event_tx: &tokio::sync::mpsc::Sender<TurnEvent>) -> Option<String> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::IterationContextBudgetHook for GuiHooksFromAgent {
+    async fn prepare(
+        &self,
+        _iteration: usize,
+        _event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
+    ) {
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::ExperienceRecorderHook for GuiHooksFromAgent {
+    async fn record(&self, summary: &crate::agent::loop_hooks::TurnExperienceSummary) {
+        let Some(ref replay) = self.experience_replay else {
+            return;
+        };
+        if !replay.collection_enabled() {
+            return;
+        }
+        let refs: Vec<(&str, bool)> = summary
+            .tool_results
+            .iter()
+            .map(|(n, s)| (n.as_str(), *s))
+            .collect();
+        let dims = crate::agent::self_eval::heuristic_eval(
+            &summary.user_query,
+            &summary.assistant_response,
+            &refs,
+        );
+        let reward = (dims.aggregate() * 2.0) - 1.0;
+        let query_category =
+            crate::agent::classifier::classify(&self.classification_config, &summary.user_query)
+                .unwrap_or_else(|| "general".to_string());
+        let experience = crate::agent::experience::Experience {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: self.memory_session_id.clone().unwrap_or_default(),
+            timestamp: chrono::Utc::now(),
+            user_query: summary.user_query.clone(),
+            assistant_response: summary.assistant_response.clone(),
+            tools_used: summary.tools_used.clone(),
+            model: self.default_model.clone(),
+            reward,
+            query_category,
+            replay_count: 0,
+        };
+        replay.store(experience);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::loop_hooks::PlanModeNudgeHook for GuiHooksFromAgent {
+    async fn try_inject(
+        &self,
+        _iteration: usize,
+        _history: &mut Vec<ChatMessage>,
+        _event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
+    ) -> bool {
+        false
+    }
 }
 
 pub async fn run(

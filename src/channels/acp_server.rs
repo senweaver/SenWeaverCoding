@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ACP (Agent Control Protocol) Server — JSON-RPC 2.0 over stdio.
-//!
-//! Provides an IDE-friendly interface for spawning and managing isolated agent
-//! sessions. Each session wraps an [`Agent`] built from the global config with
-//! streaming support via JSON-RPC notifications.
-//!
-//! ## Protocol
-//!
-//! Requests and responses are newline-delimited JSON objects on stdin/stdout.
-//!
-//! | Method            | Description                              |
-//! |-------------------|------------------------------------------|
-//! | `initialize`      | Handshake — returns server capabilities  |
-//! | `session/new`     | Create an isolated agent session          |
-//! | `session/prompt`  | Send a prompt, stream back events         |
-//! | `session/stop`    | Gracefully terminate a session            |
 
 use crate::agent::agent::{Agent, TurnEvent};
 use crate::config::Config;
@@ -332,7 +316,11 @@ impl AcpServer {
                         "content": delta,
                     }),
                 },
-                TurnEvent::ToolCall { name, args } => JsonRpcNotification {
+                TurnEvent::ToolCall {
+                    name,
+                    args,
+                    tool_call_id: _,
+                } => JsonRpcNotification {
                     jsonrpc: "2.0",
                     method: "session/event",
                     params: serde_json::json!({
@@ -342,9 +330,14 @@ impl AcpServer {
                         "args": args,
                     }),
                 },
-                TurnEvent::ToolResult { name, output, success } => {
+                TurnEvent::ToolResult {
+                    name,
+                    output,
+                    success,
+                    tool_call_id: _,
+                } => {
                     let is_error = !success
-                        || crate::agent::tool_event_status::output_indicates_error(&output);
+                        || crate::agent::tool_event_status::output_indicates_error(output);
                     JsonRpcNotification {
                         jsonrpc: "2.0",
                         method: "session/event",
@@ -500,6 +493,98 @@ impl AcpServer {
                         "type": "debug_pii_stats",
                         "total": report.total(),
                         "counts": report.to_label_map(),
+                    }),
+                },
+                TurnEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    wait_ms,
+                    class,
+                    provider,
+                    model,
+                    message,
+                } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "provider_retry",
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "waitMs": wait_ms,
+                        "class": class,
+                        "provider": provider,
+                        "model": model,
+                        "message": message,
+                    }),
+                },
+                TurnEvent::WorkerSpawned {
+                    parent_tool_use_id,
+                    worker_id,
+                    title,
+                    model,
+                } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "worker_spawned",
+                        "parentToolUseId": parent_tool_use_id,
+                        "workerId": worker_id,
+                        "title": title,
+                        "model": model,
+                    }),
+                },
+                TurnEvent::WorkerStatus { worker_id, status, detail } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "worker_status",
+                        "workerId": worker_id,
+                        "status": status,
+                        "detail": detail,
+                    }),
+                },
+                TurnEvent::WorkerProgress { worker_id, action, detail } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "worker_progress",
+                        "workerId": worker_id,
+                        "action": action,
+                        "detail": detail,
+                    }),
+                },
+                TurnEvent::WorkerCompleted { worker_id, success, summary } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "worker_completed",
+                        "workerId": worker_id,
+                        "success": success,
+                        "summary": summary,
+                    }),
+                },
+                TurnEvent::WorkerStopped { worker_id, reason } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "worker_stopped",
+                        "workerId": worker_id,
+                        "reason": reason,
+                    }),
+                },
+                TurnEvent::ParentResumed { reason } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "parent_resumed",
+                        "reason": reason,
                     }),
                 },
             };

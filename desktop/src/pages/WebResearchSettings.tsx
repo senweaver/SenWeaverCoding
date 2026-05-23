@@ -30,9 +30,9 @@ export function WebResearchSettings() {
   }, [hasFetched, isLoading, fetch])
 
   return (
-    <div className="max-w-3xl flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">
+        <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
           {t('settings.web.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-tertiary)]">
@@ -139,7 +139,7 @@ function WebSearchCard({ config, onUpdate, saving }: WebSearchCardProps) {
             value={config.provider}
             onChange={(e) => void onUpdate({ provider: e.target.value })}
             disabled={!config.enabled || saving}
-            className="h-10 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-sm text-[var(--color-text-primary)] disabled:opacity-50"
+            className="h-8 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-xs text-[var(--color-text-primary)] disabled:opacity-50"
           >
             {PROVIDERS.map((p) => (
               <option key={p.value} value={p.value}>
@@ -174,7 +174,7 @@ function WebSearchCard({ config, onUpdate, saving }: WebSearchCardProps) {
         </FieldShell>
       </div>
       {config.enabled && keyMissing && (
-        <div className="mt-3 rounded-md border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-[11px] text-[var(--color-warning)]">
+        <div className="mt-3 rounded-md border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-xs text-[var(--color-warning)]">
           {t('settings.web.providerHintNoKey')}
         </div>
       )}
@@ -294,7 +294,7 @@ function WebFetchCard({ config, onUpdate, saving }: WebFetchCardProps) {
           />
         </FieldShell>
       </div>
-      <p className="text-[11px] text-[var(--color-text-tertiary)]">
+      <p className="text-xs text-[var(--color-text-tertiary)]">
         {t('settings.web.fetch.allowedDomainsHint')}
       </p>
     </SectionCard>
@@ -323,14 +323,14 @@ function SectionCard({
   children,
 }: SectionCardProps) {
   return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-4">
+    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-3">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-start gap-3 min-w-0">
-          <span className="material-symbols-outlined shrink-0 text-[20px] text-[var(--color-brand)]">
+          <span className="material-symbols-outlined shrink-0 text-[18px] text-[var(--color-brand)]">
             {icon}
           </span>
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+            <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
               {title}
             </h3>
             <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
@@ -341,7 +341,7 @@ function SectionCard({
         <ToggleSwitch checked={enabled} onChange={onToggle} disabled={saving} />
       </div>
       {!enabled && (
-        <div className="mb-3 rounded-md border border-[var(--color-border)]/60 bg-[var(--color-surface-container-lowest)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
+        <div className="mb-3 rounded-md border border-[var(--color-border)]/60 bg-[var(--color-surface-container-lowest)] px-3 py-2 text-xs text-[var(--color-text-tertiary)]">
           {disabledHint}
         </div>
       )}
@@ -363,7 +363,7 @@ function FieldShell({
 }) {
   return (
     <div className={`flex flex-col gap-1 ${className}`}>
-      <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">
+      <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">
         {label}
       </span>
       {children}

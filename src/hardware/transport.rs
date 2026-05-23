@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Transport trait — decouples hardware tools from wire protocol.
-//!
-//! Implementations:
-//! - `serial::HardwareSerialTransport` — lazy-open newline-delimited JSON over USB CDC ()
-//! - `SWDTransport` — memory read/write via probe-rs ()
-//! - `UF2Transport` — firmware flashing via UF2 mass storage ()
-//! - `NativeTransport` — direct Linux GPIO/I2C/SPI via rppal/sysfs (later)
 
 use super::protocol::{ZcCommand, ZcResponse};
 use async_trait::async_trait;

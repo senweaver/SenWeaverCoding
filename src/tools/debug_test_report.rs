@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
@@ -199,6 +199,30 @@ enum ReportEvent {
         finalized_at: String,
         report_path: String,
     },
+    AddTestPlan {
+        run_id: String,
+        dimensions: Vec<Value>,
+        cases_outline: Vec<Value>,
+        recorded_at: String,
+    },
+    AddAnalysisNote {
+        run_id: String,
+        note_id: String,
+        category: String,
+        title: String,
+        description: String,
+        severity: Option<String>,
+        evidence_refs: Vec<String>,
+        recorded_at: String,
+    },
+    AddRunbookSection {
+        run_id: String,
+        section_id: String,
+        section_kind: String,
+        title: String,
+        body: String,
+        recorded_at: String,
+    },
 }
 
 async fn append_event(run_id: &str, event: &ReportEvent) -> anyhow::Result<PathBuf> {
@@ -280,7 +304,7 @@ impl Tool for DebugTestReportTool {
     }
 
     fn description(&self) -> &str {
-        "Structured QA debugging report tool. Use start/add_case/add_finding/attach_screenshot/attach_console_logs/add_coverage_entry/record_network_error/finalize to build a Markdown bug report with run.jsonl persistence in .senagentos/debug-reports/<run_id>/. add_finding accepts category=functional|ui|console|network|security|performance|access and an evidence object. add_coverage_entry tracks per-page coverage with url/depth/parent_url/http_status/console_errors/network_errors so finalize can render a coverage matrix."
+        "Structured QA debugging report tool. Use start/add_case/add_finding/attach_screenshot/attach_console_logs/add_coverage_entry/record_network_error/add_test_plan/add_analysis_note/add_runbook_section/finalize to build the three QA documents (report.md / analysis.md / runbook.md) with run.jsonl persistence in .senagentos/debug-reports/<run_id>/. add_finding accepts category=functional|ui|console|network|security|performance|access and an evidence object. add_coverage_entry tracks per-page coverage with url/depth/parent_url/http_status/console_errors/network_errors so finalize can render a coverage matrix. add_test_plan submits the QA dimensions+cases outline before execution. add_analysis_note groups findings by category (root_cause|performance|security|a11y|ux|risk). add_runbook_section adds operational steps grouped by section_kind."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -297,10 +321,39 @@ impl Tool for DebugTestReportTool {
                         "attach_console_logs",
                         "add_coverage_entry",
                         "record_network_error",
-                        "finalize"
+                        "finalize",
+                        "add_test_plan",
+                        "add_analysis_note",
+                        "add_runbook_section"
                     ],
                     "description": "Report action to perform"
                 },
+                "dimensions": {
+                    "type": "array",
+                    "description": "QA test plan dimensions; each item should carry {name, scope, priority}.",
+                    "items": {"type": "object"}
+                },
+                "cases_outline": {
+                    "type": "array",
+                    "description": "QA test plan case outline; each item should carry {title, dimension, severity}.",
+                    "items": {"type": "object"}
+                },
+                "note_id": {"type": "string"},
+                "section_id": {"type": "string"},
+                "section_kind": {
+                    "type": "string",
+                    "enum": [
+                        "context",
+                        "preconditions",
+                        "test_data",
+                        "sop_steps",
+                        "expected",
+                        "regression_checklist",
+                        "troubleshooting"
+                    ]
+                },
+                "body": {"type": "string"},
+                "evidence_refs": {"type": "array", "items": {"type": "string"}},
                 "run_id": {"type": "string"},
                 "title": {"type": "string"},
                 "slug": {"type": "string"},
@@ -365,6 +418,9 @@ impl Tool for DebugTestReportTool {
             "attach_console_logs" => action_attach_console_logs(&args).await,
             "add_coverage_entry" => action_add_coverage_entry(&args).await,
             "record_network_error" => action_record_network_error(&args).await,
+            "add_test_plan" => action_add_test_plan(&args).await,
+            "add_analysis_note" => action_add_analysis_note(&args).await,
+            "add_runbook_section" => action_add_runbook_section(&args).await,
             "finalize" => action_finalize(&args).await,
             other => Ok(err(format!("unknown action '{other}'"))),
         }
@@ -720,6 +776,134 @@ async fn action_attach_console_logs(args: &Value) -> anyhow::Result<ToolResult> 
     })))
 }
 
+async fn action_add_test_plan(args: &Value) -> anyhow::Result<ToolResult> {
+    let run_id = match args.get("run_id").and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(),
+        None => return Ok(err("missing 'run_id'")),
+    };
+    let dimensions: Vec<Value> = args
+        .get("dimensions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| redact(&v))
+        .collect();
+    let cases_outline: Vec<Value> = args
+        .get("cases_outline")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| redact(&v))
+        .collect();
+    if dimensions.is_empty() && cases_outline.is_empty() {
+        return Ok(err("add_test_plan requires non-empty 'dimensions' or 'cases_outline'"));
+    }
+    let event = ReportEvent::AddTestPlan {
+        run_id: run_id.clone(),
+        dimensions: dimensions.clone(),
+        cases_outline: cases_outline.clone(),
+        recorded_at: timestamp_now(),
+    };
+    append_event(&run_id, &event).await?;
+    Ok(ok(json!({
+        "run_id": run_id,
+        "dimensions": dimensions.len(),
+        "cases_outline": cases_outline.len(),
+    })))
+}
+
+async fn action_add_analysis_note(args: &Value) -> anyhow::Result<ToolResult> {
+    let run_id = match args.get("run_id").and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(),
+        None => return Ok(err("missing 'run_id'")),
+    };
+    let category = args
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("risk")
+        .to_ascii_lowercase();
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Analysis note")
+        .to_string();
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let severity = args
+        .get("severity")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let evidence_refs: Vec<String> = args
+        .get("evidence_refs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let note_id = format!("note-{}", Uuid::new_v4().simple());
+    let event = ReportEvent::AddAnalysisNote {
+        run_id: run_id.clone(),
+        note_id: note_id.clone(),
+        category,
+        title: redact_str(&title),
+        description: redact_str(&description),
+        severity,
+        evidence_refs: redact_string_vec(&evidence_refs),
+        recorded_at: timestamp_now(),
+    };
+    append_event(&run_id, &event).await?;
+    Ok(ok(json!({
+        "run_id": run_id,
+        "note_id": note_id,
+    })))
+}
+
+async fn action_add_runbook_section(args: &Value) -> anyhow::Result<ToolResult> {
+    let run_id = match args.get("run_id").and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(),
+        None => return Ok(err("missing 'run_id'")),
+    };
+    let section_kind = args
+        .get("section_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("sop_steps")
+        .to_ascii_lowercase();
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Runbook section")
+        .to_string();
+    let body = args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if body.is_empty() {
+        return Ok(err("add_runbook_section requires non-empty 'body'"));
+    }
+    let section_id = format!("section-{}", Uuid::new_v4().simple());
+    let event = ReportEvent::AddRunbookSection {
+        run_id: run_id.clone(),
+        section_id: section_id.clone(),
+        section_kind,
+        title: redact_str(&title),
+        body: redact_str(&body),
+        recorded_at: timestamp_now(),
+    };
+    append_event(&run_id, &event).await?;
+    Ok(ok(json!({
+        "run_id": run_id,
+        "section_id": section_id,
+    })))
+}
+
 async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
     let run_id = match args.get("run_id").and_then(|v| v.as_str()) {
         Some(r) => r.to_string(),
@@ -751,6 +935,20 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
     tokio::fs::write(&tech_doc_path, &sanitized_tech_doc).await?;
     let tech_doc_path_str = tech_doc_path.to_string_lossy().to_string();
 
+    let raw_analysis = render_analysis(&events, summary_note.as_deref());
+    let (sanitized_analysis, _) =
+        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_analysis);
+    let analysis_path = run_dir(&run_id).join("analysis.md");
+    tokio::fs::write(&analysis_path, &sanitized_analysis).await?;
+    let analysis_path_str = analysis_path.to_string_lossy().to_string();
+
+    let raw_runbook = render_runbook(&events, summary_note.as_deref());
+    let (sanitized_runbook, _) =
+        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_runbook);
+    let runbook_path = run_dir(&run_id).join("runbook.md");
+    tokio::fs::write(&runbook_path, &sanitized_runbook).await?;
+    let runbook_path_str = runbook_path.to_string_lossy().to_string();
+
     let event = ReportEvent::Finalize {
         run_id: run_id.clone(),
         summary_note: summary_note.as_deref().map(redact_str),
@@ -774,6 +972,8 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
         "run_id": run_id,
         "report_path": report_path_str,
         "tech_doc_path": tech_doc_path_str,
+        "analysis_path": analysis_path_str,
+        "runbook_path": runbook_path_str,
         "relative_path": normalize_md_path(
             &report_path
                 .strip_prefix(workspace_anchor())
@@ -784,6 +984,18 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
             &tech_doc_path
                 .strip_prefix(workspace_anchor())
                 .unwrap_or(&tech_doc_path)
+                .to_string_lossy(),
+        ),
+        "analysis_relative_path": normalize_md_path(
+            &analysis_path
+                .strip_prefix(workspace_anchor())
+                .unwrap_or(&analysis_path)
+                .to_string_lossy(),
+        ),
+        "runbook_relative_path": normalize_md_path(
+            &runbook_path
+                .strip_prefix(workspace_anchor())
+                .unwrap_or(&runbook_path)
                 .to_string_lossy(),
         ),
         "pii_redacted": {
@@ -816,7 +1028,7 @@ fn inject_pii_summary(
     if let Some(idx) = report_md.find("\n## ") {
         let mut out = String::with_capacity(report_md.len() + header.len());
         out.push_str(&report_md[..idx]);
-        out.push_str("\n");
+        out.push('\n');
         out.push_str(&header);
         out.push_str(&report_md[idx + 1..]);
         out
@@ -943,6 +1155,9 @@ fn render_tech_doc(events: &[ReportEvent], summary_note: Option<&str>) -> String
                     recorded_at: recorded_at.clone(),
                 });
             }
+            ReportEvent::AddTestPlan { .. } => {}
+            ReportEvent::AddAnalysisNote { .. } => {}
+            ReportEvent::AddRunbookSection { .. } => {}
             _ => {}
         }
     }
@@ -1127,6 +1342,251 @@ fn render_tech_doc(events: &[ReportEvent], summary_note: Option<&str>) -> String
     out
 }
 
+fn render_analysis(events: &[ReportEvent], summary_note: Option<&str>) -> String {
+    let mut title = String::from("Debug QA Analysis");
+    let mut started_at = String::new();
+    let mut run_id_value = String::new();
+    let mut findings: Vec<FindingRow> = Vec::new();
+    let mut notes: Vec<AnalysisNoteRow> = Vec::new();
+
+    for event in events {
+        match event {
+            ReportEvent::Start {
+                run_id,
+                title: t,
+                started_at: ts,
+                ..
+            } => {
+                run_id_value = run_id.clone();
+                title = format!("{} – Analysis", t);
+                started_at = ts.clone();
+            }
+            ReportEvent::AddFinding {
+                finding_id,
+                severity,
+                title,
+                description,
+                repro_steps,
+                root_cause,
+                fix_suggestion,
+                category,
+                evidence,
+                ..
+            } => {
+                findings.push(FindingRow {
+                    id: finding_id.clone(),
+                    severity: severity.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    repro: repro_steps.clone(),
+                    root_cause: root_cause.clone(),
+                    fix_suggestion: fix_suggestion.clone(),
+                    category: category.clone(),
+                    evidence: evidence.clone(),
+                });
+            }
+            ReportEvent::AddAnalysisNote {
+                note_id,
+                category,
+                title,
+                description,
+                severity,
+                evidence_refs,
+                ..
+            } => {
+                notes.push(AnalysisNoteRow {
+                    id: note_id.clone(),
+                    category: category.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    severity: severity.clone(),
+                    evidence_refs: evidence_refs.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", title));
+    out.push_str(&format!("- Run ID: `{}`\n", run_id_value));
+    if !started_at.is_empty() {
+        out.push_str(&format!("- Generated: {}\n", started_at));
+    }
+    if let Some(note) = summary_note {
+        if !note.is_empty() {
+            out.push_str(&format!("\n> {}\n", note));
+        }
+    }
+    out.push_str(
+        "\n本分析报告由 `debug_test_report.finalize` 阶段从 `add_analysis_note` 与 `add_finding` 事件聚合生成，分组维度：根因 / 性能 / 安全 / a11y / UX / 风险。所有敏感数据已在落盘前完成 PII 脱敏。\n",
+    );
+
+    let categories: &[(&str, &str)] = &[
+        ("root_cause", "根因"),
+        ("performance", "性能"),
+        ("security", "安全"),
+        ("a11y", "可访问性 (a11y)"),
+        ("ux", "用户体验 (UX)"),
+        ("risk", "风险"),
+    ];
+    for (key, label) in categories {
+        let matched: Vec<&AnalysisNoteRow> = notes
+            .iter()
+            .filter(|n| n.category == *key)
+            .collect();
+        let matched_findings: Vec<&FindingRow> = findings
+            .iter()
+            .filter(|f| match *key {
+                "root_cause" => f.root_cause.is_some(),
+                "performance" => f.category.as_deref() == Some("performance"),
+                "security" => f.category.as_deref() == Some("security"),
+                "a11y" => f.category.as_deref() == Some("access"),
+                "ux" => f.category.as_deref() == Some("ui"),
+                "risk" => true,
+                _ => false,
+            })
+            .collect();
+        if matched.is_empty() && matched_findings.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n## {}\n\n", label));
+        for note in &matched {
+            let sev_suffix = match &note.severity {
+                Some(s) if !s.is_empty() => format!(" `[{}]`", s),
+                _ => String::new(),
+            };
+            out.push_str(&format!("### {}{}\n\n{}\n", note.title, sev_suffix, note.description));
+            if !note.evidence_refs.is_empty() {
+                out.push_str("\n**Evidence**\n\n");
+                for ev in &note.evidence_refs {
+                    out.push_str(&format!("- {}\n", ev));
+                }
+            }
+            out.push('\n');
+        }
+        if !matched_findings.is_empty() && key == &"risk" {
+            out.push_str("### 相关 findings\n\n");
+            for f in &matched_findings {
+                out.push_str(&format!(
+                    "- `{}` `[{}]` {} — {}\n",
+                    f.id, f.severity, f.title, f.description
+                ));
+            }
+        }
+    }
+
+    if notes.is_empty() && findings.is_empty() {
+        out.push_str("\n(本次 run 未提交任何 analysis_note 或 finding)\n");
+    }
+
+    out
+}
+
+fn render_runbook(events: &[ReportEvent], summary_note: Option<&str>) -> String {
+    let mut title = String::from("Debug QA Runbook");
+    let mut started_at = String::new();
+    let mut run_id_value = String::new();
+    let mut sections: Vec<RunbookSectionRow> = Vec::new();
+
+    for event in events {
+        match event {
+            ReportEvent::Start {
+                run_id,
+                title: t,
+                started_at: ts,
+                ..
+            } => {
+                run_id_value = run_id.clone();
+                title = format!("{} – Runbook", t);
+                started_at = ts.clone();
+            }
+            ReportEvent::AddRunbookSection {
+                section_id,
+                section_kind,
+                title,
+                body,
+                ..
+            } => {
+                sections.push(RunbookSectionRow {
+                    id: section_id.clone(),
+                    kind: section_kind.clone(),
+                    title: title.clone(),
+                    body: body.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", title));
+    out.push_str(&format!("- Run ID: `{}`\n", run_id_value));
+    if !started_at.is_empty() {
+        out.push_str(&format!("- Generated: {}\n", started_at));
+    }
+    if let Some(note) = summary_note {
+        if !note.is_empty() {
+            out.push_str(&format!("\n> {}\n", note));
+        }
+    }
+    out.push_str(
+        "\n本操作文档由 `debug_test_report.finalize` 阶段从 `add_runbook_section` 事件聚合生成；用于人工回归、复现缺陷或回访本次测试范围。\n",
+    );
+
+    let order: &[(&str, &str)] = &[
+        ("context", "场景背景"),
+        ("preconditions", "前置条件"),
+        ("test_data", "测试数据"),
+        ("sop_steps", "操作步骤 (SOP)"),
+        ("expected", "预期结果"),
+        ("regression_checklist", "回归 checklist"),
+        ("troubleshooting", "故障处理"),
+    ];
+    for (key, label) in order {
+        let matched: Vec<&RunbookSectionRow> = sections
+            .iter()
+            .filter(|s| s.kind == *key)
+            .collect();
+        if matched.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n## {}\n\n", label));
+        for s in &matched {
+            if !s.title.is_empty() {
+                out.push_str(&format!("### {}\n\n", s.title));
+            }
+            out.push_str(&s.body);
+            if !s.body.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+
+    if sections.is_empty() {
+        out.push_str("\n(本次 run 未提交任何 runbook_section)\n");
+    }
+
+    out
+}
+
+struct AnalysisNoteRow {
+    id: String,
+    category: String,
+    title: String,
+    description: String,
+    severity: Option<String>,
+    evidence_refs: Vec<String>,
+}
+
+struct RunbookSectionRow {
+    id: String,
+    kind: String,
+    title: String,
+    body: String,
+}
+
 struct ScreenshotRow {
     id: String,
     relative_path: String,
@@ -1169,6 +1629,8 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
     let mut coverage_rows: Vec<CoverageRow> = Vec::new();
     let mut standalone_network_errors: Vec<(String, i64, Option<String>, Option<String>, String)> = Vec::new();
     let mut browser_trace: Vec<BrowserTraceRow> = Vec::new();
+    let mut test_plan_dimensions: Vec<Value> = Vec::new();
+    let mut test_plan_outlines: Vec<Value> = Vec::new();
 
     for event in events {
         match event {
@@ -1304,6 +1766,16 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
                     recorded_at: recorded_at.clone(),
                 });
             }
+            ReportEvent::AddTestPlan {
+                dimensions: dims,
+                cases_outline: outlines,
+                ..
+            } => {
+                test_plan_dimensions = dims.clone();
+                test_plan_outlines = outlines.clone();
+            }
+            ReportEvent::AddAnalysisNote { .. } => {}
+            ReportEvent::AddRunbookSection { .. } => {}
             ReportEvent::Finalize { .. } => {}
         }
     }
@@ -1325,6 +1797,69 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
             out.push_str(&format!("\n> {}\n", note));
         }
     }
+
+    if !test_plan_dimensions.is_empty() || !test_plan_outlines.is_empty() {
+        out.push_str("\n## 测试范围与计划\n\n");
+        if !test_plan_dimensions.is_empty() {
+            out.push_str("### 维度\n\n");
+            out.push_str("| # | Name | Scope | Priority |\n");
+            out.push_str("|---|------|-------|----------|\n");
+            for (idx, dim) in test_plan_dimensions.iter().enumerate() {
+                let name = dim
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unnamed)")
+                    .replace('|', "\\|");
+                let scope = dim
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .replace('|', "\\|");
+                let prio = dim
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .replace('|', "\\|");
+                out.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    idx + 1,
+                    name,
+                    scope,
+                    prio
+                ));
+            }
+        }
+        if !test_plan_outlines.is_empty() {
+            out.push_str("\n### 用例 outline\n\n");
+            out.push_str("| # | Title | Dimension | Severity |\n");
+            out.push_str("|---|-------|-----------|----------|\n");
+            for (idx, c) in test_plan_outlines.iter().enumerate() {
+                let title = c
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(untitled)")
+                    .replace('|', "\\|");
+                let dim = c
+                    .get("dimension")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .replace('|', "\\|");
+                let sev = c
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .replace('|', "\\|");
+                out.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    idx + 1,
+                    title,
+                    dim,
+                    sev
+                ));
+            }
+        }
+    }
+
     out.push_str("\n## Summary\n\n");
     out.push_str(&format!("- Cases: {}\n", cases.len()));
     out.push_str(&format!("- Findings: {}\n", findings.len()));
@@ -1581,6 +2116,3 @@ fn extract_origin(input: &str) -> Option<String> {
     }
     Some(format!("{}://{}", scheme.to_ascii_lowercase(), host))
 }
-
-#[allow(dead_code)]
-fn _unused_path(_p: &Path) {}

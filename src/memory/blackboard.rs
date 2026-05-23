@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared Blackboard ??collaborative state for multi-agent coordination.
-//!
-//! The blackboard is a shared key-value store where multiple agents can
-//! read, write, and watch for changes. It supports:
-//!
-//! - **Typed entries** with versioning and ownership tracking
-//! - **Watch notifications** via tokio broadcast for reactive updates
-//! - **Conflict detection** via optimistic concurrency (version checks)
-//! - **Namespaced sections** for organizing collaborative data
-//! - **TTL-based expiration** for ephemeral shared state
-//!
-//! metrics: every publish goes through
-//! [`crate::observability::coordination_metrics::global`] (incremented via
-//! the `incr_blackboard_*` helpers) so the Prometheus aggregator can
-//! report `published / delivered / lagged / replayed` counters.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -421,12 +406,7 @@ impl Blackboard {
             journal.append(&change);
         }
         coordination_metrics::incr_blackboard_published();
-        match self.change_sender.send(change) {
-            Ok(_) => {}
-            Err(_) => {
-
-            }
-        }
+        let _ = self.change_sender.send(change);
     }
 
     pub fn next_seq(&self) -> u64 {

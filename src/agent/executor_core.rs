@@ -1,29 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `ExecutorCore` — shared orchestration primitives used by the two tool
-//! loops that existed historically in this codebase (`run_tool_call_loop`
-//! in [`crate::agent::loop_`] and the inline loop in
-//! [`crate::agent::agent::Agent::turn_streamed`]).
-//!
-//! The goal of this module is to **eliminate the semantic drift risk**
-//! that comes from maintaining two parallel implementations of:
-//!
-//! 1. **Parallel tool scheduling** — bounded concurrency semaphore +
-//!    `join_all` with cancellation propagation.
-//! 2. **Loop detection / dedup** — detect when the LLM gets stuck on the
-//!    same tool call signature and force an intervention.
-//! 3. **Turn metrics RAII** — `sen_turns_total` / `sen_last_turn_duration_secs`
-//!    counters that must fire on every exit path (success, error, panic).
-//! 4. **Pacing governor** — budget tracking for `max_iterations` and
-//!    `step_timeout_secs`.
-//!
-//! Only [`run_tool_call_loop`] uses this module today; [`Agent::turn_streamed`]
-//! will be collapsed onto `AgentLoopCore` in PR **M2**, which in turn
-//! consumes these primitives.  Keeping the wrappers here means a bug fix
-//! in one path automatically benefits the other.
-//!
-//! [`run_tool_call_loop`]: crate::agent::loop_::run_tool_call_loop
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

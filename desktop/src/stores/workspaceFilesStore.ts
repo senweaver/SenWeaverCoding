@@ -21,7 +21,6 @@ function loadDismissedPythonRoots(): Record<string, number> {
       return parsed as Record<string, number>
     }
   } catch {
-    /* noop */
   }
   return {}
 }
@@ -32,7 +31,6 @@ function rememberDismissedPythonRoot(root: string) {
     map[root] = Date.now()
     localStorage.setItem(PYTHON_TOAST_DISMISS_KEY, JSON.stringify(map))
   } catch {
-    /* noop */
   }
 }
 

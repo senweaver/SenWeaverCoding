@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool for asking the user clarifying questions with selectable options.
-//! Used in Plan mode before generating a plan to narrow down requirements.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Credential leak detection for outbound content.
-//!
-//! Scans outbound messages for potential credential leaks before they are sent,
-//! preventing accidental exfiltration of API keys, tokens, passwords, and other
-//! sensitive values.
 
 use regex::Regex;
 use std::collections::HashMap;
@@ -75,44 +70,53 @@ impl LeakDetector {
             vec![
 
                 (
-                    Regex::new(r"sk_(live|test)_[a-zA-Z0-9]{24,}").unwrap(),
+                    Regex::new(r"sk_(live|test)_[a-zA-Z0-9]{24,}")
+                        .expect("stripe secret key regex must compile"),
                     "Stripe secret key",
                 ),
                 (
-                    Regex::new(r"pk_(live|test)_[a-zA-Z0-9]{24,}").unwrap(),
+                    Regex::new(r"pk_(live|test)_[a-zA-Z0-9]{24,}")
+                        .expect("stripe publishable key regex must compile"),
                     "Stripe publishable key",
                 ),
 
                 (
-                    Regex::new(r"sk-[a-zA-Z0-9]{20,}T3BlbkFJ[a-zA-Z0-9]{20,}").unwrap(),
+                    Regex::new(r"sk-[a-zA-Z0-9]{20,}T3BlbkFJ[a-zA-Z0-9]{20,}")
+                        .expect("OpenAI API key regex must compile"),
                     "OpenAI API key",
                 ),
                 (
-                    Regex::new(r"sk-[a-zA-Z0-9]{48,}").unwrap(),
+                    Regex::new(r"sk-[a-zA-Z0-9]{48,}")
+                        .expect("OpenAI-style API key regex must compile"),
                     "OpenAI-style API key",
                 ),
 
                 (
-                    Regex::new(r"sk-ant-[a-zA-Z0-9-_]{32,}").unwrap(),
+                    Regex::new(r"sk-ant-[a-zA-Z0-9-_]{32,}")
+                        .expect("Anthropic API key regex must compile"),
                     "Anthropic API key",
                 ),
 
                 (
-                    Regex::new(r"AIza[a-zA-Z0-9_-]{35}").unwrap(),
+                    Regex::new(r"AIza[a-zA-Z0-9_-]{35}")
+                        .expect("Google API key regex must compile"),
                     "Google API key",
                 ),
 
                 (
-                    Regex::new(r"gh[pousr]_[a-zA-Z0-9]{36,}").unwrap(),
+                    Regex::new(r"gh[pousr]_[a-zA-Z0-9]{36,}")
+                        .expect("GitHub token regex must compile"),
                     "GitHub token",
                 ),
                 (
-                    Regex::new(r"github_pat_[a-zA-Z0-9_]{22,}").unwrap(),
+                    Regex::new(r"github_pat_[a-zA-Z0-9_]{22,}")
+                        .expect("GitHub PAT regex must compile"),
                     "GitHub PAT",
                 ),
 
                 (
-                    Regex::new(r#"api[_-]?key[=:]\s*['"]*[a-zA-Z0-9_-]{20,}"#).unwrap(),
+                    Regex::new(r#"api[_-]?key[=:]\s*['"]*[a-zA-Z0-9_-]{20,}"#)
+                        .expect("generic API key regex must compile"),
                     "Generic API key",
                 ),
             ]
@@ -138,14 +142,15 @@ impl LeakDetector {
         let regexes = AWS_PATTERNS.get_or_init(|| {
             vec![
                 (
-                    Regex::new(r"AKIA[A-Z0-9]{16}").unwrap(),
+                    Regex::new(r"AKIA[A-Z0-9]{16}")
+                        .expect("AWS Access Key ID regex must compile"),
                     "AWS Access Key ID",
                 ),
                 (
                     Regex::new(
                         r#"aws[_-]?secret[_-]?access[_-]?key[=:]\s*['"]*[a-zA-Z0-9/+=]{40}"#,
                     )
-                    .unwrap(),
+                    .expect("AWS Secret Access Key regex must compile"),
                     "AWS Secret Access Key",
                 ),
             ]
@@ -171,15 +176,18 @@ impl LeakDetector {
         let regexes = SECRET_PATTERNS.get_or_init(|| {
             vec![
                 (
-                    Regex::new(r#"(?i)password[=:]\s*['"]*[^\s'"]{8,}"#).unwrap(),
+                    Regex::new(r#"(?i)password[=:]\s*['"]*[^\s'"]{8,}"#)
+                        .expect("password config regex must compile"),
                     "Password in config",
                 ),
                 (
-                    Regex::new(r#"(?i)secret[=:]\s*['"]*[a-zA-Z0-9_-]{16,}"#).unwrap(),
+                    Regex::new(r#"(?i)secret[=:]\s*['"]*[a-zA-Z0-9_-]{16,}"#)
+                        .expect("secret value regex must compile"),
                     "Secret value",
                 ),
                 (
-                    Regex::new(r#"(?i)token[=:]\s*['"]*[a-zA-Z0-9_.-]{20,}"#).unwrap(),
+                    Regex::new(r#"(?i)token[=:]\s*['"]*[a-zA-Z0-9_.-]{20,}"#)
+                        .expect("token value regex must compile"),
                     "Token value",
                 ),
             ]
@@ -236,7 +244,8 @@ impl LeakDetector {
         static JWT_PATTERN: OnceLock<Regex> = OnceLock::new();
         let regex = JWT_PATTERN.get_or_init(|| {
 
-            Regex::new(r"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*").unwrap()
+            Regex::new(r"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*")
+                .expect("JWT token regex must compile")
         });
 
         if regex.is_match(content) {
@@ -255,19 +264,23 @@ impl LeakDetector {
         let regexes = DB_PATTERNS.get_or_init(|| {
             vec![
                 (
-                    Regex::new(r"postgres(ql)?://[^:]+:[^@]+@[^\s]+").unwrap(),
+                    Regex::new(r"postgres(ql)?://[^:]+:[^@]+@[^\s]+")
+                        .expect("postgres URL regex must compile"),
                     "PostgreSQL connection URL",
                 ),
                 (
-                    Regex::new(r"mysql://[^:]+:[^@]+@[^\s]+").unwrap(),
+                    Regex::new(r"mysql://[^:]+:[^@]+@[^\s]+")
+                        .expect("mysql URL regex must compile"),
                     "MySQL connection URL",
                 ),
                 (
-                    Regex::new(r"mongodb(\+srv)?://[^:]+:[^@]+@[^\s]+").unwrap(),
+                    Regex::new(r"mongodb(\+srv)?://[^:]+:[^@]+@[^\s]+")
+                        .expect("mongodb URL regex must compile"),
                     "MongoDB connection URL",
                 ),
                 (
-                    Regex::new(r"redis://[^:]+:[^@]+@[^\s]+").unwrap(),
+                    Regex::new(r"redis://[^:]+:[^@]+@[^\s]+")
+                        .expect("redis URL regex must compile"),
                     "Redis connection URL",
                 ),
             ]
@@ -293,10 +306,12 @@ impl LeakDetector {
         let entropy_threshold = 3.5 + self.sensitivity * 1.25;
 
         static URL_PATTERN: OnceLock<Regex> = OnceLock::new();
-        let url_re = URL_PATTERN.get_or_init(|| Regex::new(r"https?://\S+").unwrap());
+        let url_re = URL_PATTERN
+            .get_or_init(|| Regex::new(r"https?://\S+").expect("URL regex must compile"));
         static MEDIA_MARKER_PATTERN: OnceLock<Regex> = OnceLock::new();
         let media_re = MEDIA_MARKER_PATTERN.get_or_init(|| {
-            Regex::new(r"\[(IMAGE|VIDEO|VOICE|AUDIO|DOCUMENT|FILE):[^\]]*\]").unwrap()
+            Regex::new(r"\[(IMAGE|VIDEO|VOICE|AUDIO|DOCUMENT|FILE):[^\]]*\]")
+                .expect("media marker regex must compile")
         });
         let content_stripped = url_re.replace_all(content, "");
         let content_without_urls = media_re.replace_all(&content_stripped, "");

@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Custom wa-rs storage backend using SenWeaverCoding's rusqlite
-//!
-//! This module implements all 4 wa-rs storage traits using rusqlite directly,
-//! avoiding the Diesel/libsqlite3-sys dependency conflict from wa-rs-sqlite-storage.
-//!
-//! # Traits Implemented
-//!
-//! - [`SignalStore`]: Signal protocol cryptographic operations
-//! - [`AppSyncStore`]: WhatsApp app state synchronization
-//! - [`ProtocolStore`]: WhatsApp Web protocol alignment
-//! - [`DeviceStore`]: Device persistence operations
 
 #[cfg(feature = "whatsapp-web")]
 use async_trait::async_trait;

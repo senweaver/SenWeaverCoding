@@ -1,0 +1,1390 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+use crate::providers::ToolCall;
+
+pub(crate) fn parse_arguments_value(raw: Option<&serde_json::Value>) -> serde_json::Value {
+    match raw {
+        Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+        Some(value) => value.clone(),
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+pub(crate) fn parse_tool_call_id(
+    root: &serde_json::Value,
+    function: Option<&serde_json::Value>,
+) -> Option<String> {
+    function
+        .and_then(|func| func.get("id"))
+        .or_else(|| root.get("id"))
+        .or_else(|| root.get("tool_call_id"))
+        .or_else(|| root.get("call_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+}
+
+pub(crate) fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
+    if let Some(function) = value.get("function") {
+        let tool_call_id = parse_tool_call_id(value, Some(function));
+        let name = function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !name.is_empty() {
+            let arguments = parse_arguments_value(
+                function
+                    .get("arguments")
+                    .or_else(|| function.get("parameters")),
+            );
+            return Some(ParsedToolCall {
+                name,
+                arguments,
+                tool_call_id,
+                parse_error: false,
+            });
+        }
+    }
+
+    let tool_call_id = parse_tool_call_id(value, None);
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if name.is_empty() {
+        return None;
+    }
+
+    let arguments =
+        parse_arguments_value(value.get("arguments").or_else(|| value.get("parameters")));
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        tool_call_id,
+        parse_error: false,
+    })
+}
+
+pub(crate) fn parse_tool_calls_from_json_value(value: &serde_json::Value) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+
+    if let Some(tool_calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
+        for call in tool_calls {
+            if let Some(parsed) = parse_tool_call_value(call) {
+                calls.push(parsed);
+            }
+        }
+
+        if !calls.is_empty() {
+            return calls;
+        }
+    }
+
+    if let Some(array) = value.as_array() {
+        for item in array {
+            if let Some(parsed) = parse_tool_call_value(item) {
+                calls.push(parsed);
+            }
+        }
+        return calls;
+    }
+
+    if let Some(parsed) = parse_tool_call_value(value) {
+        calls.push(parsed);
+    }
+
+    calls
+}
+
+pub(crate) fn is_xml_meta_tag(tag: &str) -> bool {
+    let normalized = tag.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "tool_call"
+            | "toolcall"
+            | "tool-call"
+            | "invoke"
+            | "thinking"
+            | "thought"
+            | "analysis"
+            | "reasoning"
+            | "reflection"
+    )
+}
+
+pub(crate) static XML_OPEN_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<([a-zA-Z_][a-zA-Z0-9_-]*)>").expect("XML open tag regex must compile")
+});
+
+pub(crate) static MINIMAX_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<invoke\b[^>]*\bname\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>(.*?)</invoke>"#)
+        .expect("minimax invoke regex must compile")
+});
+
+pub(crate) static MINIMAX_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?is)<parameter\b[^>]*\bname\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>(.*?)</parameter>"#,
+    )
+    .expect("minimax parameter regex must compile")
+});
+
+pub(crate) fn extract_xml_pairs(input: &str) -> Vec<(&str, &str)> {
+    let mut results = Vec::new();
+    let mut search_start = 0;
+    while let Some(open_cap) = XML_OPEN_TAG_RE.captures(&input[search_start..]) {
+        let Some(full_open) = open_cap.get(0) else {
+            break;
+        };
+        let Some(tag_match) = open_cap.get(1) else {
+            break;
+        };
+        let tag_name = tag_match.as_str();
+        let open_end = search_start + full_open.end();
+
+        let closing_tag = format!("</{tag_name}>");
+        if let Some(close_pos) = input[open_end..].find(&closing_tag) {
+            let inner = &input[open_end..open_end + close_pos];
+            results.push((tag_name, inner.trim()));
+            search_start = open_end + close_pos + closing_tag.len();
+        } else {
+            search_start = open_end;
+        }
+    }
+    results
+}
+
+pub(crate) fn parse_xml_tool_calls(xml_content: &str) -> Option<Vec<ParsedToolCall>> {
+    let mut calls = Vec::new();
+    let trimmed = xml_content.trim();
+
+    if !trimmed.starts_with('<') || !trimmed.contains('>') {
+        return None;
+    }
+
+    for (tool_name_str, inner_content) in extract_xml_pairs(trimmed) {
+        let tool_name = tool_name_str.to_string();
+        if is_xml_meta_tag(&tool_name) {
+            continue;
+        }
+
+        if inner_content.is_empty() {
+            continue;
+        }
+
+        let mut args = serde_json::Map::new();
+
+        if let Some(first_json) = extract_json_values(inner_content).into_iter().next() {
+            match first_json {
+                serde_json::Value::Object(object_args) => {
+                    args = object_args;
+                }
+                other => {
+                    args.insert("value".to_string(), other);
+                }
+            }
+        } else {
+            for (key_str, value) in extract_xml_pairs(inner_content) {
+                let key = key_str.to_string();
+                if is_xml_meta_tag(&key) {
+                    continue;
+                }
+                if !value.is_empty() {
+                    args.insert(key, serde_json::Value::String(value.to_string()));
+                }
+            }
+
+            if args.is_empty() {
+                args.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(inner_content.to_string()),
+                );
+            }
+        }
+
+        calls.push(ParsedToolCall {
+            name: tool_name,
+            arguments: serde_json::Value::Object(args),
+            tool_call_id: None,
+            parse_error: false,
+        });
+    }
+
+    if calls.is_empty() { None } else { Some(calls) }
+}
+
+pub(crate) fn parse_minimax_invoke_calls(response: &str) -> Option<(String, Vec<ParsedToolCall>)> {
+    let mut calls = Vec::new();
+    let mut text_parts = Vec::new();
+    let mut last_end = 0usize;
+
+    for cap in MINIMAX_INVOKE_RE.captures_iter(response) {
+        let Some(full_match) = cap.get(0) else {
+            continue;
+        };
+
+        let before = response[last_end..full_match.start()].trim();
+        if !before.is_empty() {
+            text_parts.push(before.to_string());
+        }
+
+        let name = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().trim())
+            .filter(|v| !v.is_empty());
+        let body = cap.get(3).map(|m| m.as_str()).unwrap_or("").trim();
+        last_end = full_match.end();
+
+        let Some(name) = name else {
+            continue;
+        };
+
+        let mut args = serde_json::Map::new();
+        for param_cap in MINIMAX_PARAMETER_RE.captures_iter(body) {
+            let key = param_cap
+                .get(1)
+                .or_else(|| param_cap.get(2))
+                .map(|m| m.as_str().trim())
+                .unwrap_or_default();
+            if key.is_empty() {
+                continue;
+            }
+            let value = param_cap
+                .get(3)
+                .map(|m| m.as_str().trim())
+                .unwrap_or_default();
+            if value.is_empty() {
+                continue;
+            }
+
+            let parsed = extract_json_values(value).into_iter().next();
+            args.insert(
+                key.to_string(),
+                parsed.unwrap_or_else(|| serde_json::Value::String(value.to_string())),
+            );
+        }
+
+        if args.is_empty() {
+            if let Some(first_json) = extract_json_values(body).into_iter().next() {
+                match first_json {
+                    serde_json::Value::Object(obj) => args = obj,
+                    other => {
+                        args.insert("value".to_string(), other);
+                    }
+                }
+            } else if !body.is_empty() {
+                args.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(body.to_string()),
+                );
+            }
+        }
+
+        calls.push(ParsedToolCall {
+            name: name.to_string(),
+            arguments: serde_json::Value::Object(args),
+            tool_call_id: None,
+            parse_error: false,
+        });
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    let after = response[last_end..].trim();
+    if !after.is_empty() {
+        text_parts.push(after.to_string());
+    }
+
+    let text = text_parts
+        .join("\n")
+        .replace("<minimax:tool_call>", "")
+        .replace("</minimax:tool_call>", "")
+        .replace("<minimax:toolcall>", "")
+        .replace("</minimax:toolcall>", "")
+        .trim()
+        .to_string();
+
+    Some((text, calls))
+}
+
+pub(crate) const TOOL_CALL_OPEN_TAGS: [&str; 6] = [
+    "<tool_call>",
+    "<toolcall>",
+    "<tool-call>",
+    "<invoke>",
+    "<minimax:tool_call>",
+    "<minimax:toolcall>",
+];
+
+pub(crate) const TOOL_CALL_CLOSE_TAGS: [&str; 6] = [
+    "</tool_call>",
+    "</toolcall>",
+    "</tool-call>",
+    "</invoke>",
+    "</minimax:tool_call>",
+    "</minimax:toolcall>",
+];
+
+pub(crate) fn find_first_tag<'a>(haystack: &str, tags: &'a [&'a str]) -> Option<(usize, &'a str)> {
+    tags.iter()
+        .filter_map(|tag| haystack.find(tag).map(|idx| (idx, *tag)))
+        .min_by_key(|(idx, _)| *idx)
+}
+
+pub(crate) fn matching_tool_call_close_tag(open_tag: &str) -> Option<&'static str> {
+    match open_tag {
+        "<tool_call>" => Some("</tool_call>"),
+        "<toolcall>" => Some("</toolcall>"),
+        "<tool-call>" => Some("</tool-call>"),
+        "<invoke>" => Some("</invoke>"),
+        "<minimax:tool_call>" => Some("</minimax:tool_call>"),
+        "<minimax:toolcall>" => Some("</minimax:toolcall>"),
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_first_json_value_with_end(input: &str) -> Option<(serde_json::Value, usize)> {
+    let trimmed = input.trim_start();
+    let trim_offset = input.len().saturating_sub(trimmed.len());
+
+    for (byte_idx, ch) in trimmed.char_indices() {
+        if ch != '{' && ch != '[' {
+            continue;
+        }
+
+        let slice = &trimmed[byte_idx..];
+        let mut stream = serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = stream.next() {
+            let consumed = stream.byte_offset();
+            if consumed > 0 {
+                return Some((value, trim_offset + byte_idx + consumed));
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn strip_leading_close_tags(mut input: &str) -> &str {
+    loop {
+        let trimmed = input.trim_start();
+        if !trimmed.starts_with("</") {
+            return trimmed;
+        }
+
+        let Some(close_end) = trimmed.find('>') else {
+            return "";
+        };
+        input = &trimmed[close_end + 1..];
+    }
+}
+
+pub(crate) fn extract_json_values(input: &str) -> Vec<serde_json::Value> {
+    let mut values = Vec::new();
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return values;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        values.push(value);
+        return values;
+    }
+
+    let char_positions: Vec<(usize, char)> = trimmed.char_indices().collect();
+    let mut idx = 0;
+    while idx < char_positions.len() {
+        let (byte_idx, ch) = char_positions[idx];
+        if ch == '{' || ch == '[' {
+            let slice = &trimmed[byte_idx..];
+            let mut stream =
+                serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
+            if let Some(Ok(value)) = stream.next() {
+                let consumed = stream.byte_offset();
+                if consumed > 0 {
+                    values.push(value);
+                    let next_byte = byte_idx + consumed;
+                    while idx < char_positions.len() && char_positions[idx].0 < next_byte {
+                        idx += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    values
+}
+
+pub(crate) fn find_json_end(input: &str) -> Option<usize> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, ch) in trimmed.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(offset + i + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+pub(crate) fn parse_xml_attribute_tool_calls(response: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+
+    static INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>"#)
+            .expect("invoke regex must compile")
+    });
+
+    static PARAM_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"<parameter\s+name="([^"]+)"[^>]*>([^<]*)</parameter>"#)
+            .expect("parameter regex must compile")
+    });
+
+    for cap in INVOKE_RE.captures_iter(response) {
+        let tool_name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+        if tool_name.is_empty() {
+            continue;
+        }
+
+        let mut arguments = serde_json::Map::new();
+
+        for param_cap in PARAM_RE.captures_iter(inner) {
+            let param_name = param_cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+            if !param_name.is_empty() {
+                arguments.insert(
+                    param_name.to_string(),
+                    serde_json::Value::String(param_value.to_string()),
+                );
+            }
+        }
+
+        if !arguments.is_empty() {
+            calls.push(ParsedToolCall {
+                name: map_tool_name_alias(tool_name).to_string(),
+                arguments: serde_json::Value::Object(arguments),
+                tool_call_id: None,
+                parse_error: false,
+            });
+        }
+    }
+
+    calls
+}
+
+pub(crate) fn parse_perl_style_tool_calls(response: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+
+    static PERL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)(?:\[TOOL_CALL\]|TOOL_CALL)\s*\{(.+?)\}\}\s*(?:\[/TOOL_CALL\]|/TOOL_CALL)")
+            .expect("perl TOOL_CALL regex must compile")
+    });
+
+    static TOOL_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"tool\s*=>\s*"([^"]+)""#).expect("perl tool name regex must compile")
+    });
+
+    static ARGS_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)args\s*=>\s*\{(.+?)(?:\}|$)")
+            .expect("perl args block regex must compile")
+    });
+
+    static ARGS_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"--(\w+)\s+"([^"]+)""#).expect("perl args regex must compile")
+    });
+
+    for cap in PERL_RE.captures_iter(response) {
+        let content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+
+        let tool_name = TOOL_NAME_RE
+            .captures(content)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str())
+            .unwrap_or("");
+
+        if tool_name.is_empty() {
+            continue;
+        }
+
+        let args_block = ARGS_BLOCK_RE
+            .captures(content)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str())
+            .unwrap_or("");
+
+        let mut arguments = serde_json::Map::new();
+
+        for arg_cap in ARGS_RE.captures_iter(args_block) {
+            let key = arg_cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let value = arg_cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+            if !key.is_empty() {
+                arguments.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+        }
+
+        if !arguments.is_empty() {
+            calls.push(ParsedToolCall {
+                name: map_tool_name_alias(tool_name).to_string(),
+                arguments: serde_json::Value::Object(arguments),
+                tool_call_id: None,
+                parse_error: false,
+            });
+        }
+    }
+
+    calls
+}
+
+pub(crate) fn parse_function_call_tool_calls(response: &str) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+
+    static FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<FunctionCall>\s*(\w+)\s*<code>([^<]+)</code>\s*</FunctionCall>")
+            .expect("FunctionCall regex must compile")
+    });
+
+    for cap in FUNC_RE.captures_iter(response) {
+        let tool_name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let args_text = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+        if tool_name.is_empty() {
+            continue;
+        }
+
+        let mut arguments = serde_json::Map::new();
+        for line in args_text.lines() {
+            let line = line.trim();
+            if let Some(pos) = line.find('>') {
+                let key = line[..pos].trim();
+                let value = line[pos + 1..].trim();
+                if !key.is_empty() && !value.is_empty() {
+                    arguments.insert(
+                        key.to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+            }
+        }
+
+        if !arguments.is_empty() {
+            calls.push(ParsedToolCall {
+                name: map_tool_name_alias(tool_name).to_string(),
+                arguments: serde_json::Value::Object(arguments),
+                tool_call_id: None,
+                parse_error: false,
+            });
+        }
+    }
+
+    calls
+}
+
+pub(crate) fn map_tool_name_alias(tool_name: &str) -> &str {
+    match tool_name {
+
+        "shell" | "bash" | "sh" | "exec" | "command" | "cmd" => "shell",
+
+        "browser_open" | "browser" | "web_search" => "http_request",
+
+        "send_message" | "sendmessage" => "message_send",
+
+        "fileread" | "file_read" | "readfile" | "read_file" | "file" => "file_read",
+        "filewrite" | "file_write" | "writefile" | "write_file" => "file_write",
+        "filelist" | "file_list" | "listfiles" | "list_files" => "file_list",
+
+        "memoryrecall" | "memory_recall" | "recall" | "memrecall" => "memory_recall",
+        "memorystore" | "memory_store" | "store" | "memstore" => "memory_store",
+        "memoryforget" | "memory_forget" | "forget" | "memforget" => "memory_forget",
+
+        "http_request" | "http" | "fetch" | "curl" | "wget" => "http_request",
+        _ => tool_name,
+    }
+}
+
+pub(crate) fn is_url_like(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+pub(crate) fn parse_glm_style_tool_calls(text: &str) -> Vec<(String, serde_json::Value, Option<String>)> {
+    let mut calls = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(pos) = line.find('/') {
+            let tool_part = &line[..pos];
+            let rest = &line[pos + 1..];
+
+            if tool_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let tool_name = map_tool_name_alias(tool_part);
+
+                if let Some(gt_pos) = rest.find('>') {
+                    let param_name = rest[..gt_pos].trim();
+                    let value = rest[gt_pos + 1..].trim();
+
+                    let (final_tool, arguments) = match tool_name {
+                        "shell" => {
+                            if param_name == "url" || is_url_like(value) {
+                                (
+                                    "http_request",
+                                    serde_json::json!({"url": value, "method": "GET"}),
+                                )
+                            } else {
+                                ("shell", serde_json::json!({ "command": value }))
+                            }
+                        }
+                        "http_request" => (
+                            "http_request",
+                            serde_json::json!({"url": value, "method": "GET"}),
+                        ),
+                        _ => (tool_name, serde_json::json!({ param_name: value })),
+                    };
+
+                    calls.push((final_tool.to_string(), arguments, Some(line.to_string())));
+                    continue;
+                }
+
+                if rest.starts_with('{') {
+                    if let Ok(json_args) = serde_json::from_str::<serde_json::Value>(rest) {
+                        calls.push((tool_name.to_string(), json_args, Some(line.to_string())));
+                    }
+                }
+            }
+        }
+    }
+
+    calls
+}
+
+pub(crate) fn default_param_for_tool(tool: &str) -> &'static str {
+    match tool {
+        "shell" | "bash" | "sh" | "exec" | "command" | "cmd" => "command",
+
+        "file_read" | "fileread" | "readfile" | "read_file" | "file" | "file_write"
+        | "filewrite" | "writefile" | "write_file" | "file_edit" | "fileedit" | "editfile"
+        | "edit_file" | "file_list" | "filelist" | "listfiles" | "list_files" => "path",
+
+        "memory_recall" | "memoryrecall" | "recall" | "memrecall" | "memory_forget"
+        | "memoryforget" | "forget" | "memforget" | "web_search_tool" | "web_search"
+        | "websearch" | "search" => "query",
+        "memory_store" | "memorystore" | "store" | "memstore" => "content",
+
+        "http_request" | "http" | "fetch" | "curl" | "wget" | "browser_open" | "browser" => "url",
+        _ => "input",
+    }
+}
+
+pub(crate) fn parse_glm_shortened_body(body: &str) -> Option<ParsedToolCall> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    let function_style = body.find('(').and_then(|open| {
+        if body.ends_with(')') && open > 0 {
+            Some((body[..open].trim(), body[open + 1..body.len() - 1].trim()))
+        } else {
+            None
+        }
+    });
+
+    let (tool_raw, value_part) = if let Some((tool, args)) = function_style {
+        (tool, args)
+    } else if body.contains("=\"") {
+
+        let split_pos = body.find(|c: char| c.is_whitespace()).unwrap_or(body.len());
+        let tool = body[..split_pos].trim();
+        let attrs = body[split_pos..]
+            .trim()
+            .trim_end_matches("/>")
+            .trim_end_matches('>')
+            .trim_end_matches('/')
+            .trim();
+        (tool, attrs)
+    } else if let Some(gt_pos) = body.find('>') {
+
+        let tool = body[..gt_pos].trim();
+        let value = body[gt_pos + 1..].trim();
+
+        let value = value.trim_end_matches("/>").trim_end_matches('/').trim();
+        (tool, value)
+    } else {
+        return None;
+    };
+
+    let tool_raw = tool_raw.trim_end_matches(|c: char| c.is_whitespace());
+    if tool_raw.is_empty() || !tool_raw.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let tool_name = map_tool_name_alias(tool_raw);
+
+    if value_part.contains("=\"") {
+        let mut args = serde_json::Map::new();
+
+        let mut rest = value_part;
+        while let Some(eq_pos) = rest.find("=\"") {
+            let key_start = rest[..eq_pos]
+                .rfind(|c: char| c.is_whitespace())
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let key = rest[key_start..eq_pos]
+                .trim()
+                .trim_matches(|c: char| c == ',' || c == ';');
+            let after_quote = &rest[eq_pos + 2..];
+            if let Some(end_quote) = after_quote.find('"') {
+                let value = &after_quote[..end_quote];
+                if !key.is_empty() {
+                    args.insert(
+                        key.to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+                rest = &after_quote[end_quote + 1..];
+            } else {
+                break;
+            }
+        }
+        if !args.is_empty() {
+            return Some(ParsedToolCall {
+                name: tool_name.to_string(),
+                arguments: serde_json::Value::Object(args),
+                tool_call_id: None,
+                parse_error: false,
+            });
+        }
+    }
+
+    if value_part.contains('\n') {
+        let mut args = serde_json::Map::new();
+        for line in value_part.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(colon_pos) = line.find(':') {
+                let key = line[..colon_pos].trim();
+                let value = line[colon_pos + 1..].trim();
+                if !key.is_empty() && !value.is_empty() {
+
+                    let json_value = match value {
+                        "true" | "yes" => serde_json::Value::Bool(true),
+                        "false" | "no" => serde_json::Value::Bool(false),
+                        _ => serde_json::Value::String(value.to_string()),
+                    };
+                    args.insert(key.to_string(), json_value);
+                }
+            }
+        }
+        if !args.is_empty() {
+            return Some(ParsedToolCall {
+                name: tool_name.to_string(),
+                arguments: serde_json::Value::Object(args),
+                tool_call_id: None,
+                parse_error: false,
+            });
+        }
+    }
+
+    if !value_part.is_empty() {
+        let param = default_param_for_tool(tool_raw);
+        let arguments = match tool_name {
+            "shell" => {
+                if is_url_like(value_part) {
+                    return Some(ParsedToolCall {
+                        name: "http_request".to_string(),
+                        arguments: serde_json::json!({"url": value_part, "method": "GET"}),
+                        tool_call_id: None,
+                        parse_error: false,
+                    });
+                }
+                serde_json::json!({ "command": value_part })
+            }
+            "http_request" => serde_json::json!({"url": value_part, "method": "GET"}),
+            _ => serde_json::json!({ param: value_part }),
+        };
+        return Some(ParsedToolCall {
+            name: tool_name.to_string(),
+            arguments,
+            tool_call_id: None,
+            parse_error: false,
+        });
+    }
+
+    None
+}
+
+pub(crate) fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
+
+    let cleaned = strip_think_tags(response);
+    let response = cleaned.as_str();
+
+    let mut text_parts = Vec::new();
+    let mut calls = Vec::new();
+    let mut remaining = response;
+
+    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(response.trim()) {
+        calls = parse_tool_calls_from_json_value(&json_value);
+        if !calls.is_empty() {
+
+            if let Some(content) = json_value.get("content").and_then(|v| v.as_str()) {
+                if !content.trim().is_empty() {
+                    text_parts.push(content.trim().to_string());
+                }
+            }
+            return (text_parts.join("\n"), calls);
+        }
+    }
+
+    if let Some((minimax_text, minimax_calls)) = parse_minimax_invoke_calls(response) {
+        if !minimax_calls.is_empty() {
+            return (minimax_text, minimax_calls);
+        }
+    }
+
+    while let Some((start, open_tag)) = find_first_tag(remaining, &TOOL_CALL_OPEN_TAGS) {
+
+        let before = &remaining[..start];
+        if !before.trim().is_empty() {
+            text_parts.push(before.trim().to_string());
+        }
+
+        let Some(close_tag) = matching_tool_call_close_tag(open_tag) else {
+            break;
+        };
+
+        let after_open = &remaining[start + open_tag.len()..];
+        if let Some(close_idx) = after_open.find(close_tag) {
+            let inner = &after_open[..close_idx];
+            let mut parsed_any = false;
+
+            let json_values = extract_json_values(inner);
+            for value in json_values {
+                let parsed_calls = parse_tool_calls_from_json_value(&value);
+                if !parsed_calls.is_empty() {
+                    parsed_any = true;
+                    calls.extend(parsed_calls);
+                }
+            }
+
+            if !parsed_any {
+                if let Some(xml_calls) = parse_xml_tool_calls(inner) {
+                    calls.extend(xml_calls);
+                    parsed_any = true;
+                }
+            }
+
+            if !parsed_any {
+
+                if let Some(glm_call) = parse_glm_shortened_body(inner) {
+                    calls.push(glm_call);
+                    parsed_any = true;
+                }
+            }
+
+            if !parsed_any {
+                tracing::warn!(
+                    "Malformed <tool_call>: expected tool-call object in tag body (JSON/XML/GLM)"
+                );
+            }
+
+            remaining = &after_open[close_idx + close_tag.len()..];
+        } else {
+
+            let mut resolved = false;
+            if let Some((cross_idx, cross_tag)) = find_first_tag(after_open, &TOOL_CALL_CLOSE_TAGS)
+            {
+                let inner = &after_open[..cross_idx];
+                let mut parsed_any = false;
+
+                let json_values = extract_json_values(inner);
+                for value in json_values {
+                    let parsed_calls = parse_tool_calls_from_json_value(&value);
+                    if !parsed_calls.is_empty() {
+                        parsed_any = true;
+                        calls.extend(parsed_calls);
+                    }
+                }
+
+                if !parsed_any {
+                    if let Some(xml_calls) = parse_xml_tool_calls(inner) {
+                        calls.extend(xml_calls);
+                        parsed_any = true;
+                    }
+                }
+
+                if !parsed_any {
+                    if let Some(glm_call) = parse_glm_shortened_body(inner) {
+                        calls.push(glm_call);
+                        parsed_any = true;
+                    }
+                }
+
+                if parsed_any {
+                    remaining = &after_open[cross_idx + cross_tag.len()..];
+                    resolved = true;
+                }
+            }
+
+            if resolved {
+                continue;
+            }
+
+            if let Some(json_end) = find_json_end(after_open) {
+                if let Ok(value) =
+                    serde_json::from_str::<serde_json::Value>(&after_open[..json_end])
+                {
+                    let parsed_calls = parse_tool_calls_from_json_value(&value);
+                    if !parsed_calls.is_empty() {
+                        calls.extend(parsed_calls);
+                        remaining = strip_leading_close_tags(&after_open[json_end..]);
+                        continue;
+                    }
+                }
+            }
+
+            if let Some((value, consumed_end)) = extract_first_json_value_with_end(after_open) {
+                let parsed_calls = parse_tool_calls_from_json_value(&value);
+                if !parsed_calls.is_empty() {
+                    calls.extend(parsed_calls);
+                    remaining = strip_leading_close_tags(&after_open[consumed_end..]);
+                    continue;
+                }
+            }
+
+            let glm_input = after_open.trim();
+            if let Some(glm_call) = parse_glm_shortened_body(glm_input) {
+                calls.push(glm_call);
+                remaining = "";
+                continue;
+            }
+
+            remaining = &remaining[start..];
+            break;
+        }
+    }
+
+    if calls.is_empty() {
+        static MD_TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"(?s)```(?:tool[_-]?call|invoke)\s*\n(.*?)(?:```|</tool[_-]?call>|</toolcall>|</invoke>|</minimax:toolcall>)",
+            )
+            .expect("markdown tool call regex must compile")
+        });
+        let mut md_text_parts: Vec<String> = Vec::new();
+        let mut last_end = 0;
+
+        for cap in MD_TOOL_CALL_RE.captures_iter(response) {
+            let Some(full_match) = cap.get(0) else {
+                continue;
+            };
+            let before = &response[last_end..full_match.start()];
+            if !before.trim().is_empty() {
+                md_text_parts.push(before.trim().to_string());
+            }
+            let inner = &cap[1];
+            let json_values = extract_json_values(inner);
+            for value in json_values {
+                let parsed_calls = parse_tool_calls_from_json_value(&value);
+                calls.extend(parsed_calls);
+            }
+            last_end = full_match.end();
+        }
+
+        if !calls.is_empty() {
+            let after = &response[last_end..];
+            if !after.trim().is_empty() {
+                md_text_parts.push(after.trim().to_string());
+            }
+            text_parts = md_text_parts;
+            remaining = "";
+        }
+    }
+
+    if calls.is_empty() {
+        static MD_TOOL_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?s)```tool\s+(\w+)\s*\n(.*?)(?:```|$)")
+                .expect("markdown tool name regex must compile")
+        });
+        let mut md_text_parts: Vec<String> = Vec::new();
+        let mut last_end = 0;
+
+        for cap in MD_TOOL_NAME_RE.captures_iter(response) {
+            let Some(full_match) = cap.get(0) else {
+                continue;
+            };
+            let before = &response[last_end..full_match.start()];
+            if !before.trim().is_empty() {
+                md_text_parts.push(before.trim().to_string());
+            }
+            let tool_name = &cap[1];
+            let inner = &cap[2];
+
+            let json_values = extract_json_values(inner);
+            if json_values.is_empty() {
+
+                tracing::warn!(
+                    tool_name = %tool_name,
+                    inner = %inner.chars().take(100).collect::<String>(),
+                    "Found ```tool <name> block but could not parse JSON arguments"
+                );
+            } else {
+                for value in json_values {
+                    let arguments = if value.is_object() {
+                        value
+                    } else {
+                        serde_json::Value::Object(serde_json::Map::new())
+                    };
+                    calls.push(ParsedToolCall {
+                        name: tool_name.to_string(),
+                        arguments,
+                        tool_call_id: None,
+                        parse_error: false,
+                    });
+                }
+            }
+            last_end = full_match.end();
+        }
+
+        if !calls.is_empty() {
+            let after = &response[last_end..];
+            if !after.trim().is_empty() {
+                md_text_parts.push(after.trim().to_string());
+            }
+            text_parts = md_text_parts;
+            remaining = "";
+        }
+    }
+
+    if calls.is_empty() {
+        let xml_calls = parse_xml_attribute_tool_calls(remaining);
+        if !xml_calls.is_empty() {
+            let mut cleaned_text = remaining.to_string();
+            for call in xml_calls {
+                calls.push(call);
+
+                if let Some(start) = cleaned_text.find("<minimax:toolcall>") {
+                    if let Some(end) = cleaned_text.find("</minimax:toolcall>") {
+                        let end_pos = end + "</minimax:toolcall>".len();
+                        if end_pos <= cleaned_text.len() {
+                            cleaned_text =
+                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
+                        }
+                    }
+                }
+            }
+            if !cleaned_text.trim().is_empty() {
+                text_parts.push(cleaned_text.trim().to_string());
+            }
+            remaining = "";
+        }
+    }
+
+    if calls.is_empty() {
+        let perl_calls = parse_perl_style_tool_calls(remaining);
+        if !perl_calls.is_empty() {
+            let mut cleaned_text = remaining.to_string();
+            for call in perl_calls {
+                calls.push(call);
+
+                while let Some(start) = cleaned_text.find("TOOL_CALL") {
+                    if let Some(end) = cleaned_text.find("/TOOL_CALL") {
+                        let end_pos = end + "/TOOL_CALL".len();
+                        if end_pos <= cleaned_text.len() {
+                            cleaned_text =
+                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !cleaned_text.trim().is_empty() {
+                text_parts.push(cleaned_text.trim().to_string());
+            }
+            remaining = "";
+        }
+    }
+
+    if calls.is_empty() {
+        let func_calls = parse_function_call_tool_calls(remaining);
+        if !func_calls.is_empty() {
+            let mut cleaned_text = remaining.to_string();
+            for call in func_calls {
+                calls.push(call);
+
+                while let Some(start) = cleaned_text.find("<FunctionCall>") {
+                    if let Some(end) = cleaned_text.find("</FunctionCall>") {
+                        let end_pos = end + "</FunctionCall>".len();
+                        if end_pos <= cleaned_text.len() {
+                            cleaned_text =
+                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !cleaned_text.trim().is_empty() {
+                text_parts.push(cleaned_text.trim().to_string());
+            }
+            remaining = "";
+        }
+    }
+
+    if calls.is_empty() {
+        let glm_calls = parse_glm_style_tool_calls(remaining);
+        if !glm_calls.is_empty() {
+            let mut cleaned_text = remaining.to_string();
+            for (name, args, raw) in &glm_calls {
+                calls.push(ParsedToolCall {
+                    name: name.clone(),
+                    arguments: args.clone(),
+                    tool_call_id: None,
+                    parse_error: false,
+                });
+                if let Some(r) = raw {
+                    cleaned_text = cleaned_text.replace(r, "");
+                }
+            }
+            if !cleaned_text.trim().is_empty() {
+                text_parts.push(cleaned_text.trim().to_string());
+            }
+            remaining = "";
+        }
+    }
+
+    if calls.is_empty() {
+        let bare = scan_bare_json_tool_calls(remaining);
+        if !bare.is_empty() {
+            let mut cleaned_text = remaining.to_string();
+            for (call, raw) in &bare {
+                calls.push(call.clone());
+                cleaned_text = cleaned_text.replace(raw, "");
+            }
+            if !cleaned_text.trim().is_empty() {
+                text_parts.push(cleaned_text.trim().to_string());
+            }
+            remaining = "";
+        }
+    }
+
+    if !remaining.trim().is_empty() {
+        text_parts.push(remaining.trim().to_string());
+    }
+
+    if calls.len() > 1 {
+        let mut deduped: Vec<ParsedToolCall> = Vec::with_capacity(calls.len());
+        for call in calls {
+            let is_duplicate = deduped.last().is_some_and(|prev| {
+                prev.name == call.name
+                    && prev.tool_call_id == call.tool_call_id
+                    && prev.arguments == call.arguments
+            });
+            if !is_duplicate {
+                deduped.push(call);
+            }
+        }
+        calls = deduped;
+    }
+
+    (text_parts.join("\n"), calls)
+}
+
+pub(crate) fn scan_bare_json_tool_calls(input: &str) -> Vec<(ParsedToolCall, String)> {
+    let mut out: Vec<(ParsedToolCall, String)> = Vec::new();
+    if input.trim().is_empty() {
+        return out;
+    }
+
+    let bytes = input.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] != b'{' {
+            idx += 1;
+            continue;
+        }
+        let slice = &input[idx..];
+        let Some(end_rel) = find_json_end(slice) else {
+            idx += 1;
+            continue;
+        };
+        let raw = &slice[..end_rel];
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            let looks_like_call = value
+                .as_object()
+                .map(|obj| {
+                    let has_name = obj.contains_key("name");
+                    let has_function = obj.contains_key("function");
+                    let has_args =
+                        obj.contains_key("arguments") || obj.contains_key("parameters");
+                    let has_tool_calls = obj.contains_key("tool_calls");
+                    has_tool_calls || ((has_name || has_function) && has_args)
+                })
+                .unwrap_or(false);
+            if looks_like_call {
+                let parsed_calls = parse_tool_calls_from_json_value(&value);
+                for parsed in parsed_calls {
+                    out.push((parsed, raw.to_string()));
+                }
+            }
+            idx += end_rel;
+            continue;
+        }
+        idx += 1;
+    }
+
+    out
+}
+
+pub(crate) fn strip_think_tags(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        if let Some(start) = rest.find("<think>") {
+            result.push_str(&rest[..start]);
+            if let Some(end) = rest[start..].find("</think>") {
+                rest = &rest[start + end + "</think>".len()..];
+            } else {
+
+                break;
+            }
+        } else {
+            result.push_str(rest);
+            break;
+        }
+    }
+    result.trim().to_string()
+}
+
+pub(crate) fn strip_tool_result_blocks(text: &str) -> String {
+    static TOOL_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<tool_result[^>]*>.*?</tool_result>")
+            .expect("tool_result block regex must compile")
+    });
+    static THINKING_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<thinking>.*?</thinking>").expect("thinking block regex must compile")
+    });
+    static THINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<think>.*?</think>").expect("think block regex must compile")
+    });
+    static TOOL_RESULTS_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?m)^\[Tool results\]\s*\n?").expect("tool results prefix regex must compile")
+    });
+    static EXCESS_BLANK_LINES_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\n{3,}").expect("excess blank lines regex must compile")
+    });
+
+    let result = TOOL_RESULT_RE.replace_all(text, "");
+    let result = THINKING_RE.replace_all(&result, "");
+    let result = THINK_RE.replace_all(&result, "");
+    let result = TOOL_RESULTS_PREFIX_RE.replace_all(&result, "");
+    let result = EXCESS_BLANK_LINES_RE.replace_all(result.trim(), "\n\n");
+
+    result.trim().to_string()
+}
+
+pub(crate) fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall]) -> Option<String> {
+    if !parsed_calls.is_empty() {
+        return None;
+    }
+
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let looks_like_tool_payload = trimmed.contains("<tool_call")
+        || trimmed.contains("<toolcall")
+        || trimmed.contains("<tool-call")
+        || trimmed.contains("```tool_call")
+        || trimmed.contains("```toolcall")
+        || trimmed.contains("```tool-call")
+        || trimmed.contains("```tool file_")
+        || trimmed.contains("```tool shell")
+        || trimmed.contains("```tool web_")
+        || trimmed.contains("```tool memory_")
+        || trimmed.contains("```tool ")
+        || trimmed.contains("\"tool_calls\"")
+        || trimmed.contains("TOOL_CALL")
+        || trimmed.contains("[TOOL_CALL]")
+        || trimmed.contains("<FunctionCall>");
+
+    if looks_like_tool_payload {
+        Some("response resembled a tool-call payload but no valid tool call could be parsed".into())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
+    tool_calls
+        .iter()
+        .map(|call| ParsedToolCall {
+            name: call.name.clone(),
+            arguments: serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            tool_call_id: Some(call.id.clone()),
+            parse_error: serde_json::from_str::<serde_json::Value>(&call.arguments).is_err(),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedToolCall {
+    pub(crate) name: String,
+    pub(crate) arguments: serde_json::Value,
+    pub(crate) tool_call_id: Option<String>,
+
+    pub(crate) parse_error: bool,
+}

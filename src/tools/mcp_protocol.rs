@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! MCP (Model Context Protocol) JSON-RPC 2.0 protocol types.
-//! Protocol version: 2024-11-05
-//! Both Serialize and Deserialize are derived — the client both sends (Serialize)
-//! and receives (Deserialize) JSON-RPC messages.
 
 use serde::{Deserialize, Serialize};
 

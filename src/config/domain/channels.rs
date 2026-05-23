@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Additional channel configurations extracted from `schema.rs`.
-//!
-//! This module contains channel types not yet migrated to `channels_core.rs`.
-//! The main `ChannelsConfig` container remains in `schema.rs` for now.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

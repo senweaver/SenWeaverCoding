@@ -1,19 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool output compression for token savings.
-//!
-//! Inspired by RTK's approach of compressing tool outputs before they enter
-//! the LLM conversation history. This module applies configurable compression
-//! strategies to tool results without losing critical information.
-//!
-//! Strategies (applied in order):
-//! 1. **Truncation** - Hard cap on output length with smart boundary detection
-//! 2. **Code filtering** - Strip comments, collapse function bodies (for file reads)
-//! 3. **Error focus** - Keep only error/warning lines from verbose output
-//! 4. **JSON compaction** - Summarize large JSON structures
-//! 5. **Line dedup** - Collapse repeated identical/similar lines
-//! 6. **Tee** - Save full output to a recovery file when compressed
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

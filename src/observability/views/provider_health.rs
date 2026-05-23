@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Provider-health view model — tabular view of `HealthSignal`s
-//! emitted by `providers::reliable` and consumed by the router /
-//! supervisor.
-//!
-//! UI-agnostic: ratatui rendering lives in `crate::tui::panels`; the
-//! Tauri-hosted desktop UI consumes the same shape via the gateway.
-//! This module only holds the data.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderHealthRow {

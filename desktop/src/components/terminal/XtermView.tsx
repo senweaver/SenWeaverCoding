@@ -1,20 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// xterm.js host component shared by the bottom Terminal Panel.
-//
-// Two render modes:
-//
-//   - mode='pty'           : owns a real PTY session via terminalApi.
-//                            stdin -> backend (interactive shell).
-//
-//   - mode='agent-mirror'  : read-only viewer fed by the bottom-panel
-//                            store ring buffer. Replays the buffer on
-//                            mount and subscribes via
-//                            registerMirrorWriter so subsequent
-//                            BackgroundShellSignal events stream live.
-//
-// All PTY lifecycle (spawn / resize / exit / dispose) lives here so
-// the rest of the panel UI can stay declarative.
 
 import { useCallback, useEffect, useImperativeHandle, useRef, type Ref } from 'react'
 import type { Terminal as XTermTerminal } from '@xterm/xterm'
@@ -24,6 +8,7 @@ import { terminalApi } from '../../api/terminal'
 import {
   readMirrorBuffer,
   registerMirrorWriter,
+  sessionIdFromMirrorTabId,
 } from '../../stores/terminalPanelStore'
 
 export type XtermViewHandle = {
@@ -85,12 +70,7 @@ export function XtermView(props: XtermViewProps) {
   const sessionIdRef = useRef<number | null>(null)
   const unlistenRef = useRef<Array<() => void>>([])
   const disposedRef = useRef(false)
-
-  // Stash the latest callbacks in refs so the boot effect below does not
-  // need to depend on them. TerminalPanel passes inline arrow functions
-  // for onSpawned / onExited / onError; if those went into the effect
-  // deps the whole xterm session would be torn down and re-spawned on
-  // every render of the parent, dropping the shell's initial banner.
+  
   const onSpawnedRef = useRef(onSpawned)
   const onExitedRef = useRef(onExited)
   const onErrorRef = useRef(onError)
@@ -277,10 +257,11 @@ export function XtermView(props: XtermViewProps) {
           unlistenRef.current = []
         }
       } else {
-        for (const chunk of readMirrorBuffer()) terminal.write(chunk)
+        const mirrorSessionId = sessionIdFromMirrorTabId(tabId)
+        for (const chunk of readMirrorBuffer(mirrorSessionId)) terminal.write(chunk)
         const unsubscribe = registerMirrorWriter((chunk) => {
           terminal.write(chunk)
-        })
+        }, mirrorSessionId)
         unlistenRef.current = [unsubscribe]
       }
     }
@@ -308,13 +289,7 @@ export function XtermView(props: XtermViewProps) {
       terminalRef.current?.dispose()
       terminalRef.current = null
       fitRef.current = null
-    }
-
-  // Intentionally NOT depending on `fit`, `onSpawned`, `onExited`, `onError`:
-  // they are either stable callbacks (fit) or accessed through refs above.
-  // Including unstable inline callbacks here would tear down the xterm
-  // session on every parent render and lose the shell's initial banner.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    }  
   }, [tabId, mode, initialCwd])
 
   return (

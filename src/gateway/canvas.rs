@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Live Canvas gateway routes — REST + WebSocket for real-time canvas updates.
-//!
-//! - `GET  /api/canvas/:id` — get current canvas content (JSON)
-//! - `POST /api/canvas/:id` — push content programmatically
-//! - `GET  /api/canvas`     — list all active canvases
-//! - `WS   /ws/canvas/:id`  — real-time canvas updates via WebSocket
 
 use super::AppState;
 use super::api::require_auth;

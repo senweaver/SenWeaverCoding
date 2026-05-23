@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Post-turn housekeeping — the third testable seam extracted from
-//! `loop_::run`'s F-section main loop.
-//!
-//! After `run_tool_call_loop` returns, the REPL has to:
-//!   1. Trim history if the buffer exceeds the pacing budget.
-//!   2. Optionally compress older messages into a summary node.
-//!   3. Persist the conversation state to disk when a session file
-//!      is configured.
-//!
-//! Historically those three steps lived inline inside the main
-//! loop, intertwined with stdout rendering.  This module pulls
-//! them out as a pure-ish function (only `history` mutation + disk
-//! I/O) so operators can exercise the teardown behaviour without
-//! running the full REPL.
 
 use std::path::Path;
 
@@ -116,11 +102,7 @@ pub async fn finalize_turn(
         let drop_count = history.len().saturating_sub(ceiling);
         if drop_count > 0 {
 
-            let start = if history.first().map(|m| m.role == "system").unwrap_or(false) {
-                1
-            } else {
-                0
-            };
+            let start = usize::from(history.first().map(|m| m.role == "system").unwrap_or(false));
             let end = (start + drop_count).min(history.len());
             if end > start {
                 history.drain(start..end);

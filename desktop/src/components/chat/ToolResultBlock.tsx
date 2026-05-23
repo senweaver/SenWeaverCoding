@@ -2,12 +2,62 @@ import { CodeViewer } from './CodeViewer'
 import { useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { InlineImageGallery } from './InlineImageGallery'
+import { isTauriRuntime } from '../../lib/desktopRuntime'
 
 type Props = {
   content: unknown
   isError: boolean
   toolName?: string
   standalone?: boolean
+}
+
+async function openLocalPath(path: string): Promise<void> {
+  if (!path) return
+  if (!isTauriRuntime()) {
+    window.open(path, '_blank')
+    return
+  }
+  try {
+    const mod = (await import(/* @vite-ignore */ '@tauri-apps/plugin-shell')) as {
+      open: (target: string) => Promise<void>
+    }
+    await mod.open(path)
+  } catch (err) {
+    console.warn('[ToolResultBlock] open path failed', err)
+  }
+}
+
+function extractQaDocPaths(
+  content: unknown,
+): { reportPath?: string; analysisPath?: string; runbookPath?: string } | null {
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map((c: any) => (typeof c === 'string' ? c : c?.text || ''))
+          .filter(Boolean)
+          .join('\n')
+      : ''
+  if (!text) return null
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end < 0 || end <= start) return null
+  const candidate = text.slice(start, end + 1)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(candidate)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const obj = parsed as Record<string, unknown>
+  const reportPath = typeof obj.report_path === 'string' ? obj.report_path : undefined
+  const analysisPath =
+    typeof obj.analysis_path === 'string' ? obj.analysis_path : undefined
+  const runbookPath =
+    typeof obj.runbook_path === 'string' ? obj.runbook_path : undefined
+  if (!reportPath && !analysisPath && !runbookPath) return null
+  return { reportPath, analysisPath, runbookPath }
 }
 
 const PREVIEW_LIMIT = 200
@@ -27,6 +77,11 @@ export function ToolResultBlock({ content, isError, toolName, standalone = true 
   const preview = previewInfo.text.slice(0, PREVIEW_LIMIT)
   const hasMore = previewInfo.truncated
   const text = expanded ? fullText : preview
+
+  const qaDocs =
+    !isError && toolName === 'debug_test_report'
+      ? extractQaDocPaths(content)
+      : null
 
   return (
     <div className={`mb-2 overflow-hidden rounded-xl border ${
@@ -93,6 +148,58 @@ export function ToolResultBlock({ content, isError, toolName, standalone = true 
                 count: expanded ? Math.max(0, fullText.length - PREVIEW_LIMIT) : 0,
               })}
         </button>
+      )}
+
+      {qaDocs && (
+        <div className="border-t border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)] px-3 py-2.5">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-accent)]">
+            <span className="material-symbols-outlined text-[12px]">
+              description
+            </span>
+            {t('debug.qa.docs.title')}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {qaDocs.reportPath && (
+              <button
+                type="button"
+                onClick={() => void openLocalPath(qaDocs.reportPath!)}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-high)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-primary-container)] hover:text-[var(--color-on-primary-container)] transition-colors"
+                title={qaDocs.reportPath}
+              >
+                <span className="material-symbols-outlined text-[12px]">
+                  assignment_turned_in
+                </span>
+                {t('debug.qa.docs.openReport')}
+              </button>
+            )}
+            {qaDocs.analysisPath && (
+              <button
+                type="button"
+                onClick={() => void openLocalPath(qaDocs.analysisPath!)}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-high)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-primary-container)] hover:text-[var(--color-on-primary-container)] transition-colors"
+                title={qaDocs.analysisPath}
+              >
+                <span className="material-symbols-outlined text-[12px]">
+                  insights
+                </span>
+                {t('debug.qa.docs.openAnalysis')}
+              </button>
+            )}
+            {qaDocs.runbookPath && (
+              <button
+                type="button"
+                onClick={() => void openLocalPath(qaDocs.runbookPath!)}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-high)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-primary-container)] hover:text-[var(--color-on-primary-container)] transition-colors"
+                title={qaDocs.runbookPath}
+              >
+                <span className="material-symbols-outlined text-[12px]">
+                  menu_book
+                </span>
+                {t('debug.qa.docs.openRunbook')}
+              </button>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )

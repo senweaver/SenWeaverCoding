@@ -1,34 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hash-sharded vector index that parallelizes search across shards.
-//!
-//! # Rationale
-//!
-//! `LinearIndex` is O(N) per query.  A typical local memory store holds
-//! 10K–100K vectors, where the dot-product hot loop is memory-bandwidth
-//! bound but otherwise well-behaved.  Naively threading the search
-//! doesn't work because a single `LinearIndex` lock serializes access.
-//!
-//! `ShardedVectorIndex` partitions the corpus by a hash of the `id`
-//! across `shard_count` `LinearIndex` instances, each guarded by its
-//! own `parking_lot::RwLock`.  Queries fan out into `shard_count`
-//! parallel sub-searches (via `tokio::task::spawn_blocking`), then
-//! merge with a bounded min-heap.  This gives near-linear speedup on
-//! multi-core systems and maintains the `VectorIndex` trait contract.
-//!
-//! # Cost model
-//!
-//! - Upsert: O(1) shard-select + O(N/shards) within the shard.
-//! - Search: O(shards) scheduling + O(N/shards) per shard (parallel).
-//!   Wall-clock for 8 shards on 8 cores ≈ 8x speedup over `LinearIndex`.
-//!
-//! # Contracts preserved
-//!
-//! - Result ordering identical to `LinearIndex` (descending similarity).
-//! - Top-K semantics: final merge uses same bounded min-heap.
-//! - Zero-vector queries return empty.
-//! - `len()` sums across shards.
 
 use std::sync::Arc;
 
@@ -108,7 +80,13 @@ impl VectorIndex for ShardedVectorIndex {
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
+            handles
+                .into_iter()
+                .filter_map(|h| match h.join() {
+                    Ok(results) => Some(results),
+                    Err(_) => None,
+                })
+                .collect()
         });
 
         use std::cmp::Reverse;

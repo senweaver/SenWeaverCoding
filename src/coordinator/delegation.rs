@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Delegation protocol for multi-agent fan-out.
-//!
-//! A coordinator agent receives a high-level user request and splits it into
-//! sub-tasks, each assigned to a specialist agent.  Once sub-task results are
-//! available, the coordinator merges them using a configurable strategy
-//! (first-wins, all-results, voting, LLM-judge).
 
 use std::sync::Arc;
 

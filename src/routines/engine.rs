@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Routines engine — event-triggered automation with pattern matching and
-//! cooldown enforcement.
-//!
-//! A **routine** is a lightweight automation rule: when an event matches one of
-//! its patterns, the associated action fires (provided cooldown has elapsed).
-//! The engine bridges channel messages, cron ticks, webhooks, and system events
-//! into the existing SOP pipeline.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Lightweight [`InlineContext`] builder.
-//!
-//! scopes the builder to the **local window** (the 4KB prefix
-//! + 2KB suffix plus a best-effort imports slice).  Richer context
-//! sources (SymbolGraph neighbourhood, tantivy top-K, recent edits)
-//! are composed through the unified `context::ContextResolver` when
-//! present, keeping this module decoupled from those heavier crates.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

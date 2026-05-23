@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Services module — mirrors claude-code's `services/` directory.
-//
-// Provides the service layer that sits between the agent core and external
-// integrations: analytics, API client wrappers, compaction, LSP, MCP
-// management, OAuth, rate limiting, token estimation, voice STT,
-// diagnostics, notifications, plugins, and tips.
-
 pub mod service;
 
 #[allow(unused_imports)]
@@ -40,6 +32,10 @@ pub mod mcp_server;
 pub mod notifier;
 #[allow(unused_imports)]
 pub mod oauth;
+
+pub mod proxy_registry;
+
+pub mod proxy_runtime;
 #[allow(unused_imports)]
 pub mod rate_limit;
 #[allow(unused_imports)]

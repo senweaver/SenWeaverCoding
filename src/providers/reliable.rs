@@ -3,14 +3,43 @@
 // Licensed under the MIT License.
 use super::Provider;
 use super::traits::{
-    ChatMessage, ChatRequest, ChatResponse, StreamChunk, StreamEvent, StreamOptions, StreamResult,
+    ChatMessage, ChatRequest, ChatResponse, RetryClass, RetryNotice, StreamChunk, StreamError,
+    StreamEvent, StreamOptions, StreamResult,
 };
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+tokio::task_local! {
+    static STREAM_CANCEL_TOKEN: Option<CancellationToken>;
+}
+
+pub fn scope_stream_cancel_token_sync<F, R>(token: Option<CancellationToken>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    STREAM_CANCEL_TOKEN.sync_scope(token, f)
+}
+
+pub async fn scope_stream_cancel_token<F: Future>(
+    token: Option<CancellationToken>,
+    fut: F,
+) -> F::Output {
+    STREAM_CANCEL_TOKEN.scope(token, fut).await
+}
+
+fn current_stream_cancel_token() -> Option<CancellationToken> {
+    STREAM_CANCEL_TOKEN
+        .try_with(|cell| cell.clone())
+        .ok()
+        .flatten()
+}
 
 #[derive(Debug, Clone)]
 pub struct ProviderFallbackInfo {
@@ -63,6 +92,17 @@ pub fn is_non_retryable(err: &anyhow::Error) -> bool {
 
     if is_tool_schema_error(err) {
         return false;
+    }
+
+    use crate::error::{ErrorCategory, ErrorClassification};
+    match err.category() {
+        ErrorCategory::Permission | ErrorCategory::Validation | ErrorCategory::NotFound => {
+            return true;
+        }
+        ErrorCategory::Network | ErrorCategory::Timeout | ErrorCategory::RateLimit => {
+
+        }
+        _ => {}
     }
 
     if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
@@ -151,6 +191,109 @@ fn is_rate_limited(err: &anyhow::Error) -> bool {
         && (msg.contains("Too Many") || msg.contains("rate") || msg.contains("limit"))
 }
 
+pub(crate) fn is_transport_level_error(err: &anyhow::Error) -> bool {
+    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
+        if reqwest_err.is_connect() || reqwest_err.is_timeout() {
+            return true;
+        }
+        if reqwest_err.is_request() && reqwest_err.status().is_none() {
+            return true;
+        }
+        return false;
+    }
+    let lower = err.to_string().to_lowercase();
+    [
+        "error sending request for url",
+        "error decoding response body",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "connection closed",
+        "broken pipe",
+        "dns error",
+        "tls handshake",
+        "operation timed out",
+        "request timeout",
+        "unexpected end of file",
+        "stream ended before",
+        "io error",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint))
+}
+
+fn is_engine_overloaded(err: &anyhow::Error) -> bool {
+    let lower = err.to_string().to_lowercase();
+    engine_overload_hints()
+        .iter()
+        .any(|hint| lower.contains(hint))
+}
+
+fn engine_overload_hints() -> &'static [&'static str] {
+    &[
+        "engine_overloaded",
+        "engine overload",
+        "engine is currently overloaded",
+        "engine is overloaded",
+        "overloaded_error",
+        "server_overloaded",
+        "service overloaded",
+        "service_overloaded",
+        "currently overloaded",
+        "temporarily overloaded",
+        "system overloaded",
+        "upstream overload",
+    ]
+}
+
+fn is_account_rate_limited(err: &anyhow::Error) -> bool {
+    if !is_rate_limited(err) {
+        return false;
+    }
+    if is_engine_overloaded(err) {
+        return false;
+    }
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureClass {
+    EngineOverloaded,
+    AccountRateLimited,
+    NonRetryable,
+    Transient,
+}
+
+impl FailureClass {
+    fn from_error(err: &anyhow::Error) -> Self {
+        if is_non_retryable(err) || is_non_retryable_rate_limit(err) {
+            return FailureClass::NonRetryable;
+        }
+        if is_engine_overloaded(err) {
+            return FailureClass::EngineOverloaded;
+        }
+        if is_account_rate_limited(err) {
+            return FailureClass::AccountRateLimited;
+        }
+        FailureClass::Transient
+    }
+
+    fn as_failure_reason(self, rate_limited: bool) -> &'static str {
+        match self {
+            FailureClass::EngineOverloaded => "engine_overloaded",
+            FailureClass::AccountRateLimited => "rate_limited",
+            FailureClass::NonRetryable => {
+                if rate_limited {
+                    "rate_limited_non_retryable"
+                } else {
+                    "non_retryable"
+                }
+            }
+            FailureClass::Transient => "retryable",
+        }
+    }
+}
+
 fn is_non_retryable_rate_limit(err: &anyhow::Error) -> bool {
     if !is_rate_limited(err) {
         return false;
@@ -220,16 +363,94 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
     None
 }
 
-fn failure_reason(rate_limited: bool, non_retryable: bool) -> &'static str {
-    if rate_limited && non_retryable {
-        "rate_limited_non_retryable"
-    } else if rate_limited {
-        "rate_limited"
-    } else if non_retryable {
-        "non_retryable"
-    } else {
-        "retryable"
+fn pseudo_jitter_seed(attempt: u32) -> f64 {
+    let x = attempt.wrapping_mul(2_654_435_761);
+    (x as f64 / u32::MAX as f64).clamp(0.0, 1.0)
+}
+
+fn class_backoff_ms(attempt: u32, class: FailureClass) -> Option<u64> {
+    let schedule: &[u64] = match class {
+        FailureClass::EngineOverloaded => &[
+            1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 30_000, 30_000, 30_000, 30_000,
+        ],
+        FailureClass::AccountRateLimited => {
+            &[5_000, 15_000, 30_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000]
+        }
+        _ => return None,
+    };
+    let idx = (attempt as usize).min(schedule.len() - 1);
+    let base = schedule[idx] as f64;
+    let jitter_ratio = 1.0 + (pseudo_jitter_seed(attempt) - 0.5) * 0.4;
+    let millis = (base * jitter_ratio).max(0.0) as u64;
+    Some(millis.min(60_000))
+}
+
+fn summarize_dominant_class(failures: &[String]) -> Option<FailureClass> {
+    let mut overload = 0usize;
+    let mut rate_limit = 0usize;
+    let mut transient = 0usize;
+    let mut non_retryable = 0usize;
+    for f in failures {
+        if f.contains("engine_overloaded") {
+            overload += 1;
+        } else if f.contains("rate_limited_non_retryable") {
+            non_retryable += 1;
+        } else if f.contains("rate_limited") {
+            rate_limit += 1;
+        } else if f.contains("non_retryable") {
+            non_retryable += 1;
+        } else if f.contains("retryable") {
+            transient += 1;
+        }
     }
+    let total = overload + rate_limit + transient + non_retryable;
+    if total == 0 {
+        return None;
+    }
+    let max = overload.max(rate_limit).max(transient).max(non_retryable);
+    if max == overload {
+        Some(FailureClass::EngineOverloaded)
+    } else if max == rate_limit {
+        Some(FailureClass::AccountRateLimited)
+    } else if max == non_retryable {
+        Some(FailureClass::NonRetryable)
+    } else {
+        Some(FailureClass::Transient)
+    }
+}
+
+fn final_failure_message(
+    failures: &[String],
+    suffix: &str,
+    attempts: u32,
+    engine_overload_attempts: u32,
+    rate_limit_attempts: u32,
+) -> String {
+    let dominant = summarize_dominant_class(failures);
+    let header = match dominant {
+        Some(FailureClass::EngineOverloaded) => format!(
+            "All providers/models failed after {attempts} attempts due to upstream engine overload \
+             (HTTP 429 engine_overloaded_error or equivalent). This is a temporary server-side issue, \
+             not a client-side rate limit. Try again in 1-2 minutes, or switch to a fallback model \
+             via reliability.fallback_providers / model_fallbacks. ({engine_overload_attempts} \
+             engine-overload retries observed.){suffix}"
+        ),
+        Some(FailureClass::AccountRateLimited) => format!(
+            "All providers/models failed after {attempts} attempts due to account-level rate limit \
+             (HTTP 429 rate_limit_exceeded / TPM / RPM). Check your account quota or wait for the \
+             window to reset. ({rate_limit_attempts} rate-limit retries observed.){suffix}"
+        ),
+        Some(FailureClass::NonRetryable) => format!(
+            "All providers/models failed after {attempts} attempts; the dominant failure was \
+             non-retryable (invalid key, missing model, validation, etc.). Verify provider \
+             credentials and model availability.{suffix}"
+        ),
+        _ => format!(
+            "All providers/models failed after {attempts} attempts. Inspect the per-attempt log \
+             below to diagnose.{suffix}"
+        ),
+    };
+    format!("{header}\nAttempts:\n{}", failures.join("\n"))
 }
 
 fn compact_error_detail(err: &anyhow::Error) -> String {
@@ -276,8 +497,14 @@ fn push_failure(
     ));
 }
 
+pub const TRANSIENT_RETRY_FLOOR: u32 = 4;
+
+pub const TRANSPORT_RETRY_CAP: u32 = 2;
+
+const STREAM_BACKOFF_CEILING_MS: u64 = 10_000;
+
 pub struct ReliableProvider {
-    providers: Vec<(String, Box<dyn Provider>)>,
+    providers: Vec<(String, Arc<dyn Provider>)>,
     max_retries: u32,
     base_backoff_ms: u64,
 
@@ -289,6 +516,14 @@ pub struct ReliableProvider {
     counter: std::sync::Arc<crate::providers::core::retry::ReliabilityCounter>,
 
     rate_limiters: std::sync::Arc<crate::providers::core::rate_limit::RateLimiterMap<String>>,
+
+    client_rate_limit_enabled: bool,
+
+    engine_overload_max_retries: u32,
+
+    account_rate_limit_max_retries: u32,
+
+    transient_max_retries: u32,
 }
 
 impl ReliableProvider {
@@ -297,6 +532,11 @@ impl ReliableProvider {
         max_retries: u32,
         base_backoff_ms: u64,
     ) -> Self {
+        let providers = providers
+            .into_iter()
+            .map(|(name, boxed)| (name, Arc::<dyn Provider>::from(boxed)))
+            .collect();
+        let max_retries = max_retries.max(1);
         Self {
             providers,
             max_retries,
@@ -306,8 +546,12 @@ impl ReliableProvider {
             model_fallbacks: HashMap::new(),
             counter: std::sync::Arc::new(crate::providers::core::retry::ReliabilityCounter::new()),
             rate_limiters: std::sync::Arc::new(
-                crate::providers::core::rate_limit::RateLimiterMap::new(1_000.0, 1_000.0),
+                crate::providers::core::rate_limit::RateLimiterMap::new(1_000_000.0, 1_000_000.0),
             ),
+            client_rate_limit_enabled: false,
+            engine_overload_max_retries: 10,
+            account_rate_limit_max_retries: 5,
+            transient_max_retries: max_retries.max(TRANSIENT_RETRY_FLOOR),
         }
     }
 
@@ -317,6 +561,30 @@ impl ReliableProvider {
                 capacity.max(0.0),
                 refill_per_sec.max(0.0),
             ));
+        self.client_rate_limit_enabled = capacity.is_finite()
+            && refill_per_sec.is_finite()
+            && capacity > 0.0
+            && refill_per_sec > 0.0;
+        self
+    }
+
+    pub fn with_client_rate_limit_enabled(mut self, enabled: bool) -> Self {
+        self.client_rate_limit_enabled = enabled;
+        self
+    }
+
+    pub fn with_retry_caps(
+        mut self,
+        engine_overload_max_retries: u32,
+        account_rate_limit_max_retries: u32,
+    ) -> Self {
+        self.engine_overload_max_retries = engine_overload_max_retries.max(1);
+        self.account_rate_limit_max_retries = account_rate_limit_max_retries.max(1);
+        self
+    }
+
+    pub fn with_transient_max_retries(mut self, transient_max_retries: u32) -> Self {
+        self.transient_max_retries = transient_max_retries.max(TRANSIENT_RETRY_FLOOR);
         self
     }
 
@@ -385,25 +653,36 @@ impl ReliableProvider {
         Some(&self.api_keys[idx])
     }
 
-    fn compute_backoff(&self, base: u64, err: &anyhow::Error) -> u64 {
+    fn compute_backoff_for_class(
+        &self,
+        attempt: u32,
+        err: &anyhow::Error,
+        class: FailureClass,
+    ) -> u64 {
         if let Some(retry_after) = parse_retry_after_ms(err) {
-
-            retry_after.min(30_000).max(base)
-        } else {
-            base
+            return retry_after.min(60_000);
         }
-    }
-
-    fn compute_backoff_exp(&self, attempt: u32, err: &anyhow::Error) -> u64 {
-        if let Some(retry_after) = parse_retry_after_ms(err) {
-            return retry_after.min(30_000);
+        if let Some(ms) = class_backoff_ms(attempt, class) {
+            return ms;
         }
         crate::providers::core::retry::exp_backoff(attempt, self.base_backoff_ms, 30_000, 0.25)
             .as_millis() as u64
     }
 
     async fn gate_rate_limit(&self, provider: &str) {
+        if !self.client_rate_limit_enabled {
+            return;
+        }
         self.rate_limiters.wait(&provider.to_string(), 1.0).await;
+    }
+
+    fn effective_class_cap(&self, class: FailureClass) -> u32 {
+        match class {
+            FailureClass::EngineOverloaded => self.engine_overload_max_retries,
+            FailureClass::AccountRateLimited => self.account_rate_limit_max_retries,
+            FailureClass::Transient => self.transient_max_retries,
+            FailureClass::NonRetryable => self.max_retries,
+        }
     }
 
     fn record_idempotency(
@@ -428,11 +707,146 @@ impl ReliableProvider {
         if is_non_retryable(err) {
             return crate::providers::core::retry::RetryClass::Permanent;
         }
+        if is_engine_overloaded(err) {
+            return crate::providers::core::retry::RetryClass::Transient;
+        }
         if is_rate_limited(err) {
             return crate::providers::core::retry::RetryClass::RateLimited;
         }
         crate::providers::core::retry::RetryClass::Transient
     }
+
+    fn outer_retry_cap(&self) -> u32 {
+        self.max_retries
+            .max(self.engine_overload_max_retries)
+            .max(self.account_rate_limit_max_retries)
+            .max(self.transient_max_retries)
+    }
+
+    fn handle_attempt_failure(
+        &self,
+        failures: &mut Vec<String>,
+        provider_name: &str,
+        current_model: &str,
+        attempt: u32,
+        state: &mut RetryState,
+        err: &anyhow::Error,
+    ) -> FailureAction {
+        let class = FailureClass::from_error(err);
+        let rate_limited = is_rate_limited(err);
+        let error_detail = compact_error_detail(err);
+        let reason = class.as_failure_reason(rate_limited);
+        let cap_for_class = self.effective_class_cap(class);
+
+        push_failure(
+            failures,
+            provider_name,
+            current_model,
+            attempt + 1,
+            cap_for_class + 1,
+            reason,
+            &error_detail,
+        );
+
+        if rate_limited && !is_non_retryable_rate_limit(err) {
+            if let Some(new_key) = self.rotate_key() {
+                tracing::warn!(
+                    provider = provider_name,
+                    error = %error_detail,
+                    "Rate limited; key rotation selected key ending ...{} \
+                     but cannot apply (Provider trait has no set_api_key). \
+                     Retrying with original key.",
+                    &new_key[new_key.len().saturating_sub(4)..]
+                );
+            }
+        }
+
+        match class {
+            FailureClass::NonRetryable => {
+                tracing::warn!(
+                    provider = provider_name,
+                    model = current_model,
+                    error = %error_detail,
+                    "Non-retryable error, moving on"
+                );
+                return FailureAction::NonRetryable;
+            }
+            FailureClass::EngineOverloaded => state.engine_overload_attempts += 1,
+            FailureClass::AccountRateLimited => state.rate_limit_attempts += 1,
+            FailureClass::Transient => state.transient_attempts += 1,
+        }
+
+        let is_transport = matches!(class, FailureClass::Transient) && is_transport_level_error(err);
+        if is_transport {
+            state.transport_attempts += 1;
+            if state.transport_attempts >= TRANSPORT_RETRY_CAP {
+                tracing::warn!(
+                    provider = provider_name,
+                    model = current_model,
+                    transport_attempts = state.transport_attempts,
+                    cap = TRANSPORT_RETRY_CAP,
+                    error = %error_detail,
+                    "Transport-level failure cap reached; short-circuiting current provider/model"
+                );
+                return FailureAction::ExhaustedClass;
+            }
+        }
+
+        let class_attempts = match class {
+            FailureClass::EngineOverloaded => state.engine_overload_attempts,
+            FailureClass::AccountRateLimited => state.rate_limit_attempts,
+            FailureClass::Transient => state.transient_attempts,
+            FailureClass::NonRetryable => attempt + 1,
+        };
+
+        if class_attempts >= cap_for_class {
+            tracing::warn!(
+                provider = provider_name,
+                model = current_model,
+                class = ?class,
+                attempts = class_attempts,
+                cap = cap_for_class,
+                "Provider exhausted retry budget for failure class, moving on"
+            );
+            return FailureAction::ExhaustedClass;
+        }
+
+        let wait = self
+            .compute_backoff_for_class(attempt, err, class)
+            .min(if matches!(class, FailureClass::Transient) {
+                STREAM_BACKOFF_CEILING_MS
+            } else {
+                60_000
+            });
+        let retry_class = Self::classify_retry(err);
+        tracing::warn!(
+            provider = provider_name,
+            model = current_model,
+            attempt = attempt + 1,
+            backoff_ms = wait,
+            reason,
+            retry_class = ?retry_class,
+            failure_class = ?class,
+            error = %error_detail,
+            "Provider call failed, retrying"
+        );
+        FailureAction::Retry { sleep_ms: wait }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RetryState {
+    engine_overload_attempts: u32,
+    rate_limit_attempts: u32,
+    transient_attempts: u32,
+    transport_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FailureAction {
+    NonRetryable,
+    ExhaustedClass,
+    Retry { sleep_ms: u64 },
 }
 
 #[async_trait]
@@ -471,9 +885,12 @@ impl Provider for ReliableProvider {
             &serde_json::Value::Null,
         );
 
+        let outer_cap = self.outer_retry_cap();
+        let mut state = RetryState::default();
+
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                for attempt in 0..=self.max_retries {
+                for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     match provider
                         .chat_with_system(system_prompt, message, current_model, temperature)
@@ -507,7 +924,6 @@ impl Provider for ReliableProvider {
                             return Ok(resp);
                         }
                         Err(e) => {
-
                             if is_context_window_exceeded(&e) {
                                 let error_detail = compact_error_detail(&e);
                                 push_failure(
@@ -515,7 +931,7 @@ impl Provider for ReliableProvider {
                                     provider_name,
                                     current_model,
                                     attempt + 1,
-                                    self.max_retries + 1,
+                                    outer_cap + 1,
                                     "non_retryable",
                                     &error_detail,
                                 );
@@ -525,59 +941,20 @@ impl Provider for ReliableProvider {
                                 );
                             }
 
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
-                            let error_detail = compact_error_detail(&e);
-
-                            push_failure(
+                            match self.handle_attempt_failure(
                                 &mut failures,
                                 provider_name,
                                 current_model,
-                                attempt + 1,
-                                self.max_retries + 1,
-                                failure_reason,
-                                &error_detail,
-                            );
-
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
+                                attempt,
+                                &mut state,
+                                &e,
+                            ) {
+                                FailureAction::NonRetryable | FailureAction::ExhaustedClass => {
+                                    break;
                                 }
-                            }
-
-                            if non_retryable {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    error = %error_detail,
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff_exp(attempt, &e);
-                                let retry_class = Self::classify_retry(&e);
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    attempt = attempt + 1,
-                                    backoff_ms = wait,
-                                    reason = failure_reason,
-                                    retry_class = ?retry_class,
-                                    error = %error_detail,
-                                    "Provider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
+                                FailureAction::Retry { sleep_ms } => {
+                                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                                }
                             }
                         }
                     }
@@ -599,9 +976,16 @@ impl Provider for ReliableProvider {
             }
         }
 
+        let total_attempts = failures.len() as u32;
         anyhow::bail!(
-            "All providers/models failed. Attempts:\n{}",
-            failures.join("\n")
+            "{}",
+            final_failure_message(
+                &failures,
+                "",
+                total_attempts,
+                state.engine_overload_attempts,
+                state.rate_limit_attempts,
+            )
         )
     }
 
@@ -626,9 +1010,12 @@ impl Provider for ReliableProvider {
             &serde_json::Value::Null,
         );
 
+        let outer_cap = self.outer_retry_cap();
+        let mut state = RetryState::default();
+
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                for attempt in 0..=self.max_retries {
+                for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     match provider
                         .chat_with_history(&effective_messages, current_model, temperature)
@@ -686,7 +1073,7 @@ impl Provider for ReliableProvider {
                                     provider_name,
                                     current_model,
                                     attempt + 1,
-                                    self.max_retries + 1,
+                                    outer_cap + 1,
                                     "non_retryable",
                                     &error_detail,
                                 );
@@ -698,59 +1085,20 @@ impl Provider for ReliableProvider {
                                 );
                             }
 
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
-                            let error_detail = compact_error_detail(&e);
-
-                            push_failure(
+                            match self.handle_attempt_failure(
                                 &mut failures,
                                 provider_name,
                                 current_model,
-                                attempt + 1,
-                                self.max_retries + 1,
-                                failure_reason,
-                                &error_detail,
-                            );
-
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
+                                attempt,
+                                &mut state,
+                                &e,
+                            ) {
+                                FailureAction::NonRetryable | FailureAction::ExhaustedClass => {
+                                    break;
                                 }
-                            }
-
-                            if non_retryable {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    error = %error_detail,
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff_exp(attempt, &e);
-                                let retry_class = Self::classify_retry(&e);
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    attempt = attempt + 1,
-                                    backoff_ms = wait,
-                                    reason = failure_reason,
-                                    retry_class = ?retry_class,
-                                    error = %error_detail,
-                                    "Provider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
+                                FailureAction::Retry { sleep_ms } => {
+                                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                                }
                             }
                         }
                     }
@@ -764,9 +1112,16 @@ impl Provider for ReliableProvider {
             }
         }
 
+        let total_attempts = failures.len() as u32;
         anyhow::bail!(
-            "All providers/models failed. Attempts:\n{}",
-            failures.join("\n")
+            "{}",
+            final_failure_message(
+                &failures,
+                "",
+                total_attempts,
+                state.engine_overload_attempts,
+                state.rate_limit_attempts,
+            )
         )
     }
 
@@ -805,9 +1160,12 @@ impl Provider for ReliableProvider {
             &serde_json::Value::Array(tools.to_vec()),
         );
 
+        let outer_cap = self.outer_retry_cap();
+        let mut state = RetryState::default();
+
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                for attempt in 0..=self.max_retries {
+                for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     match provider
                         .chat_with_tools(&effective_messages, tools, current_model, temperature)
@@ -865,7 +1223,7 @@ impl Provider for ReliableProvider {
                                     provider_name,
                                     current_model,
                                     attempt + 1,
-                                    self.max_retries + 1,
+                                    outer_cap + 1,
                                     "non_retryable",
                                     &error_detail,
                                 );
@@ -877,59 +1235,20 @@ impl Provider for ReliableProvider {
                                 );
                             }
 
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
-                            let error_detail = compact_error_detail(&e);
-
-                            push_failure(
+                            match self.handle_attempt_failure(
                                 &mut failures,
                                 provider_name,
                                 current_model,
-                                attempt + 1,
-                                self.max_retries + 1,
-                                failure_reason,
-                                &error_detail,
-                            );
-
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
+                                attempt,
+                                &mut state,
+                                &e,
+                            ) {
+                                FailureAction::NonRetryable | FailureAction::ExhaustedClass => {
+                                    break;
                                 }
-                            }
-
-                            if non_retryable {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    error = %error_detail,
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff_exp(attempt, &e);
-                                let retry_class = Self::classify_retry(&e);
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    attempt = attempt + 1,
-                                    backoff_ms = wait,
-                                    reason = failure_reason,
-                                    retry_class = ?retry_class,
-                                    error = %error_detail,
-                                    "Provider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
+                                FailureAction::Retry { sleep_ms } => {
+                                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                                }
                             }
                         }
                     }
@@ -943,9 +1262,16 @@ impl Provider for ReliableProvider {
             }
         }
 
+        let total_attempts = failures.len() as u32;
         anyhow::bail!(
-            "All providers/models failed. Attempts:\n{}",
-            failures.join("\n")
+            "{}",
+            final_failure_message(
+                &failures,
+                "",
+                total_attempts,
+                state.engine_overload_attempts,
+                state.rate_limit_attempts,
+            )
         )
     }
 
@@ -970,9 +1296,12 @@ impl Provider for ReliableProvider {
             &serde_json::to_value(request.tools).unwrap_or(serde_json::Value::Null),
         );
 
+        let outer_cap = self.outer_retry_cap();
+        let mut state = RetryState::default();
+
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                for attempt in 0..=self.max_retries {
+                for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     let req = ChatRequest {
                         messages: &effective_messages,
@@ -1031,7 +1360,7 @@ impl Provider for ReliableProvider {
                                     provider_name,
                                     current_model,
                                     attempt + 1,
-                                    self.max_retries + 1,
+                                    outer_cap + 1,
                                     "non_retryable",
                                     &error_detail,
                                 );
@@ -1043,59 +1372,20 @@ impl Provider for ReliableProvider {
                                 );
                             }
 
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
-                            let error_detail = compact_error_detail(&e);
-
-                            push_failure(
+                            match self.handle_attempt_failure(
                                 &mut failures,
                                 provider_name,
                                 current_model,
-                                attempt + 1,
-                                self.max_retries + 1,
-                                failure_reason,
-                                &error_detail,
-                            );
-
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
+                                attempt,
+                                &mut state,
+                                &e,
+                            ) {
+                                FailureAction::NonRetryable | FailureAction::ExhaustedClass => {
+                                    break;
                                 }
-                            }
-
-                            if non_retryable {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    error = %error_detail,
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff_exp(attempt, &e);
-                                let retry_class = Self::classify_retry(&e);
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = *current_model,
-                                    attempt = attempt + 1,
-                                    backoff_ms = wait,
-                                    reason = failure_reason,
-                                    retry_class = ?retry_class,
-                                    error = %error_detail,
-                                    "Provider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
+                                FailureAction::Retry { sleep_ms } => {
+                                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                                }
                             }
                         }
                     }
@@ -1117,9 +1407,16 @@ impl Provider for ReliableProvider {
             }
         }
 
+        let total_attempts = failures.len() as u32;
         anyhow::bail!(
-            "All providers/models failed. Attempts:\n{}",
-            failures.join("\n")
+            "{}",
+            final_failure_message(
+                &failures,
+                "",
+                total_attempts,
+                state.engine_overload_attempts,
+                state.rate_limit_attempts,
+            )
         )
     }
 
@@ -1151,7 +1448,8 @@ impl Provider for ReliableProvider {
                 continue;
             }
 
-            let provider_clone = provider_name.clone();
+            let provider_arc = Arc::clone(provider);
+            let provider_label = provider_name.clone();
 
             let current_model = self
                 .model_chain(model)
@@ -1160,28 +1458,263 @@ impl Provider for ReliableProvider {
                 .unwrap_or(model)
                 .to_string();
 
-            let req = ChatRequest {
-                messages: request.messages,
-                tools: request.tools,
-            };
-            let stream = provider.stream_chat(req, &current_model, temperature, options);
+            let messages_owned: Arc<Vec<ChatMessage>> = Arc::new(request.messages.to_vec());
+            let tools_owned: Option<Arc<Vec<crate::tools::ToolSpec>>> =
+                request.tools.map(|t| Arc::new(t.to_vec()));
+
+            let engine_cap = self.engine_overload_max_retries;
+            let account_cap = self.account_rate_limit_max_retries;
+            let transient_cap = self
+                .transient_max_retries
+                .max(self.max_retries)
+                .max(TRANSIENT_RETRY_FLOOR);
+            let base_backoff = self.base_backoff_ms;
+            let cancel_token = current_stream_cancel_token();
+            let session_label = crate::session::current_session_context()
+                .map(|ctx| ctx.session_id)
+                .unwrap_or_default();
+
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
             let _bg = crate::runtime::spawn_supervised(
-                "providers.reliable.stream_chat_with_tools",
+                "providers.reliable.stream_chat_retry",
                 async move {
-                    let mut stream = stream;
-                    while let Some(event) = stream.next().await {
-                        if let Err(ref e) = event {
-                            tracing::warn!(
-                                provider = provider_clone,
-                                model = current_model,
-                                "Streaming error: {e}"
-                            );
+                    let mut engine_overload_attempts: u32 = 0;
+                    let mut rate_limit_attempts: u32 = 0;
+                    let mut transient_attempts: u32 = 0;
+                    let mut transport_attempts: u32 = 0;
+                    let mut total_attempts: u32 = 0;
+
+                    loop {
+                        if let Some(token) = cancel_token.as_ref() {
+                            if token.is_cancelled() {
+                                let _ = tx
+                                    .send(Err(StreamError::Provider(
+                                        "stream cancelled by user".to_string(),
+                                    )))
+                                    .await;
+                                return;
+                            }
                         }
-                        if tx.send(event).await.is_err() {
-                            break;
+
+                        let req = ChatRequest {
+                            messages: messages_owned.as_slice(),
+                            tools: tools_owned.as_deref().map(|v| v.as_slice()),
+                        };
+                        let mut stream = provider_arc.stream_chat(
+                            req,
+                            &current_model,
+                            temperature,
+                            options,
+                        );
+
+                        let mut made_progress = false;
+                        let mut last_err: Option<StreamError> = None;
+                        let mut stream_finished_cleanly = false;
+
+                        loop {
+                            let next = if let Some(token) = cancel_token.as_ref() {
+                                tokio::select! {
+                                    biased;
+                                    () = token.cancelled() => {
+                                        let _ = tx
+                                            .send(Err(StreamError::Provider(
+                                                "stream cancelled by user".to_string(),
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                    item = stream.next() => item,
+                                }
+                            } else {
+                                stream.next().await
+                            };
+
+                            let Some(event) = next else {
+                                stream_finished_cleanly = true;
+                                break;
+                            };
+
+                            match event {
+                                Ok(ev) => {
+                                    if matches!(
+                                        ev,
+                                        StreamEvent::TextDelta(_)
+                                            | StreamEvent::ToolCall(_)
+                                            | StreamEvent::PreExecutedToolCall { .. }
+                                            | StreamEvent::PreExecutedToolResult { .. }
+                                            | StreamEvent::Usage(_)
+                                    ) {
+                                        made_progress = true;
+                                    }
+                                    let is_final = matches!(ev, StreamEvent::Final);
+                                    if tx.send(Ok(ev)).await.is_err() {
+                                        return;
+                                    }
+                                    if is_final {
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    last_err = Some(e);
+                                    break;
+                                }
+                            }
                         }
+
+                        let Some(err) = last_err else {
+                            if stream_finished_cleanly && !made_progress {
+                                let _ = tx
+                                    .send(Err(StreamError::Provider(
+                                        "Upstream stream produced no events".to_string(),
+                                    )))
+                                    .await;
+                            } else {
+                                let _ = tx.send(Ok(StreamEvent::Final)).await;
+                            }
+                            return;
+                        };
+
+                        if made_progress {
+                            let _ = tx.send(Err(err)).await;
+                            return;
+                        }
+
+                        let err_string = err.to_string();
+                        let anyhow_err = anyhow::anyhow!("{}", err_string);
+                        let class = FailureClass::from_error(&anyhow_err);
+
+                        let (class_attempts, cap_for_class, retry_class) = match class {
+                            FailureClass::EngineOverloaded => {
+                                engine_overload_attempts += 1;
+                                (
+                                    engine_overload_attempts,
+                                    engine_cap,
+                                    RetryClass::EngineOverloaded,
+                                )
+                            }
+                            FailureClass::AccountRateLimited => {
+                                rate_limit_attempts += 1;
+                                (
+                                    rate_limit_attempts,
+                                    account_cap,
+                                    RetryClass::AccountRateLimited,
+                                )
+                            }
+                            FailureClass::Transient => {
+                                transient_attempts += 1;
+                                if is_transport_level_error(&anyhow_err) {
+                                    transport_attempts += 1;
+                                    if transport_attempts >= TRANSPORT_RETRY_CAP {
+                                        let summary = format!(
+                                            "Transport-level streaming failure on {provider_label}/{current_model} \
+                                             reached cap={TRANSPORT_RETRY_CAP} (e.g. connect/send/decoding errors). \
+                                             Stopping retries against this provider/model so an outer fallback can \
+                                             pick a different one. Last error: {err_string}"
+                                        );
+                                        let _ = tx
+                                            .send(Err(StreamError::Provider(summary)))
+                                            .await;
+                                        return;
+                                    }
+                                }
+                                (transient_attempts, transient_cap, RetryClass::Transient)
+                            }
+                            FailureClass::NonRetryable => {
+                                let _ = tx.send(Err(err)).await;
+                                return;
+                            }
+                        };
+
+                        if class_attempts > cap_for_class {
+                            let summary = match class {
+                                FailureClass::EngineOverloaded => format!(
+                                    "Upstream engine overloaded (HTTP 429 engine_overloaded_error or equivalent) after {class_attempts} streaming attempts; cap={cap_for_class}. \
+                                     This is a temporary server-side issue, not a client-side rate limit. Try again in 1-2 minutes, or switch to a fallback model \
+                                     via reliability.fallback_providers / model_fallbacks. Last error: {err_string}"
+                                ),
+                                FailureClass::AccountRateLimited => format!(
+                                    "Account-level rate limit (HTTP 429 rate_limit_exceeded / TPM / RPM) after {class_attempts} streaming attempts; cap={cap_for_class}. \
+                                     Check your account quota or wait for the window to reset. Last error: {err_string}"
+                                ),
+                                FailureClass::Transient => format!(
+                                    "Transient streaming error persisted after {class_attempts} attempts; cap={cap_for_class}. Last error: {err_string}"
+                                ),
+                                FailureClass::NonRetryable => err_string.clone(),
+                            };
+                            let _ = tx.send(Err(StreamError::Provider(summary))).await;
+                            return;
+                        }
+
+                        let wait_ms_raw = if let Some(ms) = parse_retry_after_ms(&anyhow_err) {
+                            ms.min(60_000)
+                        } else if let Some(ms) =
+                            class_backoff_ms(total_attempts, class)
+                        {
+                            ms
+                        } else {
+                            crate::providers::core::retry::exp_backoff(
+                                total_attempts,
+                                base_backoff,
+                                30_000,
+                                0.25,
+                            )
+                            .as_millis() as u64
+                        };
+                        let wait_ms = if matches!(class, FailureClass::Transient) {
+                            wait_ms_raw.min(STREAM_BACKOFF_CEILING_MS)
+                        } else {
+                            wait_ms_raw
+                        };
+
+                        let last_error_summary = compact_error_detail(&anyhow_err);
+
+                        tracing::warn!(
+                            target: "providers.reliable.retry",
+                            session_id = %session_label,
+                            provider = %provider_label,
+                            model = %current_model,
+                            attempt = class_attempts,
+                            cap = cap_for_class,
+                            wait_ms,
+                            failure_class = ?class,
+                            error = %last_error_summary,
+                            "stream provider returned retryable failure; emitting RetryNotice and scheduling re-attempt"
+                        );
+
+                        let notice = RetryNotice {
+                            attempt: class_attempts,
+                            max_attempts: cap_for_class,
+                            wait_ms,
+                            failure_class: retry_class,
+                            provider: provider_label.clone(),
+                            model: current_model.clone(),
+                            last_error_summary,
+                        };
+
+                        if tx.send(Ok(StreamEvent::Retry(notice))).await.is_err() {
+                            return;
+                        }
+
+                        let sleep_dur = Duration::from_millis(wait_ms);
+                        if let Some(token) = cancel_token.as_ref() {
+                            tokio::select! {
+                                biased;
+                                () = token.cancelled() => {
+                                    let _ = tx
+                                        .send(Err(StreamError::Provider(
+                                            "stream cancelled by user during retry wait".to_string(),
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                                () = tokio::time::sleep(sleep_dur) => {}
+                            }
+                        } else {
+                            tokio::time::sleep(sleep_dur).await;
+                        }
+
+                        total_attempts = total_attempts.saturating_add(1);
                     }
                 },
             );

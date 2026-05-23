@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Sandbox trait for pluggable OS-level isolation.
-//!
-//! This module defines the [`Sandbox`] trait, which abstracts OS-level process
-//! isolation backends. Implementations wrap shell commands with platform-specific
-//! sandboxing (e.g., seccomp, AppArmor, namespaces) to limit the blast radius
-//! of tool execution. The agent runtime selects and applies a sandbox backend
-//! before executing any shell command.
 
 use async_trait::async_trait;
 use std::process::Command;

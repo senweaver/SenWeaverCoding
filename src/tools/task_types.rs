@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared types for the task management tools (task_create, task_get, etc.).
-//!
-//! This is the **tool-facing** task manager — a lightweight synchronous in-memory
-//! CRUD store that the LLM manipulates through the `task_*` tool family.
-//!
-//! For the **runtime-facing** task lifecycle manager that tracks actual background
-//! processes (shell commands, sub-agents, workflows), see [`crate::tasks::runner::TaskRunner`].
-//!
-//! The two systems are intentionally separate:
-//! - `TaskManager` (here): simple string IDs, `parking_lot::RwLock`, synchronous API.
-//! - `TaskRunner`: typed `TaskId`, `tokio::sync::RwLock`, async API, file-backed output.
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

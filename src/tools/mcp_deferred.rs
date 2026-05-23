@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Deferred MCP tool loading — stubs and activated-tool tracking.
-//!
-//! When `mcp.deferred_loading` is enabled, MCP tool schemas are NOT eagerly
-//! included in the LLM context window. Instead, only lightweight stubs (name +
-//! description) are exposed in the system prompt. The LLM must call the built-in
-//! `tool_search` tool to fetch full schemas, which moves them into the
-//! [`ActivatedToolSet`] for the current conversation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -337,36 +330,6 @@ impl DeferredBuiltinToolSet {
             .collect()
     }
 }
-
-#[deprecated(
-    since = "0.1.0",
-    note = "Use crate::tools::tool_tier::classify / partition_for_llm instead; this list will be removed after two release cycles."
-)]
-pub const BUILTIN_CORE_TOOL_NAMES: &[&str] = &[
-    "file_read",
-    "file_write",
-    "file_edit",
-    "multi_edit",
-    "glob_search",
-    "content_search",
-    "dir_list",
-    "shell",
-    "todo_write",
-    "update_plan",
-    "ask_question",
-    "ask_user",
-    "tool_search",
-    "enter_plan_mode",
-    "exit_plan_mode",
-    "read_skill",
-    "memory_recall",
-    "memory_store",
-    "code_outline",
-    "code_search",
-    "git_operations",
-    "diagnostics",
-    "now",
-];
 
 pub fn build_deferred_builtin_section(deferred: &DeferredBuiltinToolSet) -> String {
     build_deferred_builtin_section_with_surface(

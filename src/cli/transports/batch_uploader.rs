@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Ordered batch POST uploader with backoff and backpressure.
-//!
-//! Collects events into batches and posts them in order.
-//! Failed batches are retried with exponential backoff.
 
 use anyhow::Result;
 use reqwest;
@@ -118,7 +114,7 @@ async fn flush_batch(url: &str, batch: &mut Vec<String>) {
         batch.clear();
         return;
     }
-    let payload = batch.drain(..).collect::<Vec<_>>();
+    let payload = std::mem::take(batch);
     let body = format!("[{}]", payload.join(","));
 
     let client = reqwest::Client::new();

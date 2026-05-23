@@ -1,35 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Embedded **MCP server** that exposes SenWeaverCoding's tool surface to
-//! external MCP clients (Claude Desktop, Zed, IDE plugins …).
-//!
-//! Where `services::mcp_manager` and `tools::mcp_*` act as the
-//! **client** side (we call out to other MCP servers and import their
-//! tools), this module inverts the direction: it serves *our* tools as
-//! a JSON-RPC 2.0 endpoint over either stdio or SSE.
-//!
-//! # Surface area
-//!
-//! Only tools that explicitly opt in via [`crate::tools::traits::Tool::mcp_safe`]
-//! are advertised in `tools/list` and dispatched in `tools/call`.
-//! Everything else is hidden.  Marking `mcp_safe = true` is a security
-//! contract — see the trait docs.
-//!
-//! # Wire protocol
-//!
-//! Implements the MCP **2024-11-05** specification:
-//!
-//! | Method        | Direction          | Purpose                              |
-//! |---------------|--------------------|--------------------------------------|
-//! | `initialize`  | client → server    | handshake & capability advertisement |
-//! | `ping`        | both directions    | keep-alive                           |
-//! | `tools/list`  | client → server    | enumerate available tools            |
-//! | `tools/call`  | client → server    | invoke a tool by name + JSON args    |
-//!
-//! The server stays JSON-RPC strict: every request gets a response with
-//! the same `id`; unknown methods return `-32601 method not found`;
-//! malformed payloads return `-32700 / -32600`.
 
 use std::sync::Arc;
 

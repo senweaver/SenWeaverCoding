@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool/skill performance tracking and evolution.
-//!
-//! Tracks per-tool success rates, latency, and usage patterns to optimize
-//! tool selection and improve tool-calling behavior over time.
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -258,7 +254,7 @@ impl SkillEvolutionEngine {
                     (rate, avg)
                 };
 
-                let confidence = success_rate * 0.6 + (avg_reward + 1.0) / 2.0 * 0.4;
+                let confidence = success_rate * 0.6 + f64::midpoint(avg_reward, 1.0) * 0.4;
 
                 let reason = if success_rate > 0.8 {
                     format!(

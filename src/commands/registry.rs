@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Command registry — mirrors claude-code-typescript-src`commands.ts`.
-// Central registry for slash commands with filtering and execution.
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -107,15 +103,15 @@ impl HandlerPtr {
 
     #[doc(hidden)]
     pub const fn from_lazy_ptr(lazy_ptr: *const std::sync::LazyLock<BoxedHandler>) -> Self {
-        Self(lazy_ptr as *const ())
+        Self(lazy_ptr.cast::<()>())
     }
 
-    pub fn as_ref(&self) -> &'static BoxedHandler {
+    pub fn resolve(&self) -> &'static BoxedHandler {
 
         #[allow(unsafe_code)]
         unsafe {
-            let lazy_ptr = self.0 as *const std::sync::LazyLock<BoxedHandler>;
-            &**lazy_ptr
+            let lazy_ptr = self.0.cast::<std::sync::LazyLock<BoxedHandler>>();
+            &*lazy_ptr
         }
     }
 }
@@ -163,7 +159,7 @@ impl StaticSlashCommand {
             hidden: self.hidden,
             requires_interactive: self.requires_interactive,
             remote_safe: self.remote_safe,
-            handler: Arc::clone(self.handler.as_ref()),
+            handler: Arc::clone(self.handler.resolve()),
         }
     }
 }

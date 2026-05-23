@@ -1,18 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Validation helpers for the per-session `RuntimeSelection` we persist in
-// `useSessionRuntimeStore`.
-//
-// Earlier builds shipped a hard-coded "default Claude" model catalog
-// (`claude-opus-4-7` / `claude-sonnet-4-6` / `claude-haiku-4-5`) that the
-// composer would auto-select when no per-session override existed. That
-// catalog has been removed, but the previously-written `localStorage`
-// entries can still surface those phantom IDs after an upgrade. The
-// helpers below let UI code drop selections that no longer correspond to
-// a configured provider/model and pick a sane fallback derived from the
-// user's actual provider profiles.
 
 import type { RuntimeSelection } from '../types/runtime'
 import type { SavedProvider } from '../types/provider'

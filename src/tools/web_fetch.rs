@@ -563,6 +563,7 @@ impl Tool for WebFetchTool {
         };
 
         let mut webview_candidate: Option<ToolResult> = None;
+        let mut webview_error: Option<String> = None;
         if let Some(controller) = fetch_controller() {
             let webview_timeout = Duration::from_secs(timeout_secs.max(30));
             match controller.fetch(&url, webview_timeout).await {
@@ -581,9 +582,11 @@ impl Tool for WebFetchTool {
                     webview_candidate = Some(candidate);
                 }
                 Err(err) => {
+                    let msg = err.to_string();
                     tracing::warn!(
-                        "web_fetch: webview fetch failed for {url}: {err}; falling back to HTTP path"
+                        "web_fetch: webview fetch failed for {url}: {msg}; falling back to HTTP path"
                     );
+                    webview_error = Some(msg);
                 }
             }
         }
@@ -618,7 +621,9 @@ impl Tool for WebFetchTool {
             .redirect(redirect_policy)
             .cookie_store(true)
             .user_agent(BROWSER_USER_AGENT);
-        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.web_fetch");
+        let builder = crate::services::get_services()
+            .proxy_runtime()
+            .apply_to_builder(builder, "tool.web_fetch");
         let client = match builder.build() {
             Ok(c) => c,
             Err(e) => {
@@ -672,7 +677,7 @@ impl Tool for WebFetchTool {
             }
         }
 
-        let best = pick_best_result(webview_candidate, standard_result);
+        let best = pick_best_result(webview_candidate, standard_result, webview_error);
         Ok(best)
     }
 }
@@ -694,6 +699,7 @@ fn result_quality_score(result: &ToolResult) -> usize {
 fn pick_best_result(
     webview: Option<ToolResult>,
     standard: ToolResult,
+    webview_error: Option<String>,
 ) -> ToolResult {
     let standard_score = result_quality_score(&standard);
     let webview_score = webview
@@ -701,6 +707,7 @@ fn pick_best_result(
         .map(result_quality_score)
         .unwrap_or(0);
 
+    let standard_error_for_diag = standard.error.clone();
     let best = if webview_score > standard_score {
         webview.unwrap_or(standard)
     } else {
@@ -728,6 +735,29 @@ fn pick_best_result(
                     .into(),
             ),
         };
+    }
+    if !best.success {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(err) = best.error.as_ref() {
+            parts.push(format!("standard fetch: {err}"));
+        } else if let Some(err) = standard_error_for_diag.as_ref() {
+            parts.push(format!("standard fetch: {err}"));
+        }
+        if let Some(err) = webview_error.as_ref() {
+            parts.push(format!("webview fetch: {err}"));
+        }
+        if !parts.is_empty() {
+            return ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "All fetch paths failed. {}. \
+                     If your network requires a proxy, configure it via the proxy runtime \
+                     settings (services.proxy_runtime / HTTP(S)_PROXY) and retry.",
+                    parts.join("; ")
+                )),
+            };
+        }
     }
     best
 }

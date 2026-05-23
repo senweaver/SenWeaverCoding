@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Interactive user prompting tool for cross-channel confirmations.
-//!
-//! Exposes `ask_user` as an agent-callable tool that sends a question to a
-//! messaging channel and waits for the user's response. The tool holds a
-//! late-binding channel map handle that is populated once channels are
-//! initialized (after tool construction). This mirrors the pattern used by
-//! [`ReactionTool`](super::reaction::ReactionTool).
 
 use super::traits::{Tool, ToolResult};
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};

@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Tool-related configuration types extracted from `schema.rs`.
-//!
-//! This module contains configuration for shell, web fetch, http request,
-//! web search, browser, text browser, link enricher, and image generation tools.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

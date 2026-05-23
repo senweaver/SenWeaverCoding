@@ -8,8 +8,6 @@ import type { CodingModeId, CodingModeInfo } from '../types/codingMode'
 import { DEFAULT_CODING_MODE, isVisibleCodingMode } from '../types/codingMode'
 import type { Locale } from '../i18n'
 import { useUIStore } from './uiStore'
-import { useAutonomyStore } from './autonomyStore'
-
 type PendingCodingModeTransition = {
   target: CodingModeId
   resolver: (confirmed: boolean) => void
@@ -96,7 +94,6 @@ function storePiiSettings(settings: PiiSanitizerSettings): void {
   try {
     localStorage.setItem(PII_STORAGE_KEY, JSON.stringify(settings))
   } catch {
-    // ignore
   }
 }
 
@@ -276,35 +273,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
     if (get().codingMode === mode) return
 
-    const autonomy = useAutonomyStore.getState().data
-    const whitelist = autonomy?.autoApproveModeTransitions ?? []
-    if (whitelist.includes(mode)) {
-      await get().setCodingMode(mode)
-      return
-    }
-
     const existing = get().pendingCodingModeTransition
     if (existing) {
       existing.resolver(false)
     }
+    set({ pendingCodingModeTransition: null })
 
-    await new Promise<void>((resolve, reject) => {
-      set({
-        pendingCodingModeTransition: {
-          target: mode,
-          resolver: (confirmed) => {
-            if (confirmed) {
-              get()
-                .setCodingMode(mode)
-                .then(resolve)
-                .catch(reject)
-            } else {
-              resolve()
-            }
-          },
-        },
-      })
-    })
+    await get().setCodingMode(mode)
   },
 
   resolveCodingModeTransition: (confirmed) => {
@@ -431,7 +406,6 @@ if (typeof window !== 'undefined') {
       const settings = useSettingsStore.getState().piiSanitizer
       sendPiiConfigTo(sessionId, settings)
     } catch {
-      // ignore
     }
   })
 }

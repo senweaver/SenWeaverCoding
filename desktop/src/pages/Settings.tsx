@@ -187,14 +187,14 @@ function ProviderSettings() {
   }
 
   return (
-    <div className="max-w-2xl">
+    <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.providers.title')}</h2>
+          <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">{t('settings.providers.title')}</h2>
           <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">{t('settings.providers.description')}</p>
         </div>
-        <Button size="md" onClick={() => setShowCreateModal(true)} disabled={isPresetsLoading || presets.length === 0}>
-          <span className="material-symbols-outlined text-[16px]">add</span>
+        <Button size="sm" onClick={() => setShowCreateModal(true)} disabled={isPresetsLoading || presets.length === 0}>
+          <span className="material-symbols-outlined text-[14px]">add</span>
           {t('settings.providers.addProvider')}
         </Button>
       </div>
@@ -285,7 +285,7 @@ function ProviderSettings() {
 
                 {isExpanded && (
                   <div className="px-4 pb-3 pt-1 border-t border-[var(--color-border-separator)]">
-                    <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+                    <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
                       {t('settings.providers.modelsHeader')}
                     </div>
                     {provider.models.length === 0 ? (
@@ -741,14 +741,14 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       width={640}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}>
+          <Button variant="secondary" size="sm" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button size="sm" onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}>
             {mode === 'create' ? t('common.add') : t('common.save')}
           </Button>
         </>
       }
     >
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3 text-xs">
         {}
         {mode === 'create' && (
           <div>
@@ -758,7 +758,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                 <button
                   key={preset.id}
                   onClick={() => handlePresetChange(preset)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-all ${
+                  className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-all ${
                     selectedPreset.id === preset.id
                       ? 'border-[var(--color-brand)] bg-[var(--color-surface-container-high)] text-[var(--color-brand)] shadow-[var(--shadow-focus-ring)]'
                       : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
@@ -806,7 +806,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         ) : (
           <div>
             <label className="text-xs font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.baseUrl')}</label>
-            <div className="text-xs text-[var(--color-text-tertiary)] px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)]">
+            <div className="text-xs text-[var(--color-text-tertiary)] px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)]">
               {baseUrl}
             </div>
           </div>
@@ -818,7 +818,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           <select
             value={apiFormat}
             onChange={(e) => setApiFormat(e.target.value as ApiFormat)}
-            className="w-full text-xs px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+            className="w-full text-xs px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
           >
             <option value="openai_chat">{t('settings.providers.apiFormatOpenaiChat')}</option>
             <option value="openai_responses">{t('settings.providers.apiFormatOpenaiResponses')}</option>
@@ -839,7 +839,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         <div>
           <label className="text-xs font-medium text-[var(--color-text-primary)] mb-2 block">
             {t('settings.providers.modelsHeader')}
-            <span className="ml-2 text-[11px] font-normal text-[var(--color-text-tertiary)]">{t('settings.providers.modelsHelp')}</span>
+            <span className="ml-2 text-xs font-normal text-[var(--color-text-tertiary)]">{t('settings.providers.modelsHelp')}</span>
           </label>
           <div className="flex flex-col gap-1.5">
             {models.length === 0 && (
@@ -858,7 +858,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     value={m}
                     onChange={(e) => updateModel(idx, e.target.value)}
                     placeholder="model-id"
-                    className="flex-1 text-xs font-mono px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+                    className="flex-1 text-xs font-mono px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
                   />
                   <input
                     value={contextWindowDraft}
@@ -871,7 +871,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     placeholder={t('settings.providers.contextWindowPlaceholder')}
                     title={t('settings.providers.contextWindowTooltip')}
                     disabled={!trimmedModelId}
-                    className="w-28 text-xs font-mono px-2 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
+                    className="w-28 text-xs font-mono px-2 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
                   />
                   {idx === 0 && (
                     <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border border-[var(--color-brand)]/18 bg-[var(--color-brand)]/14 text-[var(--color-brand)] leading-none">
@@ -899,10 +899,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                   }
                 }}
                 placeholder={t('settings.providers.addModelPlaceholder')}
-                className="flex-1 text-xs font-mono px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-dashed border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+                className="flex-1 text-xs font-mono px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-dashed border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
               />
-              <Button variant="secondary" size="md" onClick={() => addModel()} disabled={!newModelDraft.trim()}>
-                <span className="material-symbols-outlined text-[16px]">add</span>
+              <Button variant="secondary" size="sm" onClick={() => addModel()} disabled={!newModelDraft.trim()}>
+                <span className="material-symbols-outlined text-[14px]">add</span>
                 {t('settings.providers.addModel')}
               </Button>
             </div>
@@ -923,7 +923,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
 
         {}
         <div className="flex items-center gap-3">
-          <Button variant="secondary" size="md" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !primaryModel}>
+          <Button variant="secondary" size="sm" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !primaryModel}>
             {t('settings.providers.testConnection')}
           </Button>
           {testResult && (
@@ -1055,13 +1055,13 @@ function AdvancedSettingsSection({
             <div className="text-xs font-medium text-[var(--color-text-primary)]">
               {t('settings.providers.advanced.customHeaders.title')}
             </div>
-            <div className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
               {t('settings.providers.advanced.customHeaders.description')}
             </div>
           </div>
 
           {customHeaders.length === 0 ? (
-            <div className="text-[11px] italic text-[var(--color-text-tertiary)] px-3 py-2 rounded-md border border-dashed border-[var(--color-border)]">
+            <div className="text-xs italic text-[var(--color-text-tertiary)] px-3 py-2 rounded-md border border-dashed border-[var(--color-border)]">
               {t('settings.providers.advanced.customHeaders.empty')}
             </div>
           ) : (
@@ -1117,7 +1117,7 @@ function AdvancedSettingsSection({
                           </span>
                         </button>
                       </div>
-                      <label className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] flex-shrink-0">
+                      <label className="flex items-center gap-1 text-xs text-[var(--color-text-secondary)] flex-shrink-0">
                         <input
                           type="checkbox"
                           checked={entry.enabled}
@@ -1137,7 +1137,7 @@ function AdvancedSettingsSection({
                       </button>
                     </div>
                     {(nameStatus.invalid || nameStatus.disallowed || isDuplicate) && (
-                      <div className="text-[11px] text-[var(--color-warning)] pl-1">
+                      <div className="text-xs text-[var(--color-warning)] pl-1">
                         {nameStatus.disallowed
                           ? t('settings.providers.advanced.customHeaders.disallowed')
                           : nameStatus.invalid
@@ -1152,8 +1152,8 @@ function AdvancedSettingsSection({
           )}
 
           <div className="flex">
-            <Button variant="secondary" size="md" onClick={onAddHeader}>
-              <span className="material-symbols-outlined text-[16px]">add</span>
+            <Button variant="secondary" size="sm" onClick={onAddHeader}>
+              <span className="material-symbols-outlined text-[14px]">add</span>
               {t('settings.providers.advanced.customHeaders.add')}
             </Button>
           </div>
@@ -1189,8 +1189,8 @@ function CodingModeSettings() {
   const modes = codingModes.length > 0 ? codingModes : []
 
   return (
-    <div className="max-w-2xl">
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">
+    <div>
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
         {t('settings.codingMode.title')}
       </h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
@@ -1209,13 +1209,13 @@ function CodingModeSettings() {
             <button
               key={m.id}
               onClick={() => void requestSetCodingMode(m.id)}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all text-left ${
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-all text-left ${
                 isSelected
                   ? 'border-[var(--color-brand)] bg-[var(--color-surface-container)] shadow-[var(--shadow-focus-ring)]'
                   : 'border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
               }`}
             >
-              <span className="material-symbols-outlined text-[20px] text-[var(--color-text-secondary)]">
+              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">
                 {MODE_GLYPH[m.id] ?? 'tune'}
               </span>
               <div className="flex-1">
@@ -1270,8 +1270,8 @@ function DebugPrivacySettings() {
   )
 
   return (
-    <div className="mt-8 border-t border-[var(--color-border)] pt-6">
-      <h3 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">
+    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
+      <h3 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
         {t('settings.debugPrivacy.title')}
       </h3>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
@@ -1283,7 +1283,7 @@ function DebugPrivacySettings() {
           <span className="text-xs font-medium text-[var(--color-text-primary)]">
             {t('settings.debugPrivacy.enable')}
           </span>
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.debugPrivacy.enableHint')}
           </span>
         </div>
@@ -1301,7 +1301,7 @@ function DebugPrivacySettings() {
           return (
             <label
               key={kind}
-              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border text-[12px] ${
+              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border text-xs ${
                 piiSanitizer.enabled
                   ? 'border-[var(--color-border)] bg-[var(--color-surface)]'
                   : 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] opacity-60'
@@ -1334,12 +1334,13 @@ function DebugPrivacySettings() {
       <div className="flex items-center gap-2">
         <Button
           variant="ghost"
+          size="sm"
           onClick={() => activeTabId && resetDebugPiiStats(activeTabId)}
           disabled={!activeTabId || (sessionStats?.total ?? 0) === 0}
         >
           {t('settings.debugPrivacy.clearStats')}
         </Button>
-        <Button variant="ghost" onClick={resetPiiSanitizer}>
+        <Button variant="ghost" size="sm" onClick={resetPiiSanitizer}>
           {t('settings.debugPrivacy.resetDefaults')}
         </Button>
       </div>
@@ -1388,16 +1389,16 @@ function GeneralSettings() {
   ]
 
   return (
-    <div className="max-w-xl">
+    <div>
       {}
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.appearanceTitle')}</h2>
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.appearanceTitle')}</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.appearanceDescription')}</p>
-      <div className="flex gap-2 mb-8">
+      <div className="flex flex-wrap gap-2 mb-4">
         {THEMES.map(({ value, label }) => (
           <button
             key={value}
             onClick={() => void setTheme(value)}
-            className={`flex-1 h-9 text-xs font-semibold rounded-lg border transition-all ${
+            className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
               theme === value
                 ? 'bg-[image:var(--gradient-btn-primary)] text-[var(--color-btn-primary-fg)] border-transparent shadow-[var(--shadow-button-primary)]'
                 : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
@@ -1409,14 +1410,14 @@ function GeneralSettings() {
       </div>
 
       {}
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.languageTitle')}</h2>
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.languageTitle')}</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.languageDescription')}</p>
-      <div className="flex gap-2 mb-8">
+      <div className="flex flex-wrap gap-2 mb-4">
         {LANGUAGES.map(({ value, label }) => (
           <button
             key={value}
             onClick={() => setLocale(value)}
-            className={`flex-1 h-9 text-xs font-semibold rounded-lg border transition-all ${
+            className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
               locale === value
                 ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
                 : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
@@ -1428,14 +1429,14 @@ function GeneralSettings() {
       </div>
 
       {}
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.effortTitle')}</h2>
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.effortTitle')}</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.effortDescription')}</p>
-      <div className="flex gap-2 mb-8">
+      <div className="flex flex-wrap gap-2 mb-4">
         {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
           <button
             key={level}
             onClick={() => setEffort(level)}
-            className={`flex-1 h-9 text-xs font-semibold rounded-lg border transition-all ${
+            className={`h-7 px-4 min-w-[72px] text-xs font-semibold rounded-lg border transition-all ${
               effortLevel === level
                 ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
                 : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
@@ -1447,11 +1448,11 @@ function GeneralSettings() {
       </div>
 
       {}
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.securityPolicyTitle')}</h2>
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.securityPolicyTitle')}</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.securityPolicyDescription')}</p>
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-4 py-3">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-[var(--color-text-primary)]">
+          <div className="text-xs font-medium text-[var(--color-text-primary)]">
             {t('settings.general.securityPolicyToggle')}
           </div>
           <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">

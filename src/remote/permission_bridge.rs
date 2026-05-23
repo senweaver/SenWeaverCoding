@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Remote permission bridge — mirrors claude-code-typescript-src`remote/remotePermissionBridge.ts`.
-// Bridges tool permission requests to remote clients for approval.
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;

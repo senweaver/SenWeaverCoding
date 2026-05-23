@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Permission system — mirrors cc-typescript-src's `utils/permissions/`.
-//!
-//! Provides permission modes (auto/ask/plan), rule-based tool filtering,
-//! dangerous command classification, and deny lists.
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -124,10 +120,10 @@ pub fn is_mcp_tool_name(name: &str) -> bool {
     false
 }
 
-pub fn gate_decision(
+pub fn gate_decision<S: ::std::hash::BuildHasher>(
     mode: ComposerPermissionMode,
     tool_name: &str,
-    auto_approve: &std::collections::HashSet<String>,
+    auto_approve: &std::collections::HashSet<String, S>,
     protect_browser: bool,
     protect_mcp: bool,
 ) -> GateDecision {
@@ -307,6 +303,8 @@ pub const PLAN_MODE_ALLOWED_TOOLS: &[&str] = &[
     "exa_search",
     "youtube_search",
     "github_search",
+    "github_advanced_search",
+    "workspace_deep_search",
     "reddit_search",
     "image_search",
     "discord_search",
@@ -333,6 +331,85 @@ pub fn is_plan_mode_allowed_tool(name: &str) -> bool {
 
 pub fn plan_mode_allowed_tools() -> Vec<&'static str> {
     PLAN_MODE_ALLOWED_TOOLS.to_vec()
+}
+
+pub const CURATOR_MODE_ALLOWED_TOOLS: &[&str] = &[
+    "file_read",
+    "glob_search",
+    "content_search",
+    "dir_list",
+    "present_files",
+    "view_image",
+    "image_info",
+    "screenshot",
+    "memory_recall",
+    "memory_export",
+    "calculator",
+    "weather",
+    "web_search",
+    "web_search_tool",
+    "web_fetch",
+    "multi_search",
+    "tavily_search",
+    "exa_search",
+    "youtube_search",
+    "github_search",
+    "github_advanced_search",
+    "reddit_search",
+    "image_search",
+    "discord_search",
+    "workspace_deep_search",
+    "grep",
+    "code_search",
+    "code_outline",
+    "code_graph_query",
+    "tool_search",
+    "lsp",
+    "lsp_symbols",
+    "pdf_read",
+    "mcp_resources_list",
+    "mcp_resources_read",
+    "task_list",
+    "task_get",
+    "task_output",
+    "structured_output",
+    "todo_write",
+    "ask_question",
+    "ask_user",
+    "read_skill",
+    "cloud_patterns",
+    "brief",
+    "now",
+    "file_write",
+    "file_edit",
+    "enter_curator_mode",
+    "exit_curator_mode",
+    "curator_collect",
+    "curator_deep_collect",
+    "curator_template_list",
+    "curator_template_apply",
+];
+
+pub fn is_curator_mode_allowed_tool(name: &str) -> bool {
+    CURATOR_MODE_ALLOWED_TOOLS.contains(&name)
+}
+
+pub fn curator_mode_allowed_tools() -> Vec<&'static str> {
+    CURATOR_MODE_ALLOWED_TOOLS.to_vec()
+}
+
+pub fn is_curator_write_path_allowed(path: &std::path::Path) -> bool {
+    let comps: Vec<_> = path.components().collect();
+    let target_root = std::ffi::OsStr::new(".senweavercoding");
+    let target_dir = std::ffi::OsStr::new("curators");
+    for window in comps.windows(2) {
+        if let [std::path::Component::Normal(a), std::path::Component::Normal(b)] = window {
+            if a.eq_ignore_ascii_case(target_root) && b.eq_ignore_ascii_case(target_dir) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn read_only_tool_names() -> Vec<&'static str> {

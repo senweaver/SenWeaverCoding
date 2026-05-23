@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Session-to-session messaging tools for inter-agent communication.
-//!
-//! Provides three tools:
-//! - `sessions_list` — list active sessions with metadata
-//! - `sessions_history` — read message history from a specific session
-//! - `sessions_send` — send a message to a specific session
 
 use super::traits::{Tool, ToolResult};
 use crate::channels::session_backend::SessionBackend;

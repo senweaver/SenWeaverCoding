@@ -76,7 +76,7 @@ struct NativeMessage {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "crate::providers::sanitize::skip_serializing_tool_calls")]
     tool_calls: Option<Vec<NativeToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
@@ -305,7 +305,9 @@ impl AzureOpenAiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.azure_openai", 120, 10)
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.azure_openai", 120, 10)
     }
 }
 
@@ -412,9 +414,16 @@ impl Provider for AzureOpenAiProvider {
             )
         })?;
 
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            _model,
+            0,
+            None,
+        );
         let tools = Self::convert_tools(request.tools);
         let native_request = NativeChatRequest {
-            messages: Self::convert_messages(request.messages),
+            messages: Self::convert_messages(&sanitized_messages),
             temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -475,8 +484,15 @@ impl Provider for AzureOpenAiProvider {
             )
         };
 
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            _model,
+            0,
+            None,
+        );
         let native_request = NativeChatRequest {
-            messages: Self::convert_messages(messages),
+            messages: Self::convert_messages(&sanitized_messages),
             temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,

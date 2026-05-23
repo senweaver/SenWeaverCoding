@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `flow_rollback` tool — unwind the process-global flow checkpoint
-//! store by `steps` entries and return the checkpoint the caller
-//! should restore to.  Companion to [`super::FlowRunTool`].
 
 use async_trait::async_trait;
 use serde_json::json;

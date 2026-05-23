@@ -1,21 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Cross-process session synchronization transport.
-//!
-//! Provides a platform-native IPC channel so multiple processes sharing the
-//! same session can exchange [`SessionDelta`]s in real time:
-//!
-//! * **Linux / macOS** — Unix Domain Socket (UDS) under a well-known path
-//!   derived from the session id (e.g. `/tmp/sen_session_<id>.sock`).
-//! * **Windows** — Named Pipe (`\\.\pipe\sen_session_<id>`).
-//!
-//! The high-level entry points are:
-//! * [`spawn_rpc_listener`] — start a background task that accepts inbound
-//!   deltas and feeds them to a [`SessionActor`] via
-//!   [`SessionActor::apply_remote`].
-//! * [`send_delta_to_peer`] — fire-and-forget delivery of a single delta to
-//!   a peer that is already listening.
 
 use std::path::PathBuf;
 use std::sync::Arc;

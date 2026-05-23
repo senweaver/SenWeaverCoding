@@ -1,38 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Claude Code headless CLI provider.
-//!
-//! Integrates with the Claude Code CLI, spawning the `claude` binary
-//! as a subprocess for each inference request. This allows using Claude's AI
-//! models without an interactive UI session.
-//!
-//! # Usage
-//!
-//! The `claude` binary must be available in `PATH`, or its location must be
-//! set via the `CLAUDE_CODE_PATH` environment variable.
-//!
-//! Claude Code is invoked as:
-//! ```text
-//! claude --print -
-//! ```
-//! with prompt content written to stdin.
-//!
-//! # Limitations
-//!
-//! - **System prompt**: The system prompt is prepended to the user message with a
-//!   blank-line separator, as the CLI does not provide a dedicated system-prompt flag.
-//! - **Temperature**: The CLI does not expose a temperature parameter.
-//!   Only default values are accepted; custom values return an explicit error.
-//!
-//! # Authentication
-//!
-//! Authentication is handled by Claude Code itself (its own credential store).
-//! No explicit API key is required by this provider.
-//!
-//! # Environment variables
-//!
-//! - `CLAUDE_CODE_PATH` — override the path to the `claude` binary (default: `"claude"`)
 
 use crate::providers::traits::{ChatMessage, ChatRequest, ChatResponse, Provider, TokenUsage};
 use async_trait::async_trait;
@@ -95,9 +63,13 @@ impl ClaudeCodeProvider {
                 (temperature - **a)
                     .abs()
                     .partial_cmp(&(temperature - **b).abs())
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .unwrap();
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Claude Code provider has no supported temperatures configured"
+                )
+            })?;
         tracing::debug!(
             requested = temperature,
             clamped = clamped,
@@ -217,12 +189,14 @@ impl Provider for ClaudeCodeProvider {
     ) -> anyhow::Result<String> {
         Self::validate_temperature(temperature)?;
 
-        let system = messages
+        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+
+        let system = sanitized
             .iter()
             .find(|m| m.role == "system")
             .map(|m| m.content.as_str());
 
-        let turns: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
+        let turns: Vec<&ChatMessage> = sanitized.iter().filter(|m| m.role != "system").collect();
 
         if turns.len() <= 1 {
             let last_user = turns.first().map(|m| m.content.as_str()).unwrap_or("");
@@ -263,11 +237,9 @@ impl Provider for ClaudeCodeProvider {
             .chat_with_history(request.messages, model, temperature)
             .await?;
 
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: Vec::new(),
-            usage: Some(TokenUsage::default()),
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(
+            Some(text),
+            Some(TokenUsage::default()),
+        ))
     }
 }

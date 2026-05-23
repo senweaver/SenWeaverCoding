@@ -58,10 +58,9 @@ impl DiscordHistoryChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client(
-            "channel.discord_history",
-            self.proxy_url.as_deref(),
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client("channel.discord_history", self.proxy_url.as_deref())
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {
@@ -236,12 +235,10 @@ impl Channel for DiscordHistoryChannel {
         let ws_url = format!("{gw_url}/?v=10&encoding=json");
         tracing::info!("DiscordHistory: connecting to gateway...");
 
-        let (ws_stream, _) = crate::config::ws_connect_with_proxy(
-            &ws_url,
-            "channel.discord",
-            self.proxy_url.as_deref(),
-        )
-        .await?;
+        let (ws_stream, _) = crate::services::get_services()
+            .proxy_runtime()
+            .ws_connect(&ws_url, "channel.discord", self.proxy_url.as_deref())
+            .await?;
         let (mut write, mut read) = ws_stream.split();
 
         let hello = read.next().await.ok_or(anyhow::anyhow!("No hello"))??;

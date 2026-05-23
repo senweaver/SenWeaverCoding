@@ -1,0 +1,209 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
+use axum::{
+    Json, Router,
+    extract::{Path, Query},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
+
+use crate::session::event::SessionEvent;
+use crate::workers::events::{WorkerMeta, WorkerSummary};
+use crate::workers::persistence::{WorkerEventLog, list_meta, read_meta};
+use crate::workers::supervisor::global_supervisor;
+
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListResponse {
+    pub workers: Vec<WorkerSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetailResponse {
+    pub meta: WorkerMeta,
+
+    pub summary: Option<WorkerSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventsResponse {
+    pub worker_id: String,
+    pub events: Vec<SessionEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CancelResponse {
+    pub worker_id: String,
+    pub cancelled: bool,
+}
+
+pub fn router() -> Router {
+    Router::new()
+        .route("/api/workers", get(handle_list))
+        .route("/api/workers/{id}", get(handle_get))
+        .route("/api/workers/{id}/cancel", post(handle_cancel))
+        .route("/api/workers/{id}/events", get(handle_events))
+        .route(
+            "/ws/worker/{id}",
+            get(crate::workers::ws::handle_ws_worker),
+        )
+}
+
+async fn handle_list(Query(q): Query<ListQuery>) -> impl IntoResponse {
+    let supervisor = global_supervisor();
+
+    let mut summaries: Vec<WorkerSummary> = Vec::new();
+
+    let workspace_root = supervisor
+        .as_ref()
+        .map(|s| s.workspace_root().to_path_buf())
+        .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    if let Some(parent) = q.session_id.as_deref() {
+        if let Some(sup) = supervisor.as_ref() {
+            summaries = sup.list_by_parent(parent);
+        }
+        let known: std::collections::HashSet<String> =
+            summaries.iter().map(|s| s.worker_id.clone()).collect();
+        if let Ok(metas) = list_meta(&workspace_root) {
+            for meta in metas {
+                if meta.parent_session_id != parent {
+                    continue;
+                }
+                if known.contains(&meta.worker_id) {
+                    continue;
+                }
+                summaries.push(meta.to_summary());
+            }
+        }
+    } else {
+        if let Some(sup) = supervisor.as_ref() {
+            summaries.extend(sup.all_summaries());
+        }
+        let known: std::collections::HashSet<String> =
+            summaries.iter().map(|s| s.worker_id.clone()).collect();
+        if let Ok(metas) = list_meta(&workspace_root) {
+            for meta in metas {
+                if known.contains(&meta.worker_id) {
+                    continue;
+                }
+                summaries.push(meta.to_summary());
+            }
+        }
+    }
+
+    summaries.sort_by_key(|s| s.started_at);
+    (StatusCode::OK, Json(ListResponse { workers: summaries })).into_response()
+}
+
+async fn handle_get(Path(id): Path<String>) -> impl IntoResponse {
+    let supervisor = global_supervisor();
+    let workspace_root = supervisor
+        .as_ref()
+        .map(|s| s.workspace_root().to_path_buf())
+        .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let summary = supervisor.as_ref().and_then(|s| s.summary_for(&id));
+
+    let meta = match read_meta(&workspace_root, &id) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            if let Some(s) = &summary {
+                WorkerMeta {
+                    worker_id: s.worker_id.clone(),
+                    parent_session_id: s.parent_session_id.clone(),
+                    parent_tool_use_id: s.parent_tool_use_id.clone(),
+                    title: s.title.clone(),
+                    prompt: String::new(),
+                    context: None,
+                    model: s.model.clone(),
+                    status: s.status,
+                    last_action: s.last_action.clone(),
+                    last_detail: s.last_detail.clone(),
+                    started_at: s.started_at,
+                    finished_at: s.finished_at,
+                    output: None,
+                    error: None,
+                }
+            } else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": format!("worker '{id}' not found") })),
+                )
+                    .into_response();
+            }
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    (StatusCode::OK, Json(DetailResponse { meta, summary })).into_response()
+}
+
+async fn handle_cancel(Path(id): Path<String>) -> impl IntoResponse {
+    let supervisor = match global_supervisor() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "worker supervisor not initialised" })),
+            )
+                .into_response();
+        }
+    };
+
+    let cancelled = supervisor.cancel(&id);
+    (
+        StatusCode::OK,
+        Json(CancelResponse {
+            worker_id: id,
+            cancelled,
+        }),
+    )
+        .into_response()
+}
+
+async fn handle_events(Path(id): Path<String>) -> impl IntoResponse {
+    let supervisor = global_supervisor();
+    let workspace_root = supervisor
+        .as_ref()
+        .map(|s| s.workspace_root().to_path_buf())
+        .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let log = match WorkerEventLog::open(&workspace_root, &id) {
+        Ok(l) => l,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let events = log.replay().unwrap_or_default();
+    (
+        StatusCode::OK,
+        Json(EventsResponse {
+            worker_id: id,
+            events,
+        }),
+    )
+        .into_response()
+}

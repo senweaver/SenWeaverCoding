@@ -1,27 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ToolRegistry — central store of all available tools.
-//!
-//! The LLM receives its tool list exclusively from the registry.
-//! If a tool is not registered, the LLM cannot call it.
-//!
-//! Startup sequence (called via [`ToolRegistry::load`]):
-//! 1. Register built-in hardware tools (`gpio_read`, `gpio_write`).
-//! 2. Scan `~/.senweavercoding/tools/` for user plugin manifests.
-//! 3. Build a [`SubprocessTool`] for each valid manifest and register it.
-//! 4. Print the startup log summarising loaded tools and connected devices.
-//!
-//! Dispatch flow (called per LLM tool-call):
-//! ```text
-//! registry.dispatch("gpio_write", {"device":"pico0","pin":25,"value":1})
-//!     │
-//!     ├── look up "gpio_write" in tools HashMap
-//!     └── tool.execute(args) → ToolResult
-//! ```
-//!
-//! Device lookup is handled internally by each tool (GPIO tools read the
-//! [`DeviceRegistry`] themselves via their `Arc<RwLock<DeviceRegistry>>`).
 
 use super::device::DeviceRegistry;
 use super::gpio::gpio_tools;

@@ -36,7 +36,7 @@ pub async fn apply_writeback(
         cfg.writeback_targets.as_slice()
     };
     for lesson in lessons {
-        if budget == 0 && targets.iter().any(|t| *t == ReflectionWritebackTarget::Lessons)
+        if budget == 0 && targets.contains(&ReflectionWritebackTarget::Lessons)
         {
             report
                 .errors

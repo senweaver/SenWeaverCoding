@@ -1,25 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Test-runner verifier.
-//!
-//! upgrade — the verifier now runs lightweight, structured-
-//! output checks (`cargo check --message-format=json`, `tsc --noEmit`,
-//! `pytest --collect-only`, `go vet ./...`) against an entire
-//! workspace instead of the noisy single-file `cargo check --quiet`
-//! that shipped with .  Workspace discovery is delegated to
-//! [`TestRunnerBuilder`] so callers describe *where* to verify, not
-//! *how*.  Heavy variants (`cargo test --no-run`, `pytest -x`,
-//! `go test ./...`, `npm test`) are opt-in via `heavy = true`.
-//!
-//! Diagnostics from cargo's JSON stream are parsed with stock
-//! `serde_json` (no `cargo_metadata` dep) and capped at
-//! [`TestRunnerConfig::max_diagnostics`] (default 50) so a broken
-//! macro doesn't flood the report.  The previous pattern of treating
-//! a timeout as a hard failure has been replaced: a timeout now
-//! degrades to a single `IssueSeverity::Warning` and the report is
-//! marked `passed = true` with `summary = "status=timeout ..."` so
-//! the surrounding pipeline can keep going.
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;

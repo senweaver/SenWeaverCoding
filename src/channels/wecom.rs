@@ -18,7 +18,9 @@ impl WeComChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("channel.wecom")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.wecom")
     }
 
     fn webhook_url(&self) -> String {

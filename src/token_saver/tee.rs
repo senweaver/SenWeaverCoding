@@ -45,13 +45,7 @@ pub fn sanitize_slug(command: &str) -> String {
     for tok in command.split_whitespace().take(4) {
         let cleaned: String = tok
             .chars()
-            .filter_map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
-                    Some(c)
-                } else {
-                    None
-                }
-            })
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
             .collect();
         if !cleaned.is_empty() {
             tokens.push(cleaned);

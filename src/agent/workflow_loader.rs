@@ -1,35 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Load a declarative multi-agent workflow from a YAML file and convert
-//! it into `SchedulableTask`s ready for `TaskSchedulerRuntime`.
-//!
-//! Workflow file format:
-//! ```yaml
-//! name: code-review
-//! description: "Three-agent flow: research → code → review"
-//! max_parallel: 2
-//! merge_strategy: all
-//! tasks:
-//!   - id: research
-//!     description: Survey the topic
-//!     prompt: What are the current best practices for X?
-//!     capability: researcher
-//!   - id: code
-//!     description: Implement Y
-//!     prompt: Using the research results, implement Y
-//!     capability: coder
-//!     depends_on: [research]
-//!   - id: review
-//!     description: Review the implementation
-//!     prompt: Critique the code for correctness and performance
-//!     capability: reviewer
-//!     depends_on: [code]
-//! ```
-//!
-//! Files are parsed via `serde_yaml` (pulled in as a dev-only dep) but
-//! here we accept any serde-compatible deserializer.  For ease of use we
-//! provide both `from_yaml_str` and `from_json_str`.
 
 use std::path::Path;
 

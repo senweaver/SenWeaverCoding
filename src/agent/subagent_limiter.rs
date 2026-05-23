@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Subagent Concurrency Limiter - caps parallel sub-agent executions.
-//!
-//! Prevents resource exhaustion from too many concurrent delegate/swarm tasks
-//! by enforcing a configurable maximum.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Provider-related configuration types extracted from `schema.rs`.
-//!
-//! This module contains model routing, embedding routing, query classification,
-//! and saved model configurations. The types are re-exported from `schema.rs`
-//! for backward compatibility with existing import paths.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

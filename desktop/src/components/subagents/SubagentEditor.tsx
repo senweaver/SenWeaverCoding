@@ -94,7 +94,7 @@ export function SubagentEditor({ initial, isSaving, onSubmit, onCancel }: Props)
   return (
     <div className="space-y-4">
       <header>
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {isEdit
             ? t('settings.subagents.editTitle')
             : t('settings.subagents.createTitle')}
@@ -153,7 +153,7 @@ export function SubagentEditor({ initial, isSaving, onSubmit, onCancel }: Props)
           value={draft.systemPrompt ?? ''}
           onChange={(e) => setDraft({ ...draft, systemPrompt: e.target.value })}
           rows={4}
-          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs"
         />
       </Field>
 
@@ -231,7 +231,7 @@ export function SubagentEditor({ initial, isSaving, onSubmit, onCancel }: Props)
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label={t('settings.subagents.fieldAgentic')}>
-          <label className="flex items-center gap-2 h-10 px-3">
+          <label className="flex items-center gap-2 h-8 px-2.5">
             <input
               type="checkbox"
               checked={draft.agentic}
@@ -262,10 +262,10 @@ export function SubagentEditor({ initial, isSaving, onSubmit, onCancel }: Props)
       </Field>
 
       <div className="flex items-center justify-end gap-2">
-        <Button variant="ghost" onClick={onCancel}>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           {t('common.cancel')}
         </Button>
-        <Button onClick={handleSubmit} disabled={isSaving}>
+        <Button size="sm" onClick={handleSubmit} disabled={isSaving}>
           {isSaving ? t('common.saving') : t('common.save')}
         </Button>
       </div>
@@ -292,7 +292,7 @@ function Field({
       </span>
       {children}
       {hint && (
-        <span className="block text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="block text-xs text-[var(--color-text-tertiary)]">
           {hint}
         </span>
       )}

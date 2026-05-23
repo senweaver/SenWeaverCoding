@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Multi-provider Text-to-Speech (TTS) subsystem.
-//!
-//! Supports OpenAI, ElevenLabs, Google Cloud TTS, Edge TTS (free, subprocess-based),
-//! and Piper TTS (local GPU-accelerated, OpenAI-compatible endpoint).
-//! Provider selection is driven by [`TtsConfig`] in `config.toml`.
 
 use std::collections::HashMap;
 

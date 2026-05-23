@@ -1,19 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Backpressure-aware subscriber wrapper for the event bus.
-//!
-//! The core `broadcast` channel drops messages for lagging consumers; that
-//! is the right behaviour for best-effort observability streams but wrong
-//! for consumers that must not miss events (for example, a task scheduler
-//! watching for "task completed" signals).
-//!
-//! `BoundedSubscriber` wraps a `broadcast::Receiver` plus a bounded
-//! `mpsc` channel.  A background forwarder task drains the broadcast side
-//! and pushes into the bounded mpsc; when the mpsc fills up, the
-//! forwarder blocks (back-pressuring the broadcast receiver end).  That
-//! way a slow consumer applies back-pressure without crashing the event
-//! bus.
 
 use tokio::sync::{broadcast, mpsc};
 

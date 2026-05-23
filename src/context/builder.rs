@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Context builder ??assembles the full context for an agent query.
-// Mirrors claude-code-typescript-src `context.ts` (getUserContext,
-// getSystemContext).
-//
-// expanded the builder in two ways:
-//   1. [`QueryContext`] now carries optional open-files / focus-files /
-//      symbols / outline / LSP / RAG blocks that richer agent loops can
-//      inject into the prompt.  When no producer is wired the vectors
-//      stay empty (zero-cost fallback).
-//   2. [`ContextBuilder::build`] runs the optional sources concurrently
-//      via `tokio::join!` ??git + memory + outline + symbols + LSP +
-//      RAG all fire at once instead of sequentially, keeping the agent
-//      turn latency bounded regardless of how many sources are wired.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// SDK types — mirrors claude-code-typescript-src/entrypoints/agentSdkTypes.ts.
-// Public types for the programmatic SDK embedding API.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -270,8 +267,21 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
         match event {
             T::Chunk { delta } => Self::Chunk { delta },
             T::Thinking { delta } => Self::Thinking { delta },
-            T::ToolCall { name, args } => Self::ToolCall { name, args },
-            T::ToolResult { name, output, success } => Self::ToolResult { name, output, success },
+            T::ToolCall {
+                name,
+                args,
+                tool_call_id: _,
+            } => Self::ToolCall { name, args },
+            T::ToolResult {
+                name,
+                output,
+                success,
+                tool_call_id: _,
+            } => Self::ToolResult {
+                name,
+                output,
+                success,
+            },
             T::Error { message } => Self::Error { message },
 
             T::FileEdit {
@@ -349,6 +359,46 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
                     "[debug_pii_stats] redacted {} item(s)",
                     report.total()
                 ),
+            },
+            T::ProviderRetry {
+                attempt,
+                max_attempts,
+                wait_ms,
+                class,
+                provider,
+                model,
+                message,
+            } => Self::Chunk {
+                delta: format!(
+                    "[provider_retry {class} {attempt}/{max_attempts} wait_ms={wait_ms} provider={provider} model={model}] {message}"
+                ),
+            },
+            T::WorkerSpawned {
+                worker_id, title, model, ..
+            } => Self::Chunk {
+                delta: format!("[worker_spawned:{worker_id}] {title} ({model})"),
+            },
+            T::WorkerStatus { worker_id, status, detail } => Self::Chunk {
+                delta: format!(
+                    "[worker_status:{worker_id}] {status}{}",
+                    detail
+                        .map(|d| format!(" - {d}"))
+                        .unwrap_or_default()
+                ),
+            },
+            T::WorkerProgress { worker_id, action, detail } => Self::Chunk {
+                delta: format!("[worker_progress:{worker_id}] {action}: {detail}"),
+            },
+            T::WorkerCompleted { worker_id, success, summary } => Self::ToolResult {
+                name: format!("worker:{worker_id}"),
+                output: summary,
+                success,
+            },
+            T::WorkerStopped { worker_id, reason } => Self::Chunk {
+                delta: format!("[worker_stopped:{worker_id}] {reason}"),
+            },
+            T::ParentResumed { reason } => Self::Chunk {
+                delta: format!("[parent_resumed] {reason}"),
             },
         }
     }

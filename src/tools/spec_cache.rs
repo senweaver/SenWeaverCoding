@@ -1,16 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Serialization cache for `ToolSpec`.
-//!
-//! `tool.spec()` allocates a fresh `String`/`serde_json::Value` tree each
-//! time it is called, and the agent loop serializes the whole `Vec<ToolSpec>`
-//! on every iteration.  For 60+ tools over 10 iterations that's thousands of
-//! redundant allocations per turn.
-//!
-//! `ToolSpecCache` keeps pre-serialized `Arc<str>` snapshots keyed by
-//! `(content_hash, provider_id)` so identical specs are serialized **at most
-//! once per provider** for the lifetime of the cache.
 
 use std::collections::HashMap;
 use std::sync::Arc;

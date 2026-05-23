@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TUI `ChatView` — the ratatui-rendered counterpart of
-//! `SessionChatState`.  Uses the shared event store so the same
-//! drain task that feeds the GUI also feeds the TUI.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

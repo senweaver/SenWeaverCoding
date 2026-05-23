@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Plugin management handler — install/enable/disable/uninstall plugins.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

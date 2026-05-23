@@ -1,26 +1,13 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! CLI bootstrap helpers extracted from `main.rs`.
-//!
-//! Keeping these small helpers in the library crate means:
-//! 1. The future `bin/sen_cli/main.rs` shrinks to a trivial
-//!    dispatcher.
-//! 2. Unit tests can exercise bootstrap logic without spinning up
-//!    the full clap argument parser.
-//! 3. Downstream embedders (future gateway-only binary, test
-//!    harnesses) can reuse the exact same `.env` discovery logic.
-//!
-//! Anti-placeholder: `main.rs::load_env` delegates to
-//! [`load_env`] below — grep `cli_entry::bootstrap::load_env`
-//! in `src/main.rs` to confirm the real call site.
 
 use std::io::Write;
 use std::path::PathBuf;
 
 pub fn load_env() {
     let candidates = [
-        std::env::var_os("SEN_WORKSPACE")
+        crate::util::get_env_var_os("SEN_WORKSPACE")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .map(|p| p.join(".env")),

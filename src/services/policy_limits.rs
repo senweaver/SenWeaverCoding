@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Policy limits service — mirrors claude-code-typescript-src`services/policyLimits/`.
-// Enforces organization-level policies on tool usage, model selection,
-// spending limits, and allowed operations.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

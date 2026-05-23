@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// MCP manager service — mirrors claude-code-typescript-src`services/mcp/`.
-// Manages Model Context Protocol server connections, tool discovery,
-// resource listing, and approval workflows.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

@@ -1,25 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `bench_diff` — real parser for Criterion's `estimates.json` + regression table.
-//!
-//! Criterion writes benchmark results under `target/criterion/<bench_name>/
-//! <variant>/{new,base}/estimates.json` where each estimates file contains
-//! the statistical summary of one benchmark run.  This module parses those
-//! files and produces a human-readable comparison table that operators and
-//! CI pipelines can reason about.
-//!
-//! # Usage (library)
-//!
-//! ```ignore
-//! use senweavercoding::bench_diff::{load_estimates, format_regression_table};
-//!
-//! let report = load_estimates("target/criterion")?;
-//! println!("{}", format_regression_table(&report, 0.10));
-//! ```
-//!
-//! A small CLI binary (`dev/bench_diff.rs`) wraps this logic for
-//! shell-script usage.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge API — HTTP endpoints for bridge management.
-// Mirrors claude-code-typescript-src`bridge/bridgeApi.ts` and `bridge/codeSessionApi.ts`.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

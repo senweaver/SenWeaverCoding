@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Memory file context — mirrors claude-code-typescript-src`memdir/` and `context.ts`.
-// Loads AGENTS.md, CLAUDE.md, and memory files from project directories.
 
 use std::path::PathBuf;
 

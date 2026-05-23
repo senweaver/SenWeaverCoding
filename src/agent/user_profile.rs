@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! User Profile - global user context for agent personalization.
-//!
-//! Stores user preferences, context, and background information
-//! that is injected into every agent session for personalization.
 
 use std::path::{Path, PathBuf};
 

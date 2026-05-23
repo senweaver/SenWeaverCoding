@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Public entrypoint that exposes SenWeaverCoding's tool surface as
-//! an embedded MCP **server**.
-//!
-//! The actual protocol implementation lives in
-//! [`crate::services::mcp_server`]; this façade exists so the CLI
-//! (`sen mcp serve`) and SDK consumers can share one entry point and
-//! one config struct without each rebuilding the tool list.
-//!
-//! Inverts the direction of [`crate::services::mcp_manager`] /
-//! [`crate::tools::mcp_client`], which run as clients calling into
-//! external MCP servers.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -90,9 +79,9 @@ impl McpServerEntrypoint {
                 crate::services::mcp_server::stdio::serve(server).await
             }
             McpServerTransport::Sse | McpServerTransport::Streamable => {
-                let bind = config
-                    .bind
-                    .unwrap_or_else(|| "127.0.0.1:8765".parse().unwrap());
+                let bind = config.bind.unwrap_or_else(|| {
+                    SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8765))
+                });
                 crate::services::mcp_server::sse::serve(server, bind).await
             }
         }

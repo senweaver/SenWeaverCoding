@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: MIT
-//
-// Thin TypeScript wrapper around the Tauri `browser_dock_*` commands
-// declared in `desktop/src-tauri/src/browser_dock.rs`.  The
-// `EmbeddedBrowserPanel` and `browserPanelStore` go through this
-// surface so the panel renders cleanly in the Vite browser dev mode
-// (no Tauri IPC available — every call resolves to a no-op).
 
 import { isTauriRuntime } from './desktopRuntime'
+
+const GW_SESSION_PREFIX = 'gw_'
+
+export function normalizeBrowserSessionId(
+  raw: string | null | undefined,
+): string | null {
+  if (raw == null) return null
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  return trimmed.startsWith(GW_SESSION_PREFIX)
+    ? trimmed.slice(GW_SESSION_PREFIX.length)
+    : trimmed
+}
 
 export type BrowserDockRect = { x: number; y: number; w: number; h: number }
 
@@ -55,19 +62,22 @@ export type BrowserDockTabInfo = {
   title: string | null
   active: boolean
   owner?: BrowserDockTabOwner
+  sessionId?: string | null
 }
 
 export type BrowserDockEvent =
-  | { kind: 'state'; tabId?: number; data: { url: string; title: string; canBack: boolean; ts: number } }
-  | { kind: 'console'; tabId?: number; data: { level: string; message: string; ts: number } }
-  | { kind: 'pick'; tabId?: number; data: { selector: string; text: string; props: Record<string, string> } }
-  | { kind: 'inspect'; tabId?: number; data: { selector: string; props?: Record<string, string>; error?: string } }
-  | { kind: 'zoom'; tabId?: number; data: { factor: number } }
-  | { kind: 'cleared'; tabId?: number; data: { history: boolean; cookies: boolean; storage: boolean; cache: boolean } }
-  | { kind: 'tabs'; data: { tabs: BrowserDockTabInfo[]; active: number | null } }
-  | { kind: 'visible'; data: { session?: string | null; source?: string } }
-  | { kind: 'agent_action'; tabId?: number; data: { reqId: number; kind: string; args: unknown; tabId?: number; ts: number } }
-  | { kind: string; tabId?: number; data: unknown }
+  | { kind: 'state'; tabId?: number; sessionId?: string | null; data: { url: string; title: string; canBack: boolean; ts: number } }
+  | { kind: 'console'; tabId?: number; sessionId?: string | null; data: { level: string; message: string; ts: number } }
+  | { kind: 'pick'; tabId?: number; sessionId?: string | null; data: { selector: string; text: string; props: Record<string, string> } }
+  | { kind: 'inspect'; tabId?: number; sessionId?: string | null; data: { selector: string; props?: Record<string, string>; error?: string } }
+  | { kind: 'zoom'; tabId?: number; sessionId?: string | null; data: { factor: number } }
+  | { kind: 'cleared'; tabId?: number; sessionId?: string | null; data: { history: boolean; cookies: boolean; storage: boolean; cache: boolean } }
+  | { kind: 'tabs'; sessionId?: string | null; data: { tabs: BrowserDockTabInfo[]; active: number | null; activeSessionId?: string | null } }
+  | { kind: 'visible'; tabId?: number; sessionId?: string | null; data: { session?: string | null; source?: string; agentTabId?: number | null } }
+  | { kind: 'agent_action'; tabId?: number; sessionId?: string | null; data: { reqId: number; kind: string; args: unknown; tabId?: number; sessionId?: string | null; ts: number } }
+  | { kind: 'dock_takeover'; tabId?: number; sessionId?: string | null; data: { tab_id: number; started_at: number; sessionId?: string | null } }
+  | { kind: 'dock_takeover_end'; tabId?: number; sessionId?: string | null; data: { tab_id: number; ended_at: number; sessionId?: string | null } }
+  | { kind: string; tabId?: number; sessionId?: string | null; data: unknown }
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
 type ListenFn = <T>(event: string, cb: (event: { payload: T }) => void) => Promise<() => void>
@@ -105,10 +115,25 @@ async function invokeIfTauri<T>(cmd: string, args?: Record<string, unknown>): Pr
   return invokeRef<T>(cmd, args)
 }
 
-export async function dockOpen(rect: BrowserDockRect, url: string | null): Promise<void> {
+export async function dockOpen(
+  rect: BrowserDockRect,
+  url: string | null,
+  sessionId?: string | null,
+): Promise<void> {
+  const trimmed = typeof sessionId === 'string' ? sessionId.trim() : ''
   await invokeIfTauri('browser_dock_open', {
     rect,
     url: url && url.trim() ? url : null,
+    sessionId: trimmed.length > 0 ? trimmed : null,
+  })
+}
+
+export async function dockSetForegroundSession(
+  sessionId: string | null,
+): Promise<void> {
+  const trimmed = typeof sessionId === 'string' ? sessionId.trim() : ''
+  await invokeIfTauri('browser_dock_set_foreground_session', {
+    sessionId: trimmed.length > 0 ? trimmed : null,
   })
 }
 
@@ -197,10 +222,16 @@ export async function dockCloseDevTools(): Promise<void> {
   await invokeIfTauri('browser_dock_close_devtools')
 }
 
-export async function dockNewTab(url: string | null, activate = true): Promise<number | null> {
+export async function dockNewTab(
+  url: string | null,
+  activate = true,
+  sessionId?: string | null,
+): Promise<number | null> {
+  const trimmed = typeof sessionId === 'string' ? sessionId.trim() : ''
   return invokeIfTauri<number>('browser_dock_new_tab', {
     url: url && url.trim() ? url : null,
     activate,
+    sessionId: trimmed.length > 0 ? trimmed : null,
   })
 }
 
@@ -208,26 +239,57 @@ export async function dockCloseTab(tabId: number): Promise<number | null> {
   return invokeIfTauri<number | null>('browser_dock_close_tab', { tabId })
 }
 
-export async function dockActivateTab(tabId: number): Promise<void> {
-  await invokeIfTauri('browser_dock_activate_tab', { tabId })
+export async function dockActivateTab(
+  tabId: number,
+  sessionId?: string | null,
+): Promise<void> {
+  const trimmed = typeof sessionId === 'string' ? sessionId.trim() : ''
+  await invokeIfTauri('browser_dock_activate_tab', {
+    tabId,
+    sessionId: trimmed.length > 0 ? trimmed : null,
+  })
 }
 
-export async function dockListTabs(): Promise<BrowserDockTabInfo[]> {
-  const res = await invokeIfTauri<BrowserDockTabInfo[]>('browser_dock_list_tabs')
+export async function dockListTabs(
+  sessionId?: string | null,
+): Promise<BrowserDockTabInfo[]> {
+  const trimmed = typeof sessionId === 'string' ? sessionId.trim() : ''
+  const res = await invokeIfTauri<BrowserDockTabInfo[]>('browser_dock_list_tabs', {
+    sessionId: trimmed.length > 0 ? trimmed : null,
+  })
   return res ?? []
 }
 
-export async function dockPinTestTarget(tabId: number): Promise<void> {
-  await invokeIfTauri('browser_dock_pin_test_target', { tabId })
+export async function dockPinTestTarget(sessionId: string, tabId: number): Promise<void> {
+  await invokeIfTauri('browser_dock_pin_test_target', { sessionId, tabId })
 }
 
-export async function dockClearTestTarget(): Promise<void> {
-  await invokeIfTauri('browser_dock_clear_test_target')
+export async function dockClearTestTarget(sessionId: string): Promise<void> {
+  await invokeIfTauri('browser_dock_clear_test_target', { sessionId })
 }
 
-export async function dockGetTestTarget(): Promise<number | null> {
-  const res = await invokeIfTauri<number | null>('browser_dock_get_test_target')
+export async function dockGetTestTarget(sessionId: string): Promise<number | null> {
+  const res = await invokeIfTauri<number | null>('browser_dock_get_test_target', {
+    sessionId,
+  })
   return res ?? null
+}
+
+export async function dockPresentSession(sessionId: string): Promise<number | null> {
+  const res = await invokeIfTauri<number | null>('browser_dock_present_session', {
+    sessionId,
+  })
+  return res ?? null
+}
+
+export async function dockReleaseAgentTabForSession(
+  sessionId: string,
+): Promise<number[]> {
+  const res = await invokeIfTauri<number[]>(
+    'browser_dock_release_agent_tab_for_session',
+    { sessionId },
+  )
+  return res ?? []
 }
 
 export type BrowserDockScreenshotPayload = {

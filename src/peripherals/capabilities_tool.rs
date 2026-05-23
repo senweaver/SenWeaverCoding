@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware capabilities tool — Phase C: query device for reported GPIO pins.
 
 use super::serial::SerialTransport;
 use crate::tools::traits::{Tool, ToolResult};

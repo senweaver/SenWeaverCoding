@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool-surface extensions: global allow/deny lists, per-tool budgets.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

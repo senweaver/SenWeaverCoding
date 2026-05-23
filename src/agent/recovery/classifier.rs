@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Classify tool / provider errors so the loop can decide whether to
-//! retry transient failures, escalate rate-limit back-off, or surface
-//! permanent problems to the user.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {

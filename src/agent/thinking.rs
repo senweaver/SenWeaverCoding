@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Thinking/Reasoning Level Control
-//!
-//! Allows users to control how deeply the model reasons per message,
-//! trading speed for depth. Levels range from `Off` (fastest, most concise)
-//! to `Max` (deepest reasoning, slowest).
-//!
-//! Users can set the level via:
-//! - Inline directive: `/think:high` at the start of a message
-//! - Agent config: `[agent.thinking]` section with `default_level`
-//!
-//! Resolution hierarchy (highest priority first):
-//! 1. Inline directive (`/think:<level>`)
-//! 2. Session override (reserved for future use)
-//! 3. Agent config (`agent.thinking.default_level`)
-//! 4. Global default (`Medium`)
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

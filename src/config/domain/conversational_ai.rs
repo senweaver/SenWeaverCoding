@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Conversational AI agent builder configuration (`[conversational_ai]`).
-//!
-//! Migrated out of `schema.rs` as part of N6.4.  The feature itself
-//! is reserved for future use; this file captures the schema so
-//! existing config files that opt in don't break on load.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

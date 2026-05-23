@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent Supervisor — lifecycle management, health monitoring, and auto-recovery.
-//!
-//! The supervisor watches over all registered agents and provides:
-//! - **Health monitoring** via periodic heartbeat checks
-//! - **Automatic restart** of failed agents (with backoff)
-//! - **Graceful shutdown** coordination
-//! - **Resource limits** enforcement (max agents, per-capability limits)
-//! - **Load balancing** feedback to the task queue
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Lightweight in-memory checkpoint store used by [`super::Flow`]
-//! implementations that want to support rollback.  The full
-//! `flow_rollback` tool integration lands in D5.4.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

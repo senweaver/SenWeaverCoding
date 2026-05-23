@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Line-based markdown chunker — splits documents into semantic chunks.
-//
-// Splits on markdown headings and paragraph boundaries, respecting
-// a max token limit per chunk. Preserves heading context.
 
 use std::rc::Rc;
 

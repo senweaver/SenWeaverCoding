@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Local search-engine and common-host favicons used by the WebSearch tool
-// view.  The actual files live in `desktop/public/engine-icons/` and are
-// served as static assets — see `desktop/scripts/fetch-engine-icons.mjs`
-// for the one-shot downloader.  Values are paths from the public root.
 
 export const engineIcons = {
   duckduckgo: '/engine-icons/duckduckgo.svg',
@@ -117,7 +112,6 @@ export function engineIdForHost(host: string | null | undefined): EngineId | nul
   const norm = normalizeHost(host)
   if (!norm) return null
   if (HOST_TO_ENGINE_RAW[norm]) return HOST_TO_ENGINE_RAW[norm]
-  // longest-suffix match: foo.bar.baidu.com -> baidu.com
   const parts = norm.split('.')
   for (let i = 1; i < parts.length - 1; i += 1) {
     const suffix = parts.slice(i).join('.')

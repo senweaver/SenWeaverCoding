@@ -345,12 +345,14 @@ impl SlackChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client_with_timeouts(
-            "channel.slack",
-            self.proxy_url.as_deref(),
-            30,
-            10,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client_with_timeouts(
+                "channel.slack",
+                self.proxy_url.as_deref(),
+                30,
+                10,
+            )
     }
 
     pub async fn post_message(&self, channel: &str, text: &str) -> anyhow::Result<String> {
@@ -1421,14 +1423,16 @@ impl SlackChannel {
     }
 
     fn slack_media_http_client_no_redirect(&self) -> anyhow::Result<reqwest::Client> {
-        let builder = crate::config::apply_channel_proxy_to_builder(
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(30))
-                .connect_timeout(Duration::from_secs(10)),
-            "channel.slack",
-            self.proxy_url.as_deref(),
-        );
+        let builder = crate::services::get_services()
+            .proxy_runtime()
+            .apply_channel_to_builder(
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(30))
+                    .connect_timeout(Duration::from_secs(10)),
+                "channel.slack",
+                self.proxy_url.as_deref(),
+            );
         builder
             .build()
             .context("failed to build Slack media no-redirect HTTP client")
@@ -2485,12 +2489,10 @@ impl SlackChannel {
                 }
             };
 
-            let (ws_stream, _) = match crate::config::ws_connect_with_proxy(
-                &ws_url,
-                "channel.slack",
-                self.proxy_url.as_deref(),
-            )
-            .await
+            let (ws_stream, _) = match crate::services::get_services()
+                .proxy_runtime()
+                .ws_connect(&ws_url, "channel.slack", self.proxy_url.as_deref())
+                .await
             {
                 Ok(connection) => {
                     socket_reconnect_attempt = 0;

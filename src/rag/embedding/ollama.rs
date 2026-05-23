@@ -1,21 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Ollama embedding back-end.
-//!
-//! Speaks Ollama's [`/api/embeddings`](https://github.com/ollama/ollama/blob/main/docs/api.md#generate-embeddings)
-//! REST surface.  Ollama handles one document per call, so the
-//! implementation loops through the input batch and aggregates the
-//! responses.  This matches Ollama's official behaviour and lets us
-//! reuse the same trait shape as the OpenAI back-end without
-//! pretending the local server supports batching.
-//!
-//! The embedding URL is derived from the configured endpoint:
-//! - When the endpoint already ends with `/api/embeddings` we use
-//!   it verbatim.
-//! - When the endpoint already contains an `/api/` path we append
-//!   `embeddings`.
-//! - Otherwise we append `/api/embeddings` (the Ollama default).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -42,7 +27,9 @@ impl OllamaCodeEmbedding {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("rag.embedding.ollama")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("rag.embedding.ollama")
     }
 
     fn embeddings_url(&self) -> String {
@@ -72,16 +59,43 @@ impl EmbeddingProvider for OllamaCodeEmbedding {
         }
         let client = self.http_client();
         let mut out = Vec::with_capacity(texts.len());
+        let policy = crate::util::retry::RetryPolicy::embedding();
         for text in texts {
-            let body = OllamaEmbedRequest {
-                model: &self.model,
-                prompt: text,
-            };
-            let resp = client
-                .post(self.embeddings_url())
-                .json(&body)
-                .send()
-                .await?;
+            let model = self.model.clone();
+            let url = self.embeddings_url();
+            let text_owned = (*text).to_string();
+            let client_ref = &client;
+            let resp = crate::util::retry::retry(&policy, |attempt| {
+                let model = model.clone();
+                let url = url.clone();
+                let text_owned = text_owned.clone();
+                async move {
+                    let body = OllamaEmbedRequest {
+                        model: &model,
+                        prompt: &text_owned,
+                    };
+                    let resp = client_ref
+                        .post(&url)
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            anyhow::Error::new(e).context(format!(
+                                "ollama embedding request failed on attempt {attempt}"
+                            ))
+                        })?;
+                    let status = resp.status();
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        let detail = resp.text().await.unwrap_or_default();
+                        anyhow::bail!(
+                            "ollama embedding transient {status} on attempt {attempt}: {}",
+                            detail.chars().take(200).collect::<String>()
+                        );
+                    }
+                    Ok::<reqwest::Response, anyhow::Error>(resp)
+                }
+            })
+            .await?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 let detail = resp.text().await.unwrap_or_default();

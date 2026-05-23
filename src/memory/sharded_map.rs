@@ -1,33 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Striped / sharded concurrent hash map (D1.1).
-//!
-//! A thin wrapper around `[RwLock<HashMap>; SHARDS]` that routes
-//! single-key operations by `DefaultHasher(key) % SHARDS`.  Intended
-//! for contention-heavy, mostly-disjoint keyspaces such as the
-//! multi-agent Blackboard tool-cache and the provider response
-//! cache.
-//!
-//! ## Design
-//!
-//! - 16 shards by default — empirically large enough to hide lock
-//!   contention up to ~32 concurrent writers on desktop CPUs,
-//!   without wasting significant memory for tiny maps.
-//! - `parking_lot::RwLock` for the same reason as the surrounding
-//!   Blackboard code: multi-reader, priority-inversion friendly,
-//!   no poisoning.
-//! - Bulk operations (`iter_values`, `len`, `clear`) acquire each
-//!   shard sequentially; single-key ops (`get`, `insert`, `remove`,
-//!   `compute_if_present`) touch exactly one shard.
-//!
-//! ## Non-goals
-//!
-//! - Cross-shard atomicity.  `compare_and_swap` semantics are
-//!   delegated to the caller (acquire one shard's write lock via
-//!   [`ShardedMap::with_shard_mut`]).
-//! - Ordered iteration.  The shard walk order is deterministic but
-//!   not sorted by key — callers should sort explicitly when needed.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher, RandomState};

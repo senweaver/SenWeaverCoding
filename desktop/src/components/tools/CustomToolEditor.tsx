@@ -116,7 +116,7 @@ export function CustomToolEditor({ initial, isSaving, onSubmit, onCancel }: Prop
   return (
     <div className="space-y-4">
       <header className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {isEdit ? t('settings.tools.editTitle') : t('settings.tools.createTitle')}
         </h3>
       </header>
@@ -156,7 +156,7 @@ export function CustomToolEditor({ initial, isSaving, onSubmit, onCancel }: Prop
           value={draft.description}
           onChange={(e) => setDraft({ ...draft, description: e.target.value })}
           rows={2}
-          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs"
         />
       </Field>
 
@@ -173,7 +173,7 @@ export function CustomToolEditor({ initial, isSaving, onSubmit, onCancel }: Prop
           value={argsText}
           onChange={(e) => setArgsText(e.target.value)}
           rows={3}
-          className="w-full font-mono rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs"
+          className="w-full font-mono rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs"
           placeholder={'apply\n-f\n{file}'}
         />
       </Field>
@@ -189,7 +189,7 @@ export function CustomToolEditor({ initial, isSaving, onSubmit, onCancel }: Prop
           />
         </Field>
         <Field label={t('settings.tools.fieldEnabled')}>
-          <label className="flex items-center gap-2 h-10 px-3">
+          <label className="flex items-center gap-2 h-8 px-2.5">
             <input
               type="checkbox"
               checked={draft.enabled}
@@ -207,7 +207,7 @@ export function CustomToolEditor({ initial, isSaving, onSubmit, onCancel }: Prop
           value={envText}
           onChange={(e) => setEnvText(e.target.value)}
           rows={3}
-          className="w-full font-mono rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs"
+          className="w-full font-mono rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs"
           placeholder={'KEY=value'}
         />
       </Field>
@@ -217,15 +217,15 @@ export function CustomToolEditor({ initial, isSaving, onSubmit, onCancel }: Prop
           value={schemaText}
           onChange={(e) => setSchemaText(e.target.value)}
           rows={8}
-          className="w-full font-mono rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs"
+          className="w-full font-mono rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs"
         />
       </Field>
 
       <div className="flex items-center justify-end gap-2">
-        <Button variant="ghost" onClick={onCancel}>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           {t('common.cancel')}
         </Button>
-        <Button onClick={handleSubmit} disabled={isSaving}>
+        <Button size="sm" onClick={handleSubmit} disabled={isSaving}>
           {isSaving ? t('common.saving') : t('common.save')}
         </Button>
       </div>
@@ -252,7 +252,7 @@ function Field({
       </span>
       {children}
       {hint && (
-        <span className="block text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="block text-xs text-[var(--color-text-tertiary)]">
           {hint}
         </span>
       )}

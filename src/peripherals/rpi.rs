@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Raspberry Pi GPIO peripheral — native rppal access.
-//!
-//! Only compiled when `peripheral-rpi` feature is enabled and target is Linux.
-//! Uses BCM pin numbering (e.g. GPIO 17, 27).
 
 use crate::config::PeripheralBoardConfig;
 use crate::peripherals::Peripheral;

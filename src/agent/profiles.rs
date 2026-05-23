@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent Profiles - named agent configurations for multi-persona workflows.
-//!
-//! Allows creating, loading, and managing named agent profiles with
-//! custom system prompts, tool groups, and model preferences.
-//! Profiles are stored as TOML files in the workspace.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -195,7 +190,10 @@ impl ProfileManager {
         let mut profile: AgentProfile = toml::from_str(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
 
-        let soul_path = path.parent().unwrap().join("SOUL.md");
+        let soul_path = path
+            .parent()
+            .map(|p| p.join("SOUL.md"))
+            .unwrap_or_else(|| std::path::PathBuf::from("SOUL.md"));
         if soul_path.exists() && profile.system_prompt.is_empty() {
             profile.system_prompt = std::fs::read_to_string(&soul_path).unwrap_or_default();
         }

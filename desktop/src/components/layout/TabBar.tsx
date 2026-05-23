@@ -1,6 +1,7 @@
 import { forwardRef, useRef, useState, useEffect, useCallback } from 'react'
 import { useTabStore, type Tab } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
+import { focusSession } from '../../lib/focusSession'
 import { useIsSessionRunning } from '../../stores/sessionRunStateStore'
 import { useQueueLengthForSession } from '../../stores/workspaceQueueStore'
 import { useTranslation } from '../../i18n'
@@ -17,7 +18,6 @@ const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in windo
 export function TabBar() {
   const tabs = useTabStore((s) => s.tabs)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const setActiveTab = useTabStore((s) => s.setActiveTab)
   const closeTab = useTabStore((s) => s.closeTab)
   const disconnectSession = useChatStore((s) => s.disconnectSession)
 
@@ -234,7 +234,7 @@ export function TabBar() {
       suppressClickRef.current = false
       return
     }
-    setActiveTab(sessionId)
+    focusSession(sessionId)
   }
 
   const handleScrollRegionMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -485,6 +485,9 @@ const TabItem = forwardRef<HTMLDivElement, {
       )}
       {tab.type === 'scheduled' && (
         <span className="material-symbols-outlined text-[14px] flex-shrink-0 text-[var(--color-text-tertiary)]">schedule</span>
+      )}
+      {tab.type === 'worker' && (
+        <span className="material-symbols-outlined text-[14px] flex-shrink-0 text-[var(--color-text-tertiary)]" title="worker subagent">smart_toy</span>
       )}
 
       <span

@@ -1,15 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! LLM-driven memory consolidation.
-//!
-//! After each conversation turn, extracts structured information:
-//! - `history_entry`: A timestamped summary for the daily conversation log.
-//! - `memory_update`: New facts, preferences, or decisions worth remembering
-//!   long-term (or `null` if nothing new was learned).
-//!
-//! This two-phase approach replaces the naive raw-message auto-save with
-//! semantic extraction, similar to Nanobot's `save_memory` tool call pattern.
 
 use crate::memory::conflict;
 use crate::memory::importance;
@@ -40,7 +31,8 @@ Do not include any text outside the JSON object."#;
 fn strip_media_markers(text: &str) -> String {
 
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"\[(?:IMAGE|DOCUMENT|FILE|VIDEO|VOICE|AUDIO):[^\]]*\]").unwrap()
+        regex::Regex::new(r"\[(?:IMAGE|DOCUMENT|FILE|VIDEO|VOICE|AUDIO):[^\]]*\]")
+            .expect("media marker strip regex must compile")
     });
     RE.replace_all(text, "[media attachment]").into_owned()
 }

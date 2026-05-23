@@ -19,6 +19,7 @@ import { isWebSearchTool } from '../../../utils/toolFormatters'
 import { MemoryRecallHeader, MemoryRecallDetail } from './MemoryRecallView'
 import { PlanHeader, PlanDetail } from './PlanToolView'
 import { TaskHeader, TaskDetail } from './TaskToolView'
+import { SpawnWorkersHeader, SpawnWorkersDetail } from './SpawnWorkersToolView'
 import { TodoListHeader, TodoListDetail } from './TodoListToolView'
 import { GenericHeader, GenericDetail } from './GenericToolView'
 import { GitHeader, GitDetail } from './GitToolView'
@@ -130,14 +131,24 @@ export function ToolCard({
 }: Props) {
   const t = useTranslation()
   const category = getToolCategory(toolName)
-  const renderer = RENDERERS[category]
-  const icon = getCategoryIcon(category)
-  const verb = t(VERB_KEYS[category])
+  const isSpawnWorkers = toolName === 'spawn_workers'
+  const renderer: Renderer = isSpawnWorkers
+    ? {
+        Header: SpawnWorkersHeader,
+        Detail: SpawnWorkersDetail,
+        alwaysExpandable: true,
+      }
+    : RENDERERS[category]
+  const icon = isSpawnWorkers ? 'smart_toy' : getCategoryIcon(category)
+  const verb = isSpawnWorkers
+    ? t('chat.workers.spawnVerb') || 'spawned'
+    : t(VERB_KEYS[category])
   const codingMode = useSettingsStore((s) => s.codingMode)
   const modeBadge = compact ? null : getModeBadge(codingMode)
   const expandable =
     renderer.alwaysExpandable === true ||
     Boolean(result && hasMeaningfulOutput(result.content))
+  const hideVerb = category === 'web'
 
   const categoryDefaultExpanded = category === 'edit'
   const initialExpanded = defaultExpanded ?? categoryDefaultExpanded
@@ -193,9 +204,11 @@ export function ToolCard({
       <span className="material-symbols-outlined shrink-0 text-[14px] text-[var(--color-outline)]">
         {icon}
       </span>
-      <span className="shrink-0 text-[11px] font-semibold text-[var(--color-text-secondary)]">
-        {verb}
-      </span>
+      {!hideVerb && (
+        <span className="shrink-0 text-[11px] font-semibold text-[var(--color-text-secondary)]">
+          {verb}
+        </span>
+      )}
       {modeBadge && (
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${modeBadge.className}`}>
           {modeBadge.label}

@@ -55,6 +55,16 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
 
     let _event_bus = crate::event_bus::integration::init_global_bus();
     let _multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
+
+    {
+        let workspace_root = if config.workspace_dir.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            config.workspace_dir.clone()
+        };
+        crate::workers::init_global_supervisor(workspace_root.clone());
+        crate::workers::scan_and_recover_at(&workspace_root);
+    }
     crate::event_bus::integration::publish_system(
         "daemon",
         crate::event_bus::types::SystemCategory::Startup,

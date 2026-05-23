@@ -1,12 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
-import { createPortal } from 'react-dom'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
-import { useDockSuspend } from '../../hooks/useDockSuspend'
 import type { CodingModeId } from '../../types/codingMode'
-import { isVisibleCodingMode } from '../../types/codingMode'
+import { isVisibleCodingMode, CODING_MODE_ACCENT } from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
 
 type Props = {
@@ -19,6 +17,7 @@ const FALLBACK_MODES: { id: CodingModeId; label: string; descriptionKey: Transla
   { id: 'agent', label: 'Agent', descriptionKey: 'codingMode.agent.description' },
   { id: 'spec', label: 'Spec', descriptionKey: 'codingMode.spec.description' },
   { id: 'plan', label: 'Plan', descriptionKey: 'codingMode.plan.description' },
+  { id: 'curator', label: 'Curator', descriptionKey: 'codingMode.curator.description' },
   { id: 'ask', label: 'Ask', descriptionKey: 'codingMode.ask.description' },
   { id: 'debug', label: 'Debug', descriptionKey: 'codingMode.debug.description' },
   { id: 'harness', label: 'Harness', descriptionKey: 'codingMode.harness.description' },
@@ -37,7 +36,9 @@ const MODE_BADGE_GLYPH: Record<CodingModeId, string> = {
   context: 'data_object',
   mvai: 'hub',
   harness: 'precision_manufacturing',
+  curator: 'auto_stories',
 }
+
 
 const FALLBACK_READONLY_MODES = new Set<CodingModeId>(['ask'])
 
@@ -51,8 +52,6 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const [open, setOpen] = useState(false)
-  const [pendingAutonomous, setPendingAutonomous] = useState<CodingModeId | null>(null)
-  useDockSuspend(pendingAutonomous !== null)
   const ref = useRef<HTMLDivElement>(null)
 
   const isControlled = value !== undefined
@@ -111,29 +110,24 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   }
 
   function handleSelect(modeId: CodingModeId) {
-    const targetItem = items.find((i) => i.id === modeId)
-    const isAutonomousTarget = targetItem
-      ? targetItem.isAutonomous
-      : FALLBACK_AUTONOMOUS_MODES.has(modeId)
-    if (isAutonomousTarget && modeId !== currentMode) {
-      setOpen(false)
-      setPendingAutonomous(modeId)
-      return
-    }
     applyMode(modeId)
     setOpen(false)
   }
 
-  const isPlan = currentMode === 'plan'
-  const triggerClass = isPlan
-    ? 'flex items-center gap-1 rounded-full bg-[var(--color-plan-accent-container)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-on-plan-accent-container)] transition-colors hover:brightness-95'
+  const accentTokens = CODING_MODE_ACCENT[currentMode]
+  const triggerClass = accentTokens
+    ? 'flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors hover:brightness-95'
     : 'flex items-center gap-1 rounded-full bg-[var(--color-surface-container-low)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]'
+  const triggerStyle = accentTokens
+    ? { backgroundColor: accentTokens.container, color: accentTokens.onContainer }
+    : undefined
 
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(!open)}
         className={triggerClass}
+        style={triggerStyle}
         title={t('codingMode.selectorTitle')}
       >
         <span className="material-symbols-outlined text-[12px]">
@@ -151,6 +145,14 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
           {items.map((item) => {
             const readOnly = item.isReadOnly
             const autonomous = item.isAutonomous
+            const itemAccent = CODING_MODE_ACCENT[item.id]
+            const iconColorClass = itemAccent
+              ? ''
+              : autonomous
+                ? 'text-[var(--color-error)]'
+                : readOnly
+                  ? 'text-[var(--color-text-tertiary)]'
+                  : 'text-[var(--color-text-secondary)]'
             return (
               <button
                 key={item.id}
@@ -162,13 +164,8 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
                 `}
               >
                 <span
-                  className={`material-symbols-outlined text-[18px] mt-0.5 shrink-0 ${
-                    autonomous
-                      ? 'text-[var(--color-error)]'
-                      : readOnly
-                      ? 'text-[var(--color-text-tertiary)]'
-                      : 'text-[var(--color-text-secondary)]'
-                  }`}
+                  className={`material-symbols-outlined text-[18px] mt-0.5 shrink-0 ${iconColorClass}`}
+                  style={itemAccent ? { color: itemAccent.accent } : undefined}
                 >
                   {MODE_BADGE_GLYPH[item.id] ?? 'tune'}
                 </span>
@@ -209,55 +206,6 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
         </div>
       )}
 
-      {pendingAutonomous &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 pl-[var(--sidebar-width)]"
-            onClick={() => setPendingAutonomous(null)}
-          >
-            <div
-              className="w-[420px] rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] overflow-hidden"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center gap-3 px-5 py-4 bg-[var(--color-error)]/8 border-b border-[var(--color-error)]/15">
-                <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--color-error)]/12">
-                  <span className="material-symbols-outlined text-[22px] text-[var(--color-error)]">
-                    warning
-                  </span>
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-[var(--color-text-primary)]">
-                    {t('codingMode.confirmAutonomousTitle')}
-                  </div>
-                  <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-                    {t('codingMode.confirmAutonomousSubtitle')}
-                  </div>
-                </div>
-              </div>
-              <div className="px-5 py-4 text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                {t('codingMode.confirmAutonomousBody')}
-              </div>
-              <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-                <button
-                  onClick={() => setPendingAutonomous(null)}
-                  className="px-4 py-2 text-xs font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] rounded-lg transition-colors"
-                >
-                  {t('common.cancel')}
-                </button>
-                <button
-                  onClick={() => {
-                    if (pendingAutonomous) applyMode(pendingAutonomous)
-                    setPendingAutonomous(null)
-                  }}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-[var(--color-error)] hover:opacity-90 rounded-lg transition-colors"
-                >
-                  {t('codingMode.confirmAutonomousBtn')}
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
     </div>
   )
 }

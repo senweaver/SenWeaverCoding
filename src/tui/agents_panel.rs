@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TUI panel for visualizing the multi-agent runtime state.
-//!
-//! Renders a live view of registered agents, task queue counters, and a
-//! peek at the latest blackboard entries.  Pulls data from the global
-//! `MultiAgentRuntime` singleton on each render.
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};

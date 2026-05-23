@@ -1,25 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Plugin manifest loader — scans `~/.senweavercoding/tools/` at startup.
-//!
-//! Layout expected on disk:
-//! ```text
-//! ~/.senweavercoding/tools/
-//! ├── i2c_scan/
-//! │   ├── tool.toml
-//! │   └── i2c_scan.py
-//! └── pwm_set/
-//!     ├── tool.toml
-//!     └── pwm_set
-//! ```
-//!
-//! Rules:
-//! - The directory is **created** if it does not exist.
-//! - Each subdirectory is scanned for a `tool.toml`.
-//! - Manifests that fail to parse or validate are **skipped with a warning**;
-//!   they must not crash startup.
-//! - Non-directory entries at the top level are silently ignored.
 
 use super::manifest::ToolManifest;
 use super::subprocess::SubprocessTool;

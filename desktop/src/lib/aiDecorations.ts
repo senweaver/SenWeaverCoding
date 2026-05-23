@@ -1,24 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
-//
-// Computes per-line diffs between an editor's pre-AI snapshot and the
-// post-AI content, then paints them as Monaco line decorations that
-// fade out after a short window so the user sees exactly which lines
-// the model touched without losing the view to a giant diff modal.
-//
-// Wiring is one-way:
-//
-//   workspaceFilesStore.aiModifiedAt[relPath] tick
-//          ↓ (MonacoFileEditor effect)
-//   applyAiDecorations({ prev, current })
-//          ↓
-//   editor.deltaDecorations([], [...]) → CSS class fades opacity
-//          ↓ setTimeout(5_000)
-//   editor.deltaDecorations(prevIds, [])
-//
-// Phase 5 fills in the diff body — Phase 4 just needs the shape so
-// MonacoFileEditor compiles.  The signature is intentionally stable
-// across phases so swapping the implementation is a no-op for callers.
 
 import { diffLines } from 'diff'
 import type * as MonacoNs from 'monaco-editor'

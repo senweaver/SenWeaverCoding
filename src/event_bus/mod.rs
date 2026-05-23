@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Event Bus - central pub/sub system for agent lifecycle and inter-agent events.
-//!
-//! This module provides a `tokio::sync::broadcast`-based event bus with:
-//! - Global broadcast channel for system-wide events
-//! - Per-agent channels for targeted messaging
-//! - Bounded event history for replay
-//! - Integration with the hooks system
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,29 +30,32 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     }
     let pattern_chars: Vec<char> = pattern.chars().collect();
     let value_chars: Vec<char> = value.chars().collect();
-    glob_match(&pattern_chars, &value_chars, 0, 0)
+    glob_match_dp(&pattern_chars, &value_chars)
 }
 
-fn glob_match(pattern: &[char], value: &[char], pi: usize, vi: usize) -> bool {
-    if pi == pattern.len() {
-        return vi == value.len();
-    }
-    if pattern[pi] == '*' {
-
-        for skip in 0..=(value.len() - vi) {
-            if glob_match(pattern, value, pi + 1, vi + skip) {
-                return true;
+fn glob_match_dp(pattern: &[char], value: &[char]) -> bool {
+    let plen = pattern.len();
+    let vlen = value.len();
+    let mut prev = vec![false; vlen + 1];
+    let mut curr = vec![false; vlen + 1];
+    prev[0] = true;
+    for pi in 1..=plen {
+        if pattern[pi - 1] == '*' {
+            curr[0] = prev[0];
+            for vi in 1..=vlen {
+                curr[vi] = prev[vi] || curr[vi - 1];
+            }
+        } else {
+            curr[0] = false;
+            for vi in 1..=vlen {
+                curr[vi] = prev[vi - 1]
+                    && (pattern[pi - 1] == '?' || pattern[pi - 1] == value[vi - 1]);
             }
         }
-        return false;
+        std::mem::swap(&mut prev, &mut curr);
+        curr.iter_mut().for_each(|v| *v = false);
     }
-    if vi >= value.len() {
-        return false;
-    }
-    if pattern[pi] == '?' || pattern[pi] == value[vi] {
-        return glob_match(pattern, value, pi + 1, vi + 1);
-    }
-    false
+    prev[vlen]
 }
 
 #[derive(Debug)]
@@ -215,11 +211,8 @@ impl EventBus {
     }
 
     pub fn get_event(&self, event_id: EventId) -> Option<Event> {
-        self.history
-            .read()
-            .all()
-            .into_iter()
-            .find(|e| e.id == event_id)
+        let history = self.history.read();
+        history.find_by_id(event_id)
     }
 }
 

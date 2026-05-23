@@ -1,26 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Token-saver observability counters.
-//!
-//! Surfaces the cumulative impact of the rtk-style in-process compactor
-//! (see `crate::token_saver`) as Prometheus-compatible counters so
-//! dashboards can plot how much LLM context budget the saver reclaims
-//! over time without round-tripping through the SQLite tracking db.
-//!
-//! | Metric                                        | Type    |
-//! |-----------------------------------------------|---------|
-//! | `sen_token_saver_invocations_total`           | counter |
-//! | `sen_token_saver_passthrough_total`           | counter |
-//! | `sen_token_saver_failures_tee_total`          | counter |
-//! | `sen_token_saver_raw_bytes_total`             | counter |
-//! | `sen_token_saver_compacted_bytes_total`       | counter |
-//! | `sen_token_saver_tokens_saved_total`          | counter |
-//!
-//! Bump-only counters: every call to
-//! [`crate::token_saver::compact_command_output`] increments
-//! `invocations`, accumulates `raw_bytes` / `compacted_bytes` /
-//! `tokens_saved`, and bumps `failures_tee` when a tee log was written.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};

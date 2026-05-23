@@ -470,7 +470,9 @@ impl TelegramChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client("channel.telegram", self.proxy_url.as_deref())
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client("channel.telegram", self.proxy_url.as_deref())
     }
 
     fn normalize_identity(value: &str) -> String {
@@ -580,7 +582,9 @@ impl TelegramChannel {
         }
 
         let url = format!("{api_base}/bot{bot_token}/sendVoice");
-        let client = crate::config::build_runtime_proxy_client("channel.telegram");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.telegram");
 
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", chat_id.to_string())

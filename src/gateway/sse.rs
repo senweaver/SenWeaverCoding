@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Server-Sent Events (SSE) stream for real-time event delivery.
-//!
-//! Wraps the broadcast channel in AppState to deliver events to web dashboard clients.
 
 use super::AppState;
 use axum::{

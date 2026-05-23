@@ -1,15 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Gateway pairing mode — first-connect authentication.
-//
-// On startup the gateway generates a one-time pairing code printed to the
-// terminal. The first client must present this code via `X-Pairing-Code`
-// header on a `POST /pair` request. The server responds with a bearer token
-// that must be sent on all subsequent requests via `Authorization: Bearer <token>`.
-//
-// Already-paired tokens are persisted in config so restarts don't require
-// re-pairing.
 
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};

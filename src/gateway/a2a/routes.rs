@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! A2A Protocol Routes  - Axum handlers for inbound A2A requests.
-//!
-//! These handlers implement the A2A protocol endpoints for receiving
-//! tasks from other agents and responding to discovery requests.
 
 use crate::runtime::task_manager::spawn_supervised;
 use axum::{

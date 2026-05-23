@@ -151,8 +151,6 @@ SenWeaverCoding/
 │   │                        #   library, no sidecar process
 │   └── package.json
 │
-├── crates/                  # Workspace sub-crates (sen-core / sen-cli /
-│                            #   sen-tui / sen-channels)
 ├── tool_descriptions/       # Machine-readable tool manifests
 ├── benches/                 # Criterion benchmarks
 └── .github/workflows/       # CI / release pipelines

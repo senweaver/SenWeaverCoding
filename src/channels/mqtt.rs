@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! MQTT → SOP event fan-in listener.
-//!
-//! This is NOT a `Channel` trait implementor — it routes MQTT messages
-//! to the SOP engine via `dispatch_sop_event`, not to the chat loop.
 
 use parking_lot::Mutex;
 use std::sync::Arc;

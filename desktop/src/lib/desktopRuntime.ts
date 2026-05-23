@@ -258,7 +258,6 @@ export async function initializeDesktopServerUrl(options?: {
         }
       }
     } catch {
-      /* ignore */
     }
   }
 

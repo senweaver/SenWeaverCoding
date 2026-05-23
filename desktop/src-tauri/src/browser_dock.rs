@@ -1,55 +1,3 @@
-// SPDX-License-Identifier: MIT
-//
-//! Embedded Browser dock — a child Tauri webview that the React shell
-//! parents to a placeholder div directly above the chat composer, *and*
-//! the surface the agent's `browser` tool drives in real time.
-//!
-//! Architecture
-//! ============
-//!
-//! Tauri 2's multi-webview API ([`Webview`] inside an existing
-//! [`WebviewWindow`]) lets us add a second wry/WebView2/WebKitGTK surface
-//! to the same OS window as the React shell. The React side keeps a
-//! [`ResizeObserver`] over a placeholder `<div>`; on every layout change
-//! it sends the new physical rect to [`browser_dock_set_rect`] which calls
-//! `Webview::set_position` + `set_size`.
-//!
-//! IPC
-//! ===
-//!
-//! Cross-origin web pages can't access `window.__TAURI_INTERNALS__`, so
-//! the injected [`BRIDGE_JS`] communicates back to Rust via the
-//! `senbridge://` custom scheme. Every event navigates a hidden anchor
-//! to `senbridge://event?kind=…&data=…`; [`WebviewBuilder::on_navigation`]
-//! intercepts the URL, parses the fragment and dispatches an
-//! `browser_dock_event` Tauri event up to the main webview where the
-//! `browserPanelStore` consumes it.
-//!
-//! Agent driver
-//! ============
-//!
-//! [`TauriDockController`] implements
-//! [`senweavercoding::tools::browser::DockController`] and is
-//! registered through `install_dock_controller` inside the Tauri
-//! `setup` hook so the agent's `BrowserTool` can drive the visible
-//! dock directly through its `tauri_dock` backend (preferred under
-//! `auto`).
-//!
-//! Each [`DockController::exec`] call:
-//! 1. Awaits a per-controller `tokio::Mutex` so concurrent subagents
-//!    serialise on the singleton dock.
-//! 2. Generates a fresh `reqId`, registers a `oneshot::Sender` in the
-//!    pending map, then evals
-//!    `window.__senDockBridge.exec({reqId, kind, args})` in the dock
-//!    webview.
-//! 3. The injected JS performs the action against the page's main
-//!    world (no dynamic `eval` — every kind is a static handler) and
-//!    posts back a `result` event containing the same `reqId`. The
-//!    `senbridge://event?kind=result&...` arm of [`dispatch_bridge_event`]
-//!    routes that envelope to the oneshot.
-//! 4. Failures, timeouts and navigations all drain the pending
-//!    senders so the agent never deadlocks waiting for a page that
-//!    moved on.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,8 +8,8 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use senweavercoding::tools::browser::{
-    clear_test_target_tab, current_test_target_tab, set_test_target_tab, DockController,
-    DockRequest, DockResponse, DockTabInfo,
+    clear_test_target_for_tab, clear_test_target_tab, current_test_target_tab,
+    set_test_target_tab, DockController, DockRequest, DockResponse, DockTabInfo,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -1190,6 +1138,66 @@ struct TabsState {
     dock_visible: bool,
     last_state_url: HashMap<TabId, String>,
     agent_tab_id: Option<TabId>,
+    agent_tabs_by_session: HashMap<String, Vec<TabId>>,
+    tab_session: HashMap<TabId, String>,
+    session_active_tab: HashMap<String, TabId>,
+    foreground_session_id: Option<String>,
+}
+
+const GW_DOCK_SESSION_PREFIX: &str = "gw_";
+
+fn canonical_dock_session_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
+        .strip_prefix(GW_DOCK_SESSION_PREFIX)
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn canonical_dock_session_id_opt(opt: Option<&str>) -> Option<String> {
+    opt.map(canonical_dock_session_id)
+        .filter(|s| !s.is_empty())
+}
+
+fn session_ids_equivalent(a: &str, b: &str) -> bool {
+    canonical_dock_session_id(a) == canonical_dock_session_id(b)
+}
+
+fn reconcile_legacy_session_keys(g: &mut TabsState) {
+    for sid in g.tab_session.values_mut() {
+        let canon = canonical_dock_session_id(sid);
+        if canon != *sid {
+            *sid = canon;
+        }
+    }
+    if let Some(ref fg) = g.foreground_session_id.clone() {
+        g.foreground_session_id = Some(canonical_dock_session_id(fg));
+    }
+    let remembered: Vec<_> = g.session_active_tab.drain().collect();
+    for (sid, tab) in remembered {
+        let canon = canonical_dock_session_id(&sid);
+        g.session_active_tab
+            .entry(canon)
+            .and_modify(|existing| {
+                if g.tabs.contains_key(&tab) && !g.tabs.contains_key(existing) {
+                    *existing = tab;
+                }
+            })
+            .or_insert(tab);
+    }
+    let buckets: Vec<_> = g.agent_tabs_by_session.drain().collect();
+    for (sid, bucket) in buckets {
+        let canon = canonical_dock_session_id(&sid);
+        let entry = g.agent_tabs_by_session.entry(canon).or_default();
+        for tab in bucket {
+            if !entry.contains(&tab) {
+                entry.push(tab);
+            }
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -1202,6 +1210,8 @@ pub struct TabSummary {
     pub title: Option<String>,
     pub active: bool,
     pub owner: TabOwner,
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
 }
 
 impl DockSharedState {
@@ -1236,6 +1246,16 @@ impl DockSharedState {
         self.0.lock().dock_visible = visible;
     }
 
+    fn foreground_session_id(&self) -> Option<String> {
+        self.0.lock().foreground_session_id.clone()
+    }
+
+    fn set_foreground_session_id(&self, session_id: Option<String>) {
+        let mut g = self.0.lock();
+        reconcile_legacy_session_keys(&mut g);
+        g.foreground_session_id = canonical_dock_session_id_opt(session_id.as_deref());
+    }
+
     fn record_state_url(&self, id: TabId, url: impl Into<String>) {
         self.0.lock().last_state_url.insert(id, url.into());
     }
@@ -1254,8 +1274,26 @@ impl DockSharedState {
         g.next_id
     }
 
+    fn tab_session_of(&self, id: TabId) -> Option<String> {
+        self.0.lock().tab_session.get(&id).cloned()
+    }
+
     fn register_tab(&self, id: TabId, url: Option<String>, owner: TabOwner) {
+        let session_id = current_session_id();
+        self.register_tab_for_session(id, url, owner, session_id.as_deref());
+    }
+
+    fn register_tab_for_session(
+        &self,
+        id: TabId,
+        url: Option<String>,
+        owner: TabOwner,
+        explicit_session: Option<&str>,
+    ) {
+        let session_id = canonical_dock_session_id_opt(explicit_session)
+            .or_else(|| canonical_dock_session_id_opt(current_session_id().as_deref()));
         let mut g = self.0.lock();
+        reconcile_legacy_session_keys(&mut g);
         g.tabs.insert(
             id,
             TabRecord {
@@ -1270,33 +1308,63 @@ impl DockSharedState {
         if g.active.is_none() {
             g.active = Some(id);
         }
-        if matches!(owner, TabOwner::Agent) && g.agent_tab_id.is_none() {
-            g.agent_tab_id = Some(id);
+        if matches!(owner, TabOwner::Agent) {
+            if g.agent_tab_id.is_none() {
+                g.agent_tab_id = Some(id);
+            }
+            if let Some(sid) = session_id {
+                let bucket = g.agent_tabs_by_session.entry(sid.clone()).or_default();
+                if !bucket.contains(&id) {
+                    bucket.push(id);
+                }
+                g.tab_session.insert(id, sid);
+            }
+        } else if let Some(sid) = session_id {
+            g.tab_session.insert(id, sid.clone());
+            let bucket = g.agent_tabs_by_session.entry(sid).or_default();
+            if !bucket.contains(&id) {
+                bucket.push(id);
+            }
         }
     }
 
-    fn acquire_or_create_user_tab(&self, url: Option<String>) -> (TabId, bool) {
+    fn acquire_or_create_user_tab(
+        &self,
+        url: Option<String>,
+        session_id: Option<&str>,
+    ) -> (TabId, bool) {
+        let session_normalized = canonical_dock_session_id_opt(session_id);
         let mut g = self.0.lock();
-        if let Some(active) = g.active {
+        reconcile_legacy_session_keys(&mut g);
+        if let Some(ref sid) = session_normalized {
+            let owned_user = g
+                .order
+                .iter()
+                .rev()
+                .find(|tid| {
+                    let owner_match = g
+                        .tabs
+                        .get(tid)
+                        .is_some_and(|rec| matches!(rec.owner, TabOwner::User));
+                    let session_match = g
+                        .tab_session
+                        .get(tid)
+                        .is_some_and(|s| session_ids_equivalent(s, sid));
+                    owner_match && session_match
+                })
+                .copied();
+            if let Some(uid) = owned_user {
+                g.active = Some(uid);
+                return (uid, false);
+            }
+        } else if let Some(active) = g.active {
             if let Some(rec) = g.tabs.get(&active) {
-                if matches!(rec.owner, TabOwner::User) {
+                if matches!(rec.owner, TabOwner::User)
+                    && !g.tab_session.contains_key(&active)
+                {
                     return (active, false);
                 }
             }
-        }
-        let existing_user = g
-            .order
-            .iter()
-            .rev()
-            .find(|tid| {
-                g.tabs
-                    .get(tid)
-                    .is_some_and(|rec| matches!(rec.owner, TabOwner::User))
-            })
-            .copied();
-        if let Some(uid) = existing_user {
-            g.active = Some(uid);
-            return (uid, false);
         }
         g.next_id = g.next_id.checked_add(1).unwrap_or(1);
         let id = g.next_id;
@@ -1312,10 +1380,21 @@ impl DockSharedState {
             g.order.push(id);
         }
         g.active = Some(id);
+        if let Some(sid) = session_normalized {
+            g.tab_session.insert(id, sid.clone());
+            let bucket = g.agent_tabs_by_session.entry(sid).or_default();
+            if !bucket.contains(&id) {
+                bucket.push(id);
+            }
+        }
         (id, true)
     }
 
     fn acquire_or_create_agent_tab(&self, url: Option<String>) -> (TabId, bool) {
+        let session_id = current_session_id();
+        if let Some(ref sid) = session_id {
+            return self.acquire_or_create_agent_tab_for_session(sid, url);
+        }
         let mut g = self.0.lock();
         if let Some(existing) = g.agent_tab_id {
             if g.tabs.contains_key(&existing) {
@@ -1348,8 +1427,209 @@ impl DockSharedState {
         (id, true)
     }
 
+    fn acquire_or_create_agent_tab_for_session(
+        &self,
+        session_id: &str,
+        url: Option<String>,
+    ) -> (TabId, bool) {
+        let session_id = canonical_dock_session_id(session_id);
+        if session_id.is_empty() {
+            return self.acquire_or_create_agent_tab(url);
+        }
+        let mut g = self.0.lock();
+        reconcile_legacy_session_keys(&mut g);
+        if let Some(bucket) = g.agent_tabs_by_session.get(&session_id) {
+            if let Some(existing) = bucket
+                .iter()
+                .rev()
+                .find(|tid| g.tabs.contains_key(tid))
+                .copied()
+            {
+                if let Some(target) = url {
+                    if let Some(rec) = g.tabs.get_mut(&existing) {
+                        rec.last_url = Some(target);
+                    }
+                }
+                if g.agent_tab_id.is_none() {
+                    g.agent_tab_id = Some(existing);
+                }
+                return (existing, false);
+            }
+            g.agent_tabs_by_session.remove(&session_id);
+        }
+        g.next_id = g.next_id.checked_add(1).unwrap_or(1);
+        let id = g.next_id;
+        g.tabs.insert(
+            id,
+            TabRecord {
+                last_url: url,
+                last_title: None,
+                owner: TabOwner::Agent,
+            },
+        );
+        if !g.order.contains(&id) {
+            g.order.push(id);
+        }
+        if g.agent_tab_id.is_none() {
+            g.agent_tab_id = Some(id);
+        }
+        g.agent_tabs_by_session
+            .entry(session_id.clone())
+            .or_default()
+            .push(id);
+        g.tab_session.insert(id, session_id);
+        if g.active.is_none() {
+            g.active = Some(id);
+        }
+        (id, true)
+    }
+
     fn agent_tab_id(&self) -> Option<TabId> {
         self.0.lock().agent_tab_id
+    }
+
+    fn agent_tab_id_for_session(&self, session_id: &str) -> Option<TabId> {
+        let session_id = canonical_dock_session_id(session_id);
+        if session_id.is_empty() {
+            return None;
+        }
+        let g = self.0.lock();
+        g.agent_tabs_by_session
+            .get(&session_id)
+            .and_then(|bucket| {
+                bucket
+                    .iter()
+                    .rev()
+                    .find(|tid| g.tabs.contains_key(tid))
+                    .copied()
+            })
+    }
+
+    fn bind_user_tab_to_session(
+        &self,
+        session_id: &str,
+        tab_id: TabId,
+    ) -> Result<(), String> {
+        let session_id = canonical_dock_session_id(session_id);
+        if session_id.is_empty() {
+            return Err("session_id is required".to_string());
+        }
+        {
+            let mut g = self.0.lock();
+            reconcile_legacy_session_keys(&mut g);
+            if !g.tabs.contains_key(&tab_id) {
+                return Err(format!("unknown tab id {tab_id}"));
+            }
+            if let Some(prev) = g.tab_session.get(&tab_id).cloned() {
+                if !session_ids_equivalent(&prev, &session_id) {
+                    return Err(format!(
+                        "tab {tab_id} belongs to session {prev}, cannot bind to {session_id}"
+                    ));
+                }
+            } else {
+                g.tab_session.insert(tab_id, session_id.clone());
+            }
+            let bucket = g
+                .agent_tabs_by_session
+                .entry(session_id.to_string())
+                .or_default();
+            bucket.retain(|t| *t != tab_id);
+            bucket.push(tab_id);
+            if g.agent_tab_id.is_none() {
+                g.agent_tab_id = Some(tab_id);
+            }
+        }
+        set_test_target_tab(&session_id, tab_id);
+        Ok(())
+    }
+
+    fn unbind_tab_from_session(
+        &self,
+        session_id: &str,
+        tab_id: TabId,
+    ) -> Result<(), String> {
+        let session_id = canonical_dock_session_id(session_id);
+        if session_id.is_empty() {
+            return Err("session_id is required".to_string());
+        }
+        {
+            let mut g = self.0.lock();
+            reconcile_legacy_session_keys(&mut g);
+            if let Some(bucket) = g.agent_tabs_by_session.get_mut(&session_id) {
+                bucket.retain(|t| *t != tab_id);
+                if bucket.is_empty() {
+                    g.agent_tabs_by_session.remove(&session_id);
+                }
+            }
+            if g.tab_session.get(&tab_id).is_some_and(|s| session_ids_equivalent(s, &session_id)) {
+                g.tab_session.remove(&tab_id);
+            }
+            if g.agent_tab_id == Some(tab_id) {
+                let next_agent = g
+                    .agent_tabs_by_session
+                    .values()
+                    .flat_map(|bucket| bucket.iter().rev())
+                    .find(|tid| g.tabs.contains_key(tid))
+                    .copied();
+                g.agent_tab_id = next_agent;
+            }
+        }
+        if current_test_target_tab(&session_id) == Some(tab_id) {
+            clear_test_target_tab(&session_id);
+        }
+        Ok(())
+    }
+
+    fn release_agent_tabs_for_session(&self, session_id: &str) -> Vec<TabId> {
+        let session_id = canonical_dock_session_id(session_id);
+        if session_id.is_empty() {
+            return Vec::new();
+        }
+        let released = {
+            let mut g = self.0.lock();
+            reconcile_legacy_session_keys(&mut g);
+            let mut released = Vec::new();
+            if let Some(bucket) = g.agent_tabs_by_session.remove(&session_id) {
+                for tab_id in bucket {
+                    if !released.contains(&tab_id) {
+                        released.push(tab_id);
+                    }
+                }
+            }
+            let extras: Vec<TabId> = g
+                .tab_session
+                .iter()
+                .filter_map(|(tab, sid)| {
+                    if session_ids_equivalent(sid, &session_id) {
+                        Some(*tab)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for tab_id in extras {
+                if !released.contains(&tab_id) {
+                    released.push(tab_id);
+                }
+            }
+            for tab_id in &released {
+                g.tab_session.remove(tab_id);
+                if g.agent_tab_id == Some(*tab_id) {
+                    let next_agent = g
+                        .agent_tabs_by_session
+                        .values()
+                        .flat_map(|bucket| bucket.iter().rev())
+                        .find(|tid| g.tabs.contains_key(tid))
+                        .copied();
+                    g.agent_tab_id = next_agent;
+                }
+            }
+            released
+        };
+        for tab_id in &released {
+            clear_test_target_for_tab(*tab_id);
+        }
+        released
     }
 
     fn tab_owner(&self, id: TabId) -> Option<TabOwner> {
@@ -1366,6 +1646,22 @@ impl DockSharedState {
         }
         if g.agent_tab_id == Some(id) {
             g.agent_tab_id = None;
+        }
+        if let Some(sid) = g.tab_session.remove(&id) {
+            if let Some(bucket) = g.agent_tabs_by_session.get_mut(&sid) {
+                bucket.retain(|t| *t != id);
+                if bucket.is_empty() {
+                    g.agent_tabs_by_session.remove(&sid);
+                }
+            }
+        }
+        if g.agent_tab_id.is_none() {
+            g.agent_tab_id = g
+                .agent_tabs_by_session
+                .values()
+                .flat_map(|bucket| bucket.iter().rev())
+                .find(|tid| g.tabs.contains_key(tid))
+                .copied();
         }
         g.active
     }
@@ -1395,9 +1691,56 @@ impl DockSharedState {
                     title: t.last_title.clone(),
                     active: active == Some(*id),
                     owner: t.owner,
+                    session_id: g.tab_session.get(id).cloned(),
                 })
             })
             .collect()
+    }
+
+    fn active_session_id(&self) -> Option<String> {
+        let g = self.0.lock();
+        g.active.and_then(|id| g.tab_session.get(&id).cloned())
+    }
+
+    fn present_session_internal(&self, session_id: &str) -> Option<TabId> {
+        let session_id = canonical_dock_session_id(session_id);
+        if session_id.is_empty() {
+            return None;
+        }
+        let mut g = self.0.lock();
+        reconcile_legacy_session_keys(&mut g);
+        if let Some(active) = g.active {
+            if let Some(prev_session) = g.tab_session.get(&active).cloned() {
+                if !prev_session.is_empty() {
+                    g.session_active_tab
+                        .insert(canonical_dock_session_id(&prev_session), active);
+                }
+            }
+        }
+        if let Some(&remembered) = g.session_active_tab.get(&session_id) {
+            if g.tabs.contains_key(&remembered) {
+                return Some(remembered);
+            }
+        }
+        if let Some(bucket) = g.agent_tabs_by_session.get(&session_id) {
+            let candidate = bucket
+                .iter()
+                .rev()
+                .find(|tid| g.tabs.contains_key(tid))
+                .copied();
+            if let Some(tab_id) = candidate {
+                return Some(tab_id);
+            }
+        }
+        g.tab_session
+            .iter()
+            .find_map(|(tab, sid)| {
+                if session_ids_equivalent(sid, &session_id) && g.tabs.contains_key(tab) {
+                    Some(*tab)
+                } else {
+                    None
+                }
+            })
     }
 
     fn set_url(&self, id: TabId, url: impl Into<String>) {
@@ -1421,16 +1764,28 @@ impl DockSharedState {
         }
     }
 
-    fn find_owner_tab_with_url(&self, owner: TabOwner, target_url: &str) -> Option<TabId> {
+    fn find_owner_tab_with_url(
+        &self,
+        owner: TabOwner,
+        target_url: &str,
+        session_scope: Option<&str>,
+    ) -> Option<TabId> {
         let normalized = normalize_url_for_match(target_url);
         if normalized.is_empty() {
             return None;
         }
+        let scope = canonical_dock_session_id_opt(session_scope);
         let g = self.0.lock();
         for id in &g.order {
             let Some(rec) = g.tabs.get(id) else { continue };
             if rec.owner != owner {
                 continue;
+            }
+            if let Some(ref sid) = scope {
+                let bound = g.tab_session.get(id);
+                if !bound.is_some_and(|s| session_ids_equivalent(s, sid)) {
+                    continue;
+                }
             }
             let Some(url) = rec.last_url.as_deref() else { continue };
             if normalize_url_for_match(url) == normalized {
@@ -1514,9 +1869,12 @@ fn dispatch_bridge_event(
             let trimmed = url.trim();
             if !trimmed.is_empty() {
                 let url_owned = trimmed.to_string();
+                let opener = state.active();
                 let app_clone = app.clone();
                 if let Err(err) = app.run_on_main_thread(move || {
-                    if let Err(err) = open_url_in_new_tab(&app_clone, url_owned) {
+                    if let Err(err) =
+                        open_url_in_new_tab(&app_clone, url_owned, opener)
+                    {
                         tracing::warn!(
                             "[browser_dock] openNewTab open_url_in_new_tab failed: {err}"
                         );
@@ -1537,6 +1895,9 @@ fn dispatch_bridge_event(
         if let Some(active) = active_tab {
             if let Some(url) = parsed_data.get("url").and_then(|v| v.as_str()) {
                 let prev = state.snapshot_tab(active).0;
+                if !state_url_allowed_for_tab(prev.clone(), url) {
+                    return;
+                }
                 if prev.as_deref() != Some(url) {
                     if let Some(controller) = app.try_state::<TauriDockController>() {
                         controller.drain_pending_for_tab(
@@ -1558,9 +1919,11 @@ fn dispatch_bridge_event(
         }
     }
 
+    let session_id = active_tab.and_then(|id| state.tab_session_of(id));
     let payload = serde_json::json!({
         "kind": kind,
         "tabId": active_tab,
+        "sessionId": session_id,
         "data": parsed_data,
     });
 
@@ -1632,11 +1995,17 @@ pub fn senbridge_protocol_handler(
 fn emit_tabs_event(app: &AppHandle, state: &DockSharedState) {
     let tabs = state.list();
     let active = state.active();
+    let active_session = state.foreground_session_id().or_else(|| state.active_session_id());
     if let Err(err) = app.emit(
         "browser_dock_event",
         serde_json::json!({
             "kind": "tabs",
-            "data": { "tabs": tabs, "active": active },
+            "sessionId": active_session,
+            "data": {
+                "tabs": tabs,
+                "active": active,
+                "activeSessionId": active_session,
+            },
         }),
     ) {
         tracing::warn!("[browser_dock] emit tabs failed: {err}");
@@ -1727,11 +2096,14 @@ fn ensure_dock_webview(
                     return tauri::webview::NewWindowResponse::Deny;
                 }
                 let url_string = url.to_string();
+                let opener = app_for_new_window
+                    .try_state::<DockSharedState>()
+                    .and_then(|s| s.inner().active());
                 let app_for_task = app_for_new_window.clone();
                 if let Err(err) =
                     app_for_new_window.run_on_main_thread(move || {
                         if let Err(err) =
-                            open_url_in_new_tab(&app_for_task, url_string)
+                            open_url_in_new_tab(&app_for_task, url_string, opener)
                         {
                             tracing::warn!(
                                 "[browser_dock] on_new_window open_url_in_new_tab failed: {err}"
@@ -1787,7 +2159,15 @@ fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), St
 
     let parked = state.parked();
     let has_active = state.active().is_some();
-    let want_visible = has_active && rect.is_some() && !parked;
+    let session_matches_foreground = match (
+        state.active_session_id(),
+        state.foreground_session_id(),
+    ) {
+        (Some(active), Some(foreground)) => session_ids_equivalent(&active, &foreground),
+        (None, Some(_)) => false,
+        _ => true,
+    };
+    let want_visible = has_active && rect.is_some() && !parked && session_matches_foreground;
 
     let Some(wv) = dock_webview(app) else {
         return Ok(());
@@ -1814,16 +2194,24 @@ fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), St
     Ok(())
 }
 
+fn effective_nav_url(stored: Option<String>) -> String {
+    stored
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| ABOUT_BLANK.to_string())
+}
+
+fn state_url_allowed_for_tab(stored: Option<String>, reported: &str) -> bool {
+    let expected = effective_nav_url(stored);
+    urls_logically_match(reported, &expected)
+}
+
 fn dock_navigate_active(app: &AppHandle, state: &DockSharedState) -> Result<(), String> {
     let Some(active) = state.active() else {
         return Ok(());
     };
-    let Some(target) = state.snapshot_tab(active).0 else {
-        return Ok(());
-    };
-    if target.trim().is_empty() {
-        return Ok(());
-    }
+    let stored = state.snapshot_tab(active).0;
+    let target = effective_nav_url(stored);
     let Some(wv) = dock_webview(app) else {
         return Ok(());
     };
@@ -1891,6 +2279,7 @@ pub async fn browser_dock_open(
     state: tauri::State<'_, DockSharedState>,
     rect: DockRect,
     url: Option<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     state.set_rect(rect);
     state.set_parked(false);
@@ -1901,8 +2290,18 @@ pub async fn browser_dock_open(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
 
+    let session_normalized = canonical_dock_session_id_opt(session_id.as_deref());
+
+    if let Some(ref sid) = session_normalized {
+        s.set_foreground_session_id(Some(sid.clone()));
+    }
+
     if let Some(target_url) = target.as_deref() {
-        if let Some(existing) = s.find_owner_tab_with_url(TabOwner::User, target_url) {
+        if let Some(existing) = s.find_owner_tab_with_url(
+            TabOwner::User,
+            target_url,
+            session_normalized.as_deref(),
+        ) {
             let _ = s.set_active(existing);
             ensure_dock_webview(&app, &s)?;
             dock_navigate_active(&app, &s)?;
@@ -1913,7 +2312,8 @@ pub async fn browser_dock_open(
         }
     }
 
-    let (active, _created) = s.acquire_or_create_user_tab(target.clone());
+    let (active, _created) =
+        s.acquire_or_create_user_tab(target.clone(), session_normalized.as_deref());
     if let Some(target_url) = target.as_ref() {
         s.set_url(active, target_url.clone());
     }
@@ -1996,6 +2396,39 @@ pub async fn browser_dock_close(
 }
 
 #[tauri::command]
+pub async fn browser_dock_release_agent_tab_for_session(
+    state: tauri::State<'_, DockSharedState>,
+    session_id: String,
+) -> Result<Vec<TabId>, String> {
+    let released = state.release_agent_tabs_for_session(&session_id);
+    Ok(released)
+}
+
+#[tauri::command]
+pub async fn browser_dock_bind_tab_to_session(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    session_id: String,
+    tab_id: TabId,
+) -> Result<(), String> {
+    state.bind_user_tab_to_session(&session_id, tab_id)?;
+    emit_tabs_event(&app, state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_dock_unbind_tab_from_session(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    session_id: String,
+    tab_id: TabId,
+) -> Result<(), String> {
+    state.unbind_tab_from_session(&session_id, tab_id)?;
+    emit_tabs_event(&app, state.inner());
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn browser_dock_navigate(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
@@ -2006,7 +2439,12 @@ pub async fn browser_dock_navigate(
         .ok_or_else(|| "no active dock tab".to_string())?;
     let trimmed = url.trim();
     if !trimmed.is_empty() {
-        if let Some(existing) = state.find_owner_tab_with_url(TabOwner::User, trimmed) {
+        let scope = state.tab_session_of(id);
+        if let Some(existing) = state.find_owner_tab_with_url(
+            TabOwner::User,
+            trimmed,
+            scope.as_deref(),
+        ) {
             if existing != id {
                 state.set_active(existing)?;
             }
@@ -2031,9 +2469,15 @@ pub async fn browser_dock_new_tab(
     state: tauri::State<'_, DockSharedState>,
     url: Option<String>,
     activate: Option<bool>,
+    session_id: Option<String>,
 ) -> Result<TabId, String> {
     let id = state.alloc_id();
-    state.register_tab(id, url.clone(), TabOwner::User);
+    let explicit_session = session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| state.foreground_session_id());
+    state.register_tab_for_session(id, url.clone(), TabOwner::User, explicit_session.as_deref());
     let want_activate = activate.unwrap_or(true);
     if want_activate {
         let _ = state.set_active(id);
@@ -2048,14 +2492,29 @@ pub async fn browser_dock_new_tab(
     Ok(id)
 }
 
-fn open_url_in_new_tab(app: &AppHandle, url: String) -> Result<TabId, String> {
+fn open_url_in_new_tab(
+    app: &AppHandle,
+    url: String,
+    opener_tab_id: Option<TabId>,
+) -> Result<TabId, String> {
     let state_handle = app
         .try_state::<DockSharedState>()
         .ok_or_else(|| "browser dock state not initialised".to_string())?;
     let state = state_handle.inner();
+    let opener_session = opener_tab_id.and_then(|opener| state.tab_session_of(opener));
+    let inherit_as_agent = opener_session.is_some();
     let trimmed = url.trim();
     if !trimmed.is_empty() {
-        if let Some(existing) = state.find_owner_tab_with_url(TabOwner::User, trimmed) {
+        let lookup_owner = if inherit_as_agent {
+            TabOwner::Agent
+        } else {
+            TabOwner::User
+        };
+        if let Some(existing) = state.find_owner_tab_with_url(
+            lookup_owner,
+            trimmed,
+            opener_session.as_deref(),
+        ) {
             let _ = state.set_active(existing);
             ensure_dock_webview(app, state)?;
             dock_navigate_active(app, state)?;
@@ -2066,7 +2525,12 @@ fn open_url_in_new_tab(app: &AppHandle, url: String) -> Result<TabId, String> {
         }
     }
     let id = state.alloc_id();
-    state.register_tab(id, Some(url), TabOwner::User);
+    let owner = if inherit_as_agent {
+        TabOwner::Agent
+    } else {
+        TabOwner::User
+    };
+    state.register_tab_for_session(id, Some(url), owner, opener_session.as_deref());
     let _ = state.set_active(id);
     ensure_dock_webview(app, state)?;
     dock_navigate_active(app, state)?;
@@ -2105,7 +2569,23 @@ pub async fn browser_dock_activate_tab(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
     tab_id: TabId,
+    session_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(sid) = canonical_dock_session_id_opt(session_id.as_deref()) {
+        match state.tab_session_of(tab_id).as_deref() {
+            Some(tab_session) if session_ids_equivalent(tab_session, &sid) => {
+                state.set_foreground_session_id(Some(sid));
+            }
+            Some(other) => {
+                return Err(format!(
+                    "tab {tab_id} belongs to session {other}, not {sid}"
+                ));
+            }
+            None => {
+                return Err(format!("tab {tab_id} is not bound to any session"));
+            }
+        }
+    }
     state.set_active(tab_id)?;
     ensure_dock_webview(&app, state.inner())?;
     dock_navigate_active(&app, state.inner())?;
@@ -2118,25 +2598,127 @@ pub async fn browser_dock_activate_tab(
 #[tauri::command]
 pub async fn browser_dock_list_tabs(
     state: tauri::State<'_, DockSharedState>,
+    session_id: Option<String>,
 ) -> Result<Vec<TabSummary>, String> {
-    Ok(state.list())
+    let all = state.list();
+    let Some(sid) = canonical_dock_session_id_opt(session_id.as_deref()) else {
+        return Ok(all);
+    };
+    Ok(all
+        .into_iter()
+        .filter(|t| {
+            t.session_id
+                .as_deref()
+                .is_some_and(|tab_sid| session_ids_equivalent(tab_sid, &sid))
+        })
+        .collect())
 }
 
 #[tauri::command]
-pub async fn browser_dock_pin_test_target(tab_id: TabId) -> Result<(), String> {
-    set_test_target_tab(tab_id);
+pub async fn browser_dock_pin_test_target(
+    state: tauri::State<'_, DockSharedState>,
+    session_id: String,
+    tab_id: TabId,
+) -> Result<(), String> {
+    let sid = canonical_dock_session_id(&session_id);
+    if sid.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    match state.tab_session_of(tab_id).as_deref() {
+        Some(tab_session) if session_ids_equivalent(tab_session, &sid) => {}
+        Some(other) => {
+            return Err(format!(
+                "tab {tab_id} belongs to session {other}, not {sid}"
+            ));
+        }
+        None => {
+            return Err(format!("tab {tab_id} is not bound to any session"));
+        }
+    }
+    set_test_target_tab(&sid, tab_id);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn browser_dock_clear_test_target() -> Result<(), String> {
-    clear_test_target_tab();
+pub async fn browser_dock_clear_test_target(session_id: String) -> Result<(), String> {
+    let sid = canonical_dock_session_id(&session_id);
+    clear_test_target_tab(&sid);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn browser_dock_get_test_target() -> Result<Option<TabId>, String> {
-    Ok(current_test_target_tab())
+pub async fn browser_dock_get_test_target(
+    session_id: String,
+) -> Result<Option<TabId>, String> {
+    let sid = canonical_dock_session_id(&session_id);
+    Ok(current_test_target_tab(&sid))
+}
+
+#[tauri::command]
+pub async fn browser_dock_present_session(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    session_id: String,
+) -> Result<Option<TabId>, String> {
+    let inner = state.inner();
+    let trimmed = canonical_dock_session_id(&session_id);
+    if trimmed.is_empty() {
+        inner.set_foreground_session_id(None);
+        inner.set_parked(true);
+        update_dock_layout(&app, inner)?;
+        emit_tabs_event(&app, inner);
+        return Ok(None);
+    }
+    inner.set_foreground_session_id(Some(trimmed.clone()));
+    let target = inner.present_session_internal(&trimmed);
+    if let Some(tab_id) = target {
+        let _ = inner.set_active(tab_id);
+        ensure_dock_webview(&app, inner)?;
+        inner.set_parked(false);
+        dock_navigate_active(&app, inner)?;
+        update_dock_layout(&app, inner)?;
+        focus_dock_webview(&app);
+        emit_tabs_event(&app, inner);
+    } else {
+        {
+            let mut g = inner.0.lock();
+            if let Some(active) = g.active {
+                let foreign = g
+                    .tab_session
+                    .get(&active)
+                    .is_some_and(|sid| !session_ids_equivalent(sid, &trimmed));
+                if foreign {
+                    g.active = None;
+                }
+            }
+        }
+        if let Some(wv) = dock_webview(&app) {
+            if let Ok(parsed) = parse_target_url(None) {
+                let _ = wv.navigate(parsed);
+            }
+        }
+        inner.set_parked(true);
+        update_dock_layout(&app, inner)?;
+        emit_tabs_event(&app, inner);
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+pub async fn browser_dock_set_foreground_session(
+    app: AppHandle,
+    state: tauri::State<'_, DockSharedState>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let inner = state.inner();
+    let normalized = canonical_dock_session_id_opt(session_id.as_deref());
+    inner.set_foreground_session_id(normalized.clone());
+    if normalized.is_none() {
+        inner.set_parked(true);
+    }
+    update_dock_layout(&app, inner)?;
+    emit_tabs_event(&app, inner);
+    Ok(())
 }
 
 fn eval_dock(app: &AppHandle, _state: &DockSharedState, source: &str) -> Result<(), String> {
@@ -2453,10 +3035,19 @@ impl TauriDockController {
                     g.remove(&tab_id)
                 };
                 if removed.is_some() {
+                    let session_id = inner_for_task
+                        .app
+                        .try_state::<DockSharedState>()
+                        .and_then(|s| s.tab_session_of(tab_id));
                     let payload = serde_json::json!({
                         "kind": "dock_takeover_end",
                         "tabId": tab_id,
-                        "data": { "tab_id": tab_id, "ended_at": now_millis() },
+                        "sessionId": session_id,
+                        "data": {
+                            "tab_id": tab_id,
+                            "ended_at": now_millis(),
+                            "sessionId": session_id,
+                        },
                     });
                     let _ = inner_for_task.app.emit("browser_dock_event", payload);
                 }
@@ -2470,10 +3061,20 @@ impl TauriDockController {
             );
         }
         if emit_start {
+            let session_id = self
+                .0
+                .app
+                .try_state::<DockSharedState>()
+                .and_then(|s| s.tab_session_of(tab_id));
             let payload = serde_json::json!({
                 "kind": "dock_takeover",
                 "tabId": tab_id,
-                "data": { "tab_id": tab_id, "started_at": started_at },
+                "sessionId": session_id,
+                "data": {
+                    "tab_id": tab_id,
+                    "started_at": started_at,
+                    "sessionId": session_id,
+                },
             });
             let _ = self.0.app.emit("browser_dock_event", payload);
         }
@@ -2682,6 +3283,12 @@ fn urls_logically_match(a: &str, b: &str) -> bool {
     normalize_url_for_match(a) == normalize_url_for_match(b)
 }
 
+fn current_session_id() -> Option<String> {
+    senweavercoding::session::current_session_context()
+        .map(|c| canonical_dock_session_id(&c.session_id))
+        .filter(|s| !s.is_empty())
+}
+
 fn resolve_agent_target_tab(req: &DockRequest, state: &DockSharedState) -> TabId {
     if let Some(id) = req
         .args
@@ -2690,6 +3297,13 @@ fn resolve_agent_target_tab(req: &DockRequest, state: &DockSharedState) -> TabId
         .and_then(|v| v.as_u64())
     {
         return id as TabId;
+    }
+    if let Some(sid) = current_session_id() {
+        if let Some(tab_id) = state.agent_tab_id_for_session(&sid) {
+            return tab_id;
+        }
+        let (id, _) = state.acquire_or_create_agent_tab_for_session(&sid, None);
+        return id;
     }
     if let Some(agent_id) = state.agent_tab_id() {
         return agent_id;
@@ -2707,7 +3321,11 @@ impl DockController for TauriDockController {
             .try_state::<DockSharedState>()
             .map(|s| s.inner().clone())
             .unwrap_or_default();
-        let (agent_tab, created) = state.acquire_or_create_agent_tab(None);
+        let session_hint_norm = canonical_dock_session_id_opt(session_hint.as_deref());
+        let (agent_tab, created) = match session_hint_norm.as_deref() {
+            Some(sid) => state.acquire_or_create_agent_tab_for_session(sid, None),
+            None => state.acquire_or_create_agent_tab(None),
+        };
         if created {
             if state.rect().is_none() {
                 state.set_rect(DockRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
@@ -2727,6 +3345,8 @@ impl DockController for TauriDockController {
 
         let payload = serde_json::json!({
             "kind": "visible",
+            "tabId": agent_tab,
+            "sessionId": session_hint,
             "data": { "session": session_hint, "source": "agent", "agentTabId": agent_tab },
         });
         if let Err(err) = self.0.app.emit("browser_dock_event", payload) {
@@ -2784,16 +3404,19 @@ impl DockController for TauriDockController {
         }
 
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
+        let preview_session = state.tab_session_of(tab_id);
         let _ = self.0.app.emit(
             "browser_dock_event",
             serde_json::json!({
                 "kind": "agent_action",
                 "tabId": tab_id,
+                "sessionId": preview_session,
                 "data": {
                     "reqId": preview_id,
                     "kind": req.kind,
                     "args": req.args,
                     "tabId": tab_id,
+                    "sessionId": preview_session,
                     "ts": now_millis(),
                 },
             }),
@@ -2972,6 +3595,108 @@ impl DockController for TauriDockController {
             })
             .collect())
     }
+
+    async fn bind_tab_to_session(
+        &self,
+        session_id: String,
+        tab_id: u32,
+    ) -> Result<()> {
+        let session_id = canonical_dock_session_id(&session_id);
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        state
+            .bind_user_tab_to_session(&session_id, tab_id)
+            .map_err(|e| anyhow::anyhow!("bind_tab_to_session: {e}"))?;
+        emit_tabs_event(&self.0.app, &state);
+        Ok(())
+    }
+
+    async fn unbind_tab_from_session(
+        &self,
+        session_id: String,
+        tab_id: u32,
+    ) -> Result<()> {
+        let session_id = canonical_dock_session_id(&session_id);
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        state
+            .unbind_tab_from_session(&session_id, tab_id)
+            .map_err(|e| anyhow::anyhow!("unbind_tab_from_session: {e}"))?;
+        emit_tabs_event(&self.0.app, &state);
+        Ok(())
+    }
+
+    async fn release_agent_tabs_for_session(
+        &self,
+        session_id: String,
+    ) -> Result<Vec<u32>> {
+        let session_id = canonical_dock_session_id(&session_id);
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        let released = state.release_agent_tabs_for_session(&session_id);
+        if !released.is_empty() {
+            emit_tabs_event(&self.0.app, &state);
+        }
+        Ok(released)
+    }
+
+    async fn present_session(&self, session_id: String) -> Result<Option<u32>> {
+        let session_id = canonical_dock_session_id(&session_id);
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        state.set_foreground_session_id(Some(session_id.clone()));
+        let target = state.present_session_internal(&session_id);
+        if let Some(tab_id) = target {
+            state
+                .set_active(tab_id)
+                .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
+            ensure_dock_webview(&self.0.app, &state)
+                .map_err(|e| anyhow::anyhow!("ensure_dock_webview: {e}"))?;
+            state.set_parked(false);
+            let _ = dock_navigate_active(&self.0.app, &state);
+            let _ = update_dock_layout(&self.0.app, &state);
+            focus_dock_webview(&self.0.app);
+            emit_tabs_event(&self.0.app, &state);
+        } else {
+            {
+                let mut g = state.0.lock();
+                if let Some(active) = g.active {
+                    let foreign = g
+                        .tab_session
+                        .get(&active)
+                        .is_some_and(|sid| !session_ids_equivalent(sid, &session_id));
+                    if foreign {
+                        g.active = None;
+                    }
+                }
+            }
+            if let Some(wv) = dock_webview(&self.0.app) {
+                if let Ok(parsed) = parse_target_url(None) {
+                    let _ = wv.navigate(parsed);
+                }
+            }
+            state.set_parked(true);
+            let _ = update_dock_layout(&self.0.app, &state);
+            emit_tabs_event(&self.0.app, &state);
+        }
+        Ok(target)
+    }
 }
 
 impl TauriDockController {
@@ -2995,7 +3720,12 @@ impl TauriDockController {
         let normalized = parsed.as_str().to_string();
 
         let owner = state.tab_owner(tab_id).unwrap_or(TabOwner::Agent);
-        if let Some(existing) = state.find_owner_tab_with_url(owner, &normalized) {
+        let scope = state.tab_session_of(tab_id);
+        if let Some(existing) = state.find_owner_tab_with_url(
+            owner,
+            &normalized,
+            scope.as_deref(),
+        ) {
             if existing != tab_id {
                 state
                     .set_active(existing)
@@ -3036,16 +3766,19 @@ impl TauriDockController {
         emit_tabs_event(&self.0.app, state);
 
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
+        let preview_session = state.tab_session_of(tab_id);
         let _ = self.0.app.emit(
             "browser_dock_event",
             serde_json::json!({
                 "kind": "agent_action",
                 "tabId": tab_id,
+                "sessionId": preview_session,
                 "data": {
                     "reqId": preview_id,
                     "kind": "navigate",
                     "args": { "url": normalized },
                     "tabId": tab_id,
+                    "sessionId": preview_session,
                     "ts": now_millis(),
                 },
             }),

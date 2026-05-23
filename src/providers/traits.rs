@@ -88,6 +88,15 @@ impl ChatResponse {
     pub fn text_or_empty(&self) -> &str {
         self.text.as_deref().unwrap_or("")
     }
+
+    pub fn text_only(text: impl Into<Option<String>>, usage: Option<TokenUsage>) -> Self {
+        Self {
+            text: text.into(),
+            tool_calls: Vec::new(),
+            usage,
+            reasoning_content: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,6 +193,35 @@ impl StreamChunk {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryClass {
+    EngineOverloaded,
+    AccountRateLimited,
+    Transient,
+}
+
+impl RetryClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetryClass::EngineOverloaded => "engine_overloaded",
+            RetryClass::AccountRateLimited => "account_rate_limited",
+            RetryClass::Transient => "transient",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryNotice {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub wait_ms: u64,
+    pub failure_class: RetryClass,
+    pub provider: String,
+    pub model: String,
+    pub last_error_summary: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
 
@@ -196,6 +234,8 @@ pub enum StreamEvent {
     PreExecutedToolResult { name: String, output: String },
 
     Usage(TokenUsage),
+
+    Retry(RetryNotice),
 
     Final,
 }
@@ -253,6 +293,41 @@ pub enum StreamError {
     Io(#[from] std::io::Error),
 }
 
+impl crate::error::ErrorClassification for StreamError {
+    fn category(&self) -> crate::error::ErrorCategory {
+        use crate::error::ErrorCategory;
+        match self {
+            StreamError::Http(e) => {
+                if e.is_timeout() {
+                    ErrorCategory::Timeout
+                } else if e.is_connect() || e.is_request() {
+                    ErrorCategory::Network
+                } else if let Some(status) = e.status() {
+                    let code = status.as_u16();
+                    if code == 429 {
+                        ErrorCategory::RateLimit
+                    } else if code == 401 || code == 403 {
+                        ErrorCategory::Permission
+                    } else if code == 404 {
+                        ErrorCategory::NotFound
+                    } else if (500..600).contains(&code) {
+                        ErrorCategory::Provider
+                    } else if (400..500).contains(&code) {
+                        ErrorCategory::Validation
+                    } else {
+                        ErrorCategory::Provider
+                    }
+                } else {
+                    ErrorCategory::Provider
+                }
+            }
+            StreamError::Json(_) | StreamError::InvalidSse(_) => ErrorCategory::Provider,
+            StreamError::Provider(_) => ErrorCategory::Provider,
+            StreamError::Io(e) => crate::error::ErrorClassification::category(e),
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("provider_capability_error provider={provider} capability={capability} message={message}")]
 pub struct ProviderCapabilityError {
@@ -294,6 +369,10 @@ pub trait Provider: Send + Sync {
         ProviderCapabilities::default()
     }
 
+    fn message_format_kind(&self) -> crate::providers::sanitize::ProviderKind {
+        crate::providers::sanitize::ProviderKind::OpenAi
+    }
+
     fn convert_tools(&self, tools: &[ToolSpec]) -> ToolsPayload {
         ToolsPayload::PromptGuided {
             instructions: build_tool_instructions_text(tools),
@@ -328,12 +407,8 @@ pub trait Provider: Send + Sync {
             .iter()
             .find(|m| m.role == "system")
             .map(|m| m.content.as_str());
-        let last_user = messages
-            .iter()
-            .rfind(|m| m.role == "user")
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-        self.chat_with_system(system, last_user, model, temperature)
+        let conversation = format_conversation_history(messages);
+        self.chat_with_system(system, &conversation, model, temperature)
             .await
     }
 
@@ -370,24 +445,14 @@ pub trait Provider: Send + Sync {
                 let text = self
                     .chat_with_history(&modified_messages, model, temperature)
                     .await?;
-                return Ok(ChatResponse {
-                    text: Some(text),
-                    tool_calls: Vec::new(),
-                    usage: None,
-                    reasoning_content: None,
-                });
+                return Ok(ChatResponse::text_only(Some(text), None));
             }
         }
 
         let text = self
             .chat_with_history(request.messages, model, temperature)
             .await?;
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: Vec::new(),
-            usage: None,
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(Some(text), None))
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -410,12 +475,7 @@ pub trait Provider: Send + Sync {
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
         let text = self.chat_with_history(messages, model, temperature).await?;
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: Vec::new(),
-            usage: None,
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(Some(text), None))
     }
 
     async fn chat_structured(
@@ -487,12 +547,8 @@ pub trait Provider: Send + Sync {
             .iter()
             .find(|m| m.role == "system")
             .map(|m| m.content.as_str());
-        let last_user = messages
-            .iter()
-            .rfind(|m| m.role == "user")
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-        self.stream_chat_with_system(system, last_user, model, temperature, options)
+        let conversation = format_conversation_history(messages);
+        self.stream_chat_with_system(system, &conversation, model, temperature, options)
     }
 
     fn stream_chat(
@@ -538,8 +594,38 @@ pub fn build_tool_instructions_text(tools: &[ToolSpec]) -> String {
 
 pub fn estimate_message_tokens(message: &ChatMessage) -> usize {
     let role_overhead = 4_usize;
-    let content_tokens = message.content.len().div_ceil(4);
+    let content_tokens = estimate_content_tokens(&message.content);
     role_overhead.saturating_add(content_tokens)
+}
+
+fn estimate_content_tokens(content: &str) -> usize {
+    let mut ascii_chars = 0_usize;
+    let mut wide_chars = 0_usize;
+    for ch in content.chars() {
+        if ch.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            wide_chars += 1;
+        }
+    }
+    ascii_chars.div_ceil(4).saturating_add(wide_chars)
+}
+
+fn format_conversation_history(messages: &[ChatMessage]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for msg in messages {
+        if msg.role == "system" {
+            continue;
+        }
+        let role_label = match msg.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "tool" => "Tool",
+            other => other,
+        };
+        parts.push(format!("{role_label}: {}", msg.content));
+    }
+    parts.join("\n\n")
 }
 
 pub fn estimate_total_tokens(messages: &[ChatMessage]) -> usize {
@@ -674,80 +760,12 @@ pub fn enforce_context_budget_with_window(
     reserve_output_tokens: usize,
     context_window_override: Option<usize>,
 ) -> Vec<ChatMessage> {
-    let window = context_window_override
-        .unwrap_or_else(|| crate::constants::api_limits::context_window_for_model(model) as usize);
-    let safety_margin = 256_usize;
-    let reserve = reserve_output_tokens
-        .saturating_add(safety_margin)
-        .min(window.saturating_sub(512).max(512));
-    let max_input = window.saturating_sub(reserve).max(512);
-
-    let total = estimate_total_tokens(&messages);
-    if total <= max_input {
-        return messages;
-    }
-
-    let mut system_msgs: Vec<ChatMessage> = Vec::new();
-    let mut other: Vec<ChatMessage> = Vec::new();
-    for m in messages {
-        if m.role == "system" {
-            system_msgs.push(m);
-        } else {
-            other.push(m);
-        }
-    }
-
-    let last = other.pop();
-    let last_tokens = last
-        .as_ref()
-        .map(estimate_message_tokens)
-        .unwrap_or(0);
-
-    let mut system_tokens: usize = system_msgs
-        .iter()
-        .map(estimate_message_tokens)
-        .sum::<usize>();
-
-    let mut available = max_input
-        .saturating_sub(system_tokens)
-        .saturating_sub(last_tokens);
-
-    let mut kept: Vec<ChatMessage> = Vec::new();
-    let mut used: usize = 0;
-    for msg in other.into_iter().rev() {
-        let cost = estimate_message_tokens(&msg);
-        if used.saturating_add(cost) > available {
-            break;
-        }
-        used = used.saturating_add(cost);
-        kept.push(msg);
-    }
-    kept.reverse();
-
-    if system_tokens.saturating_add(last_tokens) > max_input {
-        let mut target_for_system = max_input.saturating_sub(last_tokens).saturating_sub(64);
-        if target_for_system < 256 {
-            target_for_system = 256;
-        }
-        truncate_system_messages(&mut system_msgs, target_for_system);
-        system_tokens = system_msgs
-            .iter()
-            .map(estimate_message_tokens)
-            .sum::<usize>();
-        available = max_input
-            .saturating_sub(system_tokens)
-            .saturating_sub(last_tokens);
-        if used > available {
-            kept.clear();
-        }
-    }
-
-    let mut out: Vec<ChatMessage> = system_msgs;
-    out.extend(kept);
-    if let Some(l) = last {
-        out.push(l);
-    }
-    out
+    enforce_context_budget_native_with_window(
+        messages,
+        model,
+        reserve_output_tokens,
+        context_window_override,
+    )
 }
 
 fn truncate_system_messages(messages: &mut Vec<ChatMessage>, target_tokens: usize) {
@@ -834,10 +852,14 @@ pub fn sanitize_messages_for_legacy(messages: &[ChatMessage]) -> Vec<ChatMessage
             _ => out.push(msg.clone()),
         }
     }
-    out
+    super::sanitize::normalize_chat_messages_for_wire(out)
 }
 
 fn parse_tool_envelope(content: &str) -> (Option<String>, String) {
+    let trimmed = content.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return (None, content.to_string());
+    }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
         let id = value
             .get("tool_call_id")
@@ -845,9 +867,9 @@ fn parse_tool_envelope(content: &str) -> (Option<String>, String) {
             .map(str::to_string);
         let body = value
             .get("content")
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                other => Some(other.to_string()),
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
             })
             .unwrap_or_else(|| content.to_string());
         return (id, body);

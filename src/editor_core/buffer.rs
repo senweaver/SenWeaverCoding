@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Text buffer backed by `ropey::Rope` for O(log n) editing on large files.
-//!
-//! Replaces the old `Vec<String>` implementation with ropey's chunked rope.
-//! Key invariants preserved:
-//! - Empty buffer has exactly 1 line.
-//! - All positions are in character units (not bytes).
-//! - `\r\n` line endings are normalized to `\n` on load.
 
 use std::borrow::Cow;
 
@@ -48,6 +41,14 @@ impl MultiSelection {
     }
 }
 
+impl<'a> IntoIterator for &'a MultiSelection {
+    type Item = &'a Selection;
+    type IntoIter = std::slice::Iter<'a, Selection>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TextBuffer {
     rope: ropey::Rope,
@@ -64,7 +65,7 @@ impl TextBuffer {
         }
     }
 
-    pub fn from_str(text: &str) -> Self {
+    pub fn from_text(text: &str) -> Self {
         let normalized = normalize_newlines(text);
         Self {
             rope: ropey::Rope::from_str(&normalized),
@@ -97,7 +98,7 @@ impl TextBuffer {
         Some(self.rope.line(idx))
     }
 
-    pub fn to_string(&self) -> String {
+    pub fn as_string(&self) -> String {
         self.rope.to_string()
     }
 

@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SQLite persistence for heartbeat task execution history.
-//!
-//! Mirrors the `cron/store.rs` pattern: fresh connection per call, schema
-//! auto-created, output truncated, history pruned to a configurable limit.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

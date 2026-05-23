@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Backup and data retention configs, migrated out of `schema.rs`
-//! as part of M8.  Both types remain `pub use`d from `schema.rs`
-//! so downstream `crate::config::BackupConfig` imports are
-//! unaffected.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

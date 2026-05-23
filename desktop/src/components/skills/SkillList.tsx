@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSkillStore } from '../../stores/skillStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
 import { useDockSuspend } from '../../hooks/useDockSuspend'
@@ -41,7 +42,7 @@ export function SkillList() {
   const userSkillsDir = useSkillStore((s) => s.userSkillsDir)
   const deleteUserSkill = useSkillStore((s) => s.deleteUserSkill)
   const sessions = useSessionStore((s) => s.sessions)
-  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const activeSessionId = useTabStore((s) => s.activeTabId)
   const addToast = useUIStore((s) => s.addToast)
   const t = useTranslation()
   const activeSession = sessions.find((session) => session.id === activeSessionId)
@@ -122,8 +123,7 @@ export function SkillList() {
     return () => {
       cancelled = true
       if (unlisten) unlisten()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }    
   }, [])
 
   async function runInstall(sources: string[], mode: SkillInstallMode = 'abort') {
@@ -240,7 +240,7 @@ export function SkillList() {
   }
 
   if (error) {
-    return <div className="text-sm text-[var(--color-error)] py-4">{error}</div>
+    return <div className="text-xs text-[var(--color-error)] py-4">{error}</div>
   }
 
   if (skills.length === 0) {
@@ -250,7 +250,7 @@ export function SkillList() {
           <button
             onClick={() => setCreateOpen(true)}
             disabled={!userSkillsDir}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-[var(--color-brand)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-brand)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <span className="material-symbols-outlined text-[14px]">add</span>
             {t('settings.skills.newButton')}
@@ -258,18 +258,18 @@ export function SkillList() {
           {userSkillsDir && (
             <button
               onClick={() => void handleOpenSkillsFolder()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
+              className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
             >
               <span className="material-symbols-outlined text-[14px]">folder_open</span>
               {t('settings.skills.openDirectory')}
             </button>
           )}
         </div>
-        <div className="text-center py-12 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6">
-          <span className="material-symbols-outlined text-[40px] text-[var(--color-text-tertiary)] mb-2 block">
+        <div className="text-center py-10 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6">
+          <span className="material-symbols-outlined text-[32px] text-[var(--color-text-tertiary)] mb-2 block">
             auto_awesome
           </span>
-          <p className="text-sm text-[var(--color-text-tertiary)]">
+          <p className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.skills.empty')}
           </p>
           <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
@@ -279,7 +279,7 @@ export function SkillList() {
             {t('settings.skills.dropHint')}
           </p>
           {userSkillsDir && (
-            <p className="text-[11px] text-[var(--color-text-tertiary)] mt-2 font-mono break-all">
+            <p className="text-xs text-[var(--color-text-tertiary)] mt-2 font-mono break-all">
               {userSkillsDir}
             </p>
           )}
@@ -318,25 +318,25 @@ export function SkillList() {
   }
 
   return (
-    <div ref={dropZoneRef} className="relative flex flex-col gap-6 min-w-0">
+    <div ref={dropZoneRef} className="relative flex flex-col gap-4 min-w-0">
       <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-hidden">
-        <div className="grid gap-4 px-5 py-5 min-w-0 xl:grid-cols-[minmax(0,1.6fr)_minmax(320px,1fr)] xl:items-end">
+        <div className="grid gap-4 px-4 py-4 min-w-0 xl:grid-cols-[minmax(0,1.6fr)_minmax(320px,1fr)] xl:items-end">
           <div className="min-w-0">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)] mb-2">
+            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)] mb-2">
               {t('settings.skills.browserEyebrow')}
             </div>
             <div className="flex items-center gap-3 mb-2">
-              <span className="material-symbols-outlined text-[22px] text-[var(--color-brand)]">
+              <span className="material-symbols-outlined text-[18px] text-[var(--color-brand)]">
                 auto_awesome
               </span>
-              <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
+              <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
                 {t('settings.skills.browserTitle')}
               </h3>
               <div className="ml-auto flex items-center gap-2">
                 <button
                   onClick={() => setCreateOpen(true)}
                   disabled={!userSkillsDir}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded-md bg-[var(--color-brand)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-brand)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined text-[14px]">add</span>
                   {t('settings.skills.newButton')}
@@ -345,7 +345,7 @@ export function SkillList() {
                   <button
                     onClick={() => void handleOpenSkillsFolder()}
                     title={userSkillsDir}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
                   >
                     <span className="material-symbols-outlined text-[14px]">folder_open</span>
                     {t('settings.skills.openDirectory')}
@@ -353,7 +353,7 @@ export function SkillList() {
                 )}
               </div>
             </div>
-            <p className="text-sm leading-6 text-[var(--color-text-secondary)] max-w-3xl">
+            <p className="text-xs leading-5 text-[var(--color-text-secondary)] max-w-3xl">
               {t('settings.skills.browserDescription')}
             </p>
             <p className="mt-2 text-xs leading-5 text-[var(--color-text-tertiary)] max-w-3xl">
@@ -404,15 +404,15 @@ export function SkillList() {
               key={source}
               className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden min-w-0"
             >
-              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+              <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${SOURCE_ACCENT_CLASSES[source]}`}>
-                      <span className="material-symbols-outlined text-[16px]">
+                      <span className="material-symbols-outlined text-[14px]">
                         {SOURCE_ICONS[source]}
                       </span>
                     </span>
-                    <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                    <h4 className="text-xs font-semibold text-[var(--color-text-primary)]">
                       {sourceLabel}
                     </h4>
                     <span className="text-xs text-[var(--color-text-tertiary)]">
@@ -426,7 +426,7 @@ export function SkillList() {
                     })}
                   </p>
                 </div>
-                <div className="text-[11px] text-[var(--color-text-tertiary)] whitespace-nowrap">
+                <div className="text-xs text-[var(--color-text-tertiary)] whitespace-nowrap">
                   {t('settings.skills.tokenEstimateShort', { count: String(sourceTokenCount) })}
                 </div>
               </div>
@@ -463,12 +463,12 @@ export function SkillList() {
                     }`}
                   >
                     <div className="flex items-start gap-3">
-                      <span className="mt-0.5 material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
+                      <span className="mt-0.5 material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]">
                         auto_awesome
                       </span>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">
+                          <span className="text-xs font-semibold text-[var(--color-text-primary)] break-all">
                             {skill.displayName || skill.name}
                           </span>
                           {skill.version && (
@@ -493,7 +493,7 @@ export function SkillList() {
                         <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)] break-words">
                           {skill.description}
                         </p>
-                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-tertiary)]">
+                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-text-tertiary)]">
                           <span>{sourceLabel}</span>
                           <span>{t('settings.skills.tokenEstimateShort', { count: String(estimateTokens(skill.contentLength)) })}</span>
                           <span>{skill.hasDirectory ? t('settings.skills.ready') : t('settings.skills.unavailable')}</span>
@@ -510,12 +510,12 @@ export function SkillList() {
                             title={t('common.delete')}
                             className="opacity-0 group-hover:opacity-100 transition-opacity inline-flex items-center justify-center w-7 h-7 rounded-md hover:bg-[var(--color-error-container)] text-[var(--color-text-tertiary)] hover:text-[var(--color-error)]"
                           >
-                            <span className="material-symbols-outlined text-[16px]">
+                            <span className="material-symbols-outlined text-[14px]">
                               delete
                             </span>
                           </button>
                         )}
-                        <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] opacity-60 transition-transform group-hover:translate-x-0.5 group-hover:opacity-100">
+                        <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)] opacity-60 transition-transform group-hover:translate-x-0.5 group-hover:opacity-100">
                           chevron_right
                         </span>
                       </div>
@@ -536,9 +536,9 @@ export function SkillList() {
 
       {pendingDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4 shadow-xl">
+          <div className="w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3 shadow-xl">
             <div>
-              <p className="text-sm font-semibold text-[var(--color-text-primary)]">
+              <p className="text-xs font-semibold text-[var(--color-text-primary)]">
                 {t('settings.skills.deleteConfirmTitle')}
               </p>
               <p className="mt-1 text-xs text-[var(--color-text-secondary)] break-all">
@@ -548,13 +548,13 @@ export function SkillList() {
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => setPendingDelete(null)}
-                className="px-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
+                className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
               >
                 {t('common.cancel')}
               </button>
               <button
                 onClick={() => void handleConfirmDeleteSkill()}
-                className="px-3 py-1.5 text-xs rounded-md bg-[var(--color-error)] text-white hover:opacity-90"
+                className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-white hover:opacity-90"
               >
                 {t('common.delete')}
               </button>
@@ -619,14 +619,14 @@ function DropOverlay({
         {installing ? (
           <>
             <div className="animate-spin w-6 h-6 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-            <p className="text-sm font-semibold text-[var(--color-brand)]">{installingLabel}</p>
+            <p className="text-xs font-semibold text-[var(--color-brand)]">{installingLabel}</p>
           </>
         ) : (
           <>
-            <span className="material-symbols-outlined text-[40px] text-[var(--color-brand)]">
+            <span className="material-symbols-outlined text-[32px] text-[var(--color-brand)]">
               upload_file
             </span>
-            <p className="text-sm font-semibold text-[var(--color-brand)]">{title}</p>
+            <p className="text-xs font-semibold text-[var(--color-brand)]">{title}</p>
             <p className="text-xs text-[var(--color-text-secondary)]">{hint}</p>
           </>
         )}
@@ -666,9 +666,9 @@ function ConflictDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-      <div className="w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4 shadow-xl">
+      <div className="w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3 shadow-xl">
         <div>
-          <p className="text-sm font-semibold text-[var(--color-text-primary)]">{title}</p>
+          <p className="text-xs font-semibold text-[var(--color-text-primary)]">{title}</p>
           <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{body}</p>
           <ul className="mt-2 list-disc list-inside text-xs text-[var(--color-text-primary)] space-y-0.5">
             {reports.map((r) => (
@@ -686,19 +686,19 @@ function ConflictDialog({
         <div className="flex items-center justify-end gap-2 flex-wrap">
           <button
             onClick={onCancel}
-            className="px-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
           >
             {cancelLabel}
           </button>
           <button
             onClick={onKeepBoth}
-            className="px-3 py-1.5 text-xs rounded-md border border-[var(--color-brand)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-brand)]"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] border border-[var(--color-brand)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-[var(--color-brand)]"
           >
             {keepBothLabel}
           </button>
           <button
             onClick={onOverwrite}
-            className="px-3 py-1.5 text-xs rounded-md bg-[var(--color-error)] text-white hover:opacity-90"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-white hover:opacity-90"
           >
             {overwriteLabel}
           </button>
@@ -721,11 +721,11 @@ function SummaryCard({
 }) {
   return (
     <div className={`rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 min-w-0 ${className}`}>
-      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] min-w-0">
+      <div className="flex items-center gap-1.5 text-xs uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] min-w-0">
         <span className="material-symbols-outlined text-[14px] flex-shrink-0">{icon}</span>
         <span className="truncate">{label}</span>
       </div>
-      <div className="mt-2 text-lg font-semibold text-[var(--color-text-primary)] truncate">
+      <div className="mt-2 text-xs font-semibold text-[var(--color-text-primary)] truncate">
         {value}
       </div>
     </div>

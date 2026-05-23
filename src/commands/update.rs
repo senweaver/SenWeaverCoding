@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `sen update` — self-update pipeline with rollback.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;

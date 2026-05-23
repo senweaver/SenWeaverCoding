@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Syntax highlighting for TUI code blocks using syntect → ratatui style conversion.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};

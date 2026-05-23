@@ -1,19 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Automatic media understanding pipeline for inbound channel messages.
-//!
-//! Pre-processes media attachments (audio, images, video) before the agent sees
-//! the message, enriching the text with human-readable annotations:
-//!
-//! - **Audio**: transcribed via the existing [`super::transcription`] infrastructure,
-//!   prepended as `[Audio transcription: ...]`.
-//! - **Images**: when a vision-capable provider is active, described as `[Image: <description>]`.
-//!   Falls back to `[Image: attached]` when vision is unavailable.
-//! - **Video**: summarised as `[Video summary: ...]` when an API is available,
-//!   otherwise `[Video: attached]`.
-//!
-//! The pipeline is **opt-in** via `[media_pipeline] enabled = true` in config.
 
 use crate::config::{MediaPipelineConfig, TranscriptionConfig};
 

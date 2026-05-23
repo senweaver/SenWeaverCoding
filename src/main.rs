@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 #![recursion_limit = "256"]
-#![allow(clippy::all, clippy::pedantic, dead_code, unused_imports)]
+#![allow(dead_code, unused_imports)]
 #[cfg(windows)]
 #[allow(unused_imports)]
 use std::os::windows::process::CommandExt;
@@ -34,90 +34,84 @@ fn print_no_command_help() -> Result<()> {
     _bootstrap::print_no_command_help()
 }
 
-mod agent;
-mod approval;
-mod auth;
-mod bootstrap {
-    pub use senweavercoding::bootstrap::*;
-}
-mod channels;
-mod cli;
-mod commands;
-mod rag {
-    pub use senweavercoding::rag::*;
-}
-mod config;
-mod cost;
-mod cron;
-mod daemon;
-mod doctor;
-mod event_bus;
-mod evolution;
-mod gateway;
-mod guardrails;
-mod hands;
-mod hardware;
-mod health;
-mod heartbeat;
-mod hooks;
-mod i18n;
-mod identity;
-mod integrations;
-mod memory;
-mod migration;
-mod multimodal;
-mod nodes;
-mod observability;
-mod onboard;
-mod peripherals;
+mod agent { pub use senweavercoding::agent::*; }
+mod approval { pub use senweavercoding::approval::*; }
+mod auth { pub use senweavercoding::auth::*; }
+mod bootstrap { pub use senweavercoding::bootstrap::*; }
+mod channels { pub use senweavercoding::channels::*; }
+mod cli { pub use senweavercoding::cli::*; }
+mod commands { pub use senweavercoding::commands::*; }
+mod rag { pub use senweavercoding::rag::*; }
+mod config { pub use senweavercoding::config::*; }
+mod cost { pub use senweavercoding::cost::*; }
+mod cron { pub use senweavercoding::cron::*; }
+mod daemon { pub use senweavercoding::daemon::*; }
+mod doctor { pub use senweavercoding::doctor::*; }
+mod event_bus { pub use senweavercoding::event_bus::*; }
+mod evolution { pub use senweavercoding::evolution::*; }
+mod gateway { pub use senweavercoding::gateway::*; }
+mod guardrails { pub use senweavercoding::guardrails::*; }
+mod hands { pub use senweavercoding::hands::*; }
+mod hardware { pub use senweavercoding::hardware::*; }
+mod health { pub use senweavercoding::health::*; }
+mod heartbeat { pub use senweavercoding::heartbeat::*; }
+mod hooks { pub use senweavercoding::hooks::*; }
+mod i18n { pub use senweavercoding::i18n::*; }
+mod identity { pub use senweavercoding::identity::*; }
+mod integrations { pub use senweavercoding::integrations::*; }
+mod memory { pub use senweavercoding::memory::*; }
+mod migration { pub use senweavercoding::migration::*; }
+mod multimodal { pub use senweavercoding::multimodal::*; }
+mod nodes { pub use senweavercoding::nodes::*; }
+mod observability { pub use senweavercoding::observability::*; }
+mod onboard { pub use senweavercoding::onboard::*; }
+mod peripherals { pub use senweavercoding::peripherals::*; }
 #[cfg(feature = "plugins-wasm")]
-mod plugins;
-mod providers;
-mod python_env;
-mod query {
-    pub use senweavercoding::query::*;
-}
-mod routines;
-mod rpc;
-mod runtime;
-mod security;
-mod services;
-mod skillforge;
+mod plugins { pub use senweavercoding::plugins::*; }
+mod providers { pub use senweavercoding::providers::*; }
+mod python_env { pub use senweavercoding::python_env::*; }
+mod query { pub use senweavercoding::query::*; }
+mod routines { pub use senweavercoding::routines::*; }
+mod rpc { pub use senweavercoding::rpc::*; }
+mod runtime { pub use senweavercoding::runtime::*; }
+mod security { pub use senweavercoding::security::*; }
+mod services { pub use senweavercoding::services::*; }
+mod skillforge { pub use senweavercoding::skillforge::*; }
 
 #[allow(unused_imports)]
 mod entrypoints {
     #[allow(unused_imports)]
     pub use senweavercoding::entrypoints::*;
 }
-mod bench_diff;
-mod session;
+mod bench_diff { pub use senweavercoding::bench_diff::*; }
+mod session { pub use senweavercoding::session::*; }
 
-mod apply_model;
+mod apply_model { pub use senweavercoding::apply_model::*; }
 
-mod code_intel;
-mod constants;
-mod context;
+mod code_intel { pub use senweavercoding::code_intel::*; }
+mod constants { pub use senweavercoding::constants::*; }
+mod context { pub use senweavercoding::context::*; }
 #[cfg(feature = "crdt-coordination")]
-mod coordination;
+mod coordination { pub use senweavercoding::coordination::*; }
 
-mod context_resolver;
-mod coordinator;
-mod editor_core;
-mod error;
-mod inline_completion;
-mod lsp;
-mod inline_edit;
-mod skills;
-mod sop;
-mod tasks;
-mod tools;
-mod token_saver;
-mod trust;
-mod tunnel;
-mod user_rules;
-mod util;
-mod verifiable_intent;
-mod workflows;
+mod context_resolver { pub use senweavercoding::context_resolver::*; }
+mod coordinator { pub use senweavercoding::coordinator::*; }
+mod editor_core { pub use senweavercoding::editor_core::*; }
+mod error { pub use senweavercoding::error::*; }
+mod inline_completion { pub use senweavercoding::inline_completion::*; }
+mod lsp { pub use senweavercoding::lsp::*; }
+mod inline_edit { pub use senweavercoding::inline_edit::*; }
+mod skills { pub use senweavercoding::skills::*; }
+mod sop { pub use senweavercoding::sop::*; }
+mod tasks { pub use senweavercoding::tasks::*; }
+mod tools { pub use senweavercoding::tools::*; }
+mod token_saver { pub use senweavercoding::token_saver::*; }
+mod trust { pub use senweavercoding::trust::*; }
+mod tunnel { pub use senweavercoding::tunnel::*; }
+mod user_rules { pub use senweavercoding::user_rules::*; }
+mod util { pub use senweavercoding::util::*; }
+mod verifiable_intent { pub use senweavercoding::verifiable_intent::*; }
+mod workflows { pub use senweavercoding::workflows::*; }
 
 use config::Config;
 
@@ -1202,6 +1196,7 @@ async fn main() -> Result<()> {
 
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(log_filter)
+        .fmt_fields(senweavercoding::observability::redact_layer::RedactingFieldFormatter::default())
         .finish();
 
     if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
@@ -1331,7 +1326,7 @@ async fn main() -> Result<()> {
             println!();
         }
 
-        if std::env::var("SEN_AUTOSTART_CHANNELS").as_deref() == Ok("1") {
+        if crate::util::get_env_var("SEN_AUTOSTART_CHANNELS").as_deref() == Some("1") {
             Box::pin(channels::start_channels(config)).await?;
         }
         return Ok(());
@@ -1370,7 +1365,10 @@ async fn main() -> Result<()> {
     });
 
     match command {
-        Commands::Onboard { .. } | Commands::Completions { .. } => unreachable!(),
+
+        Commands::Onboard { .. } | Commands::Completions { .. } => {
+            unreachable!("invariant: Onboard/Completions are short-circuited before entering the main command dispatcher")
+        }
 
         Commands::Agent {
             message,
@@ -1918,8 +1916,11 @@ async fn main() -> Result<()> {
             let transport = if unix_socket.is_some() {
                 #[cfg(unix)]
                 {
+                    let socket_path = unix_socket
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("--unix-socket is expected to be set"))?;
                     RpcTransport::UnixSocket {
-                        path: std::path::PathBuf::from(unix_socket.as_ref().unwrap()),
+                        path: std::path::PathBuf::from(socket_path),
                         mode: "0755".to_string(),
                     }
                 }
@@ -2218,7 +2219,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             ConfigCommands::Set { key, value } => {
-                set_config_value(&config, &key, &value)?;
+                set_config_value(&config, &key, &value).await?;
                 Ok(())
             }
             ConfigCommands::List { keys_only } => {
@@ -3681,20 +3682,10 @@ fn get_config_value(config: &Config, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_config_value(config: &Config, key: &str, value: &str) -> Result<()> {
-    let rt = tokio::runtime::Handle::try_current()
-        .map(|h| h.block_on(Config::load_or_init()))
-        .unwrap_or_else(|_| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(Config::load_or_init())
-        });
-    let mut cfg = match rt {
-        Ok(c) => c,
-        Err(e) => bail!("Failed to load config: {e}"),
-    };
+async fn set_config_value(config: &Config, key: &str, value: &str) -> Result<()> {
+    let mut cfg = Config::load_or_init()
+        .await
+        .context("Failed to load config")?;
 
     match key {
         "default_provider" | "provider" => cfg.default_provider = Some(value.to_string()),
@@ -3737,22 +3728,11 @@ fn set_config_value(config: &Config, key: &str, value: &str) -> Result<()> {
         ),
     }
 
-    let rt2 = tokio::runtime::Handle::try_current()
-        .map(|h| h.block_on(cfg.save()))
-        .unwrap_or_else(|_| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(cfg.save())
-        });
-    match rt2 {
-        Ok(()) => println!(
-            "Set {key} = {value} (saved to {})",
-            config.config_path.display()
-        ),
-        Err(e) => bail!("Failed to save config: {e}"),
-    }
+    cfg.save().await.context("Failed to save config")?;
+    println!(
+        "Set {key} = {value} (saved to {})",
+        config.config_path.display()
+    );
     Ok(())
 }
 

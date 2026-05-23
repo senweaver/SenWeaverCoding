@@ -1,19 +1,9 @@
 // SPDX-License-Identifier: MIT
-//
-// Embedded Browser column for the React shell.
-//
-// The panel renders as a real flex column between the home content
-// area and the right sidebar, never overlapping chat or settings.
-// The actual page rendering happens in the child webview owned by the
-// Rust shell at `desktop/src-tauri/src/browser_dock.rs`. A
-// `ResizeObserver` watches the inner viewport and forwards its rect
-// (defensively clamped) to `browserPanelStore.setAnchorRect`, which
-// drives `browser_dock_set_rect` so the OS-level webview tracks the
-// React layout precisely.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useTabStore } from '../../stores/tabStore'
+import { useChatStore } from '../../stores/chatStore'
 import {
   type BrowserAgentActionEntry,
   type BrowserConsoleEntry,
@@ -30,12 +20,14 @@ import {
   dockHide,
   dockOpen,
   dockPark,
+  dockPresentSession,
   dockResync,
   dockScreenshot,
   dockSetRect,
   listenDockEvents,
 } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
+import { bindDebugTab, unbindDebugTab } from '../../lib/debugTabBind'
 import { useTranslation } from '../../i18n'
 import { BrowserPanelSplitter } from './BrowserPanelSplitter'
 
@@ -77,6 +69,13 @@ export function EmbeddedBrowserPanel() {
   const setAnchorRect = useBrowserPanelStore((s) => s.setAnchorRect)
   const ingestEvent = useBrowserPanelStore((s) => s.ingestEvent)
 
+  const chatState = useChatStore((s) =>
+    sessionId ? s.sessions[sessionId]?.chatState : undefined,
+  )
+  const activeToolName = useChatStore((s) =>
+    sessionId ? s.sessions[sessionId]?.activeToolName : undefined,
+  )
+
   const visible = panel?.visible ?? false
   const url = panel?.url ?? ''
   const liveUrl = panel?.liveUrl ?? ''
@@ -94,7 +93,12 @@ export function EmbeddedBrowserPanel() {
   const drawerHeightRatio = panel?.drawerHeightRatio ?? 0.35
   const columnWidthAuto = panel?.columnWidthAuto ?? true
   const ownsDock = sessionId !== null && activeSessionId === sessionId
-  const hasContent = Boolean((liveUrl && liveUrl.trim()) || (url && url.trim()))
+  const hasContent = Boolean(
+    (panel?.tabs?.length ?? 0) > 0 ||
+    panel?.activeTabId != null ||
+    (liveUrl && liveUrl.trim()) ||
+    (url && url.trim()),
+  )
 
   const [liveTick, setLiveTick] = useState(0)
   useEffect(() => {
@@ -117,6 +121,20 @@ export function EmbeddedBrowserPanel() {
     ensure(sessionId)
   }, [sessionId, ensure])
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    return () => {
+      useBrowserPanelStore.setState((state) => (
+        state.activeSessionId
+          ? { activeSessionId: null }
+          : state
+      ))
+      dockHide().catch((err) => {
+        console.warn('[browserDock] dockHide on panel unmount failed', err)
+      })
+    }
+  }, [])
+
   const lastObservedSessionRef = useRef<string | null>(null)
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -131,6 +149,7 @@ export function EmbeddedBrowserPanel() {
       return
     }
     if (prev === sessionId) return
+    void useBrowserPanelStore.getState().refreshTabs(sessionId)
     const store = useBrowserPanelStore.getState()
     const newPanel = store.panels[sessionId]
     if (!newPanel?.visible) {
@@ -144,15 +163,27 @@ export function EmbeddedBrowserPanel() {
     }
     const rect = newPanel.anchorRect
     if (!rect || rect.w < 100 || rect.h < 100) {
+      dockPresentSession(sessionId).catch((err) => {
+        console.warn('[browserDock] present_session on session switch failed', err)
+      })
       return
     }
-    dockOpen(rect, newPanel.url ?? null).catch((err) => {
-      console.warn('[browserDock] dockOpen on session switch failed', err)
-    })
+    void (async () => {
+      try {
+        await dockPresentSession(sessionId)
+        await dockOpen(rect, null, sessionId)
+      } catch (err) {
+        console.warn('[browserDock] dock present/open on session switch failed', err)
+      }
+    })()
   }, [sessionId])
 
-  const [agentBubbles, setAgentBubbles] = useState<AgentBubble[]>([])
-  const [takeoverTabs, setTakeoverTabs] = useState<Record<number, number>>({})
+  const [agentBubblesBySession, setAgentBubblesBySession] = useState<
+    Record<string, AgentBubble[]>
+  >({})
+  const [takeoverTabsBySession, setTakeoverTabsBySession] = useState<
+    Record<string, Record<number, number>>
+  >({})
   const unsubRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -160,35 +191,74 @@ export function EmbeddedBrowserPanel() {
     listenDockEvents((event) => {
       if (cancelled) return
       ingestEvent(event)
+      const sid =
+        typeof (event as { sessionId?: string | null }).sessionId === 'string'
+          ? ((event as { sessionId?: string }).sessionId as string)
+          : null
       if (event.kind === 'agent_action') {
+        if (!sid) return
         const data = event.data as { kind?: string; ts?: number }
         const ts = typeof data.ts === 'number' ? data.ts : Date.now()
         const id = ts + Math.random()
         const kind = typeof data.kind === 'string' ? data.kind : 'unknown'
-        setAgentBubbles((prev) => [
-          ...prev.slice(-3),
-          { id, kind, ts },
-        ])
+        setAgentBubblesBySession((prev) => {
+          const bucket = prev[sid] ?? []
+          return {
+            ...prev,
+            [sid]: [...bucket.slice(-3), { id, kind, ts }],
+          }
+        })
         setTimeout(() => {
-          setAgentBubbles((prev) => prev.filter((b) => b.id !== id))
+          setAgentBubblesBySession((prev) => {
+            const bucket = prev[sid]
+            if (!bucket) return prev
+            const next = bucket.filter((b) => b.id !== id)
+            if (next.length === bucket.length) return prev
+            return next.length
+              ? { ...prev, [sid]: next }
+              : (() => {
+                  const copy = { ...prev }
+                  delete copy[sid]
+                  return copy
+                })()
+          })
         }, AGENT_BUBBLE_WINDOW_MS)
       } else if (event.kind === 'dock_takeover') {
-        const data = event.data as { tab_id?: number; started_at?: number }
+        const data = event.data as {
+          tab_id?: number
+          started_at?: number
+          sessionId?: string | null
+        }
         const tabId = typeof data.tab_id === 'number' ? data.tab_id : null
-        if (tabId !== null) {
+        const eventSid =
+          sid ??
+          (typeof data.sessionId === 'string' && data.sessionId ? data.sessionId : null)
+        if (tabId !== null && eventSid) {
           const startedAt =
             typeof data.started_at === 'number' ? data.started_at : Date.now()
-          setTakeoverTabs((prev) => ({ ...prev, [tabId]: startedAt }))
+          setTakeoverTabsBySession((prev) => ({
+            ...prev,
+            [eventSid]: { ...(prev[eventSid] ?? {}), [tabId]: startedAt },
+          }))
         }
       } else if (event.kind === 'dock_takeover_end') {
-        const data = event.data as { tab_id?: number }
+        const data = event.data as { tab_id?: number; sessionId?: string | null }
         const tabId = typeof data.tab_id === 'number' ? data.tab_id : null
-        if (tabId !== null) {
-          setTakeoverTabs((prev) => {
-            if (!(tabId in prev)) return prev
-            const next = { ...prev }
-            delete next[tabId]
-            return next
+        const eventSid =
+          sid ??
+          (typeof data.sessionId === 'string' && data.sessionId ? data.sessionId : null)
+        if (tabId !== null && eventSid) {
+          setTakeoverTabsBySession((prev) => {
+            const bucket = prev[eventSid]
+            if (!bucket || !(tabId in bucket)) return prev
+            const nextBucket = { ...bucket }
+            delete nextBucket[tabId]
+            if (Object.keys(nextBucket).length === 0) {
+              const copy = { ...prev }
+              delete copy[eventSid]
+              return copy
+            }
+            return { ...prev, [eventSid]: nextBucket }
           })
         }
       }
@@ -219,6 +289,9 @@ export function EmbeddedBrowserPanel() {
       }
     }
   }, [ingestEvent])
+
+  const agentBubbles = sessionId ? agentBubblesBySession[sessionId] ?? [] : []
+  const takeoverTabs = sessionId ? takeoverTabsBySession[sessionId] ?? {} : {}
 
   const setDrawerHeightRatio = useBrowserPanelStore((s) => s.setDrawerHeightRatio)
 
@@ -477,8 +550,6 @@ export function EmbeddedBrowserPanel() {
   const closeTabAction = useBrowserPanelStore((s) => s.closeTab)
   const activateTabAction = useBrowserPanelStore((s) => s.activateTab)
   const refreshTabs = useBrowserPanelStore((s) => s.refreshTabs)
-  const setPreferredTestTab = useBrowserPanelStore((s) => s.setPreferredTestTab)
-  const clearPreferredTestTab = useBrowserPanelStore((s) => s.clearPreferredTestTab)
 
   useEffect(() => {
     if (!sessionId || !visible) return
@@ -501,9 +572,14 @@ export function EmbeddedBrowserPanel() {
     if (!rect || rect.w < 100 || rect.h < 100) {
       return
     }
-    dockOpen(rect, current?.url ?? null).catch((err) => {
-      console.warn('[browserDock] dockOpen on visibility change failed', err)
-    })
+    void (async () => {
+      try {
+        await dockPresentSession(sessionId)
+        await dockOpen(rect, null, sessionId)
+      } catch (err) {
+        console.warn('[browserDock] dock present/open on visibility change failed', err)
+      }
+    })()
   }, [sessionId, visible, ownsDock, hasContent])
 
   const [draftUrl, setDraftUrl] = useState(url)
@@ -678,6 +754,27 @@ export function EmbeddedBrowserPanel() {
           isLive ? 'animate-browser-dock-pulse' : ''
         }`}
       >
+        {(() => {
+          const agentBusy =
+            chatState === 'tool_executing' && activeToolName === 'browser'
+          if (!agentBusy) return null
+          return (
+            <div
+              className="pointer-events-none flex items-center gap-1.5 border-b border-[var(--color-brand)]/40 bg-[var(--color-brand)]/12 px-3 py-1 text-[10px] font-medium text-[var(--color-brand)]"
+              style={{ animation: 'browser-dock-pulse 1.6s ease-in-out infinite' }}
+            >
+              <span
+                className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-brand)]"
+                aria-hidden="true"
+              />
+              <span>
+                {t('debug.qa.dock.agentBusy', {
+                  tabId: activeBrowserTabId ?? '-',
+                })}
+              </span>
+            </div>
+          )
+        })()}
         <div className="relative flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5"
           style={{ minHeight: HEADER_PX }}
         >
@@ -799,9 +896,9 @@ export function EmbeddedBrowserPanel() {
                           e.stopPropagation()
                           if (!sessionId) return
                           if (isPinned) {
-                            void clearPreferredTestTab(sessionId)
+                            unbindDebugTab(sessionId, tab.id)
                           } else {
-                            void setPreferredTestTab(sessionId, tab.id)
+                            bindDebugTab(sessionId, tab.id)
                           }
                         }}
                         title={

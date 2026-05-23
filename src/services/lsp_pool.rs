@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tier-1 language-server pool manifest.
-//!
-//! SenWeaverCoding supports many language servers (see
-//! [`super::lsp::server_candidates`]), but five of them are the
-//! product's "tier-1" surface: they are documented, tested, exposed
-//! through `tools::lsp_symbols`, and surfaced in the GUI status
-//! widget.  This module centralises that list so callers (docs, GUI
-//! badges, readiness checks) all reference the same source of truth.
-//!
-//! The pool is intentionally small; new languages should prove
-//! themselves through the generic LSP plumbing first, then get
-//! promoted here with a dedicated test matrix.
 
 use std::path::PathBuf;
 

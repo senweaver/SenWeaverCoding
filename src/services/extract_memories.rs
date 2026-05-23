@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Extract memories service — mirrors claude-code-typescript-src`services/extractMemories/`.
-// Automatically extracts memorable facts, decisions, and preferences
-// from conversation turns for long-term memory storage.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

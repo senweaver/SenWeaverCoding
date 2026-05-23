@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Nevis IAM authentication provider for SenWeaverCoding.
-//!
-//! Integrates with Nevis Security Suite (Adnovum) for OAuth2/OIDC token
-//! validation, FIDO2/passkey verification, and session management. Maps Nevis
-//! roles to SenWeaverCoding tool permissions via [`super::iam_policy::IamPolicy`].
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};

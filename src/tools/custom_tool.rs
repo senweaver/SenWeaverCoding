@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Script-wrapped user-defined tool.
-//!
-//! Each entry in `[[custom_tools.tools]]` becomes a `CustomTool` registered
-//! into the global tool registry under `custom_<name>`. The tool spawns the
-//! configured `command` with templated arguments, the JSON payload on stdin,
-//! and the merged environment, then returns a structured `ToolResult`.
-//!
-//! Argument templating supports two placeholder forms inside `args`:
-//!
-//! * `{json}` — replaced by the full JSON arguments (compact form).
-//! * `{<key>}` — replaced by `args.<key>` rendered as a string. Numeric
-//!   and boolean values are stringified naturally; objects/arrays are
-//!   rendered as compact JSON; missing keys resolve to an empty string.
-//!
-//! The raw JSON args are also written to the spawned process's stdin and
-//! exposed as `SEN_TOOL_ARGS` so the script can choose the form it likes.
 
 use super::traits::{Tool, ToolResult};
 use crate::config::CustomToolDef;

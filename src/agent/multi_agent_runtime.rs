@@ -1,19 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Multi-Agent Runtime — unified entry point for all collaboration infrastructure.
-//!
-//! Bundles the Agent Registry, Task Queue, TaskScheduler, Supervisor, Coordinator,
-//! and Blackboard into a single runtime that is initialized once at system startup
-//! (gateway/daemon) and shared across the system via a global handle.
-//!
-//! **Two task subsystems coexist intentionally:**
-//! - [`TaskQueueHandle`][super::task_queue::TaskQueueHandle] — agents poll for
-//!   capability-matched work; supports priority, retry, and expiration.
-//! - [`TaskScheduler`][super::scheduler::TaskScheduler] (via
-//!   [`submit_task_graph`][MultiAgentRuntime::submit_task_graph]) — DAG-based
-//!   parallel execution with dependency resolution, used for one-shot fan-out
-//!   delegations.
 
 use std::sync::{Arc, LazyLock};
 

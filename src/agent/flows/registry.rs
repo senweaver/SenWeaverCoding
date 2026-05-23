@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Process-global registry that the `flow_run` tool uses to find the
-//! currently-registered `AgentHandle`.  Bootstrap code (CLI/TUI/GUI)
-//! installs a concrete handle at startup; tests install a scripted
-//! one.  Keeping this out of `traits.rs` avoids leaking lock
-//! machinery into the core trait surface.
 
 use std::sync::{Arc, OnceLock, RwLock};
 

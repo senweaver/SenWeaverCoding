@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Security aggregate config + WebAuthn sub-config, migrated out of
-//! `schema.rs` as part of N6.3 of the v3 deep-optimisation plan.
-//!
-//! Nested config types that `SecurityConfig` references
-//! (`SandboxConfig`, `ResourceLimitsConfig`, `AuditConfig`,
-//! `OtpConfig`, `EstopConfig`, `NevisConfig`) stay in `schema.rs`
-//! for now — moving them in one shot would explode the PR surface;
-//! each can migrate incrementally in follow-on PRs.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

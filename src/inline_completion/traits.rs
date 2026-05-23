@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Core trait + request/response types for inline completion providers.
 
 use async_trait::async_trait;
 use futures_util::Stream;

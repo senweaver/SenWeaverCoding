@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Bridge between the agent loop's streaming deltas and the shared
-//! `SessionEvent` channel consumed by CLI/TUI/GUI.
-//!
-//! `SessionEventSink` implements the `OnDelta` callback expected by
-//! `run_tool_call_loop` and translates each provider delta into a
-//! `SessionEventKind::Delta` event on the shared broadcast channel.
 
 use std::sync::Arc;
 

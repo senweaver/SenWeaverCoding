@@ -1,16 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Taint tracking system for data flow integrity.
-//!
-//! This module provides security taint tracking:
-//! - Labels for data sources (external network, user input, PII, secrets)
-//! - Tainted values that carry their taint labels through the system
-//! - Sink checking before sensitive operations (shell, network, agent messages)
-//! - Declassification and cleaning operations for sanitization
-//!
-//! Taint tracking helps prevent injection attacks and data exfiltration by
-//! tracking where data came from and validating it's safe before use.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -113,7 +103,7 @@ impl TaintedValue {
     }
 
     pub fn merge_taint(&mut self, other: &TaintedValue) {
-        self.labels.extend(other.labels.iter().cloned());
+        self.labels.extend(other.labels.iter().copied());
 
         if self.source != other.source {
             self.source = format!("{} + {}", self.source, other.source);
@@ -205,7 +195,7 @@ impl TaintSink {
             Ok(())
         } else {
             Err(TaintViolation {
-                labels: blocked.into_iter().cloned().collect(),
+                labels: blocked.into_iter().copied().collect(),
                 sink_name: self.name.clone(),
                 data_source: value.source.clone(),
                 value_preview: if value.has_any_label(&[TaintLabel::Secret, TaintLabel::Pii]) {
@@ -315,16 +305,7 @@ pub mod sanitizers {
     use super::TaintedValue;
 
     pub fn sanitize_shell(value: &str) -> String {
-        value
-            .replace(';', "")
-            .replace('&', "")
-            .replace('|', "")
-            .replace('$', "")
-            .replace('`', "")
-            .replace('(', "")
-            .replace(')', "")
-            .replace('<', "")
-            .replace('>', "")
+        value.replace([';', '&', '|', '$', '`', '(', ')', '<', '>'], "")
     }
 
     pub fn sanitize_url(value: &str) -> Option<String> {

@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Channel Format Bridge - unified cross-channel message routing and format normalization.
-//!
-//! Provides a `ChannelBridge` that normalizes messages between different channel
-//! formats (Telegram Markdown, Discord Markdown, Slack mrkdwn, plain text, HTML)
-//! and routes messages across channels.
-//!
-//! **Integration status**: Ready for use. Call `ChannelBridge::convert()` when
-//! routing agent responses to channels that need format adaptation (e.g.,
-//! converting Markdown to Slack mrkdwn). Currently available as a utility but
-//! not yet automatically applied in the `send_message` pipeline — channels
-//! handle their own formatting inline.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,6 +68,10 @@ impl ChannelBridge {
     }
 
     pub fn convert(&self, msg: &BridgedMessage, target: MessageFormat) -> String {
+        Self::convert_inner(msg, target)
+    }
+
+    fn convert_inner(msg: &BridgedMessage, target: MessageFormat) -> String {
         if msg.source_format == target {
             return msg.content.clone();
         }
@@ -117,7 +110,7 @@ impl ChannelBridge {
                     source_format: MessageFormat::Markdown,
                     ..msg.clone()
                 };
-                self.convert(&intermediate, target)
+                Self::convert_inner(&intermediate, target)
             }
 
             (MessageFormat::SlackMrkdwn, MessageFormat::PlainText) => {
@@ -133,7 +126,7 @@ impl ChannelBridge {
                     source_format: MessageFormat::Markdown,
                     ..msg.clone()
                 };
-                self.convert(&intermediate, target)
+                Self::convert_inner(&intermediate, target)
             }
 
             (MessageFormat::DiscordMarkdown, target_fmt) => {
@@ -142,7 +135,7 @@ impl ChannelBridge {
                     source_format: MessageFormat::Markdown,
                     ..msg.clone()
                 };
-                self.convert(&intermediate, target_fmt)
+                Self::convert_inner(&intermediate, target_fmt)
             }
 
             (MessageFormat::Html, MessageFormat::PlainText) => strip_html(&msg.content),

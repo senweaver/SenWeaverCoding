@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! AWS Bedrock provider using the Converse API.
-//!
-//! Authentication: supports two methods:
-//! - **Bearer token**: set `BEDROCK_API_KEY` env var (takes precedence).
-//! - **SigV4 signing**: AWS AKSK (Access Key ID + Secret Access Key)
-//!   via environment variables or EC2 IMDSv2. SigV4 signing is implemented
-//!   manually using hmac/sha2 crates — no AWS SDK dependency.
 
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
@@ -474,7 +467,9 @@ impl BedrockProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.bedrock", 120, 10)
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.bedrock", 120, 10)
     }
 
     fn encode_model_path(model_id: &str) -> String {
@@ -1055,7 +1050,14 @@ impl Provider for BedrockProvider {
     ) -> anyhow::Result<ProviderChatResponse> {
         let auth = self.resolve_auth().await?;
 
-        let (system_blocks, mut converse_messages) = Self::convert_messages(request.messages);
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            self.max_tokens as usize,
+            None,
+        );
+        let (system_blocks, mut converse_messages) = Self::convert_messages(&sanitized_messages);
 
         let system = system_blocks.map(|mut blocks| {
             let has_large_system = blocks
@@ -1069,7 +1071,7 @@ impl Provider for BedrockProvider {
             blocks
         });
 
-        if Self::should_cache_conversation(request.messages) {
+        if Self::should_cache_conversation(&sanitized_messages) {
             if let Some(last_msg) = converse_messages.last_mut() {
                 last_msg
                     .content

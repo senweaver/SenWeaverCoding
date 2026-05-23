@@ -1,28 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `delegate_parallel` tool ??fan out multiple sub-tasks concurrently via
-//! the `TaskSchedulerRuntime`.
-//!
-//! Input schema:
-//! ```json
-//! {
-//!   "tasks": [
-//!     {"id": "research", "description": "...", "prompt": "...",
-//!      "depends_on": [], "capability": "research"},
-//!     {"id": "coding", "description": "...", "prompt": "...",
-//!      "depends_on": ["research"], "capability": "coding"}
-//!   ],
-//!   "merge_strategy": "all" | "first" | "voting" | "llm_judge",
-//!   "max_parallel": 4,
-//!   "allow_single_agent_fallback": false
-//! }
-//! ```
-//!
-//! metrics: missing global runtime, unmet capability, and
-//! single-agent fallback transitions are reported through
-//! [`crate::observability::coordination_metrics::global`] via the
-//! `incr_delegate_parallel_*` helpers.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -140,6 +118,20 @@ fn err_result(msg: impl Into<String>) -> ToolResult {
     }
 }
 
+type DegradedNotesMap = std::collections::HashMap<String, (bool, Option<String>)>;
+
+fn lock_degraded_notes(
+    notes: &std::sync::Mutex<DegradedNotesMap>,
+) -> std::sync::MutexGuard<'_, DegradedNotesMap> {
+    notes.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            target = "delegate_parallel",
+            "degraded_notes mutex poisoned by prior worker panic; recovering inner state"
+        );
+        poisoned.into_inner()
+    })
+}
+
 fn ok_result(output: impl Into<String>) -> ToolResult {
     ToolResult {
         success: true,
@@ -199,7 +191,7 @@ impl Tool for DelegateParallelTool {
                 },
                 "allow_single_agent_fallback": {
                     "type": "boolean",
-                    "description": "Phase 4: when true, missing multi-agent runtime / capability degrade to a single-agent fallback. Default false (strict).",
+                    "description": "When true, missing multi-agent runtime / capability degrade to a single-agent fallback. Default false (strict).",
                     "default": false
                 }
             },
@@ -233,9 +225,8 @@ impl Tool for DelegateParallelTool {
             })
             .collect();
 
-        type DegradedNotes = std::collections::HashMap<String, (bool, Option<String>)>;
-        let degraded_notes: Arc<std::sync::Mutex<DegradedNotes>> =
-            Arc::new(std::sync::Mutex::new(DegradedNotes::new()));
+        let degraded_notes: Arc<std::sync::Mutex<DegradedNotesMap>> =
+            Arc::new(std::sync::Mutex::new(DegradedNotesMap::new()));
         let degraded_notes_exec = degraded_notes.clone();
 
         let (limiter, call_timeout) = match crate::services::try_get_services() {
@@ -338,7 +329,7 @@ impl Tool for DelegateParallelTool {
                     coordination_metrics::incr_delegate_parallel_no_runtime();
                     if allow_fallback {
                         coordination_metrics::incr_delegate_parallel_fallback();
-                        notes.lock().unwrap().insert(
+                        lock_degraded_notes(&notes).insert(
                             id.clone(),
                             (
                                 true,
@@ -364,7 +355,7 @@ impl Tool for DelegateParallelTool {
                     );
                     if allow_fallback {
                         coordination_metrics::incr_delegate_parallel_fallback();
-                        notes.lock().unwrap().insert(
+                        lock_degraded_notes(&notes).insert(
                             id.clone(),
                             (
                                 true,
@@ -418,7 +409,7 @@ impl Tool for DelegateParallelTool {
                             let resolved_model = match crate::providers::resolve_default_model(&cfg) {
                                 Ok(m) => m,
                                 Err(e) => {
-                                    notes.lock().unwrap().insert(
+                                    lock_degraded_notes(&notes).insert(
                                         id.clone(),
                                         (
                                             true,
@@ -451,7 +442,7 @@ impl Tool for DelegateParallelTool {
                     None => {
                         if allow_fallback {
                             coordination_metrics::incr_delegate_parallel_fallback();
-                            notes.lock().unwrap().insert(
+                            lock_degraded_notes(&notes).insert(
                                 id.clone(),
                                 (
                                     true,
@@ -503,7 +494,7 @@ impl Tool for DelegateParallelTool {
 
                 let result = if agentic
                     && !allowed_tools.is_empty()
-                    && parent_tools.is_some()
+                    && let Some(parent_tools_ref) = parent_tools.as_ref()
                 {
                     let workspace_dir_buf = workspace_root.read().clone();
                     let chosen_timeout = Duration::from_secs(
@@ -525,9 +516,7 @@ impl Tool for DelegateParallelTool {
                             timeout: chosen_timeout,
                             multimodal: &multimodal,
                             workspace_dir: workspace_dir_buf.as_path(),
-                            parent_tools: parent_tools
-                                .as_ref()
-                                .expect("parent_tools checked above"),
+                            parent_tools: parent_tools_ref,
                             cancel: cancel.clone(),
                         },
                     )
@@ -623,7 +612,7 @@ impl Tool for DelegateParallelTool {
             }
         };
 
-        let notes_snapshot = degraded_notes.lock().unwrap().clone();
+        let notes_snapshot = lock_degraded_notes(&degraded_notes).clone();
         let results: Vec<SubTaskResult> = outcomes
             .into_iter()
             .map(|o| {
@@ -853,8 +842,7 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
     let parent_for_bridge = take_parent_draft_channel();
     let task_id_for_bridge = ctx.id.clone();
     let agent_id_for_bridge = ctx.agent_id.clone();
-    let bridge_handle = if parent_for_bridge.is_some() {
-        let parent = parent_for_bridge.clone().unwrap();
+    let bridge_handle = if let Some(parent) = parent_for_bridge.clone() {
         Some(crate::runtime::spawn_supervised(
             "delegate_parallel.subagent_bridge",
             async move {
@@ -880,7 +868,12 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
                                 delta: name,
                             })
                         }
-                        DraftEvent::ToolResult { name, output, success: _ } => {
+                        DraftEvent::ToolResult {
+                            name,
+                            output,
+                            success: _,
+                            tool_call_id: _,
+                        } => {
                             let preview = output.chars().take(160).collect::<String>();
                             Some(DraftEvent::Subagent {
                                 task_id: task_id_for_bridge.clone(),
@@ -923,33 +916,24 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
         None
     };
 
-    let loop_fut = crate::agent::loop_::run_tool_call_loop(
+    let delegated_policy = crate::agent::loop_policy::PolicyBundle::delegated(
         ctx.provider,
-        &mut history,
         &sub_tools,
         &observer,
         ctx.provider_name,
         ctx.model,
-        ctx.temperature,
-        true,
-        None,
-        "delegate_parallel",
-        None,
         ctx.multimodal,
-        ctx.max_iterations,
-        Some(ctx.cancel.clone()),
-        on_delta_for_loop,
-        None,
-        &[],
-        &[],
-        None,
-        None,
         &pacing,
-        None,
-        None,
-        None,
-        None,
-    );
+        &[],
+        &[],
+    )
+    .with_channel_name("delegate_parallel")
+    .with_temperature(ctx.temperature)
+    .with_max_iterations(ctx.max_iterations)
+    .with_cancellation(Some(ctx.cancel.clone()))
+    .with_on_delta(on_delta_for_loop);
+    let loop_fut =
+        crate::agent::loop_unified::UnifiedLoop::new(delegated_policy).run(&mut history);
 
     let result = tokio::select! {
         biased;

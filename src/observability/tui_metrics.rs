@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TUI workbench observability metrics.
-//!
-//! **This file intentionally uses a functional name (`tui_metrics`), not a
-//! phase-based name.**  The existing `phase{4,5,6,7}_metrics.rs` modules
-//! predate the naming convention; they will be renamed in a follow-up
-//! separately from TUI work.  Do not conflate this module with those.
-//!
-//! Registers Prometheus-compatible counters, one gauge, and one histogram
-//! covering the TUI event-driven loop, chat render cache, diff-review
-//! tab, file-viewer tab, inline-edit modal, and `chat_messages`
-//! reconciliation logic introduced in the TUI workbench upgrade.
-//!
-//! Rendered by [`crate::observability::prometheus::PrometheusObserver::encode`]
-//! alongside the other metric families.  Name prefix is `sen_tui_*` to
-//! avoid collision with `sen_session_*` / `sen_checkpoint_*` surfaces.
 
 use std::sync::Mutex;
 use std::sync::OnceLock;

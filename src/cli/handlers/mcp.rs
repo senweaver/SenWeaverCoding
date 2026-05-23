@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! MCP server management handler — add/remove/list/auth MCP connections.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -60,7 +59,9 @@ pub async fn add_server(workspace: &Path, entry: McpServerEntry) -> Result<()> {
     }
 
     servers.push(entry.clone());
-    let dir = config_path.parent().unwrap();
+    let dir = config_path
+        .parent()
+        .context("mcp_servers.json path must have a parent directory")?;
     tokio::fs::create_dir_all(dir).await?;
     tokio::fs::write(&config_path, serde_json::to_string_pretty(&servers)?).await?;
     println!("Added MCP server '{}'", entry.name);

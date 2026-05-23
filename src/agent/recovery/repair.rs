@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Dangling tool-call repair façade.
-//!
-//! Delegates to the canonical implementation in
-//! `crate::agent::dangling_tool_repair` while surfacing a structured
-//! [`RepairReport`] for observability.
 
 use crate::providers::traits::ConversationMessage;
 

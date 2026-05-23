@@ -1,41 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! KiloCLI subprocess provider.
-//!
-//! Integrates with the KiloCLI tool, spawning the `kilo` binary
-//! as a subprocess for each inference request. This allows using KiloCLI's AI
-//! models without an interactive UI session.
-//!
-//! # Usage
-//!
-//! The `kilo` binary must be available in `PATH`, or its location must be
-//! set via the `KILO_CLI_PATH` environment variable.
-//!
-//! KiloCLI is invoked as:
-//! ```text
-//! kilo --print -
-//! ```
-//! with prompt content written to stdin.
-//!
-//! # Limitations
-//!
-//! - **Conversation history**: Only the system prompt (if present) and the last
-//!   user message are forwarded. Full multi-turn history is not preserved because
-//!   the CLI accepts a single prompt per invocation.
-//! - **System prompt**: The system prompt is prepended to the user message with a
-//!   blank-line separator, as the CLI does not provide a dedicated system-prompt flag.
-//! - **Temperature**: The CLI does not expose a temperature parameter.
-//!   Only default values are accepted; custom values return an explicit error.
-//!
-//! # Authentication
-//!
-//! Authentication is handled by KiloCLI itself (its own credential store).
-//! No explicit API key is required by this provider.
-//!
-//! # Environment variables
-//!
-//! - `KILO_CLI_PATH` — override the path to the `kilo` binary (default: `"kilo"`)
 
 use crate::providers::traits::{ChatRequest, ChatResponse, Provider, TokenUsage};
 use async_trait::async_trait;
@@ -212,11 +177,9 @@ impl Provider for KiloCliProvider {
             .chat_with_history(request.messages, model, temperature)
             .await?;
 
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: Vec::new(),
-            usage: Some(TokenUsage::default()),
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(
+            Some(text),
+            Some(TokenUsage::default()),
+        ))
     }
 }

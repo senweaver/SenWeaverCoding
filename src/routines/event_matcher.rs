@@ -1,13 +1,14 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Event pattern matching for the routines engine.
-//!
-//! Supports three match strategies: exact, glob, and regex.  Each routine
-//! declares one or more [`EventPattern`]s; an incoming [`RoutineEvent`] fires
-//! the routine when **any** pattern matches.
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
+static REGEX_CACHE: LazyLock<Mutex<HashMap<Arc<str>, Arc<regex::Regex>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -65,5 +66,21 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 fn regex_match(pattern: &str, text: &str) -> bool {
-    regex::Regex::new(pattern).map_or(false, |re| re.is_match(text))
+    let key: Arc<str> = Arc::from(pattern);
+    let cached = {
+        let guard = REGEX_CACHE.lock();
+        guard.get(&key).cloned()
+    };
+    let re = match cached {
+        Some(re) => re,
+        None => match regex::Regex::new(pattern) {
+            Ok(re) => {
+                let arc = Arc::new(re);
+                REGEX_CACHE.lock().insert(key, Arc::clone(&arc));
+                arc
+            }
+            Err(_) => return false,
+        },
+    };
+    re.is_match(text)
 }

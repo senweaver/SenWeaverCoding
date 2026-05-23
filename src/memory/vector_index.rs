@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Pluggable vector-index backend abstraction.
-//!
-//! This module defines [`VectorIndex`], a trait that lets the memory subsystem
-//! swap between different approximate-nearest-neighbour implementations
-//! without touching the calling code.
-//!
-//! Two backends are currently available:
-//!
-//! - [`LinearIndex`] (default, always compiled): in-memory min-heap scan with
-//!   pre-computed norms.  Already hot-path-optimized and remains the
-//!   baseline implementation for small/medium memories.
-//! - `sqlite-vec` virtual table (planned, `vector-index-sqlite` feature
-//!   flag): O(log N) HNSW lookups via the `vec0` SQLite extension.
-//!
-//! Callers obtain a backend via [`build_default_backend`] and interact
-//! through the trait, so adding a new backend is a matter of implementing
-//! the trait and extending the factory.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

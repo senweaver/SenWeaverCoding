@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Task management module — mirrors claude-code's `tasks/` and `Task.ts`.
-//
-// Provides typed task abstractions (local shell, local agent, remote agent,
-// in-process teammate, workflow, monitor, dream) with lifecycle management,
-// output capture, and status tracking.
-
 pub mod dream;
 #[allow(unused_imports)]
 pub mod local_agent;

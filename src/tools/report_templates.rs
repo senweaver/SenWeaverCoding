@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Report template engine for project delivery intelligence.
-//!
-//! Provides built-in templates for weekly status, sprint review, risk register,
-//! and milestone reports with multi-language support (EN, DE, FR, IT).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;

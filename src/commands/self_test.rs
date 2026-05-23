@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `sen self-test` — quick and full diagnostic checks.
 
 use anyhow::Result;
 use std::path::Path;

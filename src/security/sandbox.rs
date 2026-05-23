@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Sandbox activation state and path-permission helpers.
-//!
-//! This module provides a stable API surface that is always compiled
-//! regardless of target OS or feature flags.  The two entry points —
-//! [`is_sandbox_active`] and [`sandbox_allows_path`] — degrade gracefully:
-//! when OS-level isolation is unavailable they return conservative defaults
-//! rather than panicking, so callers on every platform get safe behaviour.
-//!
-//! # Platform matrix
-//!
-//! | Platform | `sandbox` feature off | `sandbox` feature on |
-//! |----------|----------------------|----------------------|
-//! | Linux (kernel ≥ 5.13) | permissive | Landlock enforced (if `sandbox-landlock` enabled) |
-//! | Linux (older kernel)  | permissive | path-whitelist only, warn once |
-//! | Windows               | permissive | Job Object scope (future) + path-whitelist |
-//! | other                 | permissive | path-whitelist, warn once |
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -67,7 +51,7 @@ pub fn sandbox_allows_path(path: &Path) -> bool {
                 "Windows sandbox active but `sandbox-windows-job` feature not enabled",
             );
         }
-        return path_is_plausible(path);
+        path_is_plausible(path)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]

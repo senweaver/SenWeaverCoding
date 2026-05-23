@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TOCTOU-resistant file-system helpers.
-//!
-//! historically each write tool performed a
-//! `check(path) → canonicalize(path) → write(path)` sequence, which
-//! opens a race window between the checks and the actual syscall.
-//! This module centralises the safer pattern:
-//!
-//! 1. Open the file once with `O_NOFOLLOW` (Unix) or the symlink-reject
-//!    flag on Windows, retaining the file descriptor.
-//! 2. Call `metadata()` / `canonicalize()` **through the descriptor**
-//!    so later writes operate on the same inode.
-//!
-//! The module intentionally stays narrow — it exposes two helpers
-//! ([`open_nofollow_read`], [`open_nofollow_write`]) and a
-//! [`verify_no_symlink`] probe that tool code can use to tighten
-//! their existing code paths without rewriting them.
 
 use std::fs::{File, OpenOptions};
 use std::io;

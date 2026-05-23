@@ -265,10 +265,10 @@ export function LspSettings() {
   }, [diagnosticsByUri, selected])
 
   return (
-    <div className="flex flex-col gap-4 max-w-5xl">
+    <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
+          <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.lsp.title')}
           </h2>
           <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
@@ -297,11 +297,11 @@ export function LspSettings() {
         </div>
       )}
 
-      <div className="flex flex-col gap-3 border border-[var(--color-border)] rounded-xl p-4 bg-[var(--color-surface-container-low)]">
+      <div className="flex flex-col gap-3 border border-[var(--color-border)] rounded-xl p-3 bg-[var(--color-surface-container-low)]">
         <div className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
           {t('lsp.preferences.title')}
         </div>
-        <label className="flex items-start gap-3 text-sm text-[var(--color-text-primary)]">
+        <label className="flex items-start gap-3 text-xs text-[var(--color-text-primary)]">
           <input
             type="checkbox"
             checked={inlayHintsEnabled}
@@ -312,12 +312,12 @@ export function LspSettings() {
           />
           <div className="flex flex-col gap-0.5">
             <span>{t('lsp.preferences.inlayHints')}</span>
-            <span className="text-[11px] text-[var(--color-text-tertiary)]">
+            <span className="text-xs text-[var(--color-text-tertiary)]">
               {t('lsp.preferences.inlayHintsDescription')}
             </span>
           </div>
         </label>
-        <label className="flex items-start gap-3 text-sm text-[var(--color-text-primary)]">
+        <label className="flex items-start gap-3 text-xs text-[var(--color-text-primary)]">
           <input
             type="checkbox"
             checked={formatOnSave}
@@ -328,13 +328,13 @@ export function LspSettings() {
           />
           <div className="flex flex-col gap-0.5">
             <span>{t('lsp.preferences.formatOnSave')}</span>
-            <span className="text-[11px] text-[var(--color-text-tertiary)]">
+            <span className="text-xs text-[var(--color-text-tertiary)]">
               {t('lsp.preferences.formatOnSaveDescription')}
             </span>
           </div>
         </label>
         <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between gap-3 text-sm text-[var(--color-text-primary)]">
+          <div className="flex items-center justify-between gap-3 text-xs text-[var(--color-text-primary)]">
             <span>{t('lsp.preferences.hoverDelay')}</span>
             <span className="text-xs tabular-nums text-[var(--color-text-secondary)]">
               {hoverDelayMs} ms
@@ -353,7 +353,7 @@ export function LspSettings() {
             }}
             className="w-full accent-[var(--color-brand)]"
           />
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('lsp.preferences.hoverDelayDescription')}
           </span>
         </div>
@@ -452,7 +452,7 @@ export function LspSettings() {
         </div>
 
         {}
-        <div className="flex-1 border border-[var(--color-border)] rounded-xl p-4 bg-[var(--color-surface-container-low)] flex flex-col gap-3 min-w-0">
+        <div className="flex-1 border border-[var(--color-border)] rounded-xl p-3 bg-[var(--color-surface-container-low)] flex flex-col gap-3 min-w-0">
           {selected || isCreating ? (
             <>
               <ModeToggle
@@ -507,7 +507,7 @@ export function LspSettings() {
                       {t('settings.lsp.field.env')}
                     </label>
                     <textarea
-                      className="text-xs font-mono px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] min-h-[60px]"
+                      className="text-xs font-mono px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] min-h-[60px]"
                       value={draft.envText}
                       onChange={(e) => setDraft((d) => ({ ...d, envText: e.target.value }))}
                       placeholder="RA_LOG=info"
@@ -521,7 +521,7 @@ export function LspSettings() {
                   {t('settings.lsp.field.initOptions')}
                 </label>
                 <textarea
-                  className="text-xs font-mono px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] min-h-[80px]"
+                  className="text-xs font-mono px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] min-h-[80px]"
                   value={draft.initOptions}
                   onChange={(e) => setDraft((d) => ({ ...d, initOptions: e.target.value }))}
                   placeholder='{ "checkOnSave": true }'
@@ -603,7 +603,7 @@ export function LspSettings() {
                 {isCreating && (
                   <Button
                     variant="ghost"
-                    size="md"
+                    size="sm"
                     onClick={() => {
                       setIsCreating(false)
                       selectServer(null)
@@ -612,14 +612,14 @@ export function LspSettings() {
                     {t('common.cancel')}
                   </Button>
                 )}
-                <Button size="md" onClick={() => void handleSave()} loading={isSaving}>
+                <Button size="sm" onClick={() => void handleSave()} loading={isSaving}>
                   {isCreating ? t('common.add') : t('common.save')}
                 </Button>
               </div>
 
               {selected && recentDiagnostics.length > 0 && (
                 <div className="border-t border-[var(--color-border-separator)] pt-3 mt-2">
-                  <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+                  <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
                     {t('settings.lsp.recentDiagnostics')}
                   </div>
                   <div className="flex flex-col gap-1.5">
@@ -659,7 +659,7 @@ function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => voi
         <button
           key={m}
           onClick={() => onChange(m)}
-          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+          className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
             mode === m
               ? 'bg-[var(--color-surface)] text-[var(--color-text-primary)] shadow-sm'
               : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'

@@ -4,11 +4,13 @@ import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../../store
 import { useProviderStore } from '../../stores/providerStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useLspStore } from '../../stores/lspStore'
+import { useActiveWorkspaceRoot } from '../../lib/activeWorkDir'
 import { useUIStore } from '../../stores/uiStore'
 import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
 import { usePythonEnvStore } from '../../stores/pythonEnvStore'
 import { inferLanguageFromPath } from '../../lib/extLanguage'
 import type { CodingModeId } from '../../types/codingMode'
+import { CODING_MODE_ACCENT } from '../../types/codingMode'
 import { useTranslation, useCodingModeText } from '../../i18n'
 import { PythonEnvPicker } from '../workspace/PythonEnvPicker'
 
@@ -61,10 +63,19 @@ const STATUS_MODE_GLYPH: Record<CodingModeId, string> = {
   context: 'data_object',
   mvai: 'hub',
   harness: 'precision_manufacturing',
+  curator: 'auto_stories',
 }
 
 const STATUS_AUTONOMOUS_MODES = new Set<CodingModeId>(['agent', 'harness'])
 const STATUS_READONLY_MODES = new Set<CodingModeId>(['ask'])
+
+const EMPTY_DIAGNOSTICS_BY_URI: Record<
+  string,
+  { serverId: string; version: number | null; diagnostics: never[] }
+> = Object.freeze({}) as Record<
+  string,
+  { serverId: string; version: number | null; diagnostics: never[] }
+>
 
 export function StatusBar() {
   const t = useTranslation()
@@ -93,23 +104,19 @@ export function StatusBar() {
   const codingModeGlyph = STATUS_MODE_GLYPH[codingMode] ?? 'tune'
   const codingModeIsAutonomous = STATUS_AUTONOMOUS_MODES.has(codingMode)
   const codingModeIsReadonly = STATUS_READONLY_MODES.has(codingMode)
-  const codingModeIsPlan = codingMode === 'plan'
+  const codingModeAccent = CODING_MODE_ACCENT[codingMode]
 
-  const codingModeBadgeClass = codingModeIsAutonomous
-    ? 'flex items-center gap-1 rounded-full bg-[var(--color-error)]/12 px-1.5 py-px text-[var(--color-error)]'
-    : codingModeIsReadonly
-    ? 'flex items-center gap-1 rounded-full bg-[var(--color-surface-container)] px-1.5 py-px text-[var(--color-text-tertiary)]'
-    : codingModeIsPlan
-    ? 'flex items-center gap-1 rounded-full bg-[var(--color-plan-accent-container)] px-1.5 py-px text-[var(--color-on-plan-accent-container)]'
+  const codingModeBadgeClass = codingModeAccent
+    ? 'flex items-center gap-1 rounded-full px-1.5 py-px'
     : 'flex items-center gap-1'
+  const codingModeBadgeStyle = codingModeAccent
+    ? { backgroundColor: codingModeAccent.container, color: codingModeAccent.onContainer }
+    : undefined
 
-  const codingModeIconClass = codingModeIsAutonomous
-    ? 'material-symbols-outlined text-[11px] text-[var(--color-error)]'
-    : codingModeIsReadonly
-    ? 'material-symbols-outlined text-[11px] text-[var(--color-text-tertiary)]'
-    : codingModeIsPlan
-    ? 'material-symbols-outlined text-[11px] text-[var(--color-on-plan-accent-container)]'
-    : 'material-symbols-outlined text-[11px] text-[var(--color-text-tertiary)]'
+  const codingModeIconClass = 'material-symbols-outlined text-[11px]'
+  const codingModeIconStyle = codingModeAccent
+    ? { color: codingModeAccent.accent }
+    : { color: 'var(--color-text-tertiary)' }
 
   const codingModeTitle = codingModeIsAutonomous
     ? `${codingModeLabel} · ${t('codingMode.tag.autonomous')}`
@@ -134,7 +141,13 @@ export function StatusBar() {
     return { providerLabel: null as string | null, modelLabel: null as string | null }
   }, [providers, runtimeSelection, settingsModel, settingsProviderName])
 
-  const diagnosticsByUri = useLspStore((s) => s.diagnosticsByUri)
+  const activeWorkspaceRoot = useActiveWorkspaceRoot()
+  const diagnosticsByUri = useLspStore((s) => {
+    if (activeWorkspaceRoot && activeWorkspaceRoot.length > 0) {
+      return s.diagnosticsByWorkspace[activeWorkspaceRoot] ?? EMPTY_DIAGNOSTICS_BY_URI
+    }
+    return s.diagnosticsByUri
+  })
   const { errorCount, warningCount } = useMemo(() => {
     let errors = 0
     let warnings = 0
@@ -310,8 +323,8 @@ export function StatusBar() {
     >
       {}
       <div className="flex items-center gap-3">
-        <span className={codingModeBadgeClass} title={codingModeTitle}>
-          <span className={codingModeIconClass}>{codingModeGlyph}</span>
+        <span className={codingModeBadgeClass} style={codingModeBadgeStyle} title={codingModeTitle}>
+          <span className={codingModeIconClass} style={codingModeIconStyle}>{codingModeGlyph}</span>
           <span>{codingModeLabel}</span>
           {codingModeIsAutonomous && (
             <span className="text-[9px] uppercase tracking-wider font-bold">
@@ -345,7 +358,7 @@ export function StatusBar() {
         {cursorLabel && (
           <span
             className="tabular-nums text-[var(--color-text-tertiary)]"
-            title="Cursor position"
+            title="position"
           >
             {cursorLabel}
           </span>

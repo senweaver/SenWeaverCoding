@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Artifact presentation tool.
-//!
-//! Allows the agent to explicitly present output files to the user,
-//! providing file metadata and optionally reading content for small files.
-//! Mirrors DeerFlow's `present_files` tool for artifact-aware conversations.
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
@@ -152,9 +147,9 @@ impl Tool for PresentFilesTool {
             let modified = metadata
                 .modified()
                 .ok()
-                .and_then(|t| {
+                .map(|t| {
                     let dt: chrono::DateTime<chrono::Utc> = t.into();
-                    Some(dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
                 })
                 .unwrap_or_else(|| "unknown".into());
 

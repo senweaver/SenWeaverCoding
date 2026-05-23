@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware board info tool — returns chip name, architecture, memory map for Telegram/agent.
-//!
-//! Use when user asks "what board do I have?", "board info", "connected hardware", etc.
-//! Uses probe-rs for Nucleo when available; otherwise static datasheet info.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;

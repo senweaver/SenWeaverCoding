@@ -1,25 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Structured representation of REPL input.  Pure parser, no I/O,
-//! no global state — the unit-testable seam pulled out of
-//! `loop_::run`'s F-section main loop.
-//!
-//! ## Why this module exists
-//!
-//! The interactive REPL inside `pub async fn run` (~635 LOC in
-//! [`crate::agent::loop_`]) has historically dispatched user input
-//! via a chain of `starts_with("/quit")`, `starts_with("/clear")`,
-//! `parse_slash_command_line(...)`, etc. inlined directly into the
-//! `loop {}` body.  That made the dispatch logic **untestable**:
-//! you had to bring up the entire REPL runtime (stdin, spawn,
-//! agent, tool registry) just to confirm `/quit` still terminated
-//! the loop.
-//!
-//! This module extracts the dispatch decision as a pure function so
-//! edge cases (`/quit` with trailing whitespace, unknown slash
-//! commands, `@file` references at the start, ctrl-D sentinel, …)
-//! can be exercised with a constant-time unit test.
 
 use crate::commands::registry::CommandRegistry;
 

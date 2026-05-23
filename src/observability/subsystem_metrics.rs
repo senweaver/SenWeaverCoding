@@ -1,47 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Subsystem metrics — inline completion/edit, apply-model hunks,
-//! context resolver, evals, symbol-graph-incremental, LSP rename,
-//! verification pipeline.
-//!
-//! | # | Metric                                        | Type      |
-//! |---|-----------------------------------------------|-----------|
-//! | 1 | `sen_inline_completion_requests_total`        | counter   |
-//! | 2 | `sen_inline_completion_cache_hits_total`      | counter   |
-//! | 3 | `sen_inline_completion_cache_misses_total`    | counter   |
-//! | 4 | `sen_inline_completion_latency_ms`            | histogram |
-//! | 5 | `sen_inline_completion_acceptance_total`      | counter   |
-//! | 6 | `sen_inline_completion_throttled_total`       | counter   |
-//! | 7 | `sen_inline_edit_runs_total`                  | counter   |
-//! | 8 | `sen_inline_edit_hunks_applied_total`         | counter   |
-//! | 9 | `sen_inline_edit_validator_failures_total`    | counter   |
-//! | 10| `sen_apply_model_hunks_exact_total`           | counter   |
-//! | 11| `sen_apply_model_hunks_fuzzy_total`           | counter   |
-//! | 12| `sen_apply_model_hunks_failed_total`          | counter   |
-//! | 13| `sen_context_resolver_resolutions_total`      | counter   |
-//! | 14| `sen_context_resolver_budget_clips_total`     | counter   |
-//! | 15| `sen_evals_pass_total`                        | counter   |
-//! | 16| `sen_evals_fail_total`                        | counter   |
-//! | 17| `sen_evals_pass_at_1`                         | gauge     |
-//! | 18| `sen_symbol_graph_incremental_rebuilds_total` | counter   |
-//! | 19| `sen_symbol_graph_persist_skipped_total`      | counter   |
-//! | 20| `sen_lsp_rename_via_lsp_total`                | counter   |
-//! | 21| `sen_lsp_rename_via_regex_total`              | counter   |
-//! | 22| `sen_prompt_cache_hits_total`                 | counter   |
-//! | 23| `sen_prompt_cache_misses_total`               | counter   |
-//! | 24| `sen_prompt_cache_read_tokens_total`          | counter   |
-//! | 25| `sen_prompt_cache_creation_tokens_total`      | counter   |
-//! | 26| `sen_self_consistency_runs_total`             | counter   |
-//! | 27| `sen_self_consistency_overrides_total`        | counter   |
-//! | 28| `sen_self_consistency_failures_total`         | counter   |
-//! | 29| `sen_self_consistency_agreement_avg`          | gauge     |
-//!
-//! The module keeps a process-global registry of atomic counters so
-//! the Prometheus encoder can scrape them without per-call locking.
-//! Callers invoke the corresponding `incr_*` helper from the hot
-//! path — this decouples metric definition from the monolithic
-//! `PrometheusObserver` struct while matching its naming conventions.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};

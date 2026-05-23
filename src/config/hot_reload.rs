@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hot-reloadable config store backed by `ArcSwap`.
-//!
-//! `SharedConfig` wraps `Config` in `Arc` + `ArcSwap` so readers never block
-//! writers and vice-versa.  The `subscribe()` mechanism lets subsystems react
-//! to configuration changes without polling.
 
 use std::sync::Arc;
 

@@ -1,30 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Background shell registry + event broadcast.
-//!
-//! Powers the GUI's background-shell cards (図 3-5): when
-//! [`ShellTool::execute`](super::shell::ShellTool) is called with
-//! `background: true`, the spawned child is **registered** here so
-//! the GUI / TUI bridge can:
-//!
-//! * subscribe to a global broadcast channel of
-//!   [`BackgroundShellSignal`]s (live stdout/stderr lines, heart-
-//!   beats, exit notifications) and translate them into
-//!   `AgentEvent::BackgroundShell{,Chunk}`,
-//! * issue `kill(id)` to terminate a running child via a
-//!   `oneshot::Sender<()>`-based abort token (used by the GUI's
-//!   `Stop` row in the input-area drop-up panel and by
-//!   `UserInput::KillBackgroundShell`).
-//!
-//! The registry is intentionally process-wide (not per-Agent /
-//! per-Turn) because background shells outlive turns by design:
-//! a `cargo build` kicked off in turn N may still be running when
-//! the user types a new prompt in turn N+1 and the GUI must keep
-//! showing its rolling tail.
-//!
-//! The broadcast channel has capacity 256; slow consumers see
-//! lagged events but the registry never blocks the producer.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -43,23 +19,27 @@ pub enum BackgroundShellSignal {
     Spawned {
         id: String,
         command: String,
+        session_id: Option<String>,
     },
 
     Chunk {
         id: String,
         stream: BgStream,
         line: String,
+        session_id: Option<String>,
     },
 
     Heartbeat {
         id: String,
         elapsed_secs: u64,
+        session_id: Option<String>,
     },
 
     Exited {
         id: String,
         elapsed_secs: u64,
         exit_code: Option<i32>,
+        session_id: Option<String>,
     },
 }
 
@@ -94,7 +74,12 @@ pub(crate) fn publish(signal: BackgroundShellSignal) {
     let _ = registry().tx.send(signal);
 }
 
-pub(crate) fn register(id: String, command: String, kill_tx: oneshot::Sender<()>) {
+pub(crate) fn register(
+    id: String,
+    command: String,
+    kill_tx: oneshot::Sender<()>,
+    session_id: Option<String>,
+) {
     let mut guard = registry()
         .children
         .lock()
@@ -107,7 +92,11 @@ pub(crate) fn register(id: String, command: String, kill_tx: oneshot::Sender<()>
         },
     );
     drop(guard);
-    publish(BackgroundShellSignal::Spawned { id, command });
+    publish(BackgroundShellSignal::Spawned {
+        id,
+        command,
+        session_id,
+    });
 }
 
 pub(crate) fn unregister(id: &str) {

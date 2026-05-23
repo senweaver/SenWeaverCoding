@@ -1,35 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Inverted File (IVF) clustering vector index.
-//!
-//! # Algorithm
-//!
-//! 1. **Training**: run k-means clustering over a training subset to
-//!    produce `num_clusters` centroids.
-//! 2. **Indexing**: assign each vector to its nearest centroid; store
-//!    `{id, embedding, norm}` in that cluster's inverted list.
-//! 3. **Query**: compute similarity between the query and every
-//!    centroid, probe the top `nprobe` clusters, scan only their
-//!    inverted lists.
-//!
-//! # Cost model
-//!
-//! - Training: O(iters · num_clusters · N · D) (run once, or lazily).
-//! - Upsert: O(num_clusters · D).
-//! - Search: O(num_clusters · D + nprobe · (N / num_clusters) · D)
-//!   ≈ O(sqrt(N) · D) when `num_clusters ≈ sqrt(N)` and `nprobe = 1..8`.
-//!
-//! For a 10K × 384 corpus with `num_clusters = 100` and `nprobe = 4`,
-//! this is an order-of-magnitude speedup over full-scan `LinearIndex`
-//! at ~98% recall (typical for IVF-Flat).
-//!
-//! # Trade-offs
-//!
-//! - Recall is a function of `nprobe`; `nprobe = num_clusters` reduces
-//!   to full scan with overhead.
-//! - Re-training is required when the data distribution shifts
-//!   significantly.  `needs_retraining()` exposes a heuristic.
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -159,8 +130,8 @@ impl IvfVectorIndex {
     }
 
     pub fn for_size(n: usize) -> Self {
-        let nc = ((n as f64).sqrt() as usize).max(8).min(1024);
-        let np = ((nc as f64).sqrt() as usize).max(1).min(nc);
+        let nc = ((n as f64).sqrt() as usize).clamp(8, 1024);
+        let np = ((nc as f64).sqrt() as usize).clamp(1, nc);
         Self::new(nc, np)
     }
 

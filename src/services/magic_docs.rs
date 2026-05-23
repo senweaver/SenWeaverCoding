@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Magic docs service — mirrors claude-code-typescript-src`services/MagicDocs/`.
-// Smart documentation generation from code, project structure,
-// and conversation context.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

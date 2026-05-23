@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! RAG pipeline for hardware datasheet retrieval.
-//!
-//! Supports:
-//! - Markdown and text datasheets (always)
-//! - PDF ingestion (with `rag-pdf` feature)
-//! - Pin/alias tables (e.g. `red_led: 13`) for explicit lookup
-//! - Keyword retrieval (default) or semantic search via embeddings (optional)
-//!
-//! Lexical/dense code retrieval for prompt-context injection lives under
-//! [`vector_code_index`] (dense) and is consumed via
-//! [`crate::agent::loop_services::rag_source`] together with the
-//! heuristic / tantivy lexical index from
-//! [`crate::code_intel::search`].  The fusion happens in
-//! [`crate::agent::loop_services`] so there is exactly one wiring path.
 
 pub mod embedding;
 

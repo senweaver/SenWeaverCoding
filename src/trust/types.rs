@@ -138,7 +138,9 @@ impl TrustTracker {
         self.ensure_domain(domain);
         let now = Utc::now();
 
-        let score = self.scores.get_mut(domain).unwrap();
+        let Some(score) = self.scores.get_mut(domain) else {
+            return;
+        };
         score.score = (score.score - self.config.correction_penalty).max(0.0);
         score.last_updated = now;
         score.event_count += 1;
@@ -157,7 +159,9 @@ impl TrustTracker {
         self.ensure_domain(domain);
         let now = Utc::now();
 
-        let score = self.scores.get_mut(domain).unwrap();
+        let Some(score) = self.scores.get_mut(domain) else {
+            return;
+        };
         score.score = (score.score + self.config.success_boost).min(1.0);
         score.last_updated = now;
         score.event_count += 1;

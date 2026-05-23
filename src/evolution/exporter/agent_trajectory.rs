@@ -40,8 +40,7 @@ pub fn project(
         "task_summary": turn
             .openai_messages
             .iter()
-            .filter(|m| m.role == "user")
-            .last()
+            .rfind(|m| m.role == "user")
             .and_then(|m| m.content.clone())
             .map(|c| redact_text(&c, options, cfg))
             .unwrap_or_default(),

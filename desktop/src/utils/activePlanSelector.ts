@@ -44,6 +44,19 @@ function allTodosTerminal(card: PlanCardMsg): boolean {
   )
 }
 
+function hasNewUserTurnAfter(
+  messages: UIMessage[],
+  switchMessageId: string,
+): boolean {
+  const switchIdx = messages.findIndex((m) => m.id === switchMessageId)
+  if (switchIdx < 0) return false
+  for (let j = switchIdx + 1; j < messages.length; j++) {
+    const m = messages[j]
+    if (m && m.type === 'user_text') return true
+  }
+  return false
+}
+
 export function selectPlanCardExecutionState(
   messages: UIMessage[],
   planCardId: string,
@@ -61,8 +74,11 @@ export function selectPlanCardExecutionState(
 
   if (allTodosTerminal(card)) return 'completed_run'
 
+  if (hasNewUserTurnAfter(messages, switchCard.id)) return 'completed_run'
+
   if (chatState !== undefined && chatState === 'idle') {
-    return 'incomplete_run'
+    const hasTodos = card.todos.length > 0
+    return hasTodos ? 'incomplete_run' : 'completed_run'
   }
   return 'executing'
 }

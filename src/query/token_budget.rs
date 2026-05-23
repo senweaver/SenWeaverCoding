@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Token budget management — mirrors claude-code-typescript-src`query/tokenBudget.ts`.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +10,7 @@ pub fn estimate_tokens(text: &str) -> u32 {
     if chars == 0 {
         return 0;
     }
-    ((chars + 3) / 4) as u32
+    chars.div_ceil(4) as u32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Guardrails - pre-tool-execution authorization and policy enforcement.
-//!
-//! Provides a pluggable interception layer that evaluates tool calls before execution.
-//! Supports allowlist/denylist rules, rate limiting, and custom provider-based authorization.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -318,7 +314,7 @@ pub struct GuardrailContext<'a> {
     pub tool_name: Option<&'a str>,
 }
 
-impl<'a> GuardrailContext<'a> {
+impl GuardrailContext<'_> {
 
     fn matches(&self, rule_contexts: &[String]) -> bool {
         if rule_contexts.is_empty() {

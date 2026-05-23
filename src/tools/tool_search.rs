@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Built-in `tool_search` tool for on-demand MCP tool schema loading.
-//!
-//! When `mcp.deferred_loading` is enabled, this tool lets the LLM discover and
-//! activate deferred MCP tools. Supports two query modes:
-//! - `select:name1,name2` — fetch exact tools by prefixed name.
-//! - Free-text keyword search — returns the best-matching stubs.
 
 use std::fmt::Write;
 use std::sync::Arc;

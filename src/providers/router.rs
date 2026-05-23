@@ -77,7 +77,15 @@ impl RouterProvider {
         required_vision: bool,
         required_tools: bool,
     ) -> (usize, String) {
-        let hint = model.strip_prefix("hint:");
+        let hint = model.strip_prefix("route:").or_else(|| {
+            model.strip_prefix("hint:").inspect(|_| {
+                tracing::warn!(
+                    deprecated = "hint:",
+                    replacement = "route:",
+                    "model name uses deprecated `hint:` prefix; switch to `route:` (hint: still accepted for now)"
+                );
+            })
+        });
         let is_cost_hint = matches!(hint, Some("cost-optimized" | "cheapest"));
 
         if !is_cost_hint {
@@ -117,16 +125,27 @@ impl RouterProvider {
     }
 
     fn resolve_auto(&self, model: &str) -> (usize, String) {
-        if (model.starts_with("hint:cost") || model.starts_with("hint:cheap"))
-            && !self.prices.is_empty()
-        {
+        let is_cost_prefix = model.starts_with("route:cost")
+            || model.starts_with("route:cheap")
+            || model.starts_with("hint:cost")
+            || model.starts_with("hint:cheap");
+        if is_cost_prefix && !self.prices.is_empty() {
             return self.resolve_cost_optimized(model, &self.prices, false, false);
         }
         self.resolve(model)
     }
 
     fn resolve(&self, model: &str) -> (usize, String) {
-        if let Some(hint) = model.strip_prefix("hint:") {
+        let prefixed = model.strip_prefix("route:").or_else(|| {
+            model.strip_prefix("hint:").inspect(|_| {
+                tracing::warn!(
+                    deprecated = "hint:",
+                    replacement = "route:",
+                    "model name uses deprecated `hint:` prefix; switch to `route:` (hint: still accepted for now)"
+                );
+            })
+        });
+        if let Some(hint) = prefixed {
             if let Some((idx, resolved_model)) = self.routes.get(hint) {
                 return (*idx, resolved_model.clone());
             }

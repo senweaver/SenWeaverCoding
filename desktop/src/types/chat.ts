@@ -28,6 +28,10 @@ export type ClientMessage =
       planPath: string
       resume?: boolean
     }
+  | { type: 'debug_bind_tab'; tab_id: number }
+  | { type: 'debug_unbind_tab'; tab_id: number }
+  | { type: 'debug_bind_prototype_ref'; tab_id: number }
+  | { type: 'debug_unbind_prototype_ref' }
   | { type: 'ping' }
 
 export type AttachmentRef = {
@@ -49,7 +53,7 @@ export type ServerMessage =
   | { type: 'connected'; sessionId: string }
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }
   | { type: 'content_delta'; text?: string }
-  | { type: 'tool_use_complete'; toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string }
+  | { type: 'tool_use_complete'; toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string; sessionId?: string }
   | { type: 'tool_result'; toolUseId: string; content: unknown; isError: boolean; parentToolUseId?: string }
   | {
       type: 'permission_request'
@@ -69,11 +73,29 @@ export type ServerMessage =
   | { type: 'status'; state: ChatState; verb?: string; elapsed?: number; tokens?: number }
   | { type: 'error'; message: string; code: string; retryable?: boolean }
   | {
+      type: 'provider_retry'
+      attempt: number
+      maxAttempts: number
+      waitMs: number
+      class: 'engine_overloaded' | 'account_rate_limited' | 'transient' | string
+      provider: string
+      model: string
+      message: string
+    }
+  | {
       type: 'workspace_busy'
       workspaceKey: string
       currentSessionId?: string | null
     }
-  | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
+  | {
+      type: 'system_notification'
+      subtype: string
+      level?: 'info' | 'warning' | 'error'
+      code?: string
+      section?: string
+      message?: string
+      data?: unknown
+    }
   | {
       type: 'debug_pii_stats'
       total?: number
@@ -81,7 +103,58 @@ export type ServerMessage =
     }
   | { type: 'pong' }
   | { type: 'task_update'; taskId: string; status: string; progress?: string }
+  | {
+      type: 'todo_snapshot'
+      sessionId: string
+      todos: Array<{
+        id?: string
+        content: string
+        status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+        activeForm?: string
+        priority?: string | null
+      }>
+    }
   | { type: 'session_title_updated'; sessionId: string; title: string }
+  | {
+      type: 'worker_spawned'
+      sessionId?: string
+      parentToolUseId: string
+      workerId: string
+      title: string
+      model: string
+    }
+  | {
+      type: 'worker_status'
+      sessionId?: string
+      workerId: string
+      status: WorkerStatus
+      detail?: string | null
+    }
+  | {
+      type: 'worker_progress'
+      sessionId?: string
+      workerId: string
+      action: string
+      detail: string
+    }
+  | {
+      type: 'worker_completed'
+      sessionId?: string
+      workerId: string
+      success: boolean
+      summary: string
+    }
+  | {
+      type: 'worker_stopped'
+      sessionId?: string
+      workerId: string
+      reason: string
+    }
+  | {
+      type: 'parent_resumed'
+      sessionId?: string
+      reason: string
+    }
 
   | {
       type: 'lsp_diagnostics'
@@ -106,7 +179,41 @@ export type TokenUsage = {
   cache_creation_tokens?: number
 }
 
-export type ChatState = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending'
+export type ChatState =
+  | 'idle'
+  | 'thinking'
+  | 'tool_executing'
+  | 'streaming'
+  | 'permission_pending'
+  | 'awaiting_workers'
+
+export type WorkerStatus = 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
+
+export type WorkerSnapshot = {
+  workerId: string
+  parentSessionId: string
+  parentToolUseId: string
+  title: string
+  model: string
+  status: WorkerStatus
+  lastAction?: string | null
+  lastDetail?: string | null
+  startedAt: number
+  finishedAt?: number | null
+}
+
+export type WorkerSummaryPayload = {
+  worker_id: string
+  parent_session_id: string
+  parent_tool_use_id: string
+  title: string
+  model: string
+  status: WorkerStatus
+  last_action?: string | null
+  last_detail?: string | null
+  started_at: string
+  finished_at?: string | null
+}
 
 export type TeamMemberStatus = {
   agentId: string
@@ -285,6 +392,22 @@ export type UIMessage =
       planPath: string
       targetMode: CodingModeId
       status: 'pending' | 'switched' | 'dismissed'
+      handoffKind?: 'plan' | 'curator'
+    })
+
+  | (UIMessageCommon & {
+      id: string
+      type: 'curator_card'
+      timestamp: number
+      slug: string
+      template: string
+      finalMdPath: string
+      implBlueprintPath: string
+      docxPath?: string
+      title: string
+      body: string
+      status: 'writing' | 'completed'
+      sourceToolUseId?: string
     })
 
   | (UIMessageCommon & {

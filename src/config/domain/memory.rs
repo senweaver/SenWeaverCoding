@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Memory backend configuration, migrated out of `schema.rs` as part
-//! of N6.1.  Covers `MemoryConfig` + `MemoryPolicyConfig` + `QdrantConfig`
-//! + `SearchMode` plus all their default-fn helpers.
-//!
-//! ## Migration notes
-//!
-//! The canonical definitions live here; `schema.rs` exposes them via
-//! `pub use` so downstream imports (`crate::config::MemoryConfig`,
-//! etc.) remain stable.  Future additions should land in this file,
-//! not in `schema.rs`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -286,12 +276,42 @@ impl MemoryConfig {
                 self.backend, valid_backends
             ));
         }
-        if self.backend == "qdrant" && self.qdrant.url.is_none() {
-
-            if std::env::var("QDRANT_URL").is_err() {
-                errors.push(
+        if self.backend == "qdrant" {
+            let effective_url = self
+                .qdrant
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    std::env::var("QDRANT_URL")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+            match effective_url {
+                None => errors.push(
                     "memory.backend=qdrant requires memory.qdrant.url or QDRANT_URL env".into(),
-                );
+                ),
+                Some(url) => match reqwest::Url::parse(&url) {
+                    Ok(parsed) => {
+                        if !matches!(parsed.scheme(), "http" | "https") {
+                            errors.push(format!(
+                                "memory.qdrant.url scheme '{}' is unsupported; expected http or https",
+                                parsed.scheme()
+                            ));
+                        }
+                        if parsed.host_str().map(str::is_empty).unwrap_or(true) {
+                            errors.push(format!(
+                                "memory.qdrant.url '{url}' is missing a host component"
+                            ));
+                        }
+                    }
+                    Err(e) => errors.push(format!(
+                        "memory.qdrant.url '{url}' failed to parse: {e} (expected http(s)://host[:port])"
+                    )),
+                },
             }
         }
         if self.vector_weight < 0.0 || self.vector_weight > 1.0 {

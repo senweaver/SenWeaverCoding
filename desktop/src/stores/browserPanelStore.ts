@@ -1,20 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Per-session state for the embedded browser dock that hovers above
-// the chat composer.  The Tauri shell owns a single child WebView
-// keyed by the static `browser_dock` label, so the store also
-// remembers which session "owns" the dock right now and keeps the
-// React panel in lock-step with the underlying Tauri view.
-//
-// Wire-up:
-//   - `chatStore.handleServerMessage` calls `openForTool` whenever a
-//     `tool_use_complete` for a browser-family tool arrives, seeding
-//     the address bar with the tool's `url` argument.
-//   - `Sidebar` exposes a manual entry point that calls
-//     `toggle(activeSessionId, { source: 'manual' })`.
-//   - `EmbeddedBrowserPanel` reads `getPanelState(sessionId)` and
-//     dispatches every user action (navigate / back / pick / clear /
-//     zoom) through the actions exported here.
 
 import { create } from 'zustand'
 
@@ -23,16 +7,17 @@ import {
   dockBack,
   dockClear,
   dockClearTestTarget,
-  dockClose,
   dockCloseTab,
   dockForward,
   dockHide,
   dockInspectSelector,
+  dockGetTestTarget,
   dockListTabs,
   dockNavigate,
   dockNewTab,
   dockOpen,
   dockPinTestTarget,
+  dockPresentSession,
   dockRequestState,
   dockReload,
   dockSetPickMode,
@@ -40,7 +25,10 @@ import {
   type BrowserDockEvent,
   type BrowserDockRect,
   type BrowserDockTabInfo,
+  normalizeBrowserSessionId,
 } from '../lib/browserDock'
+import { useTabStore } from './tabStore'
+import { useUIStore } from './uiStore'
 
 const SCHEME_RE = /^[a-z][a-z0-9+\-.]*:/i
 const WINDOWS_PATH_RE = /^[a-z]:[\\/]/i
@@ -127,6 +115,8 @@ export type BrowserPanelState = {
 
   visible: boolean
 
+  pendingShow: boolean
+
   url: string
 
   liveUrl: string
@@ -162,6 +152,8 @@ export type BrowserPanelState = {
   activeTabId: number | null
 
   preferredTestTabId: number | null
+
+  prototypeRefTabId: number | null
 
   columnWidth: number
 
@@ -227,6 +219,10 @@ type StoreState = {
 
   clearPreferredTestTab: (sessionId: string) => Promise<void>
 
+  setPrototypeRefTab: (sessionId: string, tabId: number) => void
+
+  clearPrototypeRefTab: (sessionId: string) => void
+
   setColumnWidth: (sessionId: string, px: number) => void
 
   setColumnWidthAuto: (sessionId: string, auto: boolean) => void
@@ -238,9 +234,28 @@ type StoreState = {
   clearUserLog: (sessionId: string) => void
 }
 
-const COLUMN_WIDTH_STORAGE_KEY = 'sen-browser-column-width'
-const COLUMN_WIDTH_AUTO_STORAGE_KEY = 'sen-browser-column-width-auto'
-const DRAWER_RATIO_STORAGE_KEY = 'sen-browser-drawer-ratio'
+const COLUMN_WIDTH_STORAGE_PREFIX = 'sen-browser-column-width:'
+const COLUMN_WIDTH_AUTO_STORAGE_PREFIX = 'sen-browser-column-width-auto:'
+const DRAWER_RATIO_STORAGE_PREFIX = 'sen-browser-drawer-ratio:'
+const DEFAULT_WORKSPACE_KEY = '__default__'
+
+function normalizeWorkspaceKey(key: string | null | undefined): string {
+  if (!key) return DEFAULT_WORKSPACE_KEY
+  const trimmed = key.trim()
+  return trimmed.length ? trimmed : DEFAULT_WORKSPACE_KEY
+}
+
+function currentWorkspaceKey(): string {
+  if (typeof window === 'undefined') return DEFAULT_WORKSPACE_KEY
+  try {
+    const w = window as unknown as {
+      __sen_active_workspace_key__?: string | null
+    }
+    return normalizeWorkspaceKey(w.__sen_active_workspace_key__)
+  } catch {
+    return DEFAULT_WORKSPACE_KEY
+  }
+}
 
 function clampRatio(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback
@@ -257,12 +272,14 @@ export function clampColumnWidth(value: number): number {
   )
 }
 
-function readStoredColumnWidth(): number {
+function readStoredColumnWidth(workspaceKey: string): number {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return BROWSER_COLUMN_WIDTH_BOUNDS.default
   }
   try {
-    const raw = localStorage.getItem(COLUMN_WIDTH_STORAGE_KEY)
+    const raw = localStorage.getItem(
+      `${COLUMN_WIDTH_STORAGE_PREFIX}${normalizeWorkspaceKey(workspaceKey)}`,
+    )
     if (!raw) return BROWSER_COLUMN_WIDTH_BOUNDS.default
     const value = Number.parseInt(raw, 10)
     if (Number.isFinite(value)) return clampColumnWidth(value)
@@ -272,19 +289,24 @@ function readStoredColumnWidth(): number {
   return BROWSER_COLUMN_WIDTH_BOUNDS.default
 }
 
-function writeStoredColumnWidth(value: number) {
+function writeStoredColumnWidth(workspaceKey: string, value: number) {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(COLUMN_WIDTH_STORAGE_KEY, String(clampColumnWidth(value)))
+    localStorage.setItem(
+      `${COLUMN_WIDTH_STORAGE_PREFIX}${normalizeWorkspaceKey(workspaceKey)}`,
+      String(clampColumnWidth(value)),
+    )
   } catch {
 
   }
 }
 
-function readStoredColumnWidthAuto(): boolean {
+function readStoredColumnWidthAuto(workspaceKey: string): boolean {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return true
   try {
-    const raw = localStorage.getItem(COLUMN_WIDTH_AUTO_STORAGE_KEY)
+    const raw = localStorage.getItem(
+      `${COLUMN_WIDTH_AUTO_STORAGE_PREFIX}${normalizeWorkspaceKey(workspaceKey)}`,
+    )
     if (raw === 'false') return false
     if (raw === 'true') return true
   } catch {
@@ -293,19 +315,24 @@ function readStoredColumnWidthAuto(): boolean {
   return true
 }
 
-function writeStoredColumnWidthAuto(value: boolean) {
+function writeStoredColumnWidthAuto(workspaceKey: string, value: boolean) {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(COLUMN_WIDTH_AUTO_STORAGE_KEY, value ? 'true' : 'false')
+    localStorage.setItem(
+      `${COLUMN_WIDTH_AUTO_STORAGE_PREFIX}${normalizeWorkspaceKey(workspaceKey)}`,
+      value ? 'true' : 'false',
+    )
   } catch {
 
   }
 }
 
-function readStoredDrawerRatio(): number {
+function readStoredDrawerRatio(workspaceKey: string): number {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return 0.35
   try {
-    const raw = localStorage.getItem(DRAWER_RATIO_STORAGE_KEY)
+    const raw = localStorage.getItem(
+      `${DRAWER_RATIO_STORAGE_PREFIX}${normalizeWorkspaceKey(workspaceKey)}`,
+    )
     if (!raw) return 0.35
     const value = Number.parseFloat(raw)
     return clampRatio(value, 0.15, 0.6, 0.35)
@@ -314,10 +341,13 @@ function readStoredDrawerRatio(): number {
   }
 }
 
-function writeStoredDrawerRatio(value: number) {
+function writeStoredDrawerRatio(workspaceKey: string, value: number) {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(DRAWER_RATIO_STORAGE_KEY, String(value))
+    localStorage.setItem(
+      `${DRAWER_RATIO_STORAGE_PREFIX}${normalizeWorkspaceKey(workspaceKey)}`,
+      String(value),
+    )
   } catch {
 
   }
@@ -325,6 +355,7 @@ function writeStoredDrawerRatio(value: number) {
 
 const DEFAULT_STATE: BrowserPanelState = {
   visible: false,
+  pendingShow: false,
   url: '',
   liveUrl: '',
   title: '',
@@ -345,6 +376,7 @@ const DEFAULT_STATE: BrowserPanelState = {
   tabs: [],
   activeTabId: null,
   preferredTestTabId: null,
+  prototypeRefTabId: null,
   columnWidth: BROWSER_COLUMN_WIDTH_BOUNDS.default,
   columnWidthAuto: true,
   drawerHeightRatio: 0.35,
@@ -369,13 +401,100 @@ function patchPanel(
   }
 }
 
-function pickActiveSessionPanel(
-  state: StoreState,
-): { sessionId: string; panel: BrowserPanelState } | null {
-  if (!state.activeSessionId) return null
-  const panel = state.panels[state.activeSessionId]
-  if (!panel) return null
-  return { sessionId: state.activeSessionId, panel }
+function filterTabsForSession(
+  allTabs: BrowserDockTabInfo[],
+  sessionId: string,
+): BrowserDockTabInfo[] {
+  const canon = normalizeBrowserSessionId(sessionId)
+  if (!canon) return []
+  return allTabs.filter((tab) => normalizeBrowserSessionId(tab.sessionId) === canon)
+}
+
+function resolveSessionActiveTabId(
+  sessionTabs: BrowserDockTabInfo[],
+  globalActive: number | null,
+  previous: number | null,
+): number | null {
+  if (
+    globalActive !== null &&
+    sessionTabs.some((tab) => tab.id === globalActive)
+  ) {
+    return globalActive
+  }
+  if (
+    previous !== null &&
+    sessionTabs.some((tab) => tab.id === previous)
+  ) {
+    return previous
+  }
+  const sessionMarked = sessionTabs.find((tab) => tab.active)
+  if (sessionMarked) return sessionMarked.id
+  return sessionTabs.length > 0 ? sessionTabs[sessionTabs.length - 1]!.id : null
+}
+
+function liveFieldsFromSessionTabs(
+  sessionTabs: BrowserDockTabInfo[],
+  activeTabId: number | null,
+): Pick<BrowserPanelState, 'url' | 'liveUrl' | 'title'> {
+  if (sessionTabs.length === 0) {
+    return { url: '', liveUrl: '', title: '' }
+  }
+  const activeTab = sessionTabs.find((tab) => tab.id === activeTabId)
+  const tabUrl = activeTab?.url ?? ''
+  return {
+    url: tabUrl,
+    liveUrl: tabUrl,
+    title: activeTab?.title ?? '',
+  }
+}
+
+function resolvePreferredTestTabId(
+  sessionTabs: BrowserDockTabInfo[],
+  previous: number | null,
+  backendPinned: number | null | undefined,
+): number | null {
+  const candidate =
+    backendPinned !== undefined ? backendPinned : previous
+  if (candidate === null) return null
+  return sessionTabs.some((tab) => tab.id === candidate) ? candidate : null
+}
+
+function buildSessionTabPatch(
+  sessionId: string,
+  allTabs: BrowserDockTabInfo[],
+  globalActive: number | null,
+  prev: BrowserPanelState,
+  backendPinned?: number | null,
+): Partial<BrowserPanelState> {
+  const tabs = filterTabsForSession(allTabs, sessionId)
+  const activeTabId = resolveSessionActiveTabId(
+    tabs,
+    globalActive,
+    prev.activeTabId,
+  )
+  const stalePin =
+    prev.preferredTestTabId !== null &&
+    !tabs.some((tab) => tab.id === prev.preferredTestTabId)
+  if (stalePin) {
+    dockClearTestTarget(sessionId).catch((err) => {
+      console.warn('[browserDock] auto-clear stale pin failed', err)
+    })
+  }
+  const preferredTestTabId = resolvePreferredTestTabId(
+    tabs,
+    stalePin ? null : prev.preferredTestTabId,
+    stalePin ? null : backendPinned,
+  )
+  const staleProto =
+    prev.prototypeRefTabId !== null &&
+    !tabs.some((tab) => tab.id === prev.prototypeRefTabId)
+  return {
+    tabs,
+    activeTabId: tabs.some((tab) => tab.id === activeTabId) ? activeTabId : null,
+    ...liveFieldsFromSessionTabs(tabs, activeTabId),
+    preferredTestTabId,
+    prototypeRefTabId: staleProto ? null : prev.prototypeRefTabId,
+  }
 }
 
 export const useBrowserPanelStore = create<StoreState>((set, get) => ({
@@ -385,11 +504,12 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
   ensure: (sessionId) => {
     const existing = get().panels[sessionId]
     if (existing) return existing
+    const workspaceKey = currentWorkspaceKey()
     const next: BrowserPanelState = {
       ...DEFAULT_STATE,
-      columnWidth: readStoredColumnWidth(),
-      columnWidthAuto: readStoredColumnWidthAuto(),
-      drawerHeightRatio: readStoredDrawerRatio(),
+      columnWidth: readStoredColumnWidth(workspaceKey),
+      columnWidthAuto: readStoredColumnWidthAuto(workspaceKey),
+      drawerHeightRatio: readStoredDrawerRatio(workspaceKey),
     }
     set((state) => ({ panels: { ...state.panels, [sessionId]: next } }))
     return next
@@ -462,23 +582,46 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
   openForTool: async (sessionId, opts) => {
     const source: BrowserPanelSource = opts?.source ?? 'tool'
     const seedUrl = opts?.url ?? null
+    const activeTabId = useTabStore.getState().activeTabId
+    const isForegroundSession = activeTabId === sessionId
+    if (!isForegroundSession) {
+      set((state) => {
+        const prev = state.panels[sessionId] ?? DEFAULT_STATE
+        return {
+          panels: patchPanel(state.panels, sessionId, {
+            pendingShow: true,
+            lastSource: source,
+            url: seedUrl ?? (prev.tabs.length > 0 ? prev.url : ''),
+          }),
+        }
+      })
+      useUIStore.getState().addToast({
+        type: 'info',
+        message: 'Another agent session wants to open the browser. Switch to it to view.',
+        duration: 5000,
+        sessionId,
+      })
+      return
+    }
     set((state) => {
       const prev = state.panels[sessionId] ?? DEFAULT_STATE
       return {
         activeSessionId: sessionId,
         panels: patchPanel(state.panels, sessionId, {
           visible: true,
+          pendingShow: false,
           lastSource: source,
-          url: seedUrl ?? prev.url,
+          url: seedUrl ?? (prev.tabs.length > 0 ? prev.url : ''),
         }),
       }
     })
     const rect = get().panels[sessionId]?.anchorRect ?? null
     try {
+      await dockPresentSession(sessionId)
       if (rect) {
-        await dockOpen(rect, seedUrl)
+        await dockOpen(rect, seedUrl, sessionId)
       } else {
-        await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl)
+        await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl, sessionId)
       }
     } catch (err) {
       console.warn('[browserDock] openForTool dockOpen failed', err)
@@ -499,14 +642,16 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       activeSessionId: wantsVisible ? sessionId : state.activeSessionId,
       panels: patchPanel(state.panels, sessionId, {
         visible: wantsVisible,
+        pendingShow: wantsVisible ? false : cur.pendingShow,
         lastSource: source,
-        url: seedUrl ?? cur.url,
+        url: seedUrl ?? (cur.tabs.length > 0 ? cur.url : ''),
       }),
     }))
     try {
       if (wantsVisible) {
+        await dockPresentSession(sessionId)
         const rect = get().panels[sessionId]?.anchorRect ?? { x: 0, y: 0, w: 1, h: 1 }
-        await dockOpen(rect, seedUrl ?? cur.url ?? null)
+        await dockOpen(rect, seedUrl ?? cur.url ?? null, sessionId)
         dockRequestState().catch((err) => {
           console.warn('[browserDock] dockRequestState failed', err)
         })
@@ -620,14 +765,18 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
   },
 
   closeForSession: async (sessionId) => {
+    const wasOwner = get().activeSessionId === sessionId
     set((state) => ({
       activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
       panels: patchPanel(state.panels, sessionId, { visible: false, pickMode: false }),
     }))
+    if (!wasOwner) {
+      return
+    }
     try {
-      await dockClose()
+      await dockHide()
     } catch (err) {
-      console.warn('[browserDock] closeForSession dockClose failed', err)
+      console.warn('[browserDock] closeForSession dockHide failed', err)
     }
   },
 
@@ -643,10 +792,24 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
 
   refreshTabs: async (sessionId) => {
     try {
-      const tabs = await dockListTabs()
-      const active = tabs.find((t) => t.active)?.id ?? null
+      const allTabs = await dockListTabs()
+      const globalActive = allTabs.find((tab) => tab.active)?.id ?? null
+      const prev = get().panels[sessionId] ?? DEFAULT_STATE
+      let backendPinned: number | null | undefined
+      try {
+        backendPinned = await dockGetTestTarget(sessionId)
+      } catch (err) {
+        console.warn('[browserDock] refreshTabs get test target failed', err)
+      }
+      const patch = buildSessionTabPatch(
+        sessionId,
+        allTabs,
+        globalActive,
+        prev,
+        backendPinned,
+      )
       set((state) => ({
-        panels: patchPanel(state.panels, sessionId, { tabs, activeTabId: active }),
+        panels: patchPanel(state.panels, sessionId, patch),
       }))
     } catch (err) {
       console.warn('[browserDock] refreshTabs failed', err)
@@ -655,7 +818,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
 
   newTab: async (sessionId, url, activate) => {
     try {
-      const id = await dockNewTab(url ?? null, activate ?? true)
+      const id = await dockNewTab(url ?? null, activate ?? true, sessionId)
       if (id != null && (activate ?? true)) {
         set((state) => ({
           panels: patchPanel(state.panels, sessionId, { activeTabId: id }),
@@ -687,12 +850,22 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
   },
 
   activateTab: async (sessionId, tabId) => {
+    const sid = normalizeBrowserSessionId(sessionId)
+    if (!sid) return
+    const panelTabs = get().panels[sid]?.tabs ?? []
+    if (!panelTabs.some((tab) => tab.id === tabId)) {
+      const scoped = await dockListTabs(sid)
+      if (!scoped.some((tab) => tab.id === tabId)) {
+        await get().newTab(sid, null, true)
+        return
+      }
+    }
     try {
-      await dockActivateTab(tabId)
+      await dockActivateTab(tabId, sid)
       set((state) => ({
-        panels: patchPanel(state.panels, sessionId, { activeTabId: tabId }),
+        panels: patchPanel(state.panels, sid, { activeTabId: tabId }),
       }))
-      get().appendUserAction(sessionId, {
+      get().appendUserAction(sid, {
         kind: 'activate_tab',
         detail: String(tabId),
       })
@@ -702,8 +875,16 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
   },
 
   setPreferredTestTab: async (sessionId, tabId) => {
+    const panelTabs = get().panels[sessionId]?.tabs ?? []
+    const belongs =
+      panelTabs.some((tab) => tab.id === tabId) ||
+      (await dockListTabs(sessionId)).some((tab) => tab.id === tabId)
+    if (!belongs) {
+      console.warn('[browserDock] pinTestTarget rejected foreign tab', tabId, sessionId)
+      return
+    }
     try {
-      await dockPinTestTarget(tabId)
+      await dockPinTestTarget(sessionId, tabId)
       set((state) => ({
         panels: patchPanel(state.panels, sessionId, { preferredTestTabId: tabId }),
       }))
@@ -718,7 +899,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
 
   clearPreferredTestTab: async (sessionId) => {
     try {
-      await dockClearTestTarget()
+      await dockClearTestTarget(sessionId)
       set((state) => ({
         panels: patchPanel(state.panels, sessionId, { preferredTestTabId: null }),
       }))
@@ -731,46 +912,54 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     }
   },
 
+  setPrototypeRefTab: (sessionId, tabId) => {
+    set((state) => ({
+      panels: patchPanel(state.panels, sessionId, { prototypeRefTabId: tabId }),
+    }))
+    get().appendUserAction(sessionId, {
+      kind: 'set_prototype_ref',
+      detail: String(tabId),
+    })
+  },
+
+  clearPrototypeRefTab: (sessionId) => {
+    set((state) => ({
+      panels: patchPanel(state.panels, sessionId, { prototypeRefTabId: null }),
+    }))
+    get().appendUserAction(sessionId, {
+      kind: 'clear_prototype_ref',
+      detail: '',
+    })
+  },
+
   setColumnWidth: (sessionId, px) => {
     const next = clampColumnWidth(px)
-    set((state) => {
-      const updated: Record<string, BrowserPanelState> = { ...state.panels }
-      for (const [id, panel] of Object.entries(state.panels)) {
-        updated[id] = { ...panel, columnWidth: next, columnWidthAuto: false }
-      }
-      if (!updated[sessionId]) {
-        updated[sessionId] = {
-          ...DEFAULT_STATE,
-          columnWidth: next,
-          columnWidthAuto: false,
-        }
-      }
-      return { panels: updated }
-    })
-    writeStoredColumnWidth(next)
-    writeStoredColumnWidthAuto(false)
+    const workspaceKey = currentWorkspaceKey()
+    set((state) => ({
+      panels: patchPanel(state.panels, sessionId, {
+        columnWidth: next,
+        columnWidthAuto: false,
+      }),
+    }))
+    writeStoredColumnWidth(workspaceKey, next)
+    writeStoredColumnWidthAuto(workspaceKey, false)
   },
 
   setColumnWidthAuto: (sessionId, auto) => {
-    set((state) => {
-      const updated: Record<string, BrowserPanelState> = { ...state.panels }
-      for (const [id, panel] of Object.entries(state.panels)) {
-        updated[id] = { ...panel, columnWidthAuto: auto }
-      }
-      if (!updated[sessionId]) {
-        updated[sessionId] = { ...DEFAULT_STATE, columnWidthAuto: auto }
-      }
-      return { panels: updated }
-    })
-    writeStoredColumnWidthAuto(auto)
+    const workspaceKey = currentWorkspaceKey()
+    set((state) => ({
+      panels: patchPanel(state.panels, sessionId, { columnWidthAuto: auto }),
+    }))
+    writeStoredColumnWidthAuto(workspaceKey, auto)
   },
 
   setDrawerHeightRatio: (sessionId, ratio) => {
     const next = clampRatio(ratio, 0.15, 0.6, 0.35)
+    const workspaceKey = currentWorkspaceKey()
     set((state) => ({
       panels: patchPanel(state.panels, sessionId, { drawerHeightRatio: next }),
     }))
-    writeStoredDrawerRatio(next)
+    writeStoredDrawerRatio(workspaceKey, next)
   },
 
   appendUserAction: (sessionId, entry) =>
@@ -787,28 +976,62 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     set((state) => ({ panels: patchPanel(state.panels, sessionId, { userLog: [] }) })),
 
   ingestEvent: (event) => {
+    const eventSessionId =
+      typeof (event as { sessionId?: unknown }).sessionId === 'string'
+        ? ((event as { sessionId?: string }).sessionId as string)
+        : null
 
-    const resolveSessionFromHint = (hint: string | null | undefined): string | null => {
-      if (hint && get().panels[hint]) return hint
-      const cur = get().activeSessionId
-      if (cur) return cur
-      const ids = Object.keys(get().panels)
-      return ids[0] ?? null
-    }
+    if (event.kind === 'tabs') {
+      const data = event.data as {
+        tabs?: BrowserDockTabInfo[]
+        active?: number | null
+        activeSessionId?: string | null
+      }
+      const allTabs = Array.isArray(data.tabs) ? data.tabs : []
+      const globalActive =
+        typeof data.active === 'number'
+          ? data.active
+          : allTabs.find((t) => t.active)?.id ?? null
 
-    const fallbackSession = (): string | null => {
-      const cur = get().activeSessionId
-      if (cur) return cur
-      const ids = Object.keys(get().panels)
-      return ids[0] ?? null
+      const knownSessions = new Set<string>()
+      for (const tab of allTabs) {
+        const sid = normalizeBrowserSessionId(tab.sessionId)
+        if (sid) knownSessions.add(sid)
+      }
+      for (const key of Object.keys(get().panels)) {
+        const sid = normalizeBrowserSessionId(key)
+        if (sid) knownSessions.add(sid)
+      }
+      if (knownSessions.size === 0) return
+
+      set((state) => {
+        const nextPanels: Record<string, BrowserPanelState> = { ...state.panels }
+        for (const sid of knownSessions) {
+          const prev = state.panels[sid] ?? DEFAULT_STATE
+          const patch = buildSessionTabPatch(sid, allTabs, globalActive, prev)
+          nextPanels[sid] = { ...prev, ...patch }
+        }
+        const nextActiveSession =
+          normalizeBrowserSessionId(
+            typeof data.activeSessionId === 'string' ? data.activeSessionId : null,
+          ) ?? state.activeSessionId
+        return { panels: nextPanels, activeSessionId: nextActiveSession }
+      })
+      return
     }
 
     if (event.kind === 'visible') {
-      const data = event.data as { session?: string | null; source?: string } | null
-      const hinted = data?.session ?? null
-      const sessionId = resolveSessionFromHint(hinted)
-      if (!sessionId) return
-      const prevActive = get().activeSessionId
+      const data = event.data as
+        | { session?: string | null; source?: string }
+        | null
+      const sessionId = normalizeBrowserSessionId(
+        eventSessionId ??
+          (typeof data?.session === 'string' ? data.session : null),
+      )
+      if (!sessionId) {
+        console.warn('[browserDock] dropping visible event without sessionId', event)
+        return
+      }
       set((state) => ({
         activeSessionId: sessionId,
         panels: patchPanel(state.panels, sessionId, {
@@ -816,67 +1039,24 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
           lastSource: 'agent',
         }),
       }))
-
-      if (prevActive === null || prevActive === sessionId) {
-        const seedRect = get().panels[sessionId]?.anchorRect ?? {
-          x: 0,
-          y: 0,
-          w: 1,
-          h: 1,
-        }
-        const seedUrl = get().panels[sessionId]?.url || null
-        dockOpen(seedRect, seedUrl).catch((err) => {
-          console.warn('[browserDock] ingestEvent dockOpen failed', err)
-        })
-      }
       dockRequestState().catch((err) => {
         console.warn('[browserDock] ingestEvent dockRequestState failed', err)
       })
       return
     }
 
-    if (event.kind === 'tabs') {
-      const sessionId = fallbackSession()
-      if (!sessionId) return
-      const data = event.data as {
-        tabs?: BrowserDockTabInfo[]
-        active?: number | null
+    if (!eventSessionId) {
+      if (event.kind !== 'dock_takeover' && event.kind !== 'dock_takeover_end') {
+        console.warn(
+          `[browserDock] dropping ${event.kind} event without sessionId`,
+          event,
+        )
       }
-      const tabs = Array.isArray(data.tabs) ? data.tabs : []
-      const active =
-        typeof data.active === 'number'
-          ? data.active
-          : tabs.find((t) => t.active)?.id ?? null
-
-      const act = tabs.find((t) => t.id === active)
-      set((state) => {
-        const prev = state.panels[sessionId] ?? DEFAULT_STATE
-        const stalePin =
-          prev.preferredTestTabId !== null &&
-          !tabs.some((t) => t.id === prev.preferredTestTabId)
-        const nextPin = stalePin ? null : prev.preferredTestTabId
-        if (stalePin) {
-          dockClearTestTarget().catch((err) => {
-            console.warn('[browserDock] auto-clear stale pin failed', err)
-          })
-        }
-        return {
-          panels: patchPanel(state.panels, sessionId, {
-            tabs,
-            activeTabId: active,
-            url: act?.url ?? prev.url,
-            liveUrl: act?.url ?? prev.liveUrl,
-            title: act?.title ?? prev.title,
-            preferredTestTabId: nextPin,
-          }),
-        }
-      })
       return
     }
+    const sessionId = eventSessionId
 
     if (event.kind === 'agent_action') {
-      const sessionId = fallbackSession()
-      if (!sessionId) return
       const data = event.data as {
         reqId?: number
         kind?: string
@@ -909,7 +1089,6 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
             agentLog: next,
             lastAgentActionAt: ts,
             tabActivity,
-            visible: true,
             pickMode: false,
           }),
         }
@@ -922,9 +1101,6 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       return
     }
 
-    const target = pickActiveSessionPanel(get())
-    if (!target) return
-    const { sessionId } = target
     if (event.kind === 'state') {
       const data = event.data as { url?: string; title?: string; canBack?: boolean }
       const evtTabId = (event as { tabId?: number }).tabId

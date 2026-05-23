@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Task Queue — work distribution system for multi-agent coordination.
-//!
-//! Provides a priority-based task queue where:
-//! - Tasks can be submitted with required capabilities
-//! - Agents claim tasks from the queue based on capability matching
-//! - Failed tasks are automatically re-queued with retry limits
-//! - Supports priority levels and deadline-based ordering
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};

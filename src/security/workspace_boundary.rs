@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Workspace isolation boundary enforcement.
-//!
-//! Prevents cross-workspace data access and enforces per-workspace
-//! domain allowlists and tool restrictions.
 
 use crate::config::workspace::WorkspaceProfile;
 use std::path::Path;

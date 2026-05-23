@@ -1,24 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! OpenAI **Responses API** provider — `POST /v1/responses`.
-//!
-//! The Responses API (introduced 2024) replaces the classic Chat
-//! Completions surface for newer first-party OpenAI models such as
-//! `gpt-5*`, `gpt-4.1*`, `o3*`, `o4*` and the `*-realtime` series.
-//! The schema differs in a few key ways:
-//!
-//! - input is sent as `input` (string or messages-shape) plus optional
-//!   `instructions` (system prompt), instead of `messages[]`;
-//! - the response carries an `output_text` convenience field plus an
-//!   `output[]` array of typed content items;
-//! - reasoning models (`gpt-5`, `o1`, `o3`, `o4`) require
-//!   `temperature = 1.0` and accept a `reasoning.effort` knob.
-//!
-//! This provider focuses on a robust *text* surface so the CLI / agent
-//! loop can route eligible models here.  Native tool-calling and
-//! streaming over the Responses API are left to follow-up milestones
-//! (tracked as follow-up milestones).
 
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
@@ -81,12 +63,14 @@ impl OpenAiResponsesProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
-            "provider.openai_responses",
-            120,
-            10,
-            &self.extra_headers,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts_and_headers(
+                "provider.openai_responses",
+                120,
+                10,
+                &self.extra_headers,
+            )
     }
 
     fn adjust_temperature_for_model(model: &str, requested: f64) -> f64 {
@@ -294,9 +278,17 @@ impl Provider for OpenAiResponsesProvider {
 
         let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
 
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            self.max_output_tokens.unwrap_or(0) as usize,
+            None,
+        );
+
         let mut instructions: Option<&str> = None;
         let mut messages: Vec<ResponsesMessage<'_>> = Vec::new();
-        for m in request.messages {
+        for m in &sanitized {
             match m.role.as_str() {
                 "system" => {
                     instructions = Some(m.content.as_str());
@@ -354,12 +346,10 @@ impl Provider for OpenAiResponsesProvider {
             }
         });
         let text = parsed.collect_text();
-        Ok(ProviderChatResponse {
-            text: if text.is_empty() { None } else { Some(text) },
-            tool_calls: Vec::new(),
+        Ok(ProviderChatResponse::text_only(
+            if text.is_empty() { None } else { Some(text) },
             usage,
-            reasoning_content: None,
-        })
+        ))
     }
 
     async fn chat_structured(

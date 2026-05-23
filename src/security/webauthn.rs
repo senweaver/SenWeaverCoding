@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WebAuthn / FIDO2 hardware key authentication.
-//!
-//! Implements the Web Authentication API server-side flows for registration
-//! (attestation) and authentication (assertion) of hardware security keys
-//! (YubiKey, SoloKey, etc.) and platform authenticators.
-//!
-//! Credentials are serialized as JSON, encrypted via the existing [`SecretStore`],
-//! and persisted to a SQLite-backed credential database. Each user can register
-//! multiple credentials (e.g., primary key + backup key).
-//!
-//! This module intentionally avoids heavy third-party WebAuthn libraries to keep
-//! the dependency footprint small. It implements the essential challenge/response
-//! protocol using `ring` (already present) for signature verification and
-//! `base64`/`serde_json` for serialization.
 
 use crate::security::SecretStore;
 use anyhow::{Context, Result};

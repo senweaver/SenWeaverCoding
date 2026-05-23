@@ -1,26 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Code search — full-text index with opt-in tantivy back-end.
-//!
-//! the code-intelligence story requires a fast
-//! substring/token search over the workspace (think "find every
-//! definition of `fn parse_`").  Full-blown BM25 indexing via
-//! [`tantivy`] is overkill for tiny workspaces and too heavy a
-//! compile-time cost to ship unconditionally, so the module exposes:
-//!
-//! - An always-available **heuristic** scanner ([`heuristic::Search`])
-//!   that walks the directory tree and runs a regex / substring match
-//!   per line.  Zero extra dependencies; perfectly adequate for
-//!   workspaces under a few tens of megabytes.
-//! - A **tantivy-backed** index ([`tantivy_backend::TantivyIndex`])
-//!   behind `#[cfg(feature = "code-search")]` for larger trees, with
-//!   an [`IncrementalIndex`] trait so call-sites can swap back-ends
-//!   without changing their code.
-//!
-//! Prometheus hook: whenever the tantivy index is rebuilt it reports
-//! the on-disk byte size through
-//! [`crate::observability::prometheus::PrometheusObserver::set_fulltext_index_size_bytes`].
 
 use std::path::{Path, PathBuf};
 
@@ -241,9 +221,23 @@ pub mod tantivy_backend {
                 Ok(s) => s,
                 Err(_) => return Ok(()),
             };
-            let path_field = self.schema.get_field("path").unwrap();
-            let line_field = self.schema.get_field("line").unwrap();
-            let body_field = self.schema.get_field("body").unwrap();
+            let (path_field, line_field, body_field) = match (
+                self.schema.get_field("path"),
+                self.schema.get_field("line"),
+                self.schema.get_field("body"),
+            ) {
+                (Ok(p), Ok(l), Ok(b)) => (p, l, b),
+                (p, l, b) => {
+                    tracing::warn!(
+                        target = "code_intel.tantivy",
+                        path_ok = p.is_ok(),
+                        line_ok = l.is_ok(),
+                        body_ok = b.is_ok(),
+                        "TantivyIndex schema missing expected field; skipping reindex"
+                    );
+                    return Ok(());
+                }
+            };
 
             let mut writer = self
                 .writer
@@ -275,7 +269,17 @@ pub mod tantivy_backend {
         }
 
         fn remove_file(&self, path: &Path) -> io::Result<()> {
-            let path_field = self.schema.get_field("path").unwrap();
+            let path_field = match self.schema.get_field("path") {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(
+                        target = "code_intel.tantivy",
+                        error = %e,
+                        "TantivyIndex schema missing 'path' field; skipping remove"
+                    );
+                    return Ok(());
+                }
+            };
             let mut writer = self
                 .writer
                 .write()
@@ -294,9 +298,23 @@ pub mod tantivy_backend {
                 return Ok(Vec::new());
             }
             let searcher = self.reader.searcher();
-            let body_field = self.schema.get_field("body").unwrap();
-            let path_field = self.schema.get_field("path").unwrap();
-            let line_field = self.schema.get_field("line").unwrap();
+            let (body_field, path_field, line_field) = match (
+                self.schema.get_field("body"),
+                self.schema.get_field("path"),
+                self.schema.get_field("line"),
+            ) {
+                (Ok(b), Ok(p), Ok(l)) => (b, p, l),
+                (b, p, l) => {
+                    tracing::warn!(
+                        target = "code_intel.tantivy",
+                        body_ok = b.is_ok(),
+                        path_ok = p.is_ok(),
+                        line_ok = l.is_ok(),
+                        "TantivyIndex schema missing expected field; returning empty hits"
+                    );
+                    return Ok(Vec::new());
+                }
+            };
             let parser = QueryParser::for_index(&self.index, vec![body_field]);
             let parsed = parser.parse_query(query).map_err(to_io)?;
             let docs = searcher
@@ -304,12 +322,28 @@ pub mod tantivy_backend {
                 .map_err(to_io)?;
             let mut hits = Vec::new();
             for (_score, addr) in docs {
-                let doc: tantivy::TantivyDocument = searcher.doc(addr).map_err(to_io)?;
-                let p = doc
+                let doc: tantivy::TantivyDocument = match searcher.doc(addr) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            target = "code_intel.tantivy",
+                            error = %e,
+                            "failed to fetch Tantivy doc; skipping"
+                        );
+                        continue;
+                    }
+                };
+                let Some(p) = doc
                     .get_first(path_field)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .map(ToString::to_string)
+                else {
+                    tracing::warn!(
+                        target = "code_intel.tantivy",
+                        "Tantivy doc missing 'path' field; skipping hit"
+                    );
+                    continue;
+                };
                 let line = doc
                     .get_first(line_field)
                     .and_then(|v| v.as_u64())

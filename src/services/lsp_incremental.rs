@@ -1,34 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! incremental `textDocument/didChange` support.
-//!
-//! LSP 3.x allows a server to accept either full-content or
-//! range-based change notifications.  This module computes the
-//! minimal range-based patch between two buffer snapshots and
-//! formats the JSON the server expects, with a transparent
-//! full-content fallback.
-//!
-//! ## Algorithm
-//!
-//! We find the longest matching prefix and suffix between
-//! `old_text` and `new_text`, then emit a single
-//! `TextDocumentContentChangeEvent` covering the differing middle.
-//! For typical editor workloads (single-character keystrokes) this
-//! collapses a potentially-megabyte full-content payload to a
-//! handful of bytes.
-//!
-//! The routine is language-agnostic and Unicode-aware — the range
-//! is expressed in LSP `Position` (line + UTF-16 offset) units
-//! exactly as the protocol demands.
-//!
-//! ## Capability routing
-//!
-//! Callers consult [`DidChangeSupport`] (derived from the server's
-//! `textDocumentSync.change` capability) and either call
-//! [`build_incremental_change`] or [`build_full_change`].  The
-//! production call-site can start in fallback mode and upgrade once
-//! the initialize handshake completes.
 
 use serde_json::{Value, json};
 

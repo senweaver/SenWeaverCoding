@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Vim text objects — mirrors claude-code-typescript-src`vim/textObjects.ts`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextObject {
@@ -104,10 +102,10 @@ fn find_matching_pair(
 
     depth = 0;
     let mut end = None;
-    for i in (start + 1)..len {
-        if bytes[i] == open as u8 {
+    for (i, b) in bytes.iter().enumerate().skip(start + 1).take(len.saturating_sub(start + 1)) {
+        if *b == open as u8 {
             depth += 1;
-        } else if bytes[i] == close as u8 {
+        } else if *b == close as u8 {
             if depth == 0 {
                 end = Some(i);
                 break;

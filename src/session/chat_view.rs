@@ -1,26 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `SessionChatView` ??an egui widget that consumes the `AgentSession`
-//! event stream directly.
-//!
-//! This is the reference GUI thin-shell.  It does **not** reach into
-//! `Agent` state directly; all rendering is driven by
-//! `SessionEvent`s arriving on a `tokio::sync::broadcast::Receiver`.
-//! New `Delta` chunks are merged into the current assistant bubble
-//! (streaming), while `ToolCall` / `ToolResult` / `Error` events
-//! produce distinct bubbles with appropriate styling.
-//!
-//! # Threading
-//!
-//! - A background tokio task drains the receiver and pushes rendered
-//!   `ChatEntry` structs into the widget's shared `VecDeque` via a
-//!   `parking_lot::Mutex`.
-//! - The egui update loop clones the latest entries and renders them
-//!   inside `Ui::show`.
-//!
-//! This design proves `AgentSession` is a sufficient API for an
-//! event-driven GUI ??no business logic crosses into the widget itself.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -238,6 +218,7 @@ fn apply_event(entries: &mut VecDeque<ChatEntry>, pending: &mut bool, event: Ses
         | SessionEventKind::WriteVerify { .. }
         | SessionEventKind::DiffSessionApplied { .. }
         | SessionEventKind::DiffSessionRolledBack { .. } => {}
+        SessionEventKind::ProviderRetry { .. } => {}
         SessionEventKind::ApprovalRequested {
             id, tool_name, ..
         } => {
@@ -293,6 +274,49 @@ fn apply_event(entries: &mut VecDeque<ChatEntry>, pending: &mut bool, event: Ses
                 ChatEntry {
                     kind: ChatEntryKind::System,
                     text: format!("(opened {path}{cursor_hint} via {source})"),
+                },
+            );
+        }
+        SessionEventKind::WorkerSpawned {
+            worker_id, title, ..
+        } => {
+            push_with_cap(
+                entries,
+                ChatEntry {
+                    kind: ChatEntryKind::System,
+                    text: format!("(worker spawned: {worker_id} '{title}')"),
+                },
+            );
+        }
+        SessionEventKind::WorkerStatus { .. }
+        | SessionEventKind::WorkerProgress { .. } => {}
+        SessionEventKind::WorkerCompleted {
+            worker_id, success, summary,
+        } => {
+            let label = if success { "completed" } else { "failed" };
+            push_with_cap(
+                entries,
+                ChatEntry {
+                    kind: ChatEntryKind::System,
+                    text: format!("(worker {worker_id} {label}: {summary})"),
+                },
+            );
+        }
+        SessionEventKind::WorkerStopped { worker_id, reason } => {
+            push_with_cap(
+                entries,
+                ChatEntry {
+                    kind: ChatEntryKind::System,
+                    text: format!("(worker {worker_id} stopped: {reason})"),
+                },
+            );
+        }
+        SessionEventKind::ParentResumed { reason } => {
+            push_with_cap(
+                entries,
+                ChatEntry {
+                    kind: ChatEntryKind::System,
+                    text: format!("(parent resumed: {reason})"),
                 },
             );
         }
@@ -422,6 +446,28 @@ pub fn apply_session_event<S: ChatViewSink + ?Sized>(sink: &mut S, evt: &Session
         | SessionEventKind::DiffSessionApplied { .. }
         | SessionEventKind::DiffSessionRolledBack { .. } => {
 
+        }
+        SessionEventKind::ProviderRetry { .. } => {
+
+        }
+        SessionEventKind::WorkerSpawned {
+            worker_id, title, ..
+        } => {
+            sink.push_system(&format!("worker spawned: {worker_id} '{title}'"));
+        }
+        SessionEventKind::WorkerStatus { .. }
+        | SessionEventKind::WorkerProgress { .. } => {}
+        SessionEventKind::WorkerCompleted {
+            worker_id, success, summary,
+        } => {
+            let label = if *success { "completed" } else { "failed" };
+            sink.push_system(&format!("worker {worker_id} {label}: {summary}"));
+        }
+        SessionEventKind::WorkerStopped { worker_id, reason } => {
+            sink.push_system(&format!("worker {worker_id} stopped: {reason}"));
+        }
+        SessionEventKind::ParentResumed { reason } => {
+            sink.push_system(&format!("parent resumed: {reason}"));
         }
     }
 }

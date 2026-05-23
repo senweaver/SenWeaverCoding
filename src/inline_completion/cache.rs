@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Bounded LRU cache for inline-completion suggestions.
-//!
-//! Cache key = hash(prefix tail 256B + suffix head 128B + language).
-//! Entries carry their own TTL so replays older than the ceiling are
-//! treated as misses.  The cache is `Arc + Mutex` friendly so the
-//! registry can share it across threads.
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};

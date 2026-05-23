@@ -29,7 +29,7 @@ impl QdrantMemory {
         api_key: Option<String>,
         embedder: Arc<dyn EmbeddingProvider>,
     ) -> Result<Self> {
-        let mem = Self::new_lazy(url, collection, api_key, embedder);
+        let mem = Self::new_lazy(url, collection, api_key, embedder)?;
 
         mem.ensure_collection().await?;
         mem.initialized.set(()).ok();
@@ -42,18 +42,35 @@ impl QdrantMemory {
         collection: &str,
         api_key: Option<String>,
         embedder: Arc<dyn EmbeddingProvider>,
-    ) -> Self {
-        let base_url = url.trim_end_matches('/').to_string();
-        let client = crate::config::build_runtime_proxy_client("memory.qdrant");
+    ) -> Result<Self> {
+        let parsed = reqwest::Url::parse(url.trim()).with_context(|| {
+            format!(
+                "invalid qdrant url '{url}'; expected http(s)://host[:port][/path] (e.g. http://localhost:6333)"
+            )
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            anyhow::bail!(
+                "qdrant url scheme '{}' is unsupported; expected http or https",
+                parsed.scheme()
+            );
+        }
+        if parsed.host_str().map(str::is_empty).unwrap_or(true) {
+            anyhow::bail!("qdrant url '{url}' is missing a host component");
+        }
 
-        Self {
+        let base_url = url.trim().trim_end_matches('/').to_string();
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("memory.qdrant");
+
+        Ok(Self {
             client,
             base_url,
             collection: collection.to_string(),
             api_key,
             embedder,
             initialized: OnceCell::new(),
-        }
+        })
     }
 
     async fn ensure_initialized(&self) -> Result<()> {
@@ -77,6 +94,41 @@ impl QdrantMemory {
         req.header("Content-Type", "application/json")
     }
 
+    async fn send_with_retry(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<reqwest::Response> {
+        let policy = crate::util::retry::RetryPolicy::http();
+        crate::util::retry::retry(&policy, |attempt| {
+            let method = method.clone();
+            let path = path.to_string();
+            let body = body.clone();
+            async move {
+                let mut req = self.request(method, &path);
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if status.is_server_error() || status.as_u16() == 429 {
+                            anyhow::bail!(
+                                "qdrant transient HTTP {} on attempt {attempt}",
+                                status.as_u16()
+                            );
+                        }
+                        Ok(resp)
+                    }
+                    Err(e) => Err(anyhow::Error::new(e)
+                        .context(format!("qdrant request failed on attempt {attempt}"))),
+                }
+            }
+        })
+        .await
+    }
+
     async fn ensure_collection(&self) -> Result<()> {
         let dims = self.embedder.dimensions();
         if dims == 0 {
@@ -87,12 +139,9 @@ impl QdrantMemory {
             return Ok(());
         }
 
+        let path = format!("/collections/{}", self.collection);
         let resp = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/collections/{}", self.collection),
-            )
-            .send()
+            .send_with_retry(reqwest::Method::GET, &path, None)
             .await;
 
         match resp {
@@ -121,12 +170,7 @@ impl QdrantMemory {
         });
 
         let resp = self
-            .request(
-                reqwest::Method::PUT,
-                &format!("/collections/{}", self.collection),
-            )
-            .json(&create_body)
-            .send()
+            .send_with_retry(reqwest::Method::PUT, &path, Some(create_body))
             .await
             .context("failed to create Qdrant collection")?;
 

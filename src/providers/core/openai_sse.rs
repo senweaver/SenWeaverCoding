@@ -1,44 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared Server-Sent Events plumbing for every OpenAI-compatible provider.
-//!
-//! OpenAI, Compatible (Venice / Moonshot / xAI / …), OpenRouter and
-//! Azure-OpenAI all agree on the same streaming wire format:
-//!
-//! ```text
-//! data: {"choices":[{"delta":{"content":"Hel"}}]}
-//! data: {"choices":[{"delta":{"content":"lo"}}]}
-//! data: [DONE]
-//! ```
-//!
-//! Each provider previously carried a private, near-identical SSE
-//! decoder.  This module hoists those decoders into one place built on
-//! top of [`super::sse::SseParser`] so:
-//!
-//! * upstream quirks (reasoning_content on DeepSeek, pre-executed
-//!   tool events from claude-max-api-proxy, OpenAI tool_calls streamed
-//!   incrementally) are understood uniformly;
-//! * providers only wire up the HTTP call and forward the resulting
-//!   `BoxStream`;
-//! * fuzz tests against the SSE parser benefit every provider at once.
-//!
-//! Public surface:
-//!
-//! * [`StreamChunkResponse`] / [`StreamChoice`] / [`StreamDelta`] — the
-//!   normalised OpenAI chat-completions chunk envelope.
-//! * [`StreamToolCallAccumulator`] — per-index buffer that merges
-//!   incremental `tool_calls` deltas into a fully-formed `ToolCall`.
-//! * [`parse_sse_chunk`] / [`parse_proxy_tool_event`] /
-//!   [`extract_sse_text_delta`] — stateless decoders used by both
-//!   streaming entry points.
-//! * [`sse_bytes_to_chunks`] — legacy text-only `StreamChunk` path.
-//! * [`sse_bytes_to_events`] — structured `StreamEvent` path with
-//!   native tool-call emission.
-//!
-//! The types deliberately stay provider-agnostic: anything that needs
-//! to mutate here must keep both call-sites (Compatible & OpenRouter)
-//! passing their unit tests.
 
 use crate::providers::traits::{
     StreamChunk, StreamError, StreamEvent, StreamResult, TokenUsage,
@@ -226,7 +188,7 @@ impl StreamToolCallAccumulator {
         };
 
         Some(ProviderToolCall {
-            id: self.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: crate::providers::sanitize::normalize_tool_call_id(self.id),
             name,
             arguments: normalized_arguments,
         })
@@ -252,6 +214,22 @@ pub fn parse_sse_chunk(line: &str) -> StreamResult<Option<StreamChunkResponse>> 
     serde_json::from_str(data)
         .map(Some)
         .map_err(StreamError::Json)
+}
+
+pub fn parse_sse_chunk_tolerant(line: &str) -> Option<StreamChunkResponse> {
+    match parse_sse_chunk(line) {
+        Ok(value) => value,
+        Err(err) => {
+            let preview: String = line.chars().take(160).collect();
+            tracing::warn!(
+                target: "providers.core.openai_sse",
+                error = %err,
+                line_preview = %preview,
+                "skipped malformed SSE chunk; continuing to next event"
+            );
+            None
+        }
+    }
 }
 
 pub fn parse_proxy_tool_event(line: &str) -> Option<StreamEvent> {
@@ -329,13 +307,13 @@ pub fn sse_bytes_to_chunks(
                 match item {
                     Ok(bytes) => {
                         sse.push(&bytes);
-                        while let Some(ev) = sse.next() {
+                        while let Some(ev) = sse.next_event() {
                             if ev.is_done() || ev.data.is_empty() {
                                 continue;
                             }
                             let line = format!("data: {}", ev.data);
-                            match parse_sse_line(&line) {
-                                Ok(Some(chunk)) => {
+                            match parse_sse_line_tolerant(&line) {
+                                Some(chunk) => {
                                     let chunk = if count_tokens {
                                         chunk.with_token_estimate()
                                     } else {
@@ -345,11 +323,7 @@ pub fn sse_bytes_to_chunks(
                                         return;
                                     }
                                 }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    let _ = tx.send(Err(e)).await;
-                                    return;
-                                }
+                                None => {}
                             }
                         }
                     }
@@ -360,12 +334,12 @@ pub fn sse_bytes_to_chunks(
                 }
             }
             sse.finish();
-            while let Some(ev) = sse.next() {
+            while let Some(ev) = sse.next_event() {
                 if ev.is_done() || ev.data.is_empty() {
                     continue;
                 }
                 let line = format!("data: {}", ev.data);
-                if let Ok(Some(chunk)) = parse_sse_line(&line) {
+                if let Some(chunk) = parse_sse_line_tolerant(&line) {
                     let chunk = if count_tokens {
                         chunk.with_token_estimate()
                     } else {
@@ -413,7 +387,7 @@ pub fn sse_bytes_to_events(
                 match item {
                     Ok(bytes) => {
                         sse.push(&bytes);
-                        while let Some(ev) = sse.next() {
+                        while let Some(ev) = sse.next_event() {
                             if ev.is_done() || ev.data.is_empty() {
                                 continue;
                             }
@@ -426,13 +400,9 @@ pub fn sse_bytes_to_events(
                                 continue;
                             }
 
-                            let chunk = match parse_sse_chunk(&line) {
-                                Ok(Some(chunk)) => chunk,
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    let _ = tx.send(Err(e)).await;
-                                    return;
-                                }
+                            let chunk = match parse_sse_chunk_tolerant(&line) {
+                                Some(chunk) => chunk,
+                                None => continue,
                             };
 
                             if let Some(usage_info) = chunk.usage.clone() {
@@ -558,4 +528,20 @@ fn parse_sse_line(line: &str) -> StreamResult<Option<StreamChunk>> {
     }
 
     Ok(None)
+}
+
+fn parse_sse_line_tolerant(line: &str) -> Option<StreamChunk> {
+    match parse_sse_line(line) {
+        Ok(value) => value,
+        Err(err) => {
+            let preview: String = line.chars().take(160).collect();
+            tracing::warn!(
+                target: "providers.core.openai_sse",
+                error = %err,
+                line_preview = %preview,
+                "skipped malformed SSE chunk line; continuing"
+            );
+            None
+        }
+    }
 }

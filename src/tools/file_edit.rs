@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `file_edit` tool — routes every successful match through
-//! [`crate::apply_model::OpsApplier`] so journal / rollback / locking
-//! semantics are unified with the other editing surfaces.
-//!
-//! the plan: replace the previous
-//! `content.matches(old_string).count()` quadratic scan with a
-//! [`memchr::memmem::Finder`] single-pass that collects up to four
-//! hits and produces a human-readable "first N hit locations" error
-//! when the match is ambiguous.
+
 use super::edit_history::EditHistory;
 use super::traits::{Tool, ToolResult};
 use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
@@ -155,18 +147,16 @@ impl Tool for FileEditTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'new_string' parameter"))?;
 
         if mode != EditMode::Append && old_string.is_none() {
+            let mode_label = match mode {
+                EditMode::Replace => "replace",
+                EditMode::InsertAfter => "insert_after",
+                EditMode::InsertBefore => "insert_before",
+                EditMode::Append => "append",
+            };
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!(
-                    "'old_string' is required for mode '{}'",
-                    match mode {
-                        EditMode::Replace => "replace",
-                        EditMode::InsertAfter => "insert_after",
-                        EditMode::InsertBefore => "insert_before",
-                        EditMode::Append => unreachable!(),
-                    }
-                )),
+                error: Some(format!("'old_string' is required for mode '{mode_label}'")),
             });
         }
 
@@ -342,25 +332,27 @@ impl Tool for FileEditTool {
 
         match mode {
             EditMode::Replace => {
-                self.execute_replace(
-                    &args,
-                    old_string.unwrap(),
-                    new_string,
-                    &resolved_target,
-                    path,
-                )
-                .await
+                let old_string = old_string
+                    .ok_or_else(|| anyhow::anyhow!("'old_string' is required for mode 'replace'"))?;
+                self.execute_replace(&args, old_string, new_string, &resolved_target, path)
+                    .await
             }
             EditMode::Append => {
                 self.execute_append(new_string, &resolved_target, path)
                     .await
             }
             EditMode::InsertAfter => {
-                self.execute_insert_after(old_string.unwrap(), new_string, &resolved_target, path)
+                let old_string = old_string.ok_or_else(|| {
+                    anyhow::anyhow!("'old_string' is required for mode 'insert_after'")
+                })?;
+                self.execute_insert_after(old_string, new_string, &resolved_target, path)
                     .await
             }
             EditMode::InsertBefore => {
-                self.execute_insert_before(old_string.unwrap(), new_string, &resolved_target, path)
+                let old_string = old_string.ok_or_else(|| {
+                    anyhow::anyhow!("'old_string' is required for mode 'insert_before'")
+                })?;
+                self.execute_insert_before(old_string, new_string, &resolved_target, path)
                     .await
             }
         }
@@ -378,14 +370,22 @@ impl FileEditTool {
         self.snapshot_before_write(path).await;
         let batch = EditBatch::new(EditOrigin::FileEditTool).with_op(EditOp::Replace {
             path: path.to_path_buf(),
-            byte_range: 0..original.as_bytes().len(),
+            byte_range: 0..original.len(),
             old_text: original.to_string(),
             new_text: new_content.to_string(),
             anchor: None,
         });
+        let batch_id = batch.batch_id.clone();
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::session::record_write_for_current_session(path);
+                crate::agent::file_edit_emitter::emit_file_edit(
+                    path,
+                    Some(original.as_bytes()),
+                    Some(new_content.as_bytes()),
+                    Some(batch_id),
+                )
+                .await;
                 Ok(())
             }
             Err(e) => Err(format!("{e}")),
@@ -449,7 +449,7 @@ impl FileEditTool {
         let bytes = content.as_bytes();
 
         let mut hits: Vec<usize> = Vec::with_capacity(4);
-        let search_range = scope_range.as_ref().map(|r| r.clone()).unwrap_or(0..bytes.len());
+        let search_range = scope_range.clone().unwrap_or(0..bytes.len());
         for pos in finder.find_iter(&bytes[search_range.clone()]) {
 
             let abs_pos = search_range.start + pos;

@@ -276,6 +276,11 @@ export const en = {
   'titlebar.code': 'Code',
   'titlebar.terminal': 'Terminal',
   'titlebar.history': 'History',
+  'titlebar.window.minimize': 'Minimize',
+  'titlebar.window.maximize': 'Maximize',
+  'titlebar.window.restore': 'Restore Down',
+  'titlebar.window.close': 'Close',
+  'titlebar.window.zoom': 'Zoom',
 
   'menu.file': 'File',
   'menu.edit': 'Edit',
@@ -1285,6 +1290,12 @@ export const en = {
   'chat.dismiss': 'dismiss',
   'chat.stopTitle': 'Stop generation (Cmd+.)',
   'chat.stopping': 'Stopping...',
+  'chat.willResumeWhenWorkersFinish': 'Will resume when subagents finish',
+  'chat.workers.runningCount': '{count} subagents running',
+  'chat.workers.openDetail': 'Open detail',
+  'chat.workers.stopWorker': 'Stop',
+  'chat.workers.stopAll': 'Stop all',
+  'chat.workers.spawnVerb': 'spawned',
   'chat.tokenRing.tooltip': '{pct}% · {used} / {total} context used',
   'chat.tokenRing.tooltipCycled': '{pct}% · {used} / {total} context used · cycle {cycle}',
   'chat.rewindAction': 'Rewind to here',
@@ -1311,6 +1322,7 @@ export const en = {
   'chat.rewindContinueOnly': 'Continue without reverting',
   'chat.rewindContinueAndRevert': 'Continue and revert',
   'chat.editPromptHint': 'Click to edit and re-send',
+  'chat.errorDetails': 'Show detailed error',
   'chat.restoreLastConversation': 'Restore to last used',
   'chat.restoreConfirmTitle': 'Restore previous conversation',
   'chat.restoreConfirmBody': 'This will re-apply {fileCount} file changes and bring back the cancelled conversation.',
@@ -1429,6 +1441,14 @@ export const en = {
 
   'chat.planningNextMoves': 'Planning next moves',
 
+  'chat.retry.title': 'Upstream is busy ({label}); auto-retrying…',
+  'chat.retry.attempt': 'retry {attempt}/{max}',
+  'chat.retry.engineOverloaded': 'engine overloaded',
+  'chat.retry.accountRateLimited': 'account rate limited',
+  'chat.retry.transient': 'transient error',
+  'chat.retry.stopButton': 'Stop retry',
+
+
   'tool.list.workspaceRoot': 'Workspace root',
   'tool.edit.multiFiles': '{count} files',
   'tool.edit.executing': 'Editing {path}…',
@@ -1462,6 +1482,9 @@ export const en = {
   'tool.web.noResults': 'No results found',
   'tool.web.providerLabel': 'Provider:',
   'tool.web.enginesUsedLabel': 'Engines:',
+  'tool.web.openInBuiltinBrowser': 'Open in built-in browser',
+  'tool.web.engineSourceLabel': 'Source',
+  'tool.web.publishedAtLabel': 'Published',
 
   'tool.verb.read': 'Read',
   'tool.verb.listed': 'Listed',
@@ -1861,6 +1884,17 @@ export const en = {
   'codingMode.harness.label': 'Harness',
   'codingMode.harness.description':
     'Engineering-grade harness — spec generation, skill orchestration, session checkpoints and multi-agent delegation, with auto-approval and verification.',
+  'codingMode.curator.label': 'Curator',
+  'codingMode.curator.description':
+    'Research curator — extensively mines the web and local workspace, then authors a professional paper / solution / technical report with DOCX export. Stops after the document lands so a later switch to Agent mode can implement the blueprint verbatim.',
+  'curator.actions.buildSwitch': 'Build → Agent',
+  'curator.statusWriting': 'Writing…',
+  'curator.copyPath': 'Copy path',
+  'curator.modeSwitchTitle': 'Switch to Agent · execute impl_blueprint.md verbatim',
+  'curator.modeSwitchBody':
+    'After switching, Agent mode will load impl_blueprint.md and engineer the full codebase, configs and docs accordingly. Curator-stage assets feed in as implementation inputs.',
+  'review.curatorGroupLabel': 'Curator deliverables',
+  'review.completedGroupLabel': 'Completed curator deliverables',
   'pairCheckpoint.title': 'Pair Checkpoint',
   'pairCheckpoint.awaiting': 'Awaiting input',
   'pairCheckpoint.body':
@@ -2497,6 +2531,27 @@ export const en = {
   'debug.privacy.categories.ipv4': 'IPv4',
   'debug.privacy.categories.mac': 'MAC address',
 
+  'debug.qa.bindTab.button': 'Bind Tab',
+  'debug.qa.bindTab.hint':
+    'Pick a tab from the embedded browser for the agent to use. New popup tabs are auto-claimed by this session.',
+  'debug.qa.bindTab.refresh': 'Refresh tabs',
+  'debug.qa.bindTab.empty': 'No tabs in the dock — open a page in the embedded browser first.',
+  'debug.qa.bindTab.ownerUser': 'user',
+  'debug.qa.bindTab.ownerAgent': 'agent',
+  'debug.qa.bindTab.unbind': 'Unbind',
+
+  'debug.qa.prototypeRef.button': 'Prototype Ref',
+  'debug.qa.prototypeRef.hint': 'Bind a tab showing your prototype design (Modao, Figma, etc.) as a UI validation reference. The agent will compare implementation against the prototype during testing.',
+  'debug.qa.prototypeRef.empty': 'No tabs available — open a prototype design page in the embedded browser first.',
+  'debug.qa.prototypeRef.unbind': 'Unbind prototype',
+
+  'debug.qa.dock.agentBusy': 'Agent is testing dock tab #{tabId}',
+
+  'debug.qa.docs.title': 'QA documents ready',
+  'debug.qa.docs.openReport': 'Open report.md',
+  'debug.qa.docs.openAnalysis': 'Open analysis.md',
+  'debug.qa.docs.openRunbook': 'Open runbook.md',
+
   'settings.debugPrivacy.title': 'Debug Privacy',
   'settings.debugPrivacy.description':
     'Configure the outbound PII sanitizer that runs in Debug mode before any LLM call.',
@@ -2600,6 +2655,22 @@ export const en = {
   'agentMonitor.status.waitingResource': 'Waiting on resource',
   'agentMonitor.waitingResourceCount': 'Waiting on {count} resource(s)',
   'agentMonitor.codingMode': 'Mode',
+  'agentMonitor.detail.elapsed': 'Running {time}',
+  'agentMonitor.detail.tool': 'Tool {name}',
+  'agentMonitor.detail.streaming': 'Streaming',
+  'agentMonitor.detail.thinking': 'Thinking',
+  'agentMonitor.detail.permissionPending': 'Awaiting approval',
+  'agentMonitor.detail.waitingFile': 'Waiting for {target}',
+  'agentMonitor.detail.waitingShell': 'Waiting for shell',
+  'agentMonitor.detail.waitingBrowser': 'Waiting for browser',
+  'agentMonitor.detail.queued': '{count} queued',
+  'agentMonitor.detail.tokens': '{count} tokens',
+  'agentMonitor.detail.edits': '{count} edited file(s) pending',
+  'agentMonitor.detail.lastEdit': 'Last edit {path}',
+  'agentMonitor.detail.heldBy': 'Held by "{holder}"',
+  'agentMonitor.detail.connection.connecting': 'Connecting',
+  'agentMonitor.detail.connection.reconnecting': 'Reconnecting',
+  'agentMonitor.detail.connection.disconnected': 'Disconnected',
   'chat.resourceWait.banner.title': 'Waiting for resource',
   'chat.resourceWait.file': 'File {path}',
   'chat.resourceWait.shell': 'Shell',

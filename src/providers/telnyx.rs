@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Telnyx AI inference provider.
-//!
-//! Telnyx provides AI inference through an OpenAI-compatible API at
-//! https://api.telnyx.com/v2/ai with access to 53+ models including
-//! GPT-4o, Claude, Llama, Mistral, and more.
-//!
-//! # Configuration
-//!
-//! Set the `TELNYX_API_KEY` environment variable or configure in `config.toml`:
-//!
-//! ```toml
-//! default_provider = "telnyx"
-//! default_model = "openai/gpt-4o"
-//! ```
 
 use crate::providers::traits::{ChatMessage, Provider};
 use async_trait::async_trait;
@@ -210,7 +196,16 @@ impl Provider for TelnyxProvider {
             )
         })?;
 
-        let api_messages: Vec<Message> = messages
+        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let budgeted = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            sanitized,
+            model,
+            0,
+            None,
+        );
+
+        let api_messages: Vec<Message> = budgeted
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),

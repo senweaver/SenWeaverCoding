@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Response cache — avoid burning tokens on repeated prompts.
-//!
-//! Stores LLM responses in a separate SQLite table keyed by a SHA-256 hash of
-//! `(model, system_prompt_hash, user_prompt)`. Entries expire after a
-//! configurable TTL (default: 1 hour). The cache is optional and disabled by
-//! default — users opt in via `[memory] response_cache_enabled = true`.
 
 use anyhow::Result;
 use chrono::{Duration, Local};

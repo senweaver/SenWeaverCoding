@@ -1,64 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Role-pipeline DAG runner — first-class multi-role orchestration.
-//!
-//! This module sits one layer above [`crate::tools::delegate_parallel`]:
-//! instead of letting an agent script its own fan-out via tool calls,
-//! it lets the operator (CLI / SDK / gateway) describe a *fixed* role
-//! graph and run it end-to-end with shared intermediate state.
-//!
-//! ## Default DAG
-//!
-//! `default_pipeline` returns the canonical four-role graph documented
-//! in the project plan:
-//!
-//! ```text
-//!                    +-----------+
-//!                    |  planner  |
-//!                    +-----+-----+
-//!                          |
-//!              +-----------+-----------+
-//!              v                       v
-//!        +-----------+           +-------------+
-//!        |   coder   |           |  researcher |
-//!        +-----+-----+           +------+------+
-//!              \                       /
-//!               +---------+----------+
-//!                         v
-//!                    +----------+
-//!                    | reviewer |
-//!                    +----+-----+
-//!                         |
-//!                         v
-//!                    +---------+
-//!                    |  final  |
-//!                    +---------+
-//! ```
-//!
-//! Stages on the same depth level (here `coder` ∥ `researcher`) execute
-//! concurrently inside the same level barrier so the total wall-clock
-//! is `depth * max_stage_latency` rather than `Σ stage_latency`.
-//!
-//! ## Shared state
-//!
-//! Every stage's textual answer is published to a shared
-//! [`crate::memory::blackboard::Blackboard`] under the `role_pipeline`
-//! namespace, keyed by `role_pipeline/<run_id>/<stage_id>`.  Dependent
-//! stages read those entries when assembling their prompt so artifacts
-//! propagate forwards along edges of the DAG without any extra
-//! coordination boilerplate.
-//!
-//! ## Provider model
-//!
-//! Each stage is executed via [`crate::providers::Provider::chat_with_system`]
-//! against the workspace's default provider/model.  This intentionally
-//! keeps the first cut tool-free so the pipeline is portable across
-//! every backend (OpenAI, Anthropic, OpenRouter, Gemini, OpenAI-compatible,
-//! local FIM, …) without bespoke tool wiring.  Future iterations can
-//! upgrade individual stages to full
-//! [`crate::agent::loop_::run_tool_call_loop`] runs without changing
-//! the public DAG surface.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -221,7 +163,7 @@ impl RolePipeline {
         while !remaining.is_empty() {
             let mut ready: Vec<RoleStage> = Vec::new();
             let mut still_pending: Vec<RoleStage> = Vec::new();
-            for stage in remaining.into_iter() {
+            for stage in remaining {
                 if stage.depends_on.iter().all(|d| completed.contains(d)) {
                     ready.push(stage);
                 } else {
@@ -397,8 +339,7 @@ impl RolePipeline {
         let final_answer = if final_chunks.is_empty() {
             outcomes
                 .iter()
-                .filter(|o| o.success)
-                .last()
+                .rfind(|o| o.success)
                 .map(|o| o.answer.clone())
                 .unwrap_or_default()
         } else {

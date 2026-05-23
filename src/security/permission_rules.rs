@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! OpenCode-style glob-based permission rules.
-//!
-//! This module provides fine-grained permission control using glob patterns,
-//! inspired by OpenCode's permission system. Rules can match file paths,
-//! tool names, or other patterns with allow/deny/ask actions.
 
 use globset::{Glob, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};

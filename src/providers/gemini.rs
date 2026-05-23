@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Google Gemini provider with support for:
-//! - Direct API key (`GEMINI_API_KEY` env var or config)
-//! - Gemini CLI OAuth tokens (reuse existing ~/.gemini/ authentication)
-//! - SenWeaverCoding auth-profiles OAuth tokens
-//! - Google Cloud ADC (`GOOGLE_APPLICATION_CREDENTIALS`)
 
 use crate::auth::AuthService;
 use crate::providers::traits::{
@@ -560,43 +555,21 @@ impl GeminiProvider {
     ) -> Self {
         let oauth_cred_paths = Self::discover_oauth_cred_paths();
 
-        let resolved_auth = api_key
+        let explicit_auth = api_key
             .and_then(Self::normalize_non_empty)
             .map(GeminiAuth::ExplicitKey)
             .or_else(|| Self::load_non_empty_env("GEMINI_API_KEY").map(GeminiAuth::EnvGeminiKey))
             .or_else(|| Self::load_non_empty_env("GOOGLE_API_KEY").map(GeminiAuth::EnvGoogleKey));
 
-        let (auth, use_managed) = if resolved_auth.is_some() {
-            (resolved_auth, false)
-        } else {
-
-            let has_managed = std::thread::scope(|s| {
-                s.spawn(|| {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .ok()?;
-                    rt.block_on(async {
-                        auth_service
-                            .get_gemini_profile(profile_override.as_deref())
-                            .await
-                            .ok()
-                            .flatten()
-                    })
-                })
-                .join()
-                .ok()
-                .flatten()
-                .is_some()
-            });
-
-            if has_managed {
-                (Some(GeminiAuth::ManagedOAuth), true)
-            } else {
-
+        let (auth, attach_service) = match explicit_auth {
+            Some(a) => (Some(a), false),
+            None => {
                 let cli_auth = Self::try_load_gemini_cli_token(oauth_cred_paths.first())
                     .map(|state| GeminiAuth::OAuthToken(Arc::new(tokio::sync::Mutex::new(state))));
-                (cli_auth, false)
+                match cli_auth {
+                    Some(a) => (Some(a), false),
+                    None => (Some(GeminiAuth::ManagedOAuth), true),
+                }
             }
         };
 
@@ -605,7 +578,7 @@ impl GeminiProvider {
             oauth_project: Arc::new(tokio::sync::Mutex::new(None)),
             oauth_cred_paths,
             oauth_index: Arc::new(tokio::sync::Mutex::new(0)),
-            auth_service: if use_managed {
+            auth_service: if attach_service {
                 Some(auth_service)
             } else {
                 None
@@ -857,12 +830,14 @@ impl GeminiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
-            "provider.gemini",
-            120,
-            10,
-            &self.extra_headers,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts_and_headers(
+                "provider.gemini",
+                120,
+                10,
+                &self.extra_headers,
+            )
     }
 
     async fn resolve_oauth_project(&self, token: &str) -> anyhow::Result<String> {
@@ -1141,7 +1116,11 @@ impl GeminiProvider {
                             let proj = self.resolve_oauth_project(&token).await?;
                             (token, proj)
                         }
-                        _ => unreachable!(),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "Gemini OAuth refresh path reached unexpected auth variant (expected OAuthToken or ManagedOAuth)"
+                            ));
+                        }
                     };
                     oauth_token = Some(new_token);
                     project = Some(new_project);
@@ -1501,10 +1480,17 @@ impl Provider for GeminiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            0,
+            None,
+        );
         let mut system_parts: Vec<&str> = Vec::new();
         let mut contents: Vec<Content> = Vec::new();
 
-        for msg in messages {
+        for msg in &sanitized {
             match msg.role.as_str() {
                 "system" => {
                     system_parts.push(&msg.content);
@@ -1644,7 +1630,14 @@ impl Provider for GeminiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
-        let (system_parts, contents) = Self::convert_messages_native(request.messages);
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let (system_parts, contents) = Self::convert_messages_native(&sanitized);
         let system_instruction = if system_parts.is_empty() {
             None
         } else {
@@ -1696,7 +1689,14 @@ impl Provider for GeminiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
-        let (system_parts, contents) = Self::convert_messages_native(messages);
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let (system_parts, contents) = Self::convert_messages_native(&sanitized);
         let system_instruction = if system_parts.is_empty() {
             None
         } else {

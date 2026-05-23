@@ -1,30 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Workspace file explorer API for the desktop right-sidebar.
-//!
-//! Endpoints (all behind bearer auth):
-//!
-//! - `GET    /api/workspace/tree`     — list a directory (one level by default)
-//! - `GET    /api/workspace/file`     — read a file
-//! - `PUT    /api/workspace/file`     — overwrite an existing file
-//! - `POST   /api/workspace/file`     — create a new file
-//! - `POST   /api/workspace/dir`      — create a new directory
-//! - `POST   /api/workspace/move`     — rename / move
-//! - `DELETE /api/workspace/entry`    — delete a file or directory
-//! - `POST   /api/workspace/upload`   — upload a single file (base64 body)
-//! - `GET    /api/workspace/search`   — recursively search file names
-//! - `GET    /api/workspace/watch`    — SSE stream of FS change events
-//!                                      (gated by the `fs-watch` cargo feature;
-//!                                      returns `501 Not Implemented` otherwise
-//!                                      so the route is always present)
-//!
-//! Path safety: every relative path is validated by [`resolve_within`]
-//! which canonicalizes the requested target and asserts that it lives
-//! beneath the workspace root. The `root` query parameter must be either
-//! [`AppState::config.workspace_dir`] or a canonical path persisted as a
-//! desktop chat session `work_dir` (see SQLite `session_metadata`), so users
-//! can browse per-project folders without widening access to arbitrary disk.
 
 use super::AppState;
 use super::api::require_auth;
@@ -45,21 +21,7 @@ const MAX_FILE_READ_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SEARCH_RESULTS: usize = 500;
 
-const HIDDEN_DEFAULT_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    ".cargo",
-    ".next",
-    ".venv",
-    "__pycache__",
-    ".idea",
-    ".turbo",
-    ".vite",
-    ".parcel-cache",
-];
+const HIDDEN_DEFAULT_DIRS: &[&str] = &[];
 
 #[derive(Debug)]
 enum FsError {
@@ -223,9 +185,6 @@ fn entry_to_json(root: &Path, path: &Path, name: &str, is_dir: bool) -> serde_js
 }
 
 fn is_hidden_default(name: &str) -> bool {
-    if name.starts_with('.') {
-        return true;
-    }
     HIDDEN_DEFAULT_DIRS.contains(&name)
 }
 
@@ -453,7 +412,7 @@ fn strip_bom_prefix(s: String) -> String {
 fn looks_text_by_content(bytes: &[u8]) -> bool {
     let sniff_len = bytes.len().min(8_192);
     let sample = &bytes[..sniff_len];
-    if sample.iter().any(|b| *b == 0) {
+    if sample.contains(&0) {
         return false;
     }
     if sample.is_empty() {
@@ -477,7 +436,7 @@ fn decode_text_best_effort(bytes: &[u8]) -> String {
 }
 
 fn try_decode_utf16_no_bom(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 4 || bytes.len() % 2 != 0 {
+    if bytes.len() < 4 || !bytes.len().is_multiple_of(2) {
         return None;
     }
     let sample_len = bytes.len().min(512);
@@ -1244,10 +1203,12 @@ pub async fn handle_workspace_search(
             &root,
             &needle_raw,
             limit,
-            show_hidden,
-            case_sensitive,
-            whole_word,
-            regex,
+            ContentSearchOptions {
+                show_hidden,
+                case_sensitive,
+                whole_word,
+                regex,
+            },
             max_size,
         );
         let total = results.len();
@@ -1449,24 +1410,26 @@ fn camel_hump_bonus(name: &str, needle: &str) -> i64 {
     bonus
 }
 
-fn run_content_search(
-    root: &Path,
-    pattern: &str,
-    limit: usize,
+#[derive(Clone, Copy)]
+struct ContentSearchOptions {
     show_hidden: bool,
     case_sensitive: bool,
     whole_word: bool,
     regex: bool,
+}
+
+fn run_content_search(
+    root: &Path,
+    pattern: &str,
+    limit: usize,
+    opts: ContentSearchOptions,
     max_file_size_bytes: u64,
 ) -> Vec<serde_json::Value> {
     if let Some(rg_results) = run_ripgrep_search(
         root,
         pattern,
         limit,
-        show_hidden,
-        case_sensitive,
-        whole_word,
-        regex,
+        opts,
         max_file_size_bytes,
     ) {
         return rg_results;
@@ -1475,9 +1438,9 @@ fn run_content_search(
         root,
         pattern,
         limit,
-        show_hidden,
-        case_sensitive,
-        whole_word,
+        opts.show_hidden,
+        opts.case_sensitive,
+        opts.whole_word,
         max_file_size_bytes,
     )
 }
@@ -1486,10 +1449,7 @@ fn run_ripgrep_search(
     root: &Path,
     pattern: &str,
     limit: usize,
-    show_hidden: bool,
-    case_sensitive: bool,
-    whole_word: bool,
-    regex: bool,
+    opts: ContentSearchOptions,
     max_file_size_bytes: u64,
 ) -> Option<Vec<serde_json::Value>> {
     let mut cmd = crate::util::hidden_sync_command("rg");
@@ -1497,20 +1457,21 @@ fn run_ripgrep_search(
         .arg("--max-count=20")
         .arg("--max-filesize")
         .arg(format!("{}b", max_file_size_bytes));
-    if !regex {
+    if !opts.regex {
         cmd.arg("--fixed-strings");
     }
-    if whole_word {
+    if opts.whole_word {
         cmd.arg("--word-regexp");
     }
-    if !case_sensitive {
+    if !opts.case_sensitive {
         cmd.arg("--ignore-case");
     }
-    if !show_hidden {
+    if !opts.show_hidden {
+        cmd.arg("--hidden");
         for excl in HIDDEN_DEFAULT_DIRS {
             cmd.arg("--glob").arg(format!("!**/{}/**", excl));
+            cmd.arg("--glob").arg(format!("!**/{}", excl));
         }
-        cmd.arg("--glob").arg("!.*");
     } else {
         cmd.arg("--hidden");
     }
@@ -1552,7 +1513,7 @@ fn run_ripgrep_search(
             .and_then(|l| l.get("text"))
             .and_then(|s| s.as_str())
             .unwrap_or_default()
-            .trim_end_matches(|c: char| c == '\n' || c == '\r')
+            .trim_end_matches(['\n', '\r'])
             .to_string();
         let mut submatches_json: Vec<serde_json::Value> = Vec::new();
         if let Some(arr) = data.get("submatches").and_then(|v| v.as_array()) {
@@ -1697,7 +1658,7 @@ fn walk_content(
                 found = true;
             }
             if found {
-                let preview = line.trim_end_matches(|c: char| c == '\r').to_string();
+                let preview = line.trim_end_matches('\r').to_string();
                 out.push(json!({
                     "name": path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
                     "relPath": relative_path(root, &path),
@@ -2045,7 +2006,7 @@ mod watch_impl {
                             _ => {}
                         }
                         if !handled {
-                            let Some(kind_str) = classify_event_kind(&event.kind) else {
+                            let Some(kind_str) = classify_event_kind(event.kind) else {
                                 if should_invalidate_git {
                                     crate::gateway::git_routes::invalidate_root(
                                         &git_status_cache,
@@ -2118,7 +2079,7 @@ mod watch_impl {
         ))
     }
 
-    fn classify_event_kind(kind: &EventKind) -> Option<&'static str> {
+    fn classify_event_kind(kind: EventKind) -> Option<&'static str> {
         match kind {
             EventKind::Create(_) => Some("created"),
             EventKind::Modify(ModifyKind::Data(_))

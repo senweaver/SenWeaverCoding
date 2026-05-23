@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Git context — mirrors claude-code-typescript-src`context.ts` (getGitStatus).
-// Gathers git branch, status, recent log, and user info for the system prompt.
 
 use std::path::Path;
 

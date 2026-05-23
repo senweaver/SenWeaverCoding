@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Composio Tool Provider — optional managed tool surface with 1000+ OAuth integrations.
-//
-// When enabled, SenWeaverCoding can execute actions on Gmail, Notion, GitHub, Slack, etc.
-// through Composio's API without storing raw OAuth tokens locally.
-//
-// This is opt-in. Users who prefer sovereign/local-only mode skip this entirely.
-// The Composio API key is stored in the encrypted secret store.
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
@@ -59,7 +52,9 @@ impl ComposioTool {
     }
 
     fn client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("tool.composio", 60, 10)
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("tool.composio", 60, 10)
     }
 
     pub async fn list_actions(

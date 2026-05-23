@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge configuration — mirrors claude-code-typescript-src`bridge/bridgeConfig.ts`.
-
 use serde::{Deserialize, Serialize};
 
 use super::types::PollConfig;

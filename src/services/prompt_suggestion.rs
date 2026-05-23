@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Prompt suggestion service — mirrors claude-code-typescript-src`services/PromptSuggestion/`.
-// Provides context-aware prompt suggestions based on project state,
-// recent activity, and available tools.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

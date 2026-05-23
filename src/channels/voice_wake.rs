@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Voice Wake Word detection channel.
-//!
-//! Listens on the default microphone via `cpal`, detects a configurable wake
-//! word using energy-based VAD followed by transcription-based keyword matching,
-//! then captures the subsequent utterance and dispatches it as a channel message.
-//!
-//! Gated behind the `voice-wake` Cargo feature.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -82,6 +75,7 @@ impl Channel for VoiceWakeChannel {
         let max_capture = Duration::from_secs(u64::from(config.max_capture_secs));
         let sample_rate: u32;
         let channels_count: u16;
+        let _audio_stream;
 
         {
             use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -119,7 +113,7 @@ impl Channel for VoiceWakeChannel {
 
             stream.play()?;
 
-            std::mem::forget(stream);
+            _audio_stream = stream;
         }
 
         drop(audio_tx);

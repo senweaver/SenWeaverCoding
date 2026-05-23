@@ -1,28 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! pluggable persistence for flow checkpoints.
-//!
-//! The legacy [`super::CheckpointStore`] kept every
-//! [`super::Checkpoint`] in an in-process FIFO, which was fine for
-//! the single-command rollback window (`flow_rollback steps=N`)
-//! but has no way to recover state after the agent process
-//! exits.  This module introduces a trait-driven extension:
-//!
-//! * [`CheckpointBackend`] defines the async surface a backend
-//!   has to implement (save / load / list).
-//! * [`PersistentCheckpointBackend`] is the first concrete
-//!   implementation and writes every checkpoint as a standalone
-//!   JSON file under `./.sen/checkpoints/<session_id>/<cp_id>.json`.
-//!   Listing a session is a single directory scan, so a future
-//!   cross-process `flow_rollback --session --checkpoint` can find
-//!   snapshots written by an earlier process.
-//!
-//! Failure policy: every backend error is logged at `warn` and
-//! counted via
-//! [`crate::observability::session_write_mode_metrics::incr_checkpoint_backend_error`];
-//! the in-memory store stays authoritative during runtime so a
-//! broken disk never stalls a flow.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

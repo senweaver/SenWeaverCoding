@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /add-dir command — mirrors claude-code-typescript-src`commands/add-dir/`.
-// Adds additional directories to the agent's working context.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
 inventory::submit!(StaticSlashCommand {

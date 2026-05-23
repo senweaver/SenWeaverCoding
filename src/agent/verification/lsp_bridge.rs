@@ -1,32 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! production bridge from the verification subsystem to a
-//! live [`crate::services::lsp::LspService`].
-//!
-//! Why a separate module?  The `LspDiagVerifier` is intentionally
-//! parameterised over a small `LspDiagnosticFetcher` trait so unit
-//! tests can substitute a deterministic fixture and the rest of the
-//! pipeline does not have to depend on the LSP transport surface.
-//! [`LspPoolDiagnosticFetcher`] is the production implementation that
-//! routes through `LspService::refresh_diagnostics` and:
-//!
-//! 1. enforces a wall-clock fetch timeout (3s default) so a
-//!    misbehaving server cannot stall the verify step;
-//! 2. infers the LSP `language_id` from the file extension so
-//!    callers don't have to thread the language through the call
-//!    site;
-//! 3. converts the rich `services::lsp::LspDiagnostic` into the
-//!    light-weight `verification::lsp_diag::LspDiagnostic` so the
-//!    verifier signature stays unchanged.
-//!
-//! `publishDiagnostics` push notifications are *not* subscribed to
-//! here.  The current `LspService` reader explicitly drops
-//! notifications (see `services::lsp.rs` ~line 572 — "we don't handle
-//! publishDiagnostics here").  Wiring up a push channel would require
-//! adding a per-file subscriber registry to `LspService`, which is
-//! the LockManager-scale refactor scheduled for .  Until
-//! then we always run a synchronous pull (`textDocument/diagnostic`).
 
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};

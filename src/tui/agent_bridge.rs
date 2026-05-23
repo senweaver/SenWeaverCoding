@@ -1,31 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Async bridge between the ratatui event loop and the agent runtime.
-//!
-//! The TUI runs a synchronous `crossterm::event::poll` loop on the main
-//! thread while the agent runs asynchronously in a separate tokio task.
-//!
-//! ## Event pipeline (M4 soft-bridge)
-//!
-//! ```text
-//!   UserInput::Chat
-//!       │
-//!       ▼
-//!   AgentSession::submit() ──► SessionEvent broadcast
-//!                                  │
-//!                                  ▼
-//!                          translators::session_to_agent_events()
-//!                                  │
-//!                                  ▼
-//!                             AgentEvent (unchanged public API)
-//! ```
-//!
-//! The external `AgentBridge` surface (`poll_events`, `send`) is unchanged;
-//! the internals now route through `AgentSession` so TUI, GUI, and CLI
-//! share the same event source.  The legacy `turn_streamed`-direct path
-//! is kept as a fallback when `AgentSession::with_agent` cannot be
-//! constructed (e.g. agent initialisation failed).
 
 use std::sync::Arc;
 

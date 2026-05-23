@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! User instruction rules — loads markdown files from `~/.senweavercoding/rules/`
-//! with a tiered loading strategy that preserves accuracy without wasting tokens.
-//!
-//! Tier resolution per file:
-//!   * `alwaysApply: true` (or missing — the SAFE default) → full body is
-//!     embedded into the system prompt every turn. Use this for hard
-//!     constraints the assistant MUST always honour.
-//!   * `alwaysApply: false` → only metadata (name, location, description /
-//!     summary) is injected; the assistant calls `read_user_rule(name)` to
-//!     pull the full content on demand. Use this for context-specific
-//!     references (large knowledge bases, optional playbooks).
-//!
-//! The default is intentionally biased toward correctness: a user who drops
-//! a markdown file into `~/.senweavercoding/rules/` without any frontmatter
-//! gets the same eager behaviour as before, so existing setups never lose
-//! constraint enforcement when this loader rolls out.
 
 use std::fs;
 use std::io;

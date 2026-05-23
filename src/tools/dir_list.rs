@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Directory listing tool with tree-like output.
-//!
-//! Provides `ls`-style directory browsing with configurable depth,
-//! file/directory counts, and optional metadata (size, modified time).
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;

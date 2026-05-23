@@ -1,37 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! User-turn preparation — the second testable seam extracted from
-//! `loop_::run`'s F-section main loop.
-//!
-//! ## Role in the pipeline
-//!
-//! ```text
-//!   raw stdin line
-//!        │
-//!        ▼
-//!   parse_repl_input  ──(ReplCommand::Chat{ raw })──▶  prepare_user_turn
-//!                                                          │
-//!                                                          ▼
-//!                                                       UserTurn
-//!                                                    (expanded + context +
-//!                                                     thinking + excluded)
-//! ```
-//!
-//! Given a raw user message, this module produces a fully
-//! preprocessed [`UserTurn`] that both the interactive REPL (F
-//! section) and the single-shot `sen -p` path (E section) can feed
-//! straight into `run_tool_call_loop`.  Sharing this preprocessing
-//! step eliminates "works in REPL but not with -p" drift.
-//!
-//! ## Dependency injection
-//!
-//! To keep this file testable without booting the whole runtime,
-//! the three external surfaces — workspace path, memory / hardware
-//! context lookup, and coding-mode tool exclusions — are abstracted
-//! behind [`UserTurnDeps`].  Production code implements the trait
-//! on an Agent struct; tests use the `FakeUserTurnDeps` defined at
-//! the bottom of this file.
 
 use std::path::{Path, PathBuf};
 

@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Media helpers shared across channel adapters.
-//!
-//! D2.6 placeholder — image / audio / video download helpers
-//! currently live inside each channel's `download_media()` (or
-//! similarly-named) method.  The follow-up sprint lifts them here so
-//! every adapter gets the same retry / size-cap / MIME-sniff behavior.
 
 pub const MAX_INLINE_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 

@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! CLI tool auto-discovery — scans PATH for known CLI tools.
-//! Zero external dependencies (uses `std::process::Command` + `std::env`).
 
 use std::path::PathBuf;
 

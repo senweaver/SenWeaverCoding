@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Cloud pattern library for recommending cloud-native architectural patterns.
-//!
-//! Provides a built-in set of cloud migration and modernization patterns,
-//! with pattern matching against workload descriptions.
 
 use super::traits::{Tool, ToolResult};
 use crate::util::truncate_with_ellipsis;

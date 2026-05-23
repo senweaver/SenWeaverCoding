@@ -665,7 +665,7 @@ impl SqliteMemory {
     ) -> anyhow::Result<Vec<(String, f32)>> {
         Self::ensure_vec_index_fresh(vec_index, conn)?;
 
-        let overfetch = 8usize.max(1);
+        let overfetch = 8usize;
         let candidate_limit = limit.saturating_mul(overfetch).max(limit);
 
         let candidates: Vec<(String, f32)> = {
@@ -827,31 +827,43 @@ impl Memory for SqliteMemory {
             .await?
             .map(|emb| vector::vec_to_bytes(&emb));
 
-        let conn = self.conn.clone();
-        let key = key.to_string();
-        let content = content.to_string();
-        let sid = session_id.map(String::from);
+        let key_owned = key.to_string();
+        let content_owned = content.to_string();
+        let sid_owned = session_id.map(String::from);
+        let conn_arc = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let conn = conn.lock();
-            let now = Local::now().to_rfc3339();
-            let cat = Self::category_to_str(&category);
-            let id = Uuid::new_v4().to_string();
+        let policy = crate::util::retry::RetryPolicy::sqlite_busy();
+        crate::util::retry::retry(&policy, |_attempt| {
+            let conn = conn_arc.clone();
+            let key = key_owned.clone();
+            let content = content_owned.clone();
+            let sid = sid_owned.clone();
+            let category = category.clone();
+            let embedding_bytes = embedding_bytes.clone();
+            async move {
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let conn = conn.lock();
+                    let now = Local::now().to_rfc3339();
+                    let cat = Self::category_to_str(&category);
+                    let id = Uuid::new_v4().to_string();
 
-            conn.execute(
-                "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, namespace, importance)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'default', 0.5)
-                 ON CONFLICT(key) DO UPDATE SET
-                    content = excluded.content,
-                    category = excluded.category,
-                    embedding = excluded.embedding,
-                    updated_at = excluded.updated_at,
-                    session_id = excluded.session_id",
-                params![id, key, content, cat, embedding_bytes, now, now, sid],
-            )?;
-            Ok(())
+                    conn.execute(
+                        "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, namespace, importance)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'default', 0.5)
+                         ON CONFLICT(key) DO UPDATE SET
+                            content = excluded.content,
+                            category = excluded.category,
+                            embedding = excluded.embedding,
+                            updated_at = excluded.updated_at,
+                            session_id = excluded.session_id",
+                        params![id, key, content, cat, embedding_bytes, now, now, sid],
+                    )?;
+                    Ok(())
+                })
+                .await?
+            }
         })
-        .await?
+        .await
     }
 
     async fn recall(

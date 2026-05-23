@@ -399,9 +399,7 @@ fn split_unquoted_segments(command: &str) -> Vec<String> {
                     }
                     ';' | '\n' => push_segment(&mut segments, &mut current),
                     '|' => {
-                        if chars.next_if_eq(&'|').is_some() {
-
-                        }
+                        chars.next_if_eq(&'|');
                         push_segment(&mut segments, &mut current);
                     }
                     '&' => {
@@ -468,52 +466,6 @@ fn contains_unquoted_single_ampersand(command: &str) -> bool {
                             return true;
                         }
                     }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    false
-}
-
-fn contains_unquoted_char(command: &str, target: char) -> bool {
-    let mut quote = QuoteState::None;
-    let mut escaped = false;
-
-    for ch in command.chars() {
-        match quote {
-            QuoteState::Single => {
-                if ch == '\'' {
-                    quote = QuoteState::None;
-                }
-            }
-            QuoteState::Double => {
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if ch == '\\' {
-                    escaped = true;
-                    continue;
-                }
-                if ch == '"' {
-                    quote = QuoteState::None;
-                }
-            }
-            QuoteState::None => {
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if ch == '\\' {
-                    escaped = true;
-                    continue;
-                }
-                match ch {
-                    '\'' => quote = QuoteState::Single,
-                    '"' => quote = QuoteState::Double,
-                    _ if ch == target => return true,
                     _ => {}
                 }
             }
@@ -620,6 +572,17 @@ fn attached_short_option_value(token: &str) -> Option<&str> {
     }
     let value = body[1..].trim_start_matches('=').trim();
     if value.is_empty() { None } else { Some(value) }
+}
+
+fn is_safe_shell_device_path(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    matches!(
+        trimmed,
+        "/dev/null" | "/dev/stdout" | "/dev/stderr" | "NUL" | "nul"
+    )
 }
 
 fn redirection_target(token: &str) -> Option<&str> {
@@ -933,10 +896,6 @@ impl SecurityPolicy {
             return false;
         }
 
-        if contains_unquoted_char(command, '>') || contains_unquoted_char(command, '<') {
-            return false;
-        }
-
         if command
             .split_whitespace()
             .any(|w| w == "tee" || w.ends_with("/tee"))
@@ -1020,6 +979,16 @@ impl SecurityPolicy {
                 None
             }
         };
+        let redirect_target_candidate = |raw: &str| -> Option<String> {
+            let candidate = strip_wrapping_quotes(raw).trim();
+            if candidate.is_empty() {
+                return None;
+            }
+            if is_safe_shell_device_path(candidate) {
+                return None;
+            }
+            forbidden_candidate(candidate)
+        };
 
         for segment in split_unquoted_segments(command) {
             let cmd_part = skip_env_assignments(&segment);
@@ -1029,7 +998,7 @@ impl SecurityPolicy {
             };
 
             if let Some(target) = redirection_target(strip_wrapping_quotes(executable)) {
-                if let Some(blocked) = forbidden_candidate(target) {
+                if let Some(blocked) = redirect_target_candidate(target) {
                     return Some(blocked);
                 }
             }
@@ -1041,9 +1010,10 @@ impl SecurityPolicy {
                 }
 
                 if let Some(target) = redirection_target(candidate) {
-                    if let Some(blocked) = forbidden_candidate(target) {
+                    if let Some(blocked) = redirect_target_candidate(target) {
                         return Some(blocked);
                     }
+                    continue;
                 }
 
                 if candidate.starts_with('-') {
@@ -1207,18 +1177,18 @@ impl SecurityPolicy {
 
     pub fn can_act(&self) -> bool {
 
-        if std::env::var("SEN_READ_ONLY").as_deref() == Ok("1") {
+        if crate::util::get_env_var("SEN_READ_ONLY").as_deref() == Some("1") {
             return false;
         }
 
-        if std::env::var("SEN_DRY_RUN").as_deref() == Ok("1") {
+        if crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1") {
             return true;
         }
         self.autonomy != AutonomyLevel::ReadOnly
     }
 
     pub fn is_dry_run(&self) -> bool {
-        std::env::var("SEN_DRY_RUN").as_deref() == Ok("1")
+        crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1")
     }
 
     pub fn enforce_tool_operation(

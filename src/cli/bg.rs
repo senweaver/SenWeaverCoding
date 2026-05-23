@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Background session management — list, inspect, attach, and kill sessions.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -162,10 +161,7 @@ pub fn print_sessions(sessions: &[SessionInfo]) {
         return;
     }
 
-    println!(
-        "{:<36} {:<10} {:<24} {}",
-        "SESSION ID", "STATUS", "STARTED", "CWD"
-    );
+    println!("{:<36} {:<10} {:<24} CWD", "SESSION ID", "STATUS", "STARTED");
     println!("{}", "-".repeat(90));
     for s in sessions {
         println!(

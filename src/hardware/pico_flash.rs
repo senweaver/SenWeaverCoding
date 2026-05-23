@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `pico_flash` tool — flash SenWeaverCoding firmware to a Pico in BOOTSEL mode.
-//!
-//! # Happy path
-//! 1. User holds BOOTSEL while plugging in Pico → RPI-RP2 drive appears.
-//! 2. User asks "flash my pico".
-//! 3. LLM calls `pico_flash(confirm=true)`.
-//! 4. Tool copies UF2 to RPI-RP2 drive; Pico reboots into MicroPython.
-//! 5. Tool waits up to 20 s for `/dev/cu.usbmodem*` to appear.
-//! 6. Tool deploys `main.py` via `mpremote` and resets the Pico.
-//! 7. Tool waits for the serial port to reappear after reset.
-//! 8. Tool returns success; user restarts SenWeaverCoding to get `pico0`.
 
 use super::device::DeviceRegistry;
 use super::uf2;

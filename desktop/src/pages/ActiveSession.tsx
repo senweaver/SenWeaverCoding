@@ -13,7 +13,6 @@ import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { QuestionStrip } from '../components/chat/QuestionStrip'
 import { ActivePlanStickyBar } from '../components/chat/ActivePlanStickyBar'
 import { ResourceWaitBanner } from '../components/chat/ResourceWaitBanner'
-
 const TASK_POLL_INTERVAL_MS = 1000
 
 export function ActiveSession() {
@@ -23,8 +22,12 @@ export function ActiveSession() {
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
   const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
-  const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
-  const hasIncompleteTasks = useCLITaskStore((s) => s.tasks.some((task) => task.status !== 'completed'))
+  const hasIncompleteTasks = useCLITaskStore((s) => {
+    if (!activeTabId) return false
+    const tasks = s.tasksBySessionId[activeTabId]
+    if (!tasks || tasks.length === 0) return false
+    return tasks.some((task) => task.status !== 'completed')
+  })
   const chatState = sessionState?.chatState ?? 'idle'
   const tokenUsage = sessionState?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
 
@@ -42,11 +45,12 @@ export function ActiveSession() {
   useEffect(() => {
     if (!activeTabId || isMemberSession) return
 
-    const shouldPollTasks =
-      chatState !== 'idle' ||
-      (trackedTaskSessionId === activeTabId && hasIncompleteTasks)
+    const shouldPollTasks = chatState !== 'idle' || hasIncompleteTasks
 
-    if (!shouldPollTasks) return
+    if (!shouldPollTasks) {
+      void fetchSessionTasks(activeTabId)
+      return
+    }
 
     void fetchSessionTasks(activeTabId)
 
@@ -59,7 +63,6 @@ export function ActiveSession() {
     activeTabId,
     isMemberSession,
     chatState,
-    trackedTaskSessionId,
     hasIncompleteTasks,
     fetchSessionTasks,
   ])

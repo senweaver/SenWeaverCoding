@@ -1,28 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Chat tab render cache.
-//!
-//! Two cooperating layers:
-//!
-//! 1. **Per-message cache** — each [`crate::tui::ChatMessage`] carries a
-//!    `OnceCell<Arc<Vec<Line<'static>>>>` populated on first render.
-//!    The helpers [`render_message_cached`] and
-//!    [`invalidate_message_cache`] below encapsulate the fill / reset
-//!    pattern so call sites never touch the `OnceCell` directly.
-//!
-//! 2. **Frame-level viewport hash** — [`ChatRenderCache`] remembers the
-//!    last `(first_visible_idx, chat_messages.len(), streaming_len,
-//!    busy, width, height)` tuple so a redraw triggered by an
-//!    unrelated state mutation (e.g. a Logs-tab buffer append) can
-//!    skip the entire Chat-tab line assembly when the Chat viewport
-//!    is provably unchanged.  This is complementary to `App::dirty`,
-//!    not a replacement for it: `App::dirty` gates whether
-//!    `terminal.draw` runs at all; `ChatRenderCache` gates whether
-//!    `draw_chat` inside the frame rebuilds its Vec<Line>.
-//!
-//! The viewport-hash path is deliberately a best-effort optimisation —
-//! a cache miss only wastes one frame of CPU, never corrupts state.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /doctor command — mirrors claude-code-typescript-src`commands/doctor/`.
-// Runs diagnostic checks on the agent environment.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
 inventory::submit!(StaticSlashCommand {
@@ -173,6 +169,8 @@ async fn handle_network() -> CommandResult {
         .build()
         .unwrap_or_default();
 
+    let loaded_cfg = crate::config::Config::load_or_init().await.ok();
+
     match client
         .get("https://html.duckduckgo.com/html/?q=test")
         .send()
@@ -189,15 +187,9 @@ async fn handle_network() -> CommandResult {
         }
     }
 
-    let brave_key = std::env::var("BRAVE_API_KEY").ok().or_else(|| {
-        if let Ok(cfg) =
-            tokio::runtime::Handle::current().block_on(crate::config::Config::load_or_init())
-        {
-            cfg.web_search.brave_api_key.clone()
-        } else {
-            None
-        }
-    });
+    let brave_key = std::env::var("BRAVE_API_KEY")
+        .ok()
+        .or_else(|| loaded_cfg.as_ref().and_then(|c| c.web_search.brave_api_key.clone()));
     match brave_key {
         Some(ref key) if !key.is_empty() => {
             match client
@@ -225,15 +217,9 @@ async fn handle_network() -> CommandResult {
         }
     }
 
-    let searxng_url = std::env::var("SEARXNG_INSTANCE_URL").ok().or_else(|| {
-        if let Ok(cfg) =
-            tokio::runtime::Handle::current().block_on(crate::config::Config::load_or_init())
-        {
-            cfg.web_search.searxng_instance_url.clone()
-        } else {
-            None
-        }
-    });
+    let searxng_url = std::env::var("SEARXNG_INSTANCE_URL")
+        .ok()
+        .or_else(|| loaded_cfg.as_ref().and_then(|c| c.web_search.searxng_instance_url.clone()));
     match searxng_url {
         Some(ref url) if !url.is_empty() => {
             match client

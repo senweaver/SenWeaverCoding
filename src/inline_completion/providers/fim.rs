@@ -1,15 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Fill-in-the-middle (FIM) inline-completion provider.
-//!
-//! Supports Codestral / DeepSeek-FIM / Qwen2.5-Coder FIM style where
-//! the request is shaped like `<fim_prefix>...<fim_suffix>...<fim_middle>`.
-//!
-//! ships a shape-only implementation: the provider builds the
-//! FIM prompt, delegates the actual HTTP call to a caller-supplied
-//! backend closure (so unit tests stay hermetic), and post-processes
-//! the response with the common stop-sequence / trim logic.
 
 use async_trait::async_trait;
 use futures_util::stream;

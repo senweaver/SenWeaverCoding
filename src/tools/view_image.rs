@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Image viewing tool for vision-capable models.
-//!
-//! Reads an image file, validates it, and returns base64-encoded data
-//! along with metadata so vision-capable LLMs can actually "see" images.
-//! Mirrors DeerFlow's `view_image` tool.
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;

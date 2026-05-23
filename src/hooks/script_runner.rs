@@ -1,68 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `hooks.json` script runner (Cursor-compatible schema).
-//!
-//! Lets users (and projects) drop a `hooks.json` next to their config
-//! and have arbitrary external scripts veto / observe agent actions.
-//! The schema is intentionally identical to Cursor's so existing
-//! ecosystem tooling drops in unchanged:
-//!
-//! ```jsonc
-//! {
-//!   "version": 1,
-//!   "hooks": {
-//!     "beforeShellExecution": [
-//!       { "command": "/usr/local/bin/audit-shell" }
-//!     ],
-//!     "beforeReadFile":      [{ "command": "node ./policies/read.js" }],
-//!     "beforeMCPExecution":  [{ "command": "./scripts/mcp-guard.sh" }],
-//!     "beforeSubmitPrompt":  [{ "command": "python redact-secrets.py" }],
-//!     "afterFileEdit":       [{ "command": "./scripts/notify-edit.sh" }],
-//!     "stop":                [{ "command": "./scripts/cleanup.sh" }]
-//!   }
-//! }
-//! ```
-//!
-//! Each script receives the event payload on **stdin** as a single
-//! JSON object and may return a verdict on **stdout** of the shape:
-//!
-//! ```json
-//! { "permission": "allow" | "ask" | "deny",
-//!   "userMessage": "shown to the user on deny",
-//!   "agentMessage": "shown to the agent on deny" }
-//! ```
-//!
-//! Empty / non-JSON output is treated as `allow` (matches Cursor's
-//! behaviour: a hook that prints nothing is non-blocking).
-//!
-//! ## Source layering
-//!
-//! Configs are loaded from up to four locations and merged in
-//! ascending precedence (later wins for the *same event*; commands
-//! from all sources accumulate):
-//!
-//! 1. `~/.cursor/hooks.json` — Cursor compatibility, personal scope
-//! 2. `~/.sen/hooks.json`    — SenWeaverCoding personal scope
-//! 3. `<workspace>/.cursor/hooks.json` — Cursor compatibility, project scope
-//! 4. `<workspace>/.sen/hooks.json`    — SenWeaverCoding project scope
-//!
-//! Project scope **overrides** personal scope when both define the
-//! same event (so a repo can lock down what an unsuspecting user
-//! might leave open globally).
-//!
-//! ## Wiring
-//!
-//! The runner exposes [`ScriptHookRunner::dispatch`] for direct use
-//! and implements [`HookHandler`] so it slots into the existing
-//! [`crate::hooks::HookRunner`] dispatch tree without touching call
-//! sites.  Tool-name → event mapping mirrors Cursor's:
-//!
-//! - `shell_exec` / `bash` / `terminal_run` → `BeforeShellExecution`
-//! - tools whose name starts with `mcp.`    → `BeforeMcpExecution`
-//! - `file_read` / `read_file`              → `BeforeReadFile`
-//! - `file_write` / `apply_diff` / `inline_edit` (after-call only)
-//!                                          → `AfterFileEdit`
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

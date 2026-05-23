@@ -1,36 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Layered shared context management for multi-agent coordination.
-//!
-//! ## Design
-//!
-//! The system uses a stack of `ContextLayer`s, each with a priority:
-//!
-//! | Layer       | Priority | Visibility     | Conflict Strategy    |
-//! |------------|----------|----------------|---------------------|
-//! | Global     | 0        | All agents     | PriorityMerge       |
-//! | Team       | 1-99    | Team members   | PriorityMerge       |
-//! | Agent      | 100+     | Single agent   | LastWriteWins       |
-//!
-//! Lookups traverse from highest to lowest priority (most specific first).
-//!
-//! ## Conflict Resolution
-//!
-//! When the same key exists in multiple layers:
-//! - `PriorityMerge`: higher-priority layer value wins
-//! - `LastWriteWins`: most recent write wins
-//! - `ConsensusMerge`: merge all values (for structured data)
-//!
-//! ## Usage
-//!
-//! ```ignore
-//! let ctx = LayeredContext::new();
-//! ctx.set("global:greeting", "hello", Layer::Global)?;
-//! ctx.set("team:plan", plan, Layer::Team(1))?;
-//! let greeting = ctx.get("global:greeting"); // Some("hello")
-//! ```
 
 use parking_lot::RwLock;
 use std::sync::Arc;

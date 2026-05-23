@@ -1,24 +1,13 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Loop detection guardrail for the agent tool-call loop.
-//!
-//! Monitors a sliding window of recent tool calls and their results to detect
-//! three repetitive patterns that indicate the agent is stuck:
-//!
-//! 1. **Exact repeat** — same tool + args called 3+ times consecutively.
-//! 2. **Ping-pong** — two tools alternating (A->B->A->B) for 4+ cycles.
-//! 3. **No progress** — same tool called 5+ times with different args but
-//!    identical result hash each time.
-//!
-//! Detection triggers escalating responses: `Warning` -> `Block` -> `Break`.
 
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone)]
-pub(crate) struct LoopDetectorConfig {
+pub struct LoopDetectorConfig {
 
     pub enabled: bool,
 
@@ -38,7 +27,7 @@ impl Default for LoopDetectorConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LoopDetectionResult {
+pub enum LoopDetectionResult {
 
     Ok,
 
@@ -94,7 +83,7 @@ fn hash_str(s: &str) -> u64 {
     hasher.finish()
 }
 
-pub(crate) struct LoopDetector {
+pub struct LoopDetector {
     config: LoopDetectorConfig,
     window: VecDeque<ToolCallRecord>,
 }

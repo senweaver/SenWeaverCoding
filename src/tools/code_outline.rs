@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `code_outline` tool — lightweight structural overview of a source file.
-//!
-//! surfaces [`crate::code_intel::extract_outline`] as an
-//! agent tool so the LLM can request a file's top-level structure
-//! without streaming the whole file back into the context window.  The
-//! tool works on every build: the heavy tree-sitter back-end kicks in
-//! when the `code-intel` feature is enabled; otherwise the heuristic
-//! back-end returns lower-resolution but still-useful entries.
 
 use super::traits::{Tool, ToolResult};
 use crate::code_intel;

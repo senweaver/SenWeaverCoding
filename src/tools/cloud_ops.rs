@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Cloud operations advisory tool for cloud transformation analysis.
-//!
-//! Provides read-only analysis capabilities: IaC review, migration assessment,
-//! cost analysis, and Well-Architected Framework architecture review.
-//! This tool does NOT create, modify, or delete cloud resources.
 
 use super::traits::{Tool, ToolResult};
 use crate::config::CloudOpsConfig;

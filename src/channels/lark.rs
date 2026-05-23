@@ -491,10 +491,9 @@ impl LarkChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client(
-            self.platform.proxy_service_key(),
-            self.proxy_url.as_deref(),
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client(self.platform.proxy_service_key(), self.proxy_url.as_deref())
     }
 
     fn channel_name(&self) -> &'static str {
@@ -686,12 +685,10 @@ impl LarkChannel {
             .unwrap_or(0);
         tracing::info!("Lark: connecting to {wss_url}");
 
-        let (ws_stream, _) = crate::config::ws_connect_with_proxy(
-            &wss_url,
-            "channel.lark",
-            self.proxy_url.as_deref(),
-        )
-        .await?;
+        let (ws_stream, _) = crate::services::get_services()
+            .proxy_runtime()
+            .ws_connect(&wss_url, "channel.lark", self.proxy_url.as_deref())
+            .await?;
         let (mut write, mut read) = ws_stream.split();
         tracing::info!("Lark: WS connected (service_id={service_id})");
 

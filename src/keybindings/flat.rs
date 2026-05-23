@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Flat keybinding format (string keys, no modifier vector) for simple configs.
-//!
-//! For the full resolver stack see [`super::schema`] and [`super::defaults`].
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,33 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! YAML-driven rule set for [`super::prompt_guard::PromptGuard`].
-//!
-//! instead of hard-coding regex literals inside
-//! [`super::prompt_guard`], this module exposes a declarative
-//! [`PromptGuardRules`] structure that can be deserialised from
-//! `prompt_guard.yaml`.  The existing guard falls back to its
-//! built-in defaults when no YAML file is present, so this module is
-//! strictly additive.
-//!
-//! ## File format
-//!
-//! ```yaml
-//! categories:
-//!   system_override:
-//!     score: 1.0
-//!     patterns:
-//!       - "(?i)ignore\\s+(previous|all|above)\\s+instructions?"
-//!   role_confusion:
-//!     score: 0.9
-//!     patterns:
-//!       - "(?i)you\\s+are\\s+now\\s+"
-//! ```
-//!
-//! Each regex is compiled once and cached on the resulting
-//! [`CompiledRules`] value.  Callers typically load the file at
-//! start-up and keep the compiled rules around for the lifetime of
-//! the process.
 
 use std::collections::BTreeMap;
 use std::path::Path;

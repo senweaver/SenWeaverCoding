@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Pipeline tool configuration (`[pipeline]`).
-//!
-//! Migrated out of `schema.rs` as part of N6.4.  Controls the
-//! `execute_pipeline` meta-tool that lets the agent chain tool
-//! invocations in a single declarative call.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

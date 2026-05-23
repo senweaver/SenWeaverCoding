@@ -1,24 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-//! Managed installer for the built-in LSP server templates.
-//!
-//! Recipe coverage matches the desktop UI:
-//!
-//! - `rust-analyzer` — fetched as a `gz`-compressed binary from the
-//!   GitHub Releases of `rust-lang/rust-analyzer`.
-//! - `typescript-language-server` — installed via `npm` into a private
-//!   prefix; user must have `node` + `npm` on `PATH`.
-//! - `pyright` — same npm strategy as typescript-language-server.
-//!
-//! Each recipe has a *PATH fallback*: if the user already has the
-//! requested binary on `PATH` (e.g. because they installed it through
-//! `cargo install`, system package manager, or `volta`), the installer
-//! short-circuits the download step and points at the existing binary.
-//! Progress is reported through the [`InstallProgress`] callback the
-//! caller provides; the [`crate::lsp::manager::LspManager`] hooks this
-//! into the gateway broadcast so the desktop UI gets streaming updates.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -125,9 +107,7 @@ async fn install_gopls(progress: InstallProgress) -> Result<InstallReport> {
     });
 
     if let Some(existing) = which_on_path("gopls") {
-        let version = run_version_query(&existing, &["version"])
-            .await
-            .or_else(|| None);
+        let version = run_version_query(&existing, &["version"]).await;
         let report = InstallReport {
             server_id: "gopls".into(),
             version: version.unwrap_or_else(|| "system".into()),
@@ -561,15 +541,12 @@ async fn download_with_progress(
                     bytes_total: total,
                 });
             }
-        } else {
-
-            if downloaded.is_multiple_of(256 * 1024) {
-                progress(InstallPhase::Downloading {
-                    percent: None,
-                    bytes_downloaded: downloaded,
-                    bytes_total: None,
-                });
-            }
+        } else if downloaded.is_multiple_of(256 * 1024) {
+            progress(InstallPhase::Downloading {
+                percent: None,
+                bytes_downloaded: downloaded,
+                bytes_total: None,
+            });
         }
     }
     file.flush().await.ok();

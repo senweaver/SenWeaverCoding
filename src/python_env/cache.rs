@@ -11,14 +11,14 @@ use std::sync::OnceLock;
 use super::manager::PythonEnvState;
 
 fn config_root() -> PathBuf {
-    if let Ok(custom) = std::env::var("SEN_CONFIG_DIR") {
+    if let Some(custom) = crate::util::get_env_var("SEN_CONFIG_DIR") {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
         }
     }
     let home = directories::UserDirs::new()
-        .and_then(|u| Some(u.home_dir().to_path_buf()))
+        .map(|u| u.home_dir().to_path_buf())
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
@@ -54,8 +54,7 @@ fn write_to_disk(cache: &PersistedCache) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_string_pretty(cache)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let text = serde_json::to_string_pretty(cache).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(tmp, path)?;

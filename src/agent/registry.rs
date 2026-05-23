@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent Registry — centralized tracking of all agent instances.
-//!
-//! Provides runtime registration, state tracking, capability discovery,
-//! and health monitoring for all active agents in the system.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

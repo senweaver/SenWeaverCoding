@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Runtime adapter configuration (`[runtime]`) + Docker / WASM
-//! sub-configs.
-//!
-//! Migrated out of `schema.rs` as part of N6.4.  The runtime
-//! adapter controls how shell / subprocess tools are invoked
-//! (native vs Docker sandbox vs WebAssembly module).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

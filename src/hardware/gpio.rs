@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! GPIO tools — `gpio_read` and `gpio_write` for LLM-driven hardware control.
-//!
-//! These are the first built-in hardware tools. They implement the standard
-//! [`Tool`](crate::tools::Tool) trait so the LLM can call them via function
-//! calling, and dispatch commands to physical devices via the
-//! [`Transport`](super::Transport) layer.
-//!
-//! Wire protocol (SenWeaverCoding serial JSON):
-//! ```text
-//! gpio_write:
-//!   Host → Device:  {"cmd":"gpio_write","params":{"pin":25,"value":1}}\n
-//!   Device → Host:  {"ok":true,"data":{"pin":25,"value":1,"state":"HIGH"}}\n
-//!
-//! gpio_read:
-//!   Host → Device:  {"cmd":"gpio_read","params":{"pin":25}}\n
-//!   Device → Host:  {"ok":true,"data":{"pin":25,"value":1,"state":"HIGH"}}\n
-//! ```
 
 use super::device::DeviceRegistry;
 use super::protocol::ZcCommand;

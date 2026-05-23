@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Structured I/O — NDJSON protocol for SDK / headless communication.
-//!
-//! Mirrors cc-typescript-src's `cli/structuredIO.ts`. Reads NDJSON messages
-//! from stdin and writes NDJSON messages to stdout. Implements the control
-//! protocol (permission requests/responses, session state, MCP lifecycle)
-//! that allows external tools and IDEs to drive the agent.
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

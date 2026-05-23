@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Budget view model — token / cost utilisation derived from
-//! [`agent::budget_ledger::BudgetSnapshot`].
-//!
-//! UI-agnostic: neither egui nor ratatui is imported here.  The GUI
-//! and the TUI each provide their own renderer built on top of this
-//! data.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BudgetRow {

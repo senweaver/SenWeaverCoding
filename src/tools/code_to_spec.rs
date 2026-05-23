@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! `code_to_spec` tool — Code Structure Analysis and Specification Generation.
-//!
-//! Analyzes code structure and generates or updates structured specifications.
-//! Part of the Harness engineering-grade workflow (Layer 1: Spec Layer).
-//!
-//! Actions:
-//! - `analyze`: Extract structural information from files (functions, types, interfaces)
-//! - `generate`: Generate a SPEC.md from the analysis
-//! - `compare`: Compare current code against a SPEC.md and report gaps
-//! - `summarize`: Generate a lightweight spec summary of the current state
 
 use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
@@ -351,7 +340,7 @@ fn extract_rust_structures(content: &str, file_path: &str) -> Vec<CodeStructure>
                 while j < lines.len() {
                     let vline = lines[j].trim();
                     brace_depth += vline.matches('{').count();
-                    brace_depth -= vline.matches('}').count();
+                    brace_depth = brace_depth.saturating_sub(vline.matches('}').count());
 
                     if brace_depth > 0
                         && !vline.is_empty()
@@ -372,7 +361,7 @@ fn extract_rust_structures(content: &str, file_path: &str) -> Vec<CodeStructure>
                         }
                     }
 
-                    if brace_depth <= 0 {
+                    if brace_depth == 0 {
                         break;
                     }
                     j += 1;
@@ -405,7 +394,7 @@ fn extract_rust_structures(content: &str, file_path: &str) -> Vec<CodeStructure>
                 while j < lines.len() {
                     let mline = lines[j].trim();
                     brace_depth += mline.matches('{').count();
-                    brace_depth -= mline.matches('}').count();
+                    brace_depth = brace_depth.saturating_sub(mline.matches('}').count());
                     if brace_depth > 0
                         && !mline.is_empty()
                         && !mline.starts_with("//")
@@ -442,7 +431,7 @@ fn extract_rust_structures(content: &str, file_path: &str) -> Vec<CodeStructure>
                             methods.push(fn_sig);
                         }
                     }
-                    if brace_depth <= 0 {
+                    if brace_depth == 0 {
                         break;
                     }
                     j += 1;
@@ -492,7 +481,7 @@ fn extract_doc_comment_backward(lines: &[&str], i: usize) -> Option<String> {
             collected.push(prev[3..].trim().to_string());
         } else if prev.starts_with("//!") {
             collected.push(prev[3..].trim().to_string());
-        } else if prev.starts_with("/*") || prev.starts_with("*") {
+        } else if prev.starts_with("/*") || prev.starts_with('*') {
 
             let inner = prev
                 .trim_start_matches("/*")
@@ -523,7 +512,7 @@ fn extract_ts_structures(content: &str, file_path: &str) -> Vec<CodeStructure> {
     while i < lines.len() {
         let line = lines[i].trim();
 
-        if line.starts_with("//") || line.starts_with("/*") || line.starts_with("*") {
+        if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
             i += 1;
             continue;
         }
@@ -880,7 +869,7 @@ impl CodeToSpecTool {
                         }
                     }
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if extensions.iter().any(|&e| e == ext) {
+                    if extensions.contains(&ext) {
                         if let Ok(rel) = path.strip_prefix(&workspace_dir) {
                             files.push(rel.to_string_lossy().to_string());
                         }
@@ -1225,7 +1214,7 @@ impl CodeToSpecTool {
             let resolved = self.resolve_path(path);
             if resolved.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&resolved) {
-                    if let Ok(rel) = resolved.strip_prefix(&self.workspace_snapshot()) {
+                    if let Ok(rel) = resolved.strip_prefix(self.workspace_snapshot()) {
                         files.insert(rel.to_string_lossy().to_string(), content);
                     }
                 }

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Personality system — loads workspace identity files (SOUL.md, IDENTITY.md,
-//! USER.md) and injects them into the system prompt pipeline.
-//!
-//! The loader reads markdown files from the workspace root, validates size limits,
-//! and produces a [`PersonalityProfile`] that the prompt builder can render.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};

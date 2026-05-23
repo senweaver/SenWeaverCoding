@@ -5,7 +5,7 @@ const TAB_STORAGE_KEY = 'sen-open-tabs'
 
 export const SCHEDULED_TAB_ID = '__scheduled__'
 
-export type TabType = 'session' | 'scheduled'
+export type TabType = 'session' | 'scheduled' | 'worker'
 
 export type Tab = {
   sessionId: string
@@ -25,6 +25,7 @@ type TabStore = {
   activeTabId: string | null
 
   openTab: (sessionId: string, title: string, type?: TabType) => void
+  openWorkerTab: (workerId: string, title: string) => void
   closeTab: (sessionId: string) => void
   setActiveTab: (sessionId: string) => void
   updateTabTitle: (sessionId: string, title: string) => void
@@ -52,6 +53,10 @@ export const useTabStore = create<TabStore>((set, get) => ({
       })
     }
     get().saveTabs()
+  },
+
+  openWorkerTab: (workerId, title) => {
+    get().openTab(workerId, title, 'worker')
   },
 
   closeTab: (sessionId) => {
@@ -143,11 +148,15 @@ export const useTabStore = create<TabStore>((set, get) => ({
 
           if (t.type === 'settings') return false
           if (t.type === 'scheduled') return true
+          if (t.type === 'worker') return true
           return existingIds.has(t.sessionId)
         })
         .map((t) => {
           if (t.type === 'scheduled') {
             return { sessionId: t.sessionId, title: t.title, type: 'scheduled' as const, status: 'idle' as const }
+          }
+          if (t.type === 'worker') {
+            return { sessionId: t.sessionId, title: t.title, type: 'worker' as const, status: 'idle' as const }
           }
           return {
             sessionId: t.sessionId,

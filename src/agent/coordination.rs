@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Coordination Protocol ??consensus, resource locking, and barrier synchronization.
-//!
-//! Provides primitives for multi-agent coordination:
-//! - **Distributed locks** with ownership tracking and expiration
-//! - **Barrier synchronization** for phased multi-agent workflows
-//! - **Voting / consensus** for collaborative decision making
-//!
-//! wiring: all region-lock acquire / release / deadlock
-//! events report into [`crate::observability::coordination_metrics::global`]
-//! via the `incr_lockmgr_*` helpers so the Prometheus aggregator
-//! exports the canonical `sen_lockmgr_region_acquire_total{outcome=…}`
-//! family without any additional plumbing in the surface code.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -226,6 +214,14 @@ impl RegionLockTokens {
         while let Some(mut tok) = self.tokens.pop() {
             tok.release();
         }
+    }
+}
+
+impl<'a> IntoIterator for &'a RegionLockTokens {
+    type Item = &'a RegionLockToken;
+    type IntoIter = std::slice::Iter<'a, RegionLockToken>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.tokens.iter()
     }
 }
 

@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! macOS sandbox-exec (Seatbelt) sandbox backend.
-//!
-//! Uses Apple's built-in `sandbox-exec` tool to enforce per-session Seatbelt
-//! profiles that restrict network access, filesystem writes, and process
-//! spawning. Policy files are generated in `.sb` format and written to a
-//! temporary directory that is cleaned up when the sandbox is dropped.
 
 use crate::security::traits::Sandbox;
 use std::path::{Path, PathBuf};

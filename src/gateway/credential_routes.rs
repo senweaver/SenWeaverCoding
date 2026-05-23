@@ -17,8 +17,10 @@ use crate::services::credential_vault::{
 
 fn ensure_vault(
     state: &AppState,
-) -> Result<std::sync::Arc<crate::services::credential_vault::CredentialVault>, axum::response::Response>
-{
+) -> Result<
+    std::sync::Arc<crate::services::credential_vault::CredentialVault>,
+    Box<axum::response::Response>,
+> {
     if let Some(v) = try_get_credential_vault() {
         return Ok(v);
     }
@@ -30,14 +32,16 @@ fn ensure_vault(
     };
     match init_credential_vault(&anchor) {
         Ok(v) => Ok(v),
-        Err(err) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "vault_unavailable",
-                "detail": err.to_string(),
-            })),
-        )
-            .into_response()),
+        Err(err) => Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "vault_unavailable",
+                    "detail": err.to_string(),
+                })),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -56,7 +60,7 @@ pub async fn handle_list(State(state): State<AppState>, headers: HeaderMap) -> i
     }
     let vault = match ensure_vault(&state) {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let items: Vec<serde_json::Value> = vault.list().iter().map(meta_to_json).collect();
     Json(serde_json::json!({ "credentials": items })).into_response()
@@ -79,7 +83,7 @@ pub async fn handle_put(
     }
     let vault = match ensure_vault(&state) {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let kind = body
         .kind
@@ -113,7 +117,7 @@ pub async fn handle_delete(
     }
     let vault = match ensure_vault(&state) {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match vault.delete(&name) {
         Ok(true) => Json(serde_json::json!({ "status": "deleted", "name": name })).into_response(),

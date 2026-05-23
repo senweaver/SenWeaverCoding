@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TLS and mutual TLS (mTLS) support for the gateway server.
-//!
-//! Builds a [`rustls::ServerConfig`] from the gateway TLS configuration,
-//! optionally requiring client certificates verified against a trusted CA
-//! with optional certificate pinning (SHA-256 fingerprint matching).
 
 use crate::config::schema::{GatewayClientAuthConfig, GatewayTlsConfig};
 use anyhow::{Context, Result};

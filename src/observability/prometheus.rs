@@ -240,14 +240,14 @@ impl PrometheusObserver {
         .expect("valid metric");
         let fulltext_index_size_bytes = prometheus::IntGauge::new(
             "sen_fulltext_index_size_bytes",
-            "Current on-disk size of the tantivy full-text index (Phase 3 D4.3)",
+            "Current on-disk size of the tantivy full-text index",
         )
         .expect("valid metric");
 
         let first_token_latency_ms = HistogramVec::new(
             HistogramOpts::new(
                 "sen_first_token_latency_ms",
-                "Latency (ms) from TurnStarted to first streamed token (Phase 4 D3.2)",
+                "Latency (ms) from TurnStarted to first streamed token",
             )
             .buckets(vec![
                 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0,
@@ -259,7 +259,7 @@ impl PrometheusObserver {
         let response_cache_hits_total = IntCounterVec::new(
             prometheus::Opts::new(
                 "sen_response_cache_hits_total",
-                "Provider response-cache hits labelled by provider/model (Phase 4 D3.3)",
+                "Provider response-cache hits labelled by provider/model",
             ),
             &["provider", "model"],
         )
@@ -268,7 +268,7 @@ impl PrometheusObserver {
         let response_cache_misses_total = IntCounterVec::new(
             prometheus::Opts::new(
                 "sen_response_cache_misses_total",
-                "Provider response-cache misses labelled by provider/model (Phase 4 D3.3)",
+                "Provider response-cache misses labelled by provider/model",
             ),
             &["provider", "model"],
         )
@@ -277,7 +277,7 @@ impl PrometheusObserver {
         let flow_runs_total = IntCounterVec::new(
             prometheus::Opts::new(
                 "sen_flow_runs_total",
-                "Total flow runs labelled by flow name and outcome (Phase 4 D7.1)",
+                "Total flow runs labelled by flow name and outcome",
             ),
             &["flow", "outcome"],
         )
@@ -286,7 +286,7 @@ impl PrometheusObserver {
         let flow_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "sen_flow_duration_seconds",
-                "End-to-end duration of a flow run, seconds (Phase 4 D7.1)",
+                "End-to-end duration of a flow run, seconds",
             )
             .buckets(vec![
                 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
@@ -473,6 +473,11 @@ impl PrometheusObserver {
                 .snapshot()
                 .render_prometheus_text(),
         );
+
+        if let Some(svc) = crate::services::try_get_services() {
+            text.push_str(&svc.agent_metrics.render_prometheus());
+        }
+
         text
     }
 }

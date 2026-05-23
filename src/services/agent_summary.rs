@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Agent summary service — mirrors claude-code-typescript-src`services/AgentSummary/`.
-// Generates summaries of agent work for away users, session review,
-// and team handoff contexts.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

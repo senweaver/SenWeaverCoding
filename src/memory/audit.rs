@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Audit trail for memory operations.
-//!
-//! Provides a decorator `AuditedMemory<M>` that wraps any `Memory` backend
-//! and logs all operations to a `memory_audit` table. Opt-in via
-//! `[memory] audit_enabled = true`.
 
 use super::traits::{Memory, MemoryCategory, MemoryEntry, ProceduralMessage};
 use async_trait::async_trait;

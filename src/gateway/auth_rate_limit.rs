@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Sliding-window rate limiter for authentication attempts.
-//!
-//! Protects pairing and bearer-token validation endpoints against
-//! brute-force attacks.  Tracks per-IP attempt timestamps and enforces
-//! a lockout period after too many failures within the sliding window.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;

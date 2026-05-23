@@ -1,26 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `@codebase:<query>` fuzzy retrieval.
-//!
-//! Fuses two independent relevance signals with *Reciprocal Rank
-//! Fusion* (RRF), the same family of rank aggregation used by
-//! hybrid semantic + lexical search engines (cf. Cormack et al.
-//! 2009).  The output is a ranked list of file paths plus a short
-//! head snippet, rendered as a single [`ContextItem`].
-//!
-//! Signals:
-//! 1. **SymbolGraph match** — persisted symbols whose name contains
-//!    the query (case-insensitive), ranked by match offset then
-//!    definition line.  Activated whenever the workspace has a
-//!    previously-persisted `.sen/symbol_graph.json`.
-//! 2. **Path match** — source-file paths whose *stem* or relative
-//!    path contains the query, ranked by match offset.  Always
-//!    available — no external indexer required.
-//!
-//! Fusion formula: `rrf(doc) = Σ 1 / (k + rank_i(doc))` with
-//! `k = 60` (de-facto RRF constant).  Docs absent from a signal do
-//! not penalise the score — absence is treated as `rank_i = ∞`.
 
 use std::collections::HashMap;
 use std::fs;

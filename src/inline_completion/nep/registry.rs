@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! registry helper that fans a [`NepRequest`] across multiple
-//! [`NepProvider`]s and returns the first non-empty response.
-//!
-//! Mirrors the shape of
-//! [`crate::inline_completion::registry::InlineCompletionRegistry`]
-//! so the surfaces (TUI / GUI / CLI) can store a single handle and
-//! call `predict` regardless of how many providers are configured.
 
 use std::sync::Arc;
 use std::time::Instant;

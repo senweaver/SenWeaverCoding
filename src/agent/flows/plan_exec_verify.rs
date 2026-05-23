@@ -1,26 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! The `PlanExecVerify` combinator ??the canonical flow shape that
-//! drives a plan ??execute ??verify ??fix loop.
-//!
-//! added two complementary entry points on top of the
-//! original `run_once` shape:
-//!
-//! 1. [`PlanExecVerifyOptions::per_step_timeout`] ??bounds each
-//!    `(execute, verify, fix)` cycle so a stuck LLM cannot wedge the
-//!    flow.
-//! 2. [`PlanExecVerifyFlow::run_layered`] ??schedules independent
-//!    plan steps concurrently using
-//!    [`futures_util::stream::FuturesUnordered`] gated by a
-//!    [`tokio::sync::Semaphore`].  Layers are derived from
-//!    [`crate::agent::flows::code_edit_plan::PlanDependencyGraph::topo_layers`]
-//!    and emitted by `CodeEditFlow` via
-//!    `ctx.scratchpad["code_edit.plan_dag"]`.  We deliberately use
-//!    `FuturesUnordered` (not `tokio::JoinSet`) so the runner can
-//!    borrow `&self` without forcing the executor / verifier to be
-//!    `'static` ??the layered runner shares the flow's owned
-//!    executor / verifier for free.
 
 use std::collections::HashMap;
 use std::sync::Arc;

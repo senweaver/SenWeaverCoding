@@ -48,6 +48,12 @@ use std::sync::{Arc, OnceLock};
 static GLOBAL_OBSERVER: OnceLock<Arc<dyn Observer>> = OnceLock::new();
 
 pub fn set_global_observer(observer: Arc<dyn Observer>) -> Arc<dyn Observer> {
+    if GLOBAL_OBSERVER.get().is_some() {
+        tracing::warn!(
+            "set_global_observer called after observer was already installed; \
+             the new observer is being ignored (singleton)"
+        );
+    }
     GLOBAL_OBSERVER.get_or_init(|| observer).clone()
 }
 

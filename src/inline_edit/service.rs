@@ -1,24 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Process-wide factory + cache for [`InlineEditRunner`] used by the
-//! TUI / GUI / CLI inline-edit entry points.
-//!
-//! Before M1.2 each surface had its own ad-hoc bridge (the TUI sent
-//! a chat instruction to the agent, the GUI prototype called a
-//! synchronous helper, the CLI did not exist).  This module
-//! consolidates all of them on a single shared runner so:
-//!
-//! * the `Cmd+K` flow always goes through the apply / refine /
-//!   verification pipeline,
-//! * provider auth / timeout / rate-limit machinery is reused
-//!   verbatim from [`crate::providers`],
-//! * call sites can opt into the dedicated diff preview without
-//!   round-tripping through the agent loop.
-//!
-//! The runner is constructed lazily from [`Config`] and cached in a
-//! `OnceLock`.  `invalidate()` is exposed so the GUI/CLI can rebuild
-//! the runner after the user changes provider settings.
 
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;

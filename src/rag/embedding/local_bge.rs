@@ -1,19 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! On-device BGE embedding placeholder.
-//!
-//! Shipping a real BGE checkpoint requires bundling a multi-hundred
-//! MB ONNX or safetensors file plus an ONNX runtime, which is too
-//! heavy for the default profile.  This module exposes the trait
-//! contract today so call sites can plumb the configuration end to
-//! end while leaving the actual inference to a future
-//! `rag-bge`-feature-gated drop-in.
-//!
-//! When the feature is missing every embed call returns an error
-//! that the caller must downgrade to a keyword-only search.  We
-//! intentionally do not silently produce zero vectors — that would
-//! pollute the IVF index with dummy entries that always score zero.
 
 use async_trait::async_trait;
 

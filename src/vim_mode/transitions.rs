@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Vim mode transitions — mirrors claude-code-typescript-src`vim/transitions.ts`.
 
 use super::motions::{Motion, resolve_motion};
 use super::text_objects::{TextObject, resolve_text_object};
@@ -161,12 +159,10 @@ fn process_operator_pending(
     let count = take_count(state);
     state.pending_operator = None;
 
-    let doubled = match (op, key) {
-        (VimOperator::Delete, 'd') => true,
-        (VimOperator::Change, 'c') => true,
-        (VimOperator::Yank, 'y') => true,
-        _ => false,
-    };
+    let doubled = matches!(
+        (op, key),
+        (VimOperator::Delete, 'd') | (VimOperator::Change, 'c') | (VimOperator::Yank, 'y')
+    );
 
     if doubled {
         let char_len = buffer.chars().count();

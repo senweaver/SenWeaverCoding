@@ -148,6 +148,13 @@ export type AgentSnapshot = {
   } | null
   codingMode: CodingModeId | null
   resourceProfile: ResourceProfileInfo | null
+  elapsedSeconds: number
+  statusVerb: string
+  cumulativeTokens: number
+  inputTokens: number
+  outputTokens: number
+  pendingEditCount: number
+  lastEditPath: string | null
 }
 
 function hasRecentError(chat: PerSessionState | null | undefined): boolean {
@@ -201,6 +208,9 @@ export function buildAgentSnapshot(
 ): AgentSnapshot {
   const status = deriveAgentStatus(ctx)
   const { session, isRunning, chatSession, queueLen, codingMode, resourceProfile } = ctx
+  const pendingEdits = chatSession?.pendingEdits ?? []
+  const lastEdit = pendingEdits.length > 0 ? pendingEdits[pendingEdits.length - 1] : null
+  const tokenUsage = chatSession?.tokenUsage
   return {
     sessionId: session.id,
     title: session.title,
@@ -229,6 +239,13 @@ export function buildAgentSnapshot(
     })(),
     codingMode: codingMode ?? null,
     resourceProfile: resourceProfile ?? null,
+    elapsedSeconds: chatSession?.elapsedSeconds ?? 0,
+    statusVerb: chatSession?.statusVerb ?? '',
+    cumulativeTokens: chatSession?.cumulativeTokens ?? 0,
+    inputTokens: tokenUsage?.input_tokens ?? 0,
+    outputTokens: tokenUsage?.output_tokens ?? 0,
+    pendingEditCount: pendingEdits.length,
+    lastEditPath: lastEdit?.path ?? null,
   }
 }
 

@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Verifiable Intent tool — exposes VI verification and constraint evaluation
-//! to the agent orchestration loop.
 
 use async_trait::async_trait;
 use serde_json::json;

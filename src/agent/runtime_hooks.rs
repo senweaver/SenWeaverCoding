@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Runtime integration hooks that wire disconnected modules into the agent loop.
-//!
-//! This module acts as a bridge between the core agent loop and the various
-//! subsystems (learning, optimization, security, events) that need to be
-//! invoked at specific points during execution.
 
 use crate::config::Config;
 use std::sync::Arc;

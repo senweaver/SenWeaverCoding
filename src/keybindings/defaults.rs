@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Default keybindings — mirrors claude-code-typescript-src`keybindings/defaultBindings.ts`.
 
 use super::schema::{KeyAction, KeyBinding, KeyModifier};
 

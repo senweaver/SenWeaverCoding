@@ -1,46 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SWE-bench-Lite Docker runner.
-//!
-//! Drives the upstream
-//! [`princeton-nlp/SWE-bench`](https://github.com/princeton-nlp/SWE-bench)
-//! evaluation flow against a single instance.  Each task ships with:
-//!
-//! - `instance_id`         — `<repo>__<short_sha>` style identifier;
-//!                           used to derive the prebuilt Docker image.
-//! - `repo` / `base_commit`— upstream coordinates we need only for
-//!                           bookkeeping (the prebuilt image already
-//!                           checked them out at `/testbed`).
-//! - `problem_statement`   — the natural-language bug report shipped
-//!                           to the agent under test.
-//! - `FAIL_TO_PASS` /
-//!   `PASS_TO_PASS`        — pytest node IDs that must transition
-//!                           **fail → pass** and stay **pass**
-//!                           respectively for the patch to be a
-//!                           "resolved" verdict (this matches the
-//!                           upstream judging policy verbatim).
-//! - `test_patch`          — the project's verification patch (always
-//!                           applied alongside the model patch so the
-//!                           target tests exist on disk).
-//!
-//! The flow inside the container is:
-//!
-//! ```bash
-//! cd /testbed
-//! git checkout -- .
-//! git apply --check /patches/test.patch && git apply /patches/test.patch
-//! git apply --check /patches/model.patch && git apply /patches/model.patch
-//! /eval/run_tests.sh <FAIL_TO_PASS …> <PASS_TO_PASS …> > /patches/report.json
-//! ```
-//!
-//! `run_tests.sh` is the upstream harness's per-image entry point; it
-//! writes a JSON report with pass/fail status per node ID.  We capture
-//! it via a bind-mount and parse it from the executor's return value.
-//!
-//! For unit tests we skip Docker entirely — the suite-side judge is
-//! pure JSON arithmetic and lives in [`SweBenchDockerSuite::judge`],
-//! which is exercised by the inline tests at the bottom of this file.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

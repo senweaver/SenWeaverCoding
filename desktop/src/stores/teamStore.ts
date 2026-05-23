@@ -25,6 +25,7 @@ function createMemberSessionState() {
     activeThinkingId: null,
     activeThinkingContent: '',
     activeThinkingStartedAt: null,
+    activeThinkingLastChunkAt: null,
     pendingPermission: null,
     pendingComputerUsePermission: null,
     tokenUsage: { input_tokens: 0, output_tokens: 0 },
@@ -42,6 +43,7 @@ function createMemberSessionState() {
     stopRequested: false,
     debugPiiStats: { total: 0, counts: {}, lastEventAt: null },
     pendingResourceWaits: [],
+    providerRetry: null,
   }
 }
 

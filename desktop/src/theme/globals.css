@@ -144,6 +144,43 @@
   --color-plan-accent-hover: #B68F1E;
   --color-plan-accent-container: #FFF4D6;
   --color-on-plan-accent-container: #6B4F0E;
+  --color-on-plan-accent: #3D2A06;
+
+  --color-curator-accent: #7B3FE4;
+  --color-curator-accent-hover: #6326C7;
+  --color-curator-accent-container: #EFE5FF;
+  --color-on-curator-accent-container: #3B146A;
+  --color-on-curator-accent: #FFFFFF;
+
+  --color-agent-accent: #2563EB;
+  --color-agent-accent-hover: #1D4ED8;
+  --color-agent-accent-container: #DBEAFE;
+  --color-on-agent-accent-container: #1E3A8A;
+  --color-on-agent-accent: #FFFFFF;
+
+  --color-spec-accent: #0891B2;
+  --color-spec-accent-hover: #0E7490;
+  --color-spec-accent-container: #CFFAFE;
+  --color-on-spec-accent-container: #155E75;
+  --color-on-spec-accent: #FFFFFF;
+
+  --color-ask-accent: #6B7280;
+  --color-ask-accent-hover: #4B5563;
+  --color-ask-accent-container: #F3F4F6;
+  --color-on-ask-accent-container: #1F2937;
+  --color-on-ask-accent: #FFFFFF;
+
+  --color-debug-accent: #E04848;
+  --color-debug-accent-hover: #C92E2E;
+  --color-debug-accent-container: #FFE5E5;
+  --color-on-debug-accent-container: #7A1818;
+  --color-on-debug-accent: #FFFFFF;
+
+  --color-harness-accent: #EA580C;
+  --color-harness-accent-hover: #C2410C;
+  --color-harness-accent-container: #FFE8D6;
+  --color-on-harness-accent-container: #7C2D12;
+  --color-on-harness-accent: #FFFFFF;
 
   --font-headline: 'Manrope', sans-serif;
   --font-body: 'Inter', sans-serif;
@@ -298,6 +335,43 @@
   --color-plan-accent-hover: #F0C45A;
   --color-plan-accent-container: rgba(226, 179, 58, 0.16);
   --color-on-plan-accent-container: #F5D27C;
+  --color-on-plan-accent: #2A1D04;
+
+  --color-curator-accent: #B68DFF;
+  --color-curator-accent-hover: #D2B8FF;
+  --color-curator-accent-container: rgba(123, 63, 228, 0.20);
+  --color-on-curator-accent-container: #E5D6FF;
+  --color-on-curator-accent: #1E0F3D;
+
+  --color-agent-accent: #60A5FA;
+  --color-agent-accent-hover: #93C5FD;
+  --color-agent-accent-container: rgba(37, 99, 235, 0.20);
+  --color-on-agent-accent-container: #BFDBFE;
+  --color-on-agent-accent: #0A1733;
+
+  --color-spec-accent: #22D3EE;
+  --color-spec-accent-hover: #67E8F9;
+  --color-spec-accent-container: rgba(8, 145, 178, 0.20);
+  --color-on-spec-accent-container: #A5F3FC;
+  --color-on-spec-accent: #0E2A2F;
+
+  --color-ask-accent: #9CA3AF;
+  --color-ask-accent-hover: #D1D5DB;
+  --color-ask-accent-container: rgba(107, 114, 128, 0.20);
+  --color-on-ask-accent-container: #E5E7EB;
+  --color-on-ask-accent: #1F2937;
+
+  --color-debug-accent: #F87171;
+  --color-debug-accent-hover: #FCA5A5;
+  --color-debug-accent-container: rgba(224, 72, 72, 0.20);
+  --color-on-debug-accent-container: #FECACA;
+  --color-on-debug-accent: #3F0F0F;
+
+  --color-harness-accent: #FB923C;
+  --color-harness-accent-hover: #FDBA74;
+  --color-harness-accent-container: rgba(234, 88, 12, 0.20);
+  --color-on-harness-accent-container: #FED7AA;
+  --color-on-harness-accent: #3F1A06;
 
   --color-surface-sidebar: #171615;
   --color-surface-hover: var(--color-surface-container-highest);

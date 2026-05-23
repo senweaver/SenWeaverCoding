@@ -1,29 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Code-intelligence metrics — apply-model refine loop, CodeEditFlow,
-//! context build, symbol-graph sync, LSP didChange/hover, apply-hunk
-//! anchors, context preserve tags.
-//!
-//! | # | Metric                                                | Type    |
-//! |---|-------------------------------------------------------|---------|
-//! | 1 | `sen_apply_model_refine_attempts_total`               | counter |
-//! | 2 | `sen_apply_model_refine_success_total`                | counter |
-//! | 3 | `sen_apply_model_refine_failed_total`                 | counter |
-//! | 4 | `sen_apply_model_refine_recursive_attempt_total`      | counter |
-//!
-//! These are incremented by [`crate::apply_model::llm_refine::HttpLlmRefiner`]
-//! and [`crate::inline_edit::runner::InlineEditRunner`] along the
-//! validator-failure → refine retry path.
-//!
-//! ## `CodeEditFlow` counters
-//!
-//! Twelve additional counters expose the rewritten `CodeEditFlow`
-//! lifecycle (planner attempts / fallback, diff vs full-file
-//! executor branches, fix-loop attempts, layered runner activity,
-//! review-noop short-circuits, batch verification verdicts).  All
-//! follow the `sen_code_edit_*_total` naming convention so the
-//! Prometheus scrape can filter them with a single regex.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};

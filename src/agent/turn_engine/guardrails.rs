@@ -1,18 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Pre-execution guardrail + RBAC checks for tool calls.
-//!
-//! `loop_::execute_one_tool` performs two gate checks before it hands
-//! the call to `tool.execute()`:
-//!
-//! 1. RBAC authorization via `RbacEngine::authorize_tool` (only when
-//!    the gateway / channel layer has injected an engine + identity).
-//! 2. Project-level guardrails via `guardrails::check_tool_guardrails`.
-//!
-//! Both gates return structured reasons on denial; this module wraps
-//! them in a single `GuardrailVerdict` enum so future `turn_engine`
-//! call sites can treat them uniformly.
 
 use std::sync::Arc;
 
@@ -57,10 +45,7 @@ pub fn check_tool_guardrails(tool_name: &str) -> Option<String> {
         permission_mode: Some(&perm_mode_lc),
         tool_name: Some(&tool_lc),
     };
-    match crate::guardrails::check_tool_guardrails(tool_name, Some(&ctx)) {
-        Ok(()) => None,
-        Err(reason) => Some(reason),
-    }
+    crate::guardrails::check_tool_guardrails(tool_name, Some(&ctx)).err()
 }
 
 pub fn evaluate(

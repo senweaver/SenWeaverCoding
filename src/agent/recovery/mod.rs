@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Unified recovery façade: loop detection, dangling-tool repair, and
-//! tool error classification under a single entry point.
-//!
-//! C.5 — consolidates three previously-scattered concerns
-//! (`loop_detector`, `dangling_tool_repair`, `tool_error_handler`) behind
-//! one module so the `run_tool_call_loop` hot-path only needs to reach
-//! for `crate::agent::recovery::*`.  Legacy modules stay in place and
-//! re-export through here; no behaviour change is implied.
 
 pub mod classifier;
 pub mod detector;

@@ -1,30 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Heuristic next-edit predictor.
-//!
-//! Pattern-matcher that handles the high-frequency cases without an
-//! LLM round-trip.  We keep the rule set deliberately small so the
-//! predictor stays fast (< 1 ms) and easy to reason about; the
-//! [`super::llm::LlmNep`] handles the long tail.
-//!
-//! Implemented rules (all consume the most recent edit only):
-//!
-//! 1. **Trailing TODO** — when the recent diff added a `TODO` /
-//!    `FIXME` comment and the cursor sits on the same line, suggest
-//!    an empty stub immediately below so the user can keep typing.
-//! 2. **Function-signature change** — when the recent diff renamed a
-//!    parameter or changed a Rust function signature line, surface
-//!    a no-op diff that points the user at the call sites.  We
-//!    deliberately do not try to *rewrite* call sites here — that's
-//!    the [`LlmNep`] / refactor tool's job; the heuristic just
-//!    annotates the next location.
-//! 3. **Pending close-bracket** — when the recent diff opened a
-//!    block (last line ends with `{` / `(` / `[`) but did not close
-//!    it, suggest the matching close.
-//!
-//! Each rule produces at most one [`NepSuggestion`].  We pick the
-//! *first* rule that fires — they are ordered by typical hit-rate.
 
 use std::time::Instant;
 
@@ -130,8 +106,7 @@ fn rule_pending_close_bracket(req: &NepRequest) -> Option<NepSuggestion> {
     let last_added = edit
         .diff
         .lines()
-        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-        .last()?
+        .rfind(|l| l.starts_with('+') && !l.starts_with("+++"))?
         .trim_start_matches('+');
     let trimmed = last_added.trim_end();
     let close = match trimmed.chars().last()? {
@@ -153,7 +128,7 @@ fn rule_pending_close_bracket(req: &NepRequest) -> Option<NepSuggestion> {
     Some(NepSuggestion {
         file_path: edit.file_path.clone(),
         diff,
-        rationale: format!("close the pending `{}` block", close).into(),
+        rationale: format!("close the pending `{}` block", close),
         confidence: Some(0.7),
         origin: "heuristic_nep",
     })

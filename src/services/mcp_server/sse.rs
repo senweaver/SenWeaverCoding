@@ -1,25 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SSE transport for the embedded MCP server.
-//!
-//! Implements the **Server-Sent Events** transport defined by the
-//! MCP 2024-11-05 spec:
-//!
-//! 1. Client opens `GET /sse`.  Server immediately replies with an
-//!    `endpoint` event whose data is the URL the client should POST
-//!    JSON-RPC requests to (`POST /messages?session=<id>`).
-//! 2. Client POSTs JSON-RPC requests to that endpoint.  The server
-//!    dispatches them through [`super::McpServer`] and pushes
-//!    responses back over the originating SSE stream.
-//! 3. Either side may close the stream; the server drops all
-//!    per-session state on disconnect via the `SessionGuard`
-//!    helper at the bottom of the file.
-//!
-//! The transport is intentionally minimalist — there is no auth, no
-//! rate limiting, no TLS termination.  Operators that need any of
-//! that should put a reverse proxy (nginx, Caddy, Traefik) in front
-//! of the bind address.
 
 use std::collections::HashMap;
 use std::convert::Infallible;

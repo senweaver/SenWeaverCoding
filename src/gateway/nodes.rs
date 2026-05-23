@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WebSocket endpoint for dynamic node discovery and capability advertisement.
-//!
-//! External processes/devices connect to `/ws/nodes` and advertise their
-//! capabilities at runtime. The gateway exposes these as dynamically available
-//! tools to the agent.
-//!
-//! ## Protocol
-//!
-//! ```text
-//! Node -> Gateway: {"type":"register","node_id":"phone-1","capabilities":[{"name":"camera.snap","description":"Take a photo","parameters":{...}}]}
-//! Gateway -> Node: {"type":"registered","node_id":"phone-1","capabilities_count":1}
-//! Gateway -> Node: {"type":"invoke","call_id":"uuid","capability":"camera.snap","args":{...}}
-//! Node -> Gateway: {"type":"result","call_id":"uuid","success":true,"output":"..."}
-//! ```
 
 use super::AppState;
 use crate::runtime::task_manager::spawn_supervised;

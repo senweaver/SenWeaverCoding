@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-//! LSP-related events broadcast to desktop WebSocket clients.
-//!
-//! All events are wrapped in [`LspBroadcastEvent`] before being sent on
-//! the [`LspBroadcast`] channel held inside [`crate::gateway::AppState`].
-//! The desktop side mirrors these wire shapes in
-//! `desktop/src/types/lsp.ts`.
 
 use std::sync::Arc;
 

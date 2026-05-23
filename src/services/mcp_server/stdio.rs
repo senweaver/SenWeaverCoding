@@ -1,18 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Stdio transport for the embedded MCP server.
-//!
-//! Reads newline-delimited JSON-RPC 2.0 frames from `stdin`,
-//! dispatches them through [`super::McpServer`], and writes responses
-//! back to `stdout`.  This is the canonical transport for MCP clients
-//! that spawn a child process (Claude Desktop, Zed, Cursor, ...).
-//!
-//! Each request is dispatched on its own task so a long-running
-//! tool doesn't head-of-line block the next request.  Responses are
-//! serialised through a single writer task to keep stdout writes
-//! atomic — JSON-RPC over stdio assumes one message per line and
-//! interleaved writes would corrupt the framing.
 
 use std::sync::Arc;
 

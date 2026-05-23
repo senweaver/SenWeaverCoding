@@ -1,26 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! production [`FileWatcher`] backed by the cross-
-//! platform [`notify`] crate.
-//!
-//! This module is feature-gated behind `fs-watch` so minimal builds
-//! (unit tests, `--no-default-features`) continue to drive the
-//! incremental SymbolGraph via the [`ManualWatcher`].
-//!
-//! Wiring:
-//!
-//! ```text
-//! notify::RecommendedWatcher ──► tokio crossbeam channel ──► NotifyWatcher.poll()
-//!                                                         ▲
-//!                                                         │ non-blocking drain
-//!                                              IncrementalBuilder tick loop
-//! ```
-//!
-//! We deduplicate bursts of duplicate `Modify(Data)` / `Create` /
-//! `Remove` events at the watcher boundary so callers pay for the
-//! *minimum* work per filesystem change.  Final debouncing happens
-//! in [`crate::code_intel::symbol_graph_incremental::Debouncer`].
 
 #![cfg(feature = "fs-watch")]
 

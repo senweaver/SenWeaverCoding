@@ -1,21 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Multi-transport RPC server for SenWeaverCoding.
-//!
-//! Supports three transport modes:
-//! - **Stdio**: JSON-RPC over stdin/stdout (IDE integration, subprocess)
-//! - **UnixSocket**: Unix Domain Socket (local Python/CLI clients) — Unix only
-//! - **Http**: HTTP/JSON-RPC server (network clients, microservices)
-//!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! let config = RpcServerConfig::default();
-//! let server = RpcServer::new(config, sen_config).await?;
-//! server.run().await?;
-//! ```
+
 use crate::config::schema::{Config, RpcConfig};
 use crate::rpc::codec::JsonRpcRequest;
 use crate::rpc::methods::RpcCtx;
@@ -121,7 +107,7 @@ fn default_socket_path() -> PathBuf {
     PathBuf::from(r"\\.\pipe\sen")
 }
 
-pub(crate) fn build_transport(cfg: &RpcConfig) -> Result<RpcTransport> {
+pub fn build_transport(cfg: &RpcConfig) -> Result<RpcTransport> {
     let mut transports = Vec::new();
 
     if cfg.stdio {
@@ -155,8 +141,11 @@ pub(crate) fn build_transport(cfg: &RpcConfig) -> Result<RpcTransport> {
             } else if cfg.unix_socket.is_some() {
                 #[cfg(unix)]
                 {
+                    let socket_path = cfg.unix_socket.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("rpc.unix_socket is expected to be set here")
+                    })?;
                     Ok(RpcTransport::UnixSocket {
-                        path: PathBuf::from(cfg.unix_socket.as_ref().unwrap()),
+                        path: PathBuf::from(socket_path),
                         mode: default_socket_mode(),
                     })
                 }
@@ -165,7 +154,10 @@ pub(crate) fn build_transport(cfg: &RpcConfig) -> Result<RpcTransport> {
                     Ok(RpcTransport::Stdio)
                 }
             } else {
-                let http_cfg = cfg.http.as_ref().unwrap();
+                let http_cfg = cfg
+                    .http
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("rpc.http is expected to be set here"))?;
                 Ok(RpcTransport::Http {
                     host: http_cfg.host.clone(),
                     port: http_cfg.port,
@@ -320,9 +312,16 @@ impl RpcServer {
                                     });
                                     let guard = stdout_tx.lock().await;
                                     if let Some(ref tx) = *guard {
-                                        let _ = tx
-                                            .send(serde_json::to_string(&resp).unwrap() + "\n")
-                                            .await;
+                                        match serde_json::to_string(&resp) {
+                                            Ok(s) => {
+                                                let _ = tx.send(s + "\n").await;
+                                            }
+                                            Err(serialize_err) => {
+                                                tracing::error!(
+                                                    "RPC: failed to serialize parse-error response: {serialize_err}"
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -460,10 +459,9 @@ impl RpcServer {
             State(ctx): State<Arc<RpcCtx>>,
             Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
-            let requests: Vec<serde_json::Value> = if body.is_array() {
-                body.as_array().unwrap().clone()
-            } else {
-                vec![body]
+            let requests: Vec<serde_json::Value> = match body.as_array() {
+                Some(arr) => arr.clone(),
+                None => vec![body],
             };
 
             let mut responses = Vec::new();
@@ -500,10 +498,25 @@ impl RpcServer {
                 }
             }
 
-            let body = if responses.len() == 1 {
-                serde_json::to_string(&responses[0]).unwrap()
+            let serialize_target = if responses.len() == 1 {
+                serde_json::to_string(&responses[0])
             } else {
-                serde_json::to_string(&responses).unwrap()
+                serde_json::to_string(&responses)
+            };
+            let body = match serialize_target {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("RPC HTTP: failed to serialize response: {e}");
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32603,
+                            "message": format!("Internal serialization error: {e}"),
+                        },
+                        "id": serde_json::Value::Null,
+                    })
+                    .to_string()
+                }
             };
 
             (

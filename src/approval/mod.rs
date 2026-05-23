@@ -1,24 +1,90 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Interactive approval workflow for supervised mode.
-//!
-//! Provides a pre-execution hook that prompts the user before tool calls,
-//! with session-scoped "Always" allowlists and audit logging.
 
 use crate::config::AutonomyConfig;
 use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-static PENDING_GATEWAY_APPROVALS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+const PENDING_APPROVAL_TTL_SECS: u64 = 30 * 60;
 
-fn pending_gateway_approvals() -> &'static Mutex<HashSet<String>> {
-    PENDING_GATEWAY_APPROVALS.get_or_init(Default::default)
+const PENDING_APPROVAL_SWEEP_INTERVAL_SECS: u64 = 5 * 60;
+
+const PENDING_APPROVAL_MAX_ENTRIES: usize = 1_000;
+
+struct PendingGatewayApprovals {
+    entries: HashMap<String, Instant>,
+    last_sweep: Instant,
+}
+
+impl PendingGatewayApprovals {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            last_sweep: Instant::now(),
+        }
+    }
+
+    fn sweep_locked(&mut self, now: Instant) {
+        let ttl = Duration::from_secs(PENDING_APPROVAL_TTL_SECS);
+        self.entries
+            .retain(|_, ts| now.duration_since(*ts) < ttl);
+        self.last_sweep = now;
+    }
+
+    fn maybe_sweep(&mut self, now: Instant) {
+        if now.duration_since(self.last_sweep).as_secs() >= PENDING_APPROVAL_SWEEP_INTERVAL_SECS
+            || self.entries.len() >= PENDING_APPROVAL_MAX_ENTRIES
+        {
+            self.sweep_locked(now);
+        }
+    }
+
+    fn insert(&mut self, id: String) {
+        let now = Instant::now();
+        self.maybe_sweep(now);
+
+        if self.entries.len() >= PENDING_APPROVAL_MAX_ENTRIES {
+            self.sweep_locked(now);
+            if self.entries.len() >= PENDING_APPROVAL_MAX_ENTRIES {
+                if let Some(lru) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, ts)| **ts)
+                    .map(|(k, _)| k.clone())
+                {
+                    self.entries.remove(&lru);
+                    tracing::warn!(
+                        "pending_gateway_approvals at capacity; evicted oldest pending entry"
+                    );
+                }
+            }
+        }
+
+        self.entries.insert(id, now);
+    }
+
+    fn claim(&mut self, id: &str) -> bool {
+        let now = Instant::now();
+        self.maybe_sweep(now);
+        match self.entries.remove(id) {
+            Some(ts) => now.duration_since(ts).as_secs() < PENDING_APPROVAL_TTL_SECS,
+            None => false,
+        }
+    }
+}
+
+static PENDING_GATEWAY_APPROVALS: OnceLock<Mutex<PendingGatewayApprovals>> = OnceLock::new();
+
+fn pending_gateway_approvals() -> &'static Mutex<PendingGatewayApprovals> {
+    PENDING_GATEWAY_APPROVALS.get_or_init(|| Mutex::new(PendingGatewayApprovals::new()))
 }
 
 pub fn register_pending_gateway_approval(id: String) {
@@ -26,7 +92,7 @@ pub fn register_pending_gateway_approval(id: String) {
 }
 
 pub fn claim_pending_gateway_approval(id: &str) -> bool {
-    pending_gateway_approvals().lock().remove(id)
+    pending_gateway_approvals().lock().claim(id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +135,8 @@ pub struct ApprovalManager {
 
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
 
+    audit_log_path: Mutex<Option<PathBuf>>,
+
     session_sink: Mutex<Option<crate::session::SessionEventSink>>,
 }
 
@@ -82,11 +150,24 @@ impl ApprovalManager {
             non_interactive: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            audit_log_path: Mutex::new(None),
             session_sink: Mutex::new(None),
         }
     }
 
     pub fn for_non_interactive(config: &AutonomyConfig) -> Self {
+        if !matches!(
+            config.level,
+            AutonomyLevel::Full | AutonomyLevel::ReadOnly
+        ) && !config.always_ask.iter().any(|t| t == "shell" || t == "*")
+        {
+            tracing::warn!(
+                "ApprovalManager: non-interactive mode auto-approves the `shell` tool \
+                 (autonomy_level={:?}); add `shell` to [autonomy] always_ask to require approval, \
+                 or run in interactive mode.",
+                config.level
+            );
+        }
         Self {
             auto_approve: config.auto_approve.iter().cloned().collect(),
             always_ask: config.always_ask.iter().cloned().collect(),
@@ -94,8 +175,18 @@ impl ApprovalManager {
             non_interactive: true,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            audit_log_path: Mutex::new(None),
             session_sink: Mutex::new(None),
         }
+    }
+
+    pub fn with_audit_log_path(self, path: impl Into<PathBuf>) -> Self {
+        *self.audit_log_path.lock() = Some(path.into());
+        self
+    }
+
+    pub fn set_audit_log_path(&self, path: Option<PathBuf>) {
+        *self.audit_log_path.lock() = path;
     }
 
     pub fn with_session_sink(self, sink: crate::session::SessionEventSink) -> Self {
@@ -113,13 +204,7 @@ impl ApprovalManager {
 
     pub fn request_via_session(&self, request: &ApprovalRequest) -> Option<String> {
         let sink = self.session_sink.lock().clone()?;
-        let id = format!(
-            "appr_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
+        let id = format!("appr_{}", uuid::Uuid::new_v4().simple());
         sink.emit_kind(crate::session::SessionEventKind::ApprovalRequested {
             id: id.clone(),
             tool_name: request.tool_name.clone(),
@@ -219,6 +304,18 @@ impl ApprovalManager {
             decision,
             channel: channel.to_string(),
         };
+
+        let path = self.audit_log_path.lock().clone();
+        if let Some(path) = path {
+            if let Err(e) = append_audit_entry_to_disk(&path, &entry) {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to persist approval audit log entry"
+                );
+            }
+        }
+
         let mut log = self.audit_log.lock();
         log.push(entry);
     }
@@ -234,6 +331,36 @@ impl ApprovalManager {
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
     }
+}
+
+fn append_audit_entry_to_disk(
+    path: &std::path::Path,
+    entry: &ApprovalLogEntry,
+) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut line = serde_json::to_string(entry)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    line.push('\n');
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
 }
 
 fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {

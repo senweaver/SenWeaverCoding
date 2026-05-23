@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge session management — mirrors claude-code-typescript-src`bridge/createSession.ts` and `bridge/sessionRunner.ts`.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Arduino Uno Q Bridge — GPIO via socket to Bridge app.
-//!
-//! When SenWeaverCoding runs on Uno Q, the Bridge app (Python + MCU) exposes
-//! digitalWrite/digitalRead over a local socket. These tools connect to it.
 
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;

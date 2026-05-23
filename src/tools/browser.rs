@@ -14,8 +14,11 @@ use tokio::process::Command;
 use tracing::debug;
 
 pub use dock::{
-    clear_test_target_tab, current_test_target_tab, dock_controller, install_dock_controller,
-    set_test_target_tab, DockController, DockRequest, DockResponse, DockTabInfo,
+    clear_test_target_for_tab, clear_test_target_tab, current_test_target_tab, dock_controller,
+    install_dock_controller, sessions_pinned_to, set_test_target_tab,
+    set_prototype_ref_tab, clear_prototype_ref_tab, current_prototype_ref_tab,
+    DockController, DockRequest,
+    DockResponse, DockTabInfo,
 };
 
 mod dock {
@@ -23,6 +26,7 @@ mod dock {
     use async_trait::async_trait;
     use parking_lot::RwLock;
     use serde_json::Value;
+    use std::collections::HashMap;
     use std::sync::{Arc, OnceLock};
 
     #[derive(Debug, Clone)]
@@ -68,6 +72,33 @@ mod dock {
         async fn activate_tab(&self, tab_id: u32) -> Result<()>;
 
         async fn list_tabs(&self) -> Result<Vec<DockTabInfo>>;
+
+        async fn bind_tab_to_session(
+            &self,
+            _session_id: String,
+            _tab_id: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn unbind_tab_from_session(
+            &self,
+            _session_id: String,
+            _tab_id: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn release_agent_tabs_for_session(
+            &self,
+            _session_id: String,
+        ) -> Result<Vec<u32>> {
+            Ok(Vec::new())
+        }
+
+        async fn present_session(&self, _session_id: String) -> Result<Option<u32>> {
+            Ok(None)
+        }
     }
 
     static CONTROLLER: OnceLock<Arc<dyn DockController>> = OnceLock::new();
@@ -80,22 +111,73 @@ mod dock {
         CONTROLLER.get().cloned()
     }
 
-    static TEST_TARGET_TAB: OnceLock<RwLock<Option<u32>>> = OnceLock::new();
+    static TEST_TARGET_TABS: OnceLock<RwLock<HashMap<String, u32>>> = OnceLock::new();
 
-    fn target_slot() -> &'static RwLock<Option<u32>> {
-        TEST_TARGET_TAB.get_or_init(|| RwLock::new(None))
+    fn pins_slot() -> &'static RwLock<HashMap<String, u32>> {
+        TEST_TARGET_TABS.get_or_init(|| RwLock::new(HashMap::new()))
     }
 
-    pub fn set_test_target_tab(tab_id: u32) {
-        *target_slot().write() = Some(tab_id);
+    fn canonical_pin_session_id(session_id: &str) -> String {
+        const GW: &str = "gw_";
+        let trimmed = session_id.trim();
+        trimmed
+            .strip_prefix(GW)
+            .unwrap_or(trimmed)
+            .to_string()
     }
 
-    pub fn clear_test_target_tab() {
-        *target_slot().write() = None;
+    pub fn set_test_target_tab(session_id: &str, tab_id: u32) {
+        let key = canonical_pin_session_id(session_id);
+        if key.is_empty() {
+            return;
+        }
+        pins_slot().write().insert(key, tab_id);
     }
 
-    pub fn current_test_target_tab() -> Option<u32> {
-        *target_slot().read()
+    pub fn clear_test_target_tab(session_id: &str) {
+        let key = canonical_pin_session_id(session_id);
+        if key.is_empty() {
+            return;
+        }
+        pins_slot().write().remove(&key);
+    }
+
+    pub fn current_test_target_tab(session_id: &str) -> Option<u32> {
+        let key = canonical_pin_session_id(session_id);
+        if key.is_empty() {
+            return None;
+        }
+        pins_slot().read().get(&key).copied()
+    }
+
+    pub fn clear_test_target_for_tab(tab_id: u32) {
+        pins_slot().write().retain(|_, t| *t != tab_id);
+    }
+
+    pub fn sessions_pinned_to(tab_id: u32) -> Vec<String> {
+        pins_slot()
+            .read()
+            .iter()
+            .filter_map(|(s, t)| if *t == tab_id { Some(s.clone()) } else { None })
+            .collect()
+    }
+
+    static PROTOTYPE_REF_TABS: OnceLock<RwLock<HashMap<String, u32>>> = OnceLock::new();
+
+    fn proto_slot() -> &'static RwLock<HashMap<String, u32>> {
+        PROTOTYPE_REF_TABS.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    pub fn set_prototype_ref_tab(session_id: &str, tab_id: u32) {
+        proto_slot().write().insert(session_id.to_string(), tab_id);
+    }
+
+    pub fn clear_prototype_ref_tab(session_id: &str) {
+        proto_slot().write().remove(session_id);
+    }
+
+    pub fn current_prototype_ref_tab(session_id: &str) -> Option<u32> {
+        proto_slot().read().get(session_id).copied()
     }
 }
 
@@ -1039,7 +1121,9 @@ impl BrowserTool {
             }
         });
 
-        let client = crate::config::build_runtime_proxy_client("tool.browser");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("tool.browser");
         let mut request = client
             .post(endpoint)
             .timeout(Duration::from_millis(self.computer_use.timeout_ms))
@@ -1155,9 +1239,11 @@ impl BrowserTool {
         const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
         let preferred = *self.preferred_tab.lock().await;
+        let session_id_opt: Option<String> =
+            crate::session::current_session_context().map(|c| c.session_id);
         let effective_tab_id = request_tab_id
             .or(preferred)
-            .or_else(current_test_target_tab);
+            .or_else(|| session_id_opt.as_deref().and_then(current_test_target_tab));
 
         match &action {
             BrowserAction::PinTestTarget { tab_id } => {
@@ -1175,7 +1261,9 @@ impl BrowserTool {
                         )),
                     });
                 };
-                set_test_target_tab(*tab_id);
+                if let Some(sid) = session_id_opt.as_deref() {
+                    set_test_target_tab(sid, *tab_id);
+                }
                 {
                     let mut guard = self.preferred_tab.lock().await;
                     *guard = Some(*tab_id);
@@ -1192,7 +1280,9 @@ impl BrowserTool {
                 ));
             }
             BrowserAction::ClearTestTarget => {
-                clear_test_target_tab();
+                if let Some(sid) = session_id_opt.as_deref() {
+                    clear_test_target_tab(sid);
+                }
                 {
                     let mut guard = self.preferred_tab.lock().await;
                     *guard = None;
@@ -1203,13 +1293,13 @@ impl BrowserTool {
                 ));
             }
             BrowserAction::GetTestTarget => {
-                let pinned = current_test_target_tab();
+                let pinned = session_id_opt.as_deref().and_then(current_test_target_tab);
                 let local_pref = preferred;
                 let resolved = pinned.or(local_pref);
                 let mut payload = json!({
                     "tab_id": resolved,
-                    "global_pinned": pinned,
-                    "session_pinned": local_pref,
+                    "session_pinned": pinned,
+                    "preferred_tab": local_pref,
                 });
                 if let Some(tab_id) = resolved {
                     if let Ok(tabs) = controller.list_tabs().await {
@@ -1304,7 +1394,9 @@ impl BrowserTool {
                     let mut guard = self.preferred_tab.lock().await;
                     *guard = Some(*tab_id);
                 }
-                set_test_target_tab(*tab_id);
+                if let Some(sid) = session_id_opt.as_deref() {
+                    set_test_target_tab(sid, *tab_id);
+                }
                 let owner = info.owner.clone();
                 let is_user_tab = owner.as_deref() == Some("user");
                 let mut payload = json!({
@@ -1503,7 +1595,7 @@ impl BrowserTool {
 
         if let BrowserAction::ClearStorage { scope, force } = action.clone() {
             if !force {
-                let pinned = current_test_target_tab();
+                let pinned = session_id_opt.as_deref().and_then(current_test_target_tab);
                 let target = effective_tab_id;
                 let pin_hits = match (target, pinned) {
                     (Some(t), Some(p)) => t == p,
@@ -1646,7 +1738,11 @@ impl BrowserTool {
                     ("get_title", json!({}), DEFAULT_TIMEOUT_MS, "get_title")
                 }
                 BrowserAction::GetUrl => ("get_url", json!({}), DEFAULT_TIMEOUT_MS, "get_url"),
-                BrowserAction::Screenshot { .. } => unreachable!("screenshot handled earlier"),
+                BrowserAction::Screenshot { .. } => {
+                    return Err(anyhow::anyhow!(
+                        "browser action 'screenshot' must be dispatched via execute_action; reached dock fallback by mistake"
+                    ));
+                }
                 BrowserAction::Wait {
                     selector,
                     ms,
@@ -1724,7 +1820,9 @@ impl BrowserTool {
                 | BrowserAction::ActivateTab { .. }
                 | BrowserAction::ListTabs
                 | BrowserAction::AttachTab { .. } => {
-                    unreachable!("tab actions handled earlier")
+                    return Err(anyhow::anyhow!(
+                        "browser tab action must be dispatched via execute_action; reached dock fallback by mistake"
+                    ));
                 }
                 BrowserAction::Assert { .. }
                 | BrowserAction::ConsoleLogs { .. }
@@ -1735,12 +1833,16 @@ impl BrowserTool {
                 | BrowserAction::Reload
                 | BrowserAction::CollectLinks { .. }
                 | BrowserAction::NetworkErrors { .. } => {
-                    unreachable!("QA actions handled earlier")
+                    return Err(anyhow::anyhow!(
+                        "browser QA action must be dispatched via execute_action; reached dock fallback by mistake"
+                    ));
                 }
                 BrowserAction::PinTestTarget { .. }
                 | BrowserAction::ClearTestTarget
                 | BrowserAction::GetTestTarget => {
-                    unreachable!("test-target actions handled earlier")
+                    return Err(anyhow::anyhow!(
+                        "browser test-target action must be dispatched via execute_action; reached dock fallback by mistake"
+                    ));
                 }
             };
 
@@ -1870,7 +1972,7 @@ impl Tool for BrowserTool {
     fn description(&self) -> &str {
         concat!(
             "**Built-in browser** — the SenAgentOS embedded dock webview is the ONLY browser the user wants you to drive ",
-            "for opening pages, navigating URLs, scraping, screenshots, and any in-app browsing task. ",
+            "for opening pages, navigating URLs, reading page content, screenshots, and any in-app browsing task. ",
             "When the user says \"open <site>\", \"打开<网站>\", \"navigate to ...\", call this tool with ",
             "`action='open'` and `url=<target>` — that single call fully opens the page in the visible dock and you ",
             "MUST NOT additionally call `browser_open`, `browser_delegate`, or any external/system-browser launcher; ",
@@ -1895,7 +1997,7 @@ impl Tool for BrowserTool {
             "Use `list_tabs` to enumerate every tab (including ones the user already opened) with `{tab_id, owner, url, title, is_active}`. ",
             "`attach_tab(tab_id=<id>)` switches to a specific tab and binds subsequent commands to it — required when ",
             "operating on a user-pre-authenticated tab so no credentials are needed. ",
-            "Use `collect_links` to enumerate same-origin `<a href>`/`form action` for BFS crawling, and `network_errors` to pull ",
+            "Use `collect_links` to enumerate same-origin `<a href>`/`form action` for BFS exploration, and `network_errors` to pull ",
             "recent `status >= 400` fetch/XHR responses for backend coverage checks. ",
             "Enforces `browser.allowed_domains` for public hosts when the command policy is enabled. ",
             "**Local preview workflow**: for static HTML/JS/CSS, navigate directly to a `file:///<absolute path>/index.html` ",

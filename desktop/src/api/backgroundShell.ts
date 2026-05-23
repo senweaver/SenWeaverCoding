@@ -1,16 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Long-lived SSE client for /api/background-shell/stream.
-//
-// The desktop gateway broadcasts every shell-tool invocation
-// (foreground sync + background) through this endpoint, and the
-// terminal panel's read-only "Agent" mirror tab consumes it so the
-// user can watch agent commands execute live.
-//
-// Lifetime: started once during AppShell bootstrap. The connection is
-// auto-reconnected by the EventSource itself; we additionally retry
-// after explicit `error` close events with a small backoff so the
-// mirror tab keeps working across desktop server restarts.
 
 import { getBaseUrl } from './client'
 import {
@@ -44,7 +32,6 @@ export function stopBackgroundShellMirror(): void {
     try {
       activeSource.close()
     } catch {
-      /* already closed */
     }
     activeSource = null
   }
@@ -82,7 +69,6 @@ function connect() {
     try {
       source.close()
     } catch {
-      /* ignore */
     }
     if (activeSource === source) {
       activeSource = null

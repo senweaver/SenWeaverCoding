@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Arduino upload tool — agent generates code, uploads via arduino-cli.
-//!
-//! When user says "make a heart on the LED grid", the agent generates Arduino
-//! sketch code and calls this tool. SenWeaverCoding compiles and uploads it — no
-//! manual IDE or file editing.
 
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;

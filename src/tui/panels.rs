@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TUI renderers for the multi-agent observability
-//! panels.
-//!
-//! Both the GUI (egui) and this TUI (ratatui) consume the same
-//! UI-framework-free view models that live in
-//! [`crate::observability::views`]
-//! ([`BudgetView`](crate::observability::views::BudgetView) and
-//! [`ProviderHealthView`](crate::observability::views::ProviderHealthView)).
-//! That keeps the CLI-friendly TUI at parity with the GUI without
-//! duplicating the data-shaping logic.
-//!
-//! The renderers are deliberately read-only — a live copy of each
-//! view model is passed by reference and drawn into the supplied
-//! [`ratatui::layout::Rect`].  Update cadence and data sourcing are
-//! owned by the TUI app shell (see `tui::mod.rs`).
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};

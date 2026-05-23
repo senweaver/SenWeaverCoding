@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Trait abstraction for session persistence backends.
-//!
-//! Backends store per-sender conversation histories. The trait is intentionally
-//! minimal — load, append, remove_last, list — so that JSONL and SQLite (and
-//! future backends) share a common interface.
 
 use crate::providers::traits::ChatMessage;
 use chrono::{DateTime, Utc};

@@ -290,7 +290,7 @@ impl Tool for LspRenameTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'new_name' parameter"))?;
 
-        let cli_dry_run = std::env::var("SEN_DRY_RUN").as_deref() == Ok("1");
+        let cli_dry_run = crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1");
         let dry_run = args
             .get("dry_run")
             .and_then(|v| v.as_bool())

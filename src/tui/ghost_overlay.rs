@@ -1,25 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TUI ghost-text overlay that surfaces inline-completion suggestions
-//! next to the chat / file-viewer cursor.  This is the M1.1 entry
-//! point for "real" Cursor-Tab parity in the terminal UI.
-//!
-//! The overlay owns:
-//!
-//! 1. **State machine** — `Idle → Pending → Visible → Accepted/Dismissed`.
-//! 2. **Async dispatch** — every keystroke can call
-//!    [`GhostOverlay::on_typing`] which schedules a debounced fetch
-//!    via [`InlineCompletionRegistry`].  In flight requests are
-//!    cancelled when the prefix changes.
-//! 3. **Rendering** — given a [`Rect`] and the current prefix /
-//!    cursor row+col, the overlay paints a dim `Span` after the
-//!    cursor without disturbing the underlying widget.
-//!
-//! The overlay is intentionally backend-agnostic: it consumes a
-//! [`RegistryHandle`] (which already encapsulates throttling /
-//! caching / provider fan-out) and emits opaque [`GhostText`] values
-//! the caller can paint however it likes.
 
 use std::sync::Arc;
 use std::time::Duration;

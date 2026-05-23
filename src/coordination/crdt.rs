@@ -1,45 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ??CRDT proof-of-concept document.
-//!
-//! ## Why a stub?
-//!
-//! The plan calls out [`loro`] as the production CRDT crate.  In the
-//! offline build environment we cannot fetch the dependency, so this
-//! module currently ships a **minimal in-process stub** that mirrors
-//! the public surface a real `loro::LoroDoc`-backed implementation
-//! would expose:
-//!
-//! - [`Document::from_path`] ??load the file's current text (or
-//!   start empty when the file does not exist).
-//! - [`Document::apply_local`] ??translate the byte-range
-//!   [`crate::apply_model::edit_op::EditOp`] variants
-//!   (`Replace`/`Insert`/`Delete`) into in-memory text mutations and
-//!   record an opaque "update" blob keyed by a monotonic clock.
-//! - [`Document::apply_remote`] ??append a peer's update blob to the
-//!   replay buffer (idempotent: duplicate updates are skipped).
-//! - [`Document::encode_update`] ??emit every update accumulated
-//!   since the last call as a single byte vector that callers can
-//!   broadcast to peers (e.g. via Blackboard `crdt:<path>:<batch>`).
-//! - [`Document::current_text`] ??current rendered text body.
-//!
-//! Swapping in real `loro` later only requires adding `dep:loro` to
-//! the `crdt-coordination` feature, swapping the in-memory `text`
-//! field for a `loro::LoroDoc`, and rewriting the four method
-//! bodies.  Call sites in [`crate::apply_model::ops_applier`] do not
-//! change.
-//!
-//! ## Wire-format
-//!
-//! Updates are encoded as JSON inside the byte vector for forward
-//! compatibility ??a real Loro deployment would use the binary
-//! `to_export_format` / `import_with` codec.  The JSON envelope is:
-//!
-//! ```json
-//! {"clock": 12, "kind": "replace", "path": "src/foo.rs",
-//!  "range": [0, 12], "text": "fn main() {}"}
-//! ```
 
 use std::path::Path;
 

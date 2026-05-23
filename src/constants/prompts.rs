@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Prompt constants — mirrors claude-code-typescript-src`constants/prompts.ts`.
 
 pub const COMPACT_SUMMARY_PROMPT: &str = "\
 Summarize the conversation so far in a concise way that preserves all important \

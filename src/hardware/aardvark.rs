@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! AardvarkTransport — implements the Transport trait for Total Phase Aardvark USB adapters.
-//!
-//! The Aardvark is NOT a microcontroller firmware target; it is a USB bridge
-//! that speaks I2C / SPI / GPIO directly.  Unlike [`HardwareSerialTransport`],
-//! this transport interprets [`ZcCommand`] locally and calls the Aardvark C
-//! library (via [`aardvark_sys`]) rather than forwarding JSON over a serial wire.
-//!
-//! Lazy-open strategy: a fresh [`aardvark_sys::AardvarkHandle`] is opened at
-//! the start of each [`send`](AardvarkTransport::send) call and automatically
-//! closed (dropped) before the call returns.  No persistent handle is held,
-//! matching the design of [`HardwareSerialTransport`].
 
 use super::protocol::{ZcCommand, ZcResponse};
 use super::transport::{Transport, TransportError, TransportKind};

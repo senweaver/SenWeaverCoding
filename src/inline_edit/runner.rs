@@ -1,27 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! End-to-end runner that glues LLM ??diff ??apply-model ??preview.
-//!
-//! M3 adds an optional [`LlmRefiner`] that is invoked when
-//! the heuristic applier rejects the initial diff.  On refine
-//! success the runner retries exactly once; if the second attempt
-//! also fails the original error is bubbled up so the caller sees a
-//! stable, non-silent failure mode.
-//!
-//! / OpsApplier note ??this runner intentionally stays on the
-//! in-memory `HeuristicApplier::apply` path.  It does **not** persist
-//! anything to disk: it consumes a `&str` source, runs hunk location
-//! through the heuristic engine (already shared with
-//! [`crate::apply_model::OpsApplier`] via the same
-//! `apply_unified_diff` implementation), and hands an
-//! [`InlineEditOutcome`] back to the caller.  Whoever decides to
-//! commit that outcome (typically `file_edit` / `multi_edit` /
-//! `write_mode`) is the surface that goes through OpsApplier with
-//! its journal, locking and rollback guarantees.  Routing the
-//! preview itself through OpsApplier would require synthesising a
-//! temporary disk file just to read the result back, which buys
-//! nothing for a read-only preview.
 
 use async_trait::async_trait;
 use std::sync::Arc;

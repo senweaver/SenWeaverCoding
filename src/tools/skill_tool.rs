@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shell-based tool derived from a skill's `[[tools]]` section.
-//!
-//! Each `SkillTool` with `kind = "shell"` or `kind = "script"` is converted
-//! into a `SkillShellTool` that implements the `Tool` trait. The tool name is
-//! prefixed with the skill name (e.g. `my_skill.run_lint`) to avoid collisions
-//! with built-in tools.
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;

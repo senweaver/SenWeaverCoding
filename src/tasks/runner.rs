@@ -1,18 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// TaskRunner — manages the lifecycle of all background tasks.
-// Mirrors claude-code's task state management in AppState.
-//
-// This is the **runtime-facing** task manager used by `ServiceContainer` to track
-// actual background processes (shell commands, sub-agents, workflows). It uses
-// typed `TaskId`, async `tokio::sync::RwLock`, and rich `TaskState` with timing,
-// output files, and cancellation support.
-//
-// For the **tool-facing** lightweight task CRUD store that the LLM manipulates
-// through the `task_*` tool family, see `crate::tools::task_types::TaskManager`.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

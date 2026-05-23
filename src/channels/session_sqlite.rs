@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SQLite-backed session persistence with FTS5 search.
-//!
-//! Stores sessions in `{workspace}/sessions/sessions.db` using WAL mode.
-//! Provides full-text search via FTS5 and automatic TTL-based cleanup.
-//! Designed as the default backend, replacing JSONL for new installations.
 
 use crate::channels::session_backend::{
     LoadedMessage, RewindStash, SessionBackend, SessionMetadata, SessionQuery,
@@ -175,7 +170,7 @@ impl SqliteSessionBackend {
                 message.role,
                 message.content,
                 now,
-                if hidden_for_ui { 1 } else { 0 },
+                i32::from(hidden_for_ui),
             ],
         )
         .map_err(std::io::Error::other)?;

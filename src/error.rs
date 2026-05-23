@@ -1,13 +1,202 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Typed error hierarchy for the SenWeaverCoding public API.
-//!
-//! Internal code may continue to use `anyhow::Result` for convenience,
-//! but all `pub` functions on SDK-facing types should return
-//! `Result<T, SenError>` so downstream consumers can match on variants.
 
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorCategory {
+    Network,
+    Timeout,
+    RateLimit,
+    Permission,
+    Validation,
+    NotFound,
+    Provider,
+    Storage,
+    Internal,
+    Cancelled,
+}
+
+impl ErrorCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCategory::Network => "network",
+            ErrorCategory::Timeout => "timeout",
+            ErrorCategory::RateLimit => "rate_limit",
+            ErrorCategory::Permission => "permission",
+            ErrorCategory::Validation => "validation",
+            ErrorCategory::NotFound => "not_found",
+            ErrorCategory::Provider => "provider",
+            ErrorCategory::Storage => "storage",
+            ErrorCategory::Internal => "internal",
+            ErrorCategory::Cancelled => "cancelled",
+        }
+    }
+}
+
+pub trait ErrorClassification {
+    fn category(&self) -> ErrorCategory;
+
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self.category(),
+            ErrorCategory::Network
+                | ErrorCategory::Timeout
+                | ErrorCategory::RateLimit
+                | ErrorCategory::Storage
+        )
+    }
+
+    fn is_fatal(&self) -> bool {
+        matches!(
+            self.category(),
+            ErrorCategory::Permission | ErrorCategory::Validation | ErrorCategory::Cancelled
+        )
+    }
+
+    fn retry_after_hint(&self) -> Option<std::time::Duration> {
+        None
+    }
+}
+
+pub fn classify_anyhow(err: &anyhow::Error) -> ErrorCategory {
+    for cause in err.chain() {
+        if cause.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
+            return ErrorCategory::Timeout;
+        }
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            return io_error_category(io_err);
+        }
+        if let Some(provider_err) = cause.downcast_ref::<crate::providers::ProviderError>() {
+            return provider_error_category(provider_err);
+        }
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            return reqwest_error_category(reqwest_err);
+        }
+        if let Some(agent_err) = cause.downcast_ref::<AgentError>() {
+            return agent_err.category();
+        }
+        if let Some(sen_err) = cause.downcast_ref::<SenError>() {
+            return sen_err.category();
+        }
+    }
+    let s = err.to_string().to_lowercase();
+    if s.contains("timed out") || s.contains("timeout") || s.contains("deadline") {
+        return ErrorCategory::Timeout;
+    }
+    if s.contains("rate limit") || s.contains("rate_limit") || s.contains("429") || s.contains("too many requests") {
+        return ErrorCategory::RateLimit;
+    }
+    if s.contains("unauthorized") || s.contains("forbidden") || s.contains("401") || s.contains("403") || s.contains("permission") {
+        return ErrorCategory::Permission;
+    }
+    if s.contains("not found") || s.contains("404") {
+        return ErrorCategory::NotFound;
+    }
+    if s.contains("connection") || s.contains("dns") || s.contains("network") || s.contains("reset by peer") || s.contains("broken pipe") {
+        return ErrorCategory::Network;
+    }
+    if s.contains("database is locked") || s.contains("database is busy") || s.contains("sqlite_busy") {
+        return ErrorCategory::Storage;
+    }
+    if s.contains("cancel") {
+        return ErrorCategory::Cancelled;
+    }
+    if s.contains("validation") || s.contains("invalid") {
+        return ErrorCategory::Validation;
+    }
+    if s.contains("provider") || s.contains("model") {
+        return ErrorCategory::Provider;
+    }
+    ErrorCategory::Internal
+}
+
+fn io_error_category(err: &std::io::Error) -> ErrorCategory {
+    use std::io::ErrorKind;
+    match err.kind() {
+        ErrorKind::TimedOut => ErrorCategory::Timeout,
+        ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected
+        | ErrorKind::BrokenPipe
+        | ErrorKind::AddrInUse
+        | ErrorKind::AddrNotAvailable
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::NetworkDown => ErrorCategory::Network,
+        ErrorKind::PermissionDenied => ErrorCategory::Permission,
+        ErrorKind::NotFound => ErrorCategory::NotFound,
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => ErrorCategory::Validation,
+        ErrorKind::Interrupted => ErrorCategory::Cancelled,
+        _ => ErrorCategory::Storage,
+    }
+}
+
+fn reqwest_error_category(err: &reqwest::Error) -> ErrorCategory {
+    if err.is_timeout() {
+        return ErrorCategory::Timeout;
+    }
+    if err.is_connect() {
+        return ErrorCategory::Network;
+    }
+    if let Some(status) = err.status() {
+        let code = status.as_u16();
+        if code == 401 || code == 403 {
+            return ErrorCategory::Permission;
+        }
+        if code == 404 {
+            return ErrorCategory::NotFound;
+        }
+        if code == 429 {
+            return ErrorCategory::RateLimit;
+        }
+        if (500..=599).contains(&code) {
+            return ErrorCategory::Provider;
+        }
+        if (400..500).contains(&code) {
+            return ErrorCategory::Validation;
+        }
+    }
+    if err.is_request() || err.is_body() || err.is_decode() {
+        return ErrorCategory::Provider;
+    }
+    ErrorCategory::Network
+}
+
+pub fn provider_error_category(err: &crate::providers::ProviderError) -> ErrorCategory {
+    use crate::services::api::ApiErrorCategory;
+    match err.category() {
+        ApiErrorCategory::ServerError => ErrorCategory::Provider,
+        ApiErrorCategory::RateLimited | ApiErrorCategory::Overloaded => ErrorCategory::RateLimit,
+        ApiErrorCategory::AuthError => ErrorCategory::Permission,
+        ApiErrorCategory::InvalidRequest | ApiErrorCategory::ContextLengthExceeded => {
+            ErrorCategory::Validation
+        }
+        ApiErrorCategory::NetworkError => ErrorCategory::Network,
+        ApiErrorCategory::Timeout => ErrorCategory::Timeout,
+        ApiErrorCategory::Unknown => ErrorCategory::Provider,
+    }
+}
+
+impl ErrorClassification for crate::providers::ProviderError {
+    fn category(&self) -> ErrorCategory {
+        provider_error_category(self)
+    }
+}
+
+impl ErrorClassification for std::io::Error {
+    fn category(&self) -> ErrorCategory {
+        io_error_category(self)
+    }
+}
+
+impl ErrorClassification for anyhow::Error {
+    fn category(&self) -> ErrorCategory {
+        classify_anyhow(self)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum SenError {
@@ -256,4 +445,144 @@ pub enum TaskQueueError {
 
     #[error("queue capacity exceeded")]
     CapacityExceeded,
+}
+
+impl ErrorClassification for SenError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            SenError::Agent(e) => e.category(),
+            SenError::Scheduler(e) => e.category(),
+            SenError::Coordinator(e) => e.category(),
+            SenError::Blackboard(e) => e.category(),
+            SenError::EventBus(e) => e.category(),
+            SenError::Supervisor(e) => e.category(),
+            SenError::Registry(e) => e.category(),
+            SenError::TaskQueue(e) => e.category(),
+            SenError::Config(_) => ErrorCategory::Validation,
+            SenError::Provider(_) => ErrorCategory::Provider,
+            SenError::Other(e) => classify_anyhow(e),
+        }
+    }
+}
+
+impl ErrorClassification for AgentError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            AgentError::LoopOverflow(_) | AgentError::LoopAborted(_) => ErrorCategory::Internal,
+            AgentError::ModelSwitchFailed(_) | AgentError::Provider(_) => ErrorCategory::Provider,
+            AgentError::TurnCancelled => ErrorCategory::Cancelled,
+            AgentError::ToolDispatchFailed(s) => {
+                let lower = s.to_lowercase();
+                if lower.contains("timeout") || lower.contains("timed out") {
+                    ErrorCategory::Timeout
+                } else if lower.contains("cancel") {
+                    ErrorCategory::Cancelled
+                } else {
+                    ErrorCategory::Internal
+                }
+            }
+            AgentError::StreamInterrupted(_) => ErrorCategory::Network,
+            AgentError::ContextBudgetExceeded(_) | AgentError::CostBudgetExceeded(_) => {
+                ErrorCategory::Validation
+            }
+            AgentError::Tool { cause, .. } => cause.category(),
+        }
+    }
+}
+
+impl ErrorClassification for crate::tools::ToolErrorCause {
+    fn category(&self) -> ErrorCategory {
+        use crate::tools::ToolErrorCause as C;
+        match self {
+            C::Validation(_) | C::PreconditionFailed(_) => ErrorCategory::Validation,
+            C::Execution(_) => ErrorCategory::Internal,
+            C::Timeout(_) => ErrorCategory::Timeout,
+            C::Cancelled => ErrorCategory::Cancelled,
+            C::RbacDenied(_) => ErrorCategory::Permission,
+            C::Io(e) => io_error_category(e),
+            C::Provider(_) => ErrorCategory::Provider,
+            C::LockContention(_) => ErrorCategory::Storage,
+            C::NoMatchingAgent(_) => ErrorCategory::NotFound,
+            C::Unknown(e) => classify_anyhow(e),
+        }
+    }
+}
+
+impl ErrorClassification for SchedulerError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            SchedulerError::CycleDetected | SchedulerError::UnknownDependency { .. } => {
+                ErrorCategory::Validation
+            }
+            SchedulerError::TaskNotFound(_) => ErrorCategory::NotFound,
+            SchedulerError::Cancelled => ErrorCategory::Cancelled,
+        }
+    }
+}
+
+impl ErrorClassification for CoordinatorError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            CoordinatorError::LockContention { .. } => ErrorCategory::Storage,
+            CoordinatorError::BarrierTimeout(_) | CoordinatorError::VotingExpired(_) => {
+                ErrorCategory::Timeout
+            }
+            CoordinatorError::AgentNotFound(_) => ErrorCategory::NotFound,
+        }
+    }
+}
+
+impl ErrorClassification for BlackboardError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            BlackboardError::KeyNotFound(_) => ErrorCategory::NotFound,
+            BlackboardError::VersionConflict(_) => ErrorCategory::Storage,
+            BlackboardError::Expired => ErrorCategory::Timeout,
+        }
+    }
+}
+
+impl ErrorClassification for EventBusError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            EventBusError::ChannelClosed => ErrorCategory::Cancelled,
+            EventBusError::Lagged(_) => ErrorCategory::Internal,
+        }
+    }
+}
+
+impl ErrorClassification for SupervisorError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            SupervisorError::MaxAgentsLimit(_) | SupervisorError::CapabilityLimit(_, _) => {
+                ErrorCategory::Validation
+            }
+            SupervisorError::AlreadyRegistered(_) => ErrorCategory::Storage,
+            SupervisorError::AgentNotFound(_) => ErrorCategory::NotFound,
+        }
+    }
+}
+
+impl ErrorClassification for RegistryError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            RegistryError::AlreadyRegistered(_) => ErrorCategory::Storage,
+            RegistryError::AgentNotFound(_) => ErrorCategory::NotFound,
+            RegistryError::AgentNotAvailable(_, _) | RegistryError::StateMismatch { .. } => {
+                ErrorCategory::Validation
+            }
+        }
+    }
+}
+
+impl ErrorClassification for TaskQueueError {
+    fn category(&self) -> ErrorCategory {
+        match self {
+            TaskQueueError::TaskNotFound(_) => ErrorCategory::NotFound,
+            TaskQueueError::StatusMismatch { .. } | TaskQueueError::NotRunning(_) => {
+                ErrorCategory::Validation
+            }
+            TaskQueueError::CapacityExceeded => ErrorCategory::Internal,
+        }
+    }
 }

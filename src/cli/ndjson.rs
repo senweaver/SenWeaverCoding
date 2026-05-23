@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Safe NDJSON serialization.
-//!
-//! JSON.stringify emits U+2028/U+2029 raw (valid per ECMA-404 / RFC 8259).
-//! When the output is a single NDJSON line, any receiver that uses JavaScript
-//! line-terminator semantics to split the stream will cut the JSON mid-string.
-//! The `\uXXXX` escape form is equivalent JSON but can never be mistaken for
-//! a line terminator by any receiver.
 
 use serde::Serialize;
 

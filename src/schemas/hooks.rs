@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Hook schemas — mirrors claude-code-typescript-src`schemas/hooks.ts`.
-// Defines the schema for hook events that plugins and SDK consumers can register.
 
 use serde::{Deserialize, Serialize};
 

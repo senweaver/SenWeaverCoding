@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Provider retry primitives: exponential back-off with jitter,
-//! retry budgets, and a reliability counter used by the supervisor /
-//! router health-signal pipeline (C.3).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

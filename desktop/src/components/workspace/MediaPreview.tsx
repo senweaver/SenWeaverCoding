@@ -1,24 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
-//
-// Lightweight in-editor preview for binary / media files that Monaco
-// cannot render as text.  Covers the file types VSCode previews
-// natively in its built-in editor:
-//
-//   • Images (png/jpg/gif/webp/avif/bmp/ico/svg)  — zoom + fit-to-pane
-//   • Video  (mp4/webm/mov/mkv/ogv)               — HTML5 controls
-//   • Audio  (mp3/wav/ogg/flac/m4a/aac)           — HTML5 controls
-//   • PDF                                          — embedded via iframe
-//
-// All previews are driven from a single `data:` URL built from the
-// file buffer's base64 payload, so we never re-fetch the file or
-// require any backend route beyond the existing `/api/workspace/file`
-// endpoint.  For SVG we also accept a utf8 buffer because the
-// backend's binary-detection heuristic classifies many SVGs as text.
-//
-// Anything we can't preview (zip, exe, fonts, …) routes to a
-// "binary not previewable" fallback identical to the previous
-// behaviour, so the user never gets stuck staring at a blank pane.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@iconify/react/dist/offline'

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Query dependencies — mirrors claude-code-typescript-src`query/deps.ts`.
-// Bundles the injectable dependencies that a query needs at execution time.
 
 use std::path::PathBuf;
 use std::sync::Arc;

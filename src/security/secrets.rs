@@ -1,37 +1,19 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Encrypted secret store — defense-in-depth for API keys and tokens.
-//
-// Secrets are encrypted using ChaCha20-Poly1305 AEAD with a random key stored
-// in `~/.senweavercoding/.secret_key` with restrictive file permissions (0600). The
-// config file stores only hex-encoded ciphertext, never plaintext keys.
-//
-// Each encryption generates a fresh random 12-byte nonce, prepended to the
-// ciphertext. The Poly1305 authentication tag prevents tampering.
-//
-// This prevents:
-//   - Plaintext exposure in config files
-//   - Casual `grep` or `git log` leaks
-//   - Accidental commit of raw API keys
-//   - Known-plaintext attacks (unlike the previous XOR cipher)
-//   - Ciphertext tampering (authenticated encryption)
-//
-// For sovereign users who prefer plaintext, `secrets.encrypt = false` disables this.
-//
-// Migration: values with the legacy `enc:` prefix (XOR cipher) are decrypted
-// using the old algorithm for backward compatibility. New encryptions always
-// produce `enc2:` (ChaCha20-Poly1305).
 
 use anyhow::{Context, Result};
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 
 const KEY_LEN: usize = 32;
 
 const NONCE_LEN: usize = 12;
+
+static DISABLED_ENCRYPTION_WARN_ONCE: Once = Once::new();
 
 #[derive(Debug, Clone)]
 pub struct SecretStore {
@@ -61,7 +43,16 @@ impl SecretStore {
     }
 
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
-        if !self.enabled || plaintext.is_empty() {
+        if plaintext.is_empty() {
+            return Ok(plaintext.to_string());
+        }
+        if !self.enabled {
+            DISABLED_ENCRYPTION_WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "secrets.encrypt is disabled in config; storing secrets as plaintext. \
+                     Set [secrets].encrypt = true to enable ChaCha20-Poly1305 encryption."
+                );
+            });
             return Ok(plaintext.to_string());
         }
 

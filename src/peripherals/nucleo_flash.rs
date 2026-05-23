@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Flash SenWeaverCoding Nucleo-F401RE firmware via probe-rs.
-//!
-//! Builds the Embassy firmware and flashes via ST-Link (built into Nucleo).
-//! Requires: cargo install probe-rs-tools --locked
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;

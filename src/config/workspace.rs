@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Workspace profile management for multi-client isolation.
-//!
-//! Each workspace represents an isolated client engagement with its own
-//! memory namespace, audit trail, secrets scope, and tool restrictions.
-//! Profiles are stored under `~/.senweavercoding/workspaces/<client_name>/`.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};

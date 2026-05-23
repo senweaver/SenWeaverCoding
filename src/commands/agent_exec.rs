@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `/agent exec <agent_name> <prompt>` — run a standalone sub-agent
-//! directly against the LLM, bypassing the main tool-call loop.
-//!
-//! Useful for:
-//!   - Quick spot-checks of an agent's role/system prompt behaviour
-//!   - Manual delegation without writing a workflow
-//!   - Surfacing configuration issues (provider/model/system_prompt) early
-//!
-//! The command uses the same dispatch logic as `delegate_parallel`'s
-//! per-task executor: look up `config.agents[agent_name]`, build a
-//! provider, call `chat_with_system`, return the raw output.
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 
@@ -138,7 +127,7 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
 
             if let Some(rt) = crate::agent::multi_agent_runtime::global_runtime() {
                 rt.blackboard.inner().write(
-                    &format!(
+                    format!(
                         "/agent_exec/{name}/{}",
                         chrono::Utc::now().timestamp_millis()
                     ),

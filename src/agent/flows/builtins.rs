@@ -1,48 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Built-in [`Flow`](super::Flow) implementations: `CodeEditFlow`
-//! (plan ??diff ??syntactic verify ??fix loop) and `ResearchFlow`
-//! (plan ??gather ??completeness verify).
-//!
-//! ??`CodeEditFlow` is a structured, diff-based, layered
-//! pipeline:
-//!
-//! 1. [`CodeEditPlanner`] asks the LLM for a strict JSON
-//!    [`PlannerResponse`](super::code_edit_plan::PlannerResponse),
-//!    self-corrects once on validation failure, optionally appends
-//!    `kind = "review"` steps via
-//!    [`auto_expand_with_symbol_graph`](super::code_edit_plan::auto_expand_with_symbol_graph),
-//!    and stores the resulting [`PlanDependencyGraph`](super::code_edit_plan::PlanDependencyGraph)
-//!    JSON in `ctx.scratchpad["code_edit.plan_dag"]` so
-//!    [`CodeEditFlow::run`] can extract topological layers and dispatch
-//!    them through [`PlanExecVerifyFlow::run_layered`].
-//! 2. [`CodeEditExecutor`] picks one of three prompts based on file
-//!    size: a windowed prompt for files at or above
-//!    `window_prompt_min_lines`, a `full_file_rewrite` fallback for
-//!    files smaller than `full_file_rewrite_max_lines` (marks
-//!    this path `deprecated="full_file_rewrite"`), or the standard
-//!    diff prompt otherwise.  Successful LLM responses are routed
-//!    through [`OpsApplier::apply_batch`] as
-//!    [`EditOp::ApplyHunk`](crate::apply_model::edit_op::EditOp::ApplyHunk)
-//!    or [`EditOp::Replace`](crate::apply_model::edit_op::EditOp::Replace);
-//!    review-noop steps short-circuit before any disk write.
-//! 3. [`CodeEditVerifier`] reads `metadata["path"]`, short-circuits
-//!    review-noops as `Pass`, and otherwise dispatches to the
-//!    [`VerificationPipeline`](crate::agent::verification::VerificationPipeline).
-//!    Failures are surfaced as a JSON [`StructuredFixReason`] in the
-//!    `Verdict::Fail.reason` slot so
-//!    [`PlanExecVerifyFlow::execute_step_with_fix_inner`](super::plan_exec_verify::PlanExecVerifyFlow)
-//!    feeds it back into the executor as `Step.inputs["fix_reason"]`.
-//! 4. After all layers complete, `CodeEditFlow::run` issues a
-//!    project-wide
-//!    [`VerificationPipeline::run_on_workspace`](crate::agent::verification::VerificationPipeline::run_on_workspace)
-//!    so `cargo check` / LSP diagnostics catch cross-file regressions
-//!    that the per-step verifier could not.
-//!
-//! [`ResearchFlow`] is unchanged from D5.2 ??it still issues a
-//! line-per-question prompt and verifies that every answer cites at
-//! least one source.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -434,7 +392,7 @@ fn degraded_step_vec(ctx: &FlowContext, focus_files: &str) -> Vec<Step> {
     vec![step_from_plan(&plan, true)]
 }
 
-const CODE_EDIT_EXECUTOR_PROMPT_V2: &str = r#"You are a precise code editor.
+const CODE_EDIT_EXECUTOR_PROMPT_V2: &str = r"You are a precise code editor.
 
 Target file: {path}
 Language: {lang}
@@ -445,19 +403,19 @@ Task: {description}
 
 {fix_reason_block}
 
-Respond with a SINGLE unified diff for `{path}` ONLY.  Use correct line numbers in `@@` headers (they reference the *full* file, not the snippet window).  Do NOT emit any prose, commentary, or markdown fences."#;
+Respond with a SINGLE unified diff for `{path}` ONLY.  Use correct line numbers in `@@` headers (they reference the *full* file, not the snippet window).  Do NOT emit any prose, commentary, or markdown fences.";
 
-const CODE_EDIT_FULL_FILE_PROMPT: &str = r#"Edit description: {description}
+const CODE_EDIT_FULL_FILE_PROMPT: &str = r"Edit description: {description}
 Target file: {path}
 Language: {lang}
 Current file body:
 {body}
 {fix_reason_block}
-Respond with ONLY the new full file body. Do not emit prose or markdown fences."#;
+Respond with ONLY the new full file body. Do not emit prose or markdown fences.";
 
-const CODE_EDIT_REVIEW_SUFFIX: &str = r#"
+const CODE_EDIT_REVIEW_SUFFIX: &str = r"
 
-This is a REVIEW step.  If the upstream symbol change does NOT require modifying this file, respond with an EMPTY string.  Otherwise respond with a unified diff per the rules above."#;
+This is a REVIEW step.  If the upstream symbol change does NOT require modifying this file, respond with an EMPTY string.  Otherwise respond with a unified diff per the rules above.";
 
 struct CodeEditExecutor {
     language: String,
@@ -818,7 +776,7 @@ impl CodeEditExecutor {
         let new_body = agent.complete(&prompt).await?;
         let new_body = strip_markdown_fence(&new_body).to_string();
 
-        let byte_range = 0..body.as_bytes().len();
+        let byte_range = 0..body.len();
         let batch = EditBatch::new(EditOrigin::CodeEditFlow).with_op(EditOp::Replace {
             path: abs_path.to_path_buf(),
             byte_range,

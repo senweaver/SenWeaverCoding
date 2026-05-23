@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Debounce / throttle rules for inline completion requests.
-//!
-//! The hot path is the user's keystroke — without throttling, the
-//! registry would fire dozens of provider requests per second.  The
-//! [`Throttler`] enforces:
-//!
-//! * a minimum prefix length before the first request fires;
-//! * a debounce window between consecutive requests; and
-//! * a "recently rejected" lock-out so consecutive `Reject` events do
-//!   not trigger a fresh request until the user's cursor moves far
-//!   enough to invalidate the previous suggestion.
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Cloud transformation accelerator config, moved from `schema.rs`
-//! as part of M8.
 
 use anyhow::Result;
 use schemars::JsonSchema;

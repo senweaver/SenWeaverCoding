@@ -1,28 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Core chat-bot channel configs (Telegram / Discord / Slack /
-//! DiscordHistory / Mattermost), extracted from `schema.rs` as part
-//! of M7 to drive schema.rs toward the < 6 000-line target.
-//!
-//! The types here are the canonical definitions; `schema.rs` now
-//! `pub use`s them so existing import paths (`crate::config::TelegramConfig`,
-//! etc.) keep working without downstream changes.
-//!
-//! ## Why these four share a file
-//!
-//! They all represent "chat platform" channels with overlapping field
-//! shapes (`bot_token`, `allowed_users`, `stream_mode`, `mention_only`,
-//! `interrupt_on_new_message`, `proxy_url`).  Grouping them surfaces
-//! the shared defaults in one spot and makes it easy to add new chat
-//! platforms by following a clear template.
-//!
-//! ## Not covered here
-//!
-//! iMessage / WhatsApp / Signal / Lark / Feishu / WeCom / QQ and
-//! specialised transports (webhook, email, gmail_push, irc) stay in
-//! `schema.rs` for now — they have platform-specific fields that
-//! warrant their own modules in later M-phases.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

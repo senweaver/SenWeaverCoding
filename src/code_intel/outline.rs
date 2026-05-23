@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Document-outline extraction.
-//!
-//! Two back-ends are exposed:
-//!
-//! - **tree-sitter** (behind `cfg(feature = "code-intel")`): produces
-//!   a structured list of `OutlineEntry` values with precise line
-//!   anchors and item kinds.  This path is used by the GUI as well
-//!   as the headless `tools::code_outline`.
-//! - **heuristic fallback**: a tiny regex/line-prefix scan that works
-//!   everywhere tree-sitter isn't available.  Accuracy is limited to
-//!   obvious `fn`, `pub fn`, `struct`, `class`, `def` declarations
-//!   but the output shape is stable.
-//!
-//! Callers should not branch on the back-end: the public API is the
-//! same in both configurations.
 
 use serde::Serialize;
 use std::path::Path;
@@ -188,13 +173,11 @@ pub fn locate_named_scope(
     let mut depth = 0usize;
     let mut end = start;
     let bytes = content.as_bytes();
-    for i in start..bytes.len() {
-        match bytes[i] {
+    for (i, b) in bytes.iter().enumerate().skip(start) {
+        match *b {
             b'{' => depth += 1,
             b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
                 if depth == 0 && i > start {
                     end = i + 1;
                     break;

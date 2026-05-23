@@ -114,8 +114,7 @@ impl Tool for McpResourcesReadTool {
             });
         }
 
-        let resource_meta = server_info.resources.iter().find(|r| r.uri == uri);
-        if resource_meta.is_none() {
+        let Some(meta) = server_info.resources.iter().find(|r| r.uri == uri) else {
             let known_uris: Vec<&str> = server_info
                 .resources
                 .iter()
@@ -135,9 +134,7 @@ impl Tool for McpResourcesReadTool {
                     }
                 )),
             });
-        }
-
-        let meta = resource_meta.unwrap();
+        };
 
         if let Some(registry) = &self.registry {
             match registry.read_resource(server, uri).await {

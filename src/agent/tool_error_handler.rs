@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool Error Handler - graceful tool execution error handling.
-//!
-//! Wraps tool execution to catch panics and errors, returning structured
-//! error messages so the agent loop can continue rather than crash.
 
 const MAX_ERROR_DETAIL_CHARS: usize = 500;
 

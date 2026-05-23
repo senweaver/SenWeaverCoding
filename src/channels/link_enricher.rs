@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Link enricher: auto-detects URLs in inbound messages, fetches their content,
-//! and prepends summaries so the agent has link context without explicit tool calls.
 
 use regex::Regex;
 use std::net::IpAddr;

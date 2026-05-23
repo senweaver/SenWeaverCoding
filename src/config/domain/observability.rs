@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Observability backend configuration (`[observability]` section).
-//!
-//! Migrated out of `schema.rs` as part of N6.2 of the v3 deep-
-//! optimisation plan.  Controls the observer backend (log /
-//! Prometheus / OTLP) and the runtime-trace rolling buffer.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

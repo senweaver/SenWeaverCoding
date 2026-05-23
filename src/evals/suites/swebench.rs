@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SWE-bench-lite suite scaffold.
-//!
-//! The full SWE-bench harness requires a container runtime and the
-//! SWE-bench-Lite tarballs.  ships the trait + a smoke
-//! fixture so CI can exercise the wiring; the real runner plugs in
-//! via the `evals-swebench` feature (reserved for a follow-up
-//! sprint).
 
 use async_trait::async_trait;
 

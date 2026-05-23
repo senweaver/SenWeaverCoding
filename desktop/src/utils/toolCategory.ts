@@ -1,16 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Centralized mapping from a tool's canonical name (the string the LLM sees)
-// to a UI display category. Used by both the message grouping logic and the
-// per-category renderers under desktop/src/components/chat/tools/.
-//
-// Two naming conventions are supported in parallel:
-//   1. Backend snake_case names (the default), e.g. `file_read`, `content_search`.
-//   2. cc-haha / Claude-style PascalCase names (legacy or 3rd-party), e.g.
-//      `Read`, `Grep`, `WebSearch`. Some MCP servers and historical sessions
-//      still emit these.
-//
-// Unknown tools fall back to `'other'` and get the GenericToolView renderer.
 
 export type ToolCategory =
   | 'read'

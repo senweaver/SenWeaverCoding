@@ -131,11 +131,13 @@ impl LinkedInClient {
     }
 
     fn client() -> reqwest::Client {
-        crate::config::build_runtime_proxy_client_with_timeouts(
-            "tool.linkedin",
-            LINKEDIN_REQUEST_TIMEOUT_SECS,
-            LINKEDIN_CONNECT_TIMEOUT_SECS,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts(
+                "tool.linkedin",
+                LINKEDIN_REQUEST_TIMEOUT_SECS,
+                LINKEDIN_CONNECT_TIMEOUT_SECS,
+            )
     }
 
     fn api_headers(&self, token: &str) -> HeaderMap {
@@ -838,11 +840,9 @@ impl ImageGenerator {
     }
 
     fn http_client() -> reqwest::Client {
-        crate::config::build_runtime_proxy_client_with_timeouts(
-            "tool.linkedin.image",
-            60,
-            10,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("tool.linkedin.image", 60, 10)
     }
 
     async fn try_stability(

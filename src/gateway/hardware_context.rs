@@ -1,35 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware context management endpoints.
-//!
-//! These endpoints let remote callers (phone, laptop) register GPIO pins and
-//! append context to the running agent's hardware knowledge base without SSH.
-//!
-//! ## Endpoints
-//!
-//! - `POST /api/hardware/pin`     — register a single GPIO pin assignment
-//! - `POST /api/hardware/context` — append raw markdown to a device file
-//! - `GET  /api/hardware/context` — read all current hardware context files
-//! - `POST /api/hardware/reload`  — verify on-disk context; report what will be
-//!                                  used on the next chat request
-//!
-//! ## Live update semantics
-//!
-//! SenWeaverCoding's agent loop calls [`crate::hardware::boot`] on **every** request,
-//! which re-reads `~/.senweavercoding/hardware/` from disk.  Writing to those files
-//! therefore takes effect on the very next `/api/chat` call — no daemon restart
-//! needed.  The `/api/hardware/reload` endpoint verifies what is on disk and
-//! reports what will be injected into the system prompt next time.
-//!
-//! ## Security
-//!
-//! - **Auth**: same `require_auth` helper used by all `/api/*` routes.
-//! - **Path traversal**: device aliases are validated to be alphanumeric +
-//!   hyphens/underscores only; they are never used as raw path components.
-//! - **Append-only**: all writes use `OpenOptions::append(true)` — existing
-//!   content cannot be truncated or overwritten through these endpoints.
-//! - **Size limit**: individual append payloads are capped at 32 KB.
 
 use super::AppState;
 use axum::{

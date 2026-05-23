@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Background GC task for memory subsystems.
-//!
-//! Spawns a `tokio::interval` that periodically:
-//!   1. Evicts expired blackboard entries via `Blackboard::evict_expired`.
-//!   2. Runs `MultiAgentRuntime::maintenance` (supervisor health checks,
-//!      task queue overdue-expiry, coordinator locks/barriers).
-//!   3. Records the GC run as a metric so operators can confirm it's alive.
-//!
-//! Driven by `MemoryRuntimeExtras::gc_interval_secs`.  Call
-//! `spawn_memory_gc_task()` once at startup from the CLI entrypoint; the
-//! returned `JoinHandle` can be awaited during graceful shutdown.
 
 use std::sync::Arc;
 

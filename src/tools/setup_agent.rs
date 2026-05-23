@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Agent profile setup tool.
-//!
-//! Allows the agent to create new agent profiles (SOUL.md + config) from
-//! within a conversation. Mirrors DeerFlow's `setup_agent` tool for
-//! creating customized sub-agents with specific personalities and configurations.
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;

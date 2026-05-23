@@ -1,35 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Async runtime that drives `TaskScheduler` with a worker pool.
-//!
-//! `TaskSchedulerRuntime::run(tasks, executor)` spawns `max_parallel`
-//! concurrent workers, feeds them tasks as their dependencies clear,
-//! and returns all outcomes once the graph completes (or cancellation
-//! fires).
-//!
-//! ## — event-driven workers
-//!
-//! The pre-5.1 runtime polled [`TaskScheduler::claim_next`] in a
-//! single loop and used [`tokio::sync::Notify`] as a one-shot wake
-//! between workers.  The rewritten runtime spawns N concurrent
-//! workers that each:
-//!
-//! 1. Subscribe to the scheduler's `broadcast::Sender<SchedulerEvent>`.
-//! 2. Perform an initial ready-heap scan so tasks that became ready
-//!    *before* the worker subscribed (the typical `add_tasks → run`
-//!    flow) are still picked up.
-//! 3. Race on `recv().await` for `TaskReady(id)` events and CAS-claim
-//!    via [`TaskScheduler::try_claim`].  Losers bump
-//!    `scheduler_metrics::incr_try_claim_miss` and continue.
-//! 4. On `RecvError::Lagged(n)` fall back to
-//!    [`TaskScheduler::ready_snapshot`] and bump
-//!    `scheduler_metrics::incr_broadcast_lagged(n)`.
-//! 5. Exit on `GraphCompleted` or external cancellation.
-//!
-//! Every state transition (started / completed / failed / cancelled)
-//! feeds the `scheduler_metrics::record_task_duration_ms` histogram
-//! so Grafana dashboards observe event-driven throughput end-to-end.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -237,7 +208,7 @@ async fn drain_ready_snapshot(
                 return;
             }
             let claimed = scheduler.lock().try_claim(&id);
-            if claimed.is_some() {
+            if let Some(task) = claimed {
                 claimed_any = true;
                 execute_claimed(
                     worker_idx,
@@ -246,7 +217,7 @@ async fn drain_ready_snapshot(
                     cancellation,
                     executor,
                     ctx,
-                    claimed.unwrap(),
+                    task,
                 )
                 .await;
             }

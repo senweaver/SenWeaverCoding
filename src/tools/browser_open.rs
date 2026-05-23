@@ -66,7 +66,7 @@ impl Tool for BrowserOpenTool {
          On desktop the user has the built-in `browser` tool (visible embedded dock) — ALWAYS prefer that; only fall \
          back to this tool when no embedded dock is available (pure CLI / headless server) or when the user \
          explicitly asks for the system browser. Never call this in the same turn as a successful `browser` with \
-         action='open' for the same URL. Security constraints: allowlist-only domains, no local/private hosts, no scraping."
+         action='open' for the same URL. Security constraints: allowlist-only domains, no local/private hosts, no bulk content extraction."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

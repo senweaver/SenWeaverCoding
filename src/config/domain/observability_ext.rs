@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Observability extensions — OTLP, metrics, sampling.
-//!
-//! Split of P6.1: observability concerns that extend `ObservabilityConfig`
-//! with runtime-tunable knobs.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

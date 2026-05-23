@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Remote I/O — extends StructuredIO with network transport for remote sessions.
-//!
-//! Wraps the base StructuredIO with a Transport (WebSocket, SSE, or HTTP)
-//! for remote agent sessions. Adds session authentication, heartbeat,
-//! and reconnection.
 
 use super::structured_io::{StdinMessage, StdoutMessage};
 use super::transports::Transport;

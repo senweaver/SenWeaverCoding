@@ -11,6 +11,7 @@ type Props = {
   status: 'pending' | 'switched' | 'dismissed'
   superseded?: boolean
   sessionId?: string | null
+  handoffKind?: 'plan' | 'curator'
 }
 
 export function ModeSwitchCard({
@@ -18,6 +19,8 @@ export function ModeSwitchCard({
   status,
   superseded,
   sessionId,
+  planPath,
+  handoffKind,
 }: Props) {
   const t = useTranslation()
   const confirmModeSwitch = useChatStore((s) => s.confirmModeSwitch)
@@ -43,17 +46,43 @@ export function ModeSwitchCard({
 
   const isPending = status === 'pending'
 
+  const inferredKind: 'plan' | 'curator' =
+    handoffKind ??
+    (planPath && /impl_blueprint\.md$/i.test(planPath) ? 'curator' : 'plan')
+  const isCurator = inferredKind === 'curator'
+
+  const containerCls = isCurator
+    ? 'rounded-[var(--radius-lg)] border border-[var(--color-curator-accent)]/55 ring-1 ring-[var(--color-curator-accent)]/25 shadow-[0_2px_18px_-8px_var(--color-curator-accent)] bg-[var(--color-surface-container-lowest)] overflow-hidden'
+    : 'rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] overflow-hidden'
+
+  const iconCls = isCurator
+    ? 'material-symbols-outlined text-[16px] text-[var(--color-curator-accent)]'
+    : 'material-symbols-outlined text-[16px] text-[var(--color-text-secondary)]'
+
+  const titleText = isCurator
+    ? t('curator.modeSwitchTitle') || '切换到 Agent · 按 impl_blueprint.md 落地完整工程'
+    : t('plan.modeSwitchTitle')
+
+  const bodyText = isCurator
+    ? t('curator.modeSwitchBody') ||
+      '点击切换后，Agent 将读取 impl_blueprint.md 并按其工程化完整代码、配置与文档。'
+    : t('plan.modeSwitchBody')
+
+  const switchBtnCls = isCurator
+    ? 'flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] transition-all'
+    : 'flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-text-primary)] text-[var(--color-surface)] hover:brightness-110 transition-all'
+
   return (
     <div
       className={`mb-3 ${superseded ? 'opacity-60 saturate-50 pointer-events-none' : ''}`}
     >
-      <div className="rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] overflow-hidden">
+      <div className={containerCls}>
         <div className="flex items-center gap-2 px-3 py-2">
-          <span className="material-symbols-outlined text-[16px] text-[var(--color-text-secondary)]">
+          <span className={iconCls}>
             swap_horiz
           </span>
           <span className="text-[12px] font-semibold text-[var(--color-text-primary)]">
-            {t('plan.modeSwitchTitle')}
+            {titleText}
           </span>
           {status === 'switched' && (
             <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-[var(--color-success)]/12 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[var(--color-success)]">
@@ -68,7 +97,7 @@ export function ModeSwitchCard({
           )}
         </div>
         <div className="px-3 pb-2 text-[12px] text-[var(--color-text-secondary)] leading-relaxed">
-          {t('plan.modeSwitchBody')}
+          {bodyText}
         </div>
         {isPending && (
           <div className="flex items-center justify-between gap-2 border-t border-[var(--color-outline-variant)]/30 bg-[var(--color-surface-container-low)] px-3 py-1.5">
@@ -90,7 +119,7 @@ export function ModeSwitchCard({
               <button
                 type="button"
                 onClick={() => sessionId && confirmModeSwitch(sessionId, messageId)}
-                className="flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-text-primary)] text-[var(--color-surface)] hover:brightness-110 transition-all"
+                className={switchBtnCls}
               >
                 {t('plan.modeSwitchSwitch')}
                 <span className="text-[10px] px-1 py-0.5 rounded bg-[var(--color-text-secondary)]/20">

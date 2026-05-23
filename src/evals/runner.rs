@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Generic suite runner and Prometheus-friendly report struct.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

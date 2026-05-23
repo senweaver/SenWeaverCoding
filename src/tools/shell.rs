@@ -120,13 +120,20 @@ async fn spawn_background(
             .take(8)
             .collect::<String>()
     );
+    let session_id = crate::session::current_session_context().map(|c| c.session_id);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-    super::background_registry::register(id.clone(), command_text.to_string(), kill_tx);
+    super::background_registry::register(
+        id.clone(),
+        command_text.to_string(),
+        kill_tx,
+        session_id.clone(),
+    );
 
     if let Some(out) = stdout {
         let id_clone = id.clone();
+        let sid_clone = session_id.clone();
         crate::runtime::spawn_supervised("tools.shell.bg.stdout", async move {
             let mut reader = BufReader::new(out).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -135,6 +142,7 @@ async fn spawn_background(
                         id: id_clone.clone(),
                         stream: super::background_registry::BgStream::Stdout,
                         line,
+                        session_id: sid_clone.clone(),
                     },
                 );
             }
@@ -142,6 +150,7 @@ async fn spawn_background(
     }
     if let Some(err) = stderr {
         let id_clone = id.clone();
+        let sid_clone = session_id.clone();
         crate::runtime::spawn_supervised("tools.shell.bg.stderr", async move {
             let mut reader = BufReader::new(err).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -150,6 +159,7 @@ async fn spawn_background(
                         id: id_clone.clone(),
                         stream: super::background_registry::BgStream::Stderr,
                         line,
+                        session_id: sid_clone.clone(),
                     },
                 );
             }
@@ -157,6 +167,7 @@ async fn spawn_background(
     }
 
     let id_for_watchdog = id.clone();
+    let sid_for_watchdog = session_id.clone();
     crate::runtime::spawn_supervised("tools.shell.bg.watchdog", async move {
         let started = std::time::Instant::now();
         let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -168,6 +179,7 @@ async fn spawn_background(
                         super::background_registry::BackgroundShellSignal::Heartbeat {
                             id: id_for_watchdog.clone(),
                             elapsed_secs: started.elapsed().as_secs(),
+                            session_id: sid_for_watchdog.clone(),
                         },
                     );
                 }
@@ -187,6 +199,7 @@ async fn spawn_background(
                 id: id_for_watchdog.clone(),
                 elapsed_secs: started.elapsed().as_secs(),
                 exit_code,
+                session_id: sid_for_watchdog.clone(),
             },
         );
         super::background_registry::unregister(&id_for_watchdog);
@@ -215,12 +228,17 @@ fn is_valid_env_var_name(name: &str) -> bool {
 
 const MIRROR_MAX_LINES_PER_STREAM: usize = 2048;
 
-fn emit_mirror_chunks(id: &str, body: &str, stream: super::background_registry::BgStream) {
+fn emit_mirror_chunks(
+    id: &str,
+    body: &str,
+    stream: super::background_registry::BgStream,
+    session_id: Option<&str>,
+) {
     if body.is_empty() {
         return;
     }
-    let mut count = 0usize;
-    for line in body.split_inclusive('\n') {
+    let sid_owned = session_id.map(|s| s.to_string());
+    for (count, line) in body.split_inclusive('\n').enumerate() {
         if count >= MIRROR_MAX_LINES_PER_STREAM {
             super::background_registry::publish(
                 super::background_registry::BackgroundShellSignal::Chunk {
@@ -228,6 +246,7 @@ fn emit_mirror_chunks(id: &str, body: &str, stream: super::background_registry::
                     stream,
                     line: "... [mirror output truncated; agent still sees full result]\n"
                         .to_string(),
+                    session_id: sid_owned.clone(),
                 },
             );
             break;
@@ -237,9 +256,9 @@ fn emit_mirror_chunks(id: &str, body: &str, stream: super::background_registry::
                 id: id.to_string(),
                 stream,
                 line: line.to_string(),
+                session_id: sid_owned.clone(),
             },
         );
-        count += 1;
     }
 }
 
@@ -430,11 +449,13 @@ impl Tool for ShellTool {
                 .take(8)
                 .collect::<String>(),
         );
+        let mirror_session_id = crate::session::current_session_context().map(|c| c.session_id);
         let mirror_started = std::time::Instant::now();
         super::background_registry::publish(
             super::background_registry::BackgroundShellSignal::Spawned {
                 id: mirror_id.clone(),
                 command: command.to_string(),
+                session_id: mirror_session_id.clone(),
             },
         );
 
@@ -487,17 +508,20 @@ impl Tool for ShellTool {
                     &mirror_id,
                     &stdout,
                     super::background_registry::BgStream::Stdout,
+                    mirror_session_id.as_deref(),
                 );
                 emit_mirror_chunks(
                     &mirror_id,
                     &stderr,
                     super::background_registry::BgStream::Stderr,
+                    mirror_session_id.as_deref(),
                 );
                 super::background_registry::publish(
                     super::background_registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: status.code(),
+                        session_id: mirror_session_id.clone(),
                     },
                 );
 
@@ -538,6 +562,14 @@ impl Tool for ShellTool {
                     while b > 0 && !stdout.is_char_boundary(b) {
                         b -= 1;
                     }
+                    tracing::debug!(
+                        target: "shell.output_truncated",
+                        command = %command,
+                        total_bytes = total,
+                        shown_bytes = b,
+                        stdout_full = %stdout,
+                        "shell stdout exceeded LLM cap; full content logged at debug",
+                    );
                     stdout.truncate(b);
                     stdout.push_str(&format!(
                         "\n... [output truncated: showing {b}/{total} bytes. \
@@ -550,6 +582,14 @@ impl Tool for ShellTool {
                     while b > 0 && !stderr.is_char_boundary(b) {
                         b -= 1;
                     }
+                    tracing::debug!(
+                        target: "shell.output_truncated",
+                        command = %command,
+                        total_bytes = total,
+                        shown_bytes = b,
+                        stderr_full = %stderr,
+                        "shell stderr exceeded LLM cap; full content logged at debug",
+                    );
                     stderr.truncate(b);
                     stderr.push_str(&format!(
                         "\n... [stderr truncated: showing {b}/{total} bytes]"
@@ -572,12 +612,14 @@ impl Tool for ShellTool {
                     &mirror_id,
                     &format!("{error_text}\n"),
                     super::background_registry::BgStream::Stderr,
+                    mirror_session_id.as_deref(),
                 );
                 super::background_registry::publish(
                     super::background_registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
+                        session_id: mirror_session_id.clone(),
                     },
                 );
                 Ok(ToolResult {
@@ -593,12 +635,14 @@ impl Tool for ShellTool {
                     &mirror_id,
                     &format!("{error_text}\n"),
                     super::background_registry::BgStream::Stderr,
+                    mirror_session_id.as_deref(),
                 );
                 super::background_registry::publish(
                     super::background_registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
+                        session_id: mirror_session_id.clone(),
                     },
                 );
                 Ok(ToolResult {

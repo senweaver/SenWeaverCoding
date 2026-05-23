@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Firejail sandbox (Linux user-space sandboxing)
-//!
-//! Firejail is a SUID sandbox program that Linux applications use to sandbox themselves.
 
 use crate::security::traits::Sandbox;
 use std::process::Command;

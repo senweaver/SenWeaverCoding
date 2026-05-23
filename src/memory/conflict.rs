@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Conflict resolution for memory entries.
-//!
-//! Before storing Core memories, performs a semantic similarity check against
-//! existing entries. If cosine similarity exceeds a threshold but content
-//! differs, the old entry is marked as superseded.
 
 use super::traits::{Memory, MemoryCategory, MemoryEntry};
 

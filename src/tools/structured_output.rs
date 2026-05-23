@@ -1,27 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Structured-output bridge.
-//!
-//! Two complementary surfaces live here:
-//!
-//! 1. [`StructuredOutputTool`] is the *tool-loop* surface: the agent
-//!    produces a JSON payload through a regular function call and we
-//!    do a lightweight `required`-key validation before echoing it
-//!    back to the SDK consumer.  This is the model-emits-once flow
-//!    that has existed since the first SDK release.
-//!
-//! 2. [`request_structured_output`] is the *direct* surface: it skips
-//!    the tool loop entirely and hands the schema to the underlying
-//!    [`Provider::chat_structured`] implementation.  Use this from
-//!    the SDK / role pipelines when you already have a [`Provider`]
-//!    handle and want native strict-mode JSON guaranteed by the
-//!    upstream API (OpenAI `response_format: json_schema`,
-//!    Gemini `responseSchema`, Anthropic tool-use binding, ...).
-//!
-//! Both paths return JSON with the same shape, so callers can choose
-//! between them based on whether they have a `Provider` (direct) or
-//! only an agent loop in flight (tool).
 
 use super::traits::{Tool, ToolResult};
 use crate::providers::traits::{ChatMessage, Provider, StructuredResponse};

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge transport — WebSocket transport layer.
-// Mirrors claude-code-typescript-src`bridge/replBridgeTransport.ts`.
-
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 

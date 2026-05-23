@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! LSP snapshot attached to the query context.
-//!
-//! Captures a tiny slice of what the running language server has told
-//! us about the focus files: number of diagnostics and (optionally) a
-//! condensed hover blurb.  The full LSP payload is much larger; the
-//! context layer only needs enough to steer the LLM toward fixes.
 
 use std::path::PathBuf;
 

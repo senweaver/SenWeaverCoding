@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! MCP (Model Context Protocol) client — connects to external tool servers.
-//!
-//! Supports multiple transports: stdio (spawn local process), HTTP, and SSE.
 
 use std::collections::HashMap;
 use std::sync::Arc;

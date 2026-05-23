@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! CLI slash-command dispatch — looks the command up in the global
-//! [`crate::commands::registry::CommandRegistry`] (built at start-up
-//! inside [`crate::services::container::ServiceContainer::new`]) and
-//! executes it against a supplied
-//! [`crate::commands::registry::CommandContext`].
-//!
-//! This replaces the previous placeholder that just `bail!`-ed with a
-//! real dispatcher: every registered `/slash` command is reachable
-//! here.  Binaries that embed the agent (CLI, TUI, channel adapters)
-//! should prefer this entry point over hand-written `match` arms so
-//! new commands are picked up automatically.
 
 use anyhow::{Result, anyhow};
 

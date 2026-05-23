@@ -1,98 +1,13 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `AgentLoopCore` — builder-shaped façade over the **stateless tool loop**
-//! `run_tool_call_loop`.
-//!
-//! ## Architecture: two layers, not one
-//!
-//! After auditing what each path actually does (Apr 2026 review) the
-//! project deliberately keeps **two execution layers** that serve
-//! different purposes — they are NOT redundant implementations of the
-//! same loop:
-//!
-//! ```text
-//! ┌──────────────────────────────────────────────────────────────┐
-//! │ Upper layer (stateful, user-facing): Agent::turn_streamed    │
-//! │  - Memory loader / auto_save                                  │
-//! │  - Response cache lookup + write-back                          │
-//! │  - apply_turn_preamble (mode filter, hot-reload, sys prompt)   │
-//! │  - apply_gui_model_switch (mid-turn model swap from GUI)      │
-//! │  - classify_model (per-turn complexity-based model routing)   │
-//! │  - finish_turn_experience (experience replay records)         │
-//! │  - prepare_iteration_context_budget                            │
-//! └──────────────────────────────────────────────────────────────┘
-//!                            │
-//!                            ▼ (calls provider.stream_chat / execute_tools)
-//! ┌──────────────────────────────────────────────────────────────┐
-//! │ Lower layer (stateless executor): run_tool_call_loop         │
-//! │  - 25 explicit parameters, no implicit state                  │
-//! │  - self_consistency resampling + majority vote                │
-//! │  - DraftEvent rich event stream                               │
-//! │  - tokio_util::CancellationToken multi-level cancel           │
-//! │  - Channel routing (channel_name, channel_reply_target)       │
-//! │  - RBAC engine integration                                    │
-//! └──────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! Each frontend picks the layer that matches its needs:
-//!
-//! | Frontend | Loop body | Why |
-//! |----------|-----------|-----|
-//! | CLI / `channels::mod`              | `run_tool_call_loop` directly | batch / no UI session state |
-//! | Subagents (`tools::delegate*`)     | `run_tool_call_loop` directly | scoped child tool execution |
-//! | `Agent::turn_via_loop_core` (SDK)  | `AgentLoopCore::run_turn` → `run_tool_call_loop` | thin SDK adapter |
-//! | TUI (`session::mod`)               | `Agent::turn_streamed`  | needs cache / memory / model switch |
-//! | GUI (`gui::bridge`)                | `Agent::turn_streamed`  | needs cache / memory / hot-reload |
-//! | Gateway WS / RPC / ACP             | `Agent::turn_streamed`  | needs full agent state |
-//!
-//! ## Why not "make everyone go through `run_tool_call_loop`"?
-//!
-//! It looks tempting from a "single source of truth" angle, but the
-//! lower-layer loop intentionally does NOT carry the upper-layer
-//! features.  A blanket migration would silently delete:
-//!
-//! * Response cache → instantly regresses token-saving work.
-//! * Memory persistence → cross-session continuity broken.
-//! * GUI mid-turn model switching.
-//! * `classify_model` automatic complexity-based routing.
-//! * Config hot-reload.
-//! * `mode_tool_filter` (Plan / Ask allowlists).
-//! * `finish_turn_experience` records (kills experience replay /
-//!   evaluation pipelines).
-//!
-//! These features are stateful, agent-scoped, and live deliberately in
-//! `Agent::turn_streamed`.  They cannot be "lifted" into
-//! `run_tool_call_loop` without turning that function into a 50-parameter
-//! stateful API — which defeats its purpose.
-//!
-//! ## How parity is kept (the actually-correct pattern)
-//!
-//! Cross-cutting policy that MUST be identical between the two layers
-//! lives in **shared modules**, and BOTH paths call those modules.  Any
-//! new such policy must be added the same way; never duplicate logic
-//! across `run_tool_call_loop` and `Agent::turn_streamed`.
-//!
-//! Currently shared:
-//!
-//! * Loop detection — [`crate::agent::loop_control::LoopControlState`].
-//! * Mode hooks (auto-verify, post-tool-batch) — [`crate::agent::mode_effects`].
-//! * Plan-mode enforcement — [`crate::agent::plan_mode_enforcement`].
-//! * Turn-metrics RAII — [`crate::agent::executor_core::TurnMetricsGuard`].
-//! * Pacing — [`crate::agent::executor_core::PacingGovernor`].
-//!
-//! ## What this module provides
-//!
-//! `AgentLoopCore` exists for the *third* call site —
-//! `Agent::turn_via_loop_core` and any future SDK / batch caller that
-//! wants a clean builder API into the lower layer without the 25
-//! positional arguments.  It is intentionally a thin façade and never
-//! grows upper-layer responsibilities.
 
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::loop_policy::{LoopOrigin, PolicyBundle};
+use crate::agent::loop_unified::UnifiedLoop;
 use crate::config::PacingConfig;
 use crate::observability::traits::Observer;
 use crate::providers::traits::{ChatMessage, Provider};
@@ -100,34 +15,34 @@ use crate::security::rbac::{CallerIdentity, RbacEngine};
 use crate::tools::traits::Tool;
 
 pub struct AgentLoopCore<'a> {
-    pub provider: &'a dyn Provider,
-    pub tools_registry: &'a [Box<dyn Tool>],
-    pub observer: &'a dyn Observer,
+    provider: &'a dyn Provider,
+    tools_registry: &'a [Box<dyn Tool>],
+    observer: &'a dyn Observer,
 
-    pub provider_name: &'a str,
-    pub model: &'a str,
-    pub temperature: f64,
-    pub silent: bool,
+    provider_name: &'a str,
+    model: &'a str,
+    temperature: f64,
+    silent: bool,
 
-    pub channel_name: &'a str,
-    pub channel_reply_target: Option<&'a str>,
+    channel_name: &'a str,
+    channel_reply_target: Option<&'a str>,
 
-    pub multimodal_config: &'a crate::config::MultimodalConfig,
-    pub max_tool_iterations: usize,
-    pub cancellation_token: Option<CancellationToken>,
+    multimodal_config: &'a crate::config::MultimodalConfig,
+    max_tool_iterations: usize,
+    cancellation_token: Option<CancellationToken>,
 
-    pub excluded_tools: &'a [String],
-    pub dedup_exempt_tools: &'a [String],
+    excluded_tools: &'a [String],
+    dedup_exempt_tools: &'a [String],
 
-    pub pacing: &'a PacingConfig,
-    pub rbac_engine: Option<&'a Arc<RbacEngine>>,
-    pub rbac_identity: Option<&'a CallerIdentity>,
+    pacing: &'a PacingConfig,
+    rbac_engine: Option<&'a Arc<RbacEngine>>,
+    rbac_identity: Option<&'a CallerIdentity>,
 
-    pub agent_id: Option<String>,
+    agent_id: Option<String>,
 }
 
 impl<'a> AgentLoopCore<'a> {
-
+    #[must_use]
     pub fn bare(
         provider: &'a dyn Provider,
         tools_registry: &'a [Box<dyn Tool>],
@@ -150,7 +65,6 @@ impl<'a> AgentLoopCore<'a> {
             channel_name: "cli",
             channel_reply_target: None,
             multimodal_config,
-
             max_tool_iterations: crate::config::default_agent_max_tool_iterations(),
             cancellation_token: None,
             excluded_tools,
@@ -203,12 +117,49 @@ impl<'a> AgentLoopCore<'a> {
         self
     }
 
+    fn to_policy(
+        &self,
+        on_delta: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::DraftEvent>>,
+    ) -> PolicyBundle<'a> {
+        let origin = match self.channel_name {
+            "cli" => LoopOrigin::Cli,
+            "delegate" => LoopOrigin::Delegated,
+            "gui" => LoopOrigin::Gui,
+            _ => LoopOrigin::Channel,
+        };
+        PolicyBundle::new(
+            origin,
+            self.provider,
+            self.tools_registry,
+            self.observer,
+            self.provider_name,
+            self.model,
+            self.multimodal_config,
+            self.pacing,
+            self.excluded_tools,
+            self.dedup_exempt_tools,
+        )
+        .with_temperature(self.temperature)
+        .with_silent(self.silent)
+        .with_channel_name(self.channel_name)
+        .with_channel_reply_target(self.channel_reply_target)
+        .with_max_iterations(self.max_tool_iterations)
+        .with_cancellation(self.cancellation_token.clone())
+        .with_on_delta(on_delta)
+        .with_rbac(self.rbac_engine, self.rbac_identity)
+    }
+
     pub async fn run_turn(
         &self,
         history: &mut Vec<ChatMessage>,
         on_delta: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::DraftEvent>>,
     ) -> anyhow::Result<String> {
-        self.run_turn_internal(history, on_delta).await
+        if let Some(ref id) = self.agent_id {
+            tracing::debug!(target: "agent.loop_core", agent_id = %id, "dispatching via UnifiedLoop");
+        }
+        UnifiedLoop::new(self.to_policy(on_delta))
+            .run(history)
+            .await
     }
 
     pub async fn run_streamed(
@@ -216,89 +167,14 @@ impl<'a> AgentLoopCore<'a> {
         history: &mut Vec<ChatMessage>,
         event_tx: tokio::sync::mpsc::Sender<crate::agent::TurnEvent>,
     ) -> anyhow::Result<String> {
-
         let (delta_tx, mut delta_rx) =
             tokio::sync::mpsc::channel::<crate::agent::loop_::DraftEvent>(64);
 
         let bridge_handle =
             crate::runtime::spawn_supervised("agent.loop_core.draft_bridge", async move {
                 while let Some(event) = delta_rx.recv().await {
-                    let turn_event = match event {
-                        crate::agent::loop_::DraftEvent::Clear => {
-
-                            continue;
-                        }
-                        crate::agent::loop_::DraftEvent::Progress(text) => {
-                            crate::agent::TurnEvent::StatusUpdate {
-                                action: "thinking".into(),
-                                detail: text,
-                            }
-                        }
-                        crate::agent::loop_::DraftEvent::Content(text) => {
-                            crate::agent::TurnEvent::Chunk { delta: text }
-                        }
-                        crate::agent::loop_::DraftEvent::Thinking(text) => {
-                            crate::agent::TurnEvent::Thinking { delta: text }
-                        }
-                        crate::agent::loop_::DraftEvent::ToolCall { name, args } => {
-                            crate::agent::TurnEvent::ToolCall { name, args }
-                        }
-                        crate::agent::loop_::DraftEvent::ToolResult { name, output, success } => {
-                            crate::agent::TurnEvent::ToolResult { name, output, success }
-                        }
-                        crate::agent::loop_::DraftEvent::FileEdit {
-                            path,
-                            additions,
-                            deletions,
-                            diff,
-                            edit_batch_id,
-                        } => crate::agent::TurnEvent::FileEdit {
-                            path,
-                            additions,
-                            deletions,
-                            diff,
-                            edit_batch_id,
-                        },
-                        crate::agent::loop_::DraftEvent::ProgressTick {
-                            iteration,
-                            max_iterations,
-                            tokens_used,
-                        } => crate::agent::TurnEvent::ProgressTick {
-                            iteration,
-                            max_iterations,
-                            tokens_used,
-                        },
-                        crate::agent::loop_::DraftEvent::ContextCompressed {
-                            tokens_before,
-                            tokens_after,
-                        } => crate::agent::TurnEvent::ContextCompressed {
-                            tokens_before,
-                            tokens_after,
-                        },
-                        crate::agent::loop_::DraftEvent::Cancelling { reason } => {
-                            crate::agent::TurnEvent::Cancelling { reason }
-                        }
-                        crate::agent::loop_::DraftEvent::Error { message } => {
-                            crate::agent::TurnEvent::Error { message }
-                        }
-                        crate::agent::loop_::DraftEvent::UsageUpdate { .. } => {
-
-                            continue;
-                        }
-                        crate::agent::loop_::DraftEvent::Subagent {
-                            task_id,
-                            agent_id,
-                            kind,
-                            delta,
-                        } => crate::agent::TurnEvent::SubagentChunk {
-                            task_id,
-                            agent_id,
-                            kind,
-                            delta,
-                        },
-                        crate::agent::loop_::DraftEvent::PiiSanitized { report } => {
-                            crate::agent::TurnEvent::PiiSanitized { report }
-                        }
+                    let Some(turn_event) = crate::agent::event_sink::draft_to_turn(event) else {
+                        continue;
                     };
                     if event_tx.send(turn_event).await.is_err() {
                         tracing::debug!(
@@ -310,47 +186,10 @@ impl<'a> AgentLoopCore<'a> {
             })
             .into_inner();
 
-        let result = self.run_turn_internal(history, Some(delta_tx)).await;
+        let result = self.run_turn(history, Some(delta_tx)).await;
 
         bridge_handle.abort();
-
         result
-    }
-
-    #[allow(deprecated)]
-    async fn run_turn_internal(
-        &self,
-        history: &mut Vec<ChatMessage>,
-        on_delta: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::DraftEvent>>,
-    ) -> anyhow::Result<String> {
-        crate::agent::loop_::run_tool_call_loop(
-            self.provider,
-            history,
-            self.tools_registry,
-            self.observer,
-            self.provider_name,
-            self.model,
-            self.temperature,
-            self.silent,
-            None,
-            self.channel_name,
-            self.channel_reply_target,
-            self.multimodal_config,
-            self.max_tool_iterations,
-            self.cancellation_token.clone(),
-            on_delta,
-            None,
-            self.excluded_tools,
-            self.dedup_exempt_tools,
-            None,
-            None,
-            self.pacing,
-            self.rbac_engine,
-            self.rbac_identity,
-            None,
-            None,
-        )
-        .await
     }
 
     pub fn dry_check(&self, history: &[ChatMessage]) -> Result<(), String> {

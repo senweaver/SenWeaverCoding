@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! TUI theme and color palette for SenWeaverCoding.
-//!
-//! Provides a consistent visual style across all TUI screens with
-//! semantic color assignments for different UI elements.
 
 use ratatui::style::{Color, Modifier, Style};
 

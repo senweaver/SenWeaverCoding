@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Per-workspace Python interpreter state, keyed by workspace root.
-// Subscribes to /api/python/events SSE for live updates while a venv is being
-// created or requirements are being installed, and exposes the actions backing
-// the StatusBar Python segment and the PythonEnvPicker modal.
 
 import { create } from 'zustand'
 import {

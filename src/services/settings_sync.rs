@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Settings sync service — mirrors claude-code-typescript-src`services/settingsSync/`.
-// Synchronizes agent settings across devices and sessions.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

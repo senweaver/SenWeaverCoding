@@ -1,17 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Client-side LSP coordination layer.
-//
-// Responsibilities:
-// 1. Forward CodeMirror lifecycle events (`didOpen` / `didChange` /
-//    `didSave` / `didClose`) to the backend `/api/lsp/textdocument`
-//    relay, with a 300 ms debounce on `didChange` so a fast typist
-//    doesn't drown the server.
-// 2. Issue synchronous `hover` / `completion` / `definition` requests
-//    against `/api/lsp/request`.
-// 3. Subscribe to every active chat WebSocket so `lsp_diagnostics`,
-//    `lsp_install_progress`, and `lsp_server_status` events flow into
-//    the `lspStore` regardless of which session is currently focused.
 
 import { lspApi } from '../api/lsp'
 import { wsManager } from '../api/websocket'

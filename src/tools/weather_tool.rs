@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Weather tool — fetches current conditions and forecast via wttr.in.
-//!
-//! Uses the free, no-API-key wttr.in service (`?format=j1` JSON endpoint).
-//! Supports any location wttr.in accepts: city names (in any language/script),
-//! airport IATA codes, GPS coordinates, zip/postal codes, and domain-based
-//! geolocation. Units default to metric but can be overridden per-call.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
@@ -150,7 +144,9 @@ impl WeatherTool {
             .connect_timeout(Duration::from_secs(WTTR_CONNECT_TIMEOUT_SECS))
             .user_agent("sen-weather/1.0");
 
-        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.weather");
+        let builder = crate::services::get_services()
+            .proxy_runtime()
+            .apply_to_builder(builder, "tool.weather");
         let client = builder.build()?;
 
         let response = client.get(&url).send().await?;

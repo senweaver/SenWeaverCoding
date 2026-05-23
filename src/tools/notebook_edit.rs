@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `notebook_edit` tool — wraps every cell mutation in an
-//! [`EditOp::NotebookCell`] and dispatches it through
-//! [`crate::apply_model::OpsApplier`].  The cell-level JSON helpers
-//! ([`apply_notebook_cell_op`] and friends) remain `pub(crate)` so
-//! both the tool surface and the OpsApplier dispatch path share the
-//! exact same semantics.
+
 use super::traits::{Tool, ToolResult};
 use crate::apply_model::{EditBatch, EditOp, EditOrigin, NotebookCellOp, OpsApplier};
 use crate::security::SecurityPolicy;
@@ -500,13 +495,25 @@ impl Tool for NotebookEditTool {
             path: resolved_target.clone(),
             cell: cell_op,
         });
+        let batch_id = batch.batch_id.clone();
+        let before_bytes = std::fs::read(&resolved_target).ok();
 
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
-                let out_len = tokio::fs::metadata(&resolved_target)
-                    .await
-                    .map(|m| m.len())
+                let after_bytes = std::fs::read(&resolved_target).ok();
+                let out_len = after_bytes
+                    .as_ref()
+                    .map(|b| b.len() as u64)
                     .unwrap_or(0);
+                if let Some(after) = after_bytes.as_deref() {
+                    crate::agent::file_edit_emitter::emit_file_edit(
+                        &resolved_target,
+                        before_bytes.as_deref(),
+                        Some(after),
+                        Some(batch_id),
+                    )
+                    .await;
+                }
                 Ok(ToolResult {
                     success: true,
                     output: format!(

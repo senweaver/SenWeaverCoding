@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ??in-process [`SessionSyncHub`].
-//!
-//! A single tokio `broadcast::Sender` per live session id.  CLI /
-//! TUI / GUI each create their own `subscribe`-backed receiver and
-//! drive a local "chat view" reducer from the delta stream; the
-//! [`crate::session::state::SessionActor`] is the sole publisher.
-//!
-//! Cross-process synchronisation (UDS / Windows Named Pipe) is
-//! documented as a follow-up in the plan and intentionally
-//! **not** wired here ??doing so would change the failure modes of
-//! the hub (network backpressure, auth) and conflict with the
-//! "ship single process first" risk mitigation.  See
-//! `c:\Users\cai\.cursor\plans\phase_7_session_unification_4643f099.plan.md`
-//! section "任务 7.3 ??跨端同步（进程内?? for the deferral note.
 
 use std::collections::HashMap;
 use std::sync::Arc;

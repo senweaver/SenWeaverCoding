@@ -1,54 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Next-Edit Prediction (NEP / "Agent Tab").
-//!
-//! Cursor's *Agent Tab* / Windsurf's *Cascade Next Edit* / Claude
-//! Code's `--continue` rely on the same primitive: look at the user's
-//! most-recent edit and predict the **next** edit they're likely to
-//! make.  The classic case is "user changed a function signature →
-//! suggest updating the call sites"; another is "user added an
-//! import → suggest finishing the type usage that motivated it".
-//!
-//! The module exposes:
-//!
-//! - [`NepProvider`] — the dispatch trait.  All providers consume an
-//!   [`NepRequest`] (recent edit + open-buffer view) and produce an
-//!   [`NepResponse`] (zero or more [`NepSuggestion`]s).  Each
-//!   suggestion carries a unified diff so the surface can re-use the
-//!   M1.5 [`crate::apply_model::FastApplyRefiner`] / heuristic apply
-//!   path without any extra plumbing.
-//! - [`HeuristicNep`] — pure-Rust pattern-matcher that handles the
-//!   "obvious" cases (signature change / unused import resolution /
-//!   newly-introduced TODO).  Always available, no provider needed.
-//! - [`LlmNep`] — provider-backed predictor that asks the configured
-//!   LLM to produce a unified diff aimed at the next edit.  Used when
-//!   the heuristic finds nothing or when the user explicitly tabs
-//!   through to the "smarter" suggestion.
-//! - [`NepRegistry`] — fan-out helper that runs each registered
-//!   provider until one returns a non-empty response, mirroring the
-//!   shape of [`crate::inline_completion::InlineCompletionRegistry`].
-//!
-//! The triggering surface (TUI editor / GUI editor / CLI `sen
-//! complete --next-edit`) calls [`NepRegistry::predict`] after a save
-//! or after an accepted ghost-text suggestion; the renderer then
-//! displays the resulting diff alongside the cursor and lets the
-//! user accept it via Tab.
-//!
-//! ## Design choices
-//!
-//! - **Diff-shaped output, not free text.**  By emitting a unified
-//!   diff we can apply the suggestion through the same M1.5
-//!   `apply_unified_diff_with_fast_path` pipeline that handles
-//!   `Cmd+K`.  This keeps the apply path single-source-of-truth and
-//!   guarantees the same locking / journaling guarantees.
-//! - **Stateless providers.**  Edit-history bookkeeping lives in the
-//!   call site; providers see a snapshot in [`NepRequest`].  This
-//!   avoids the classic pitfall of a long-lived predictor cache that
-//!   drifts out of sync with the buffer.
-//! - **Bounded context.**  The request carries at most a handful of
-//!   recent edits (`recent_edits`) and a window of the active file
-//!   so an aggressive editor can't blow up the LLM context budget.
 
 use std::path::PathBuf;
 use std::sync::Arc;

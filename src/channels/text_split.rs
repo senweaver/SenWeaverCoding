@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared message splitting utility for channels with per-message length limits.
 
 pub fn split_message(text: &str, max_chars: usize, max_chunks: usize) -> Vec<String> {
     if text.len() <= max_chars {

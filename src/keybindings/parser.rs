@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Key sequence parser — mirrors claude-code-typescript-src`keybindings/parser.ts`.
 
 use super::schema::KeyModifier;
 

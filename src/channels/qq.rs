@@ -296,7 +296,9 @@ impl QQChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client("channel.qq", self.proxy_url.as_deref())
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client("channel.qq", self.proxy_url.as_deref())
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {
@@ -948,9 +950,10 @@ impl Channel for QQChannel {
         let gw_url = self.get_gateway_url(&token).await?;
 
         tracing::info!("QQ: connecting to gateway WebSocket...");
-        let (ws_stream, _) =
-            crate::config::ws_connect_with_proxy(&gw_url, "channel.qq", self.proxy_url.as_deref())
-                .await?;
+        let (ws_stream, _) = crate::services::get_services()
+            .proxy_runtime()
+            .ws_connect(&gw_url, "channel.qq", self.proxy_url.as_deref())
+            .await?;
         let (mut write, mut read) = ws_stream.split();
 
         let hello = read

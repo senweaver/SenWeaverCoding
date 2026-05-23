@@ -12,6 +12,10 @@ import type {
   ResourceWaitKind,
 } from '../../stores/chatStore'
 
+const EMPTY_WAITS: readonly PendingResourceWait[] = Object.freeze(
+  [],
+) as readonly PendingResourceWait[]
+
 interface ResourceWaitBannerProps {
   sessionId: string
 }
@@ -52,8 +56,8 @@ function formatElapsed(startedAt: number, now: number): string {
 export function ResourceWaitBanner({ sessionId }: ResourceWaitBannerProps) {
   const t = useTranslation()
   const waits = useChatStore(
-    (s) => s.sessions[sessionId]?.pendingResourceWaits ?? [],
-  )
+    (s) => s.sessions[sessionId]?.pendingResourceWaits ?? EMPTY_WAITS,
+  ) as readonly PendingResourceWait[]
   const sessions = useSessionStore((s) => s.sessions)
   const openTab = useTabStore((s) => s.openTab)
   const [expanded, setExpanded] = useState(false)
@@ -69,7 +73,7 @@ export function ResourceWaitBanner({ sessionId }: ResourceWaitBannerProps) {
 
   if (items.length === 0) return null
 
-  const visible: PendingResourceWait[] = expanded ? items : items.slice(0, 1)
+  const visible: readonly PendingResourceWait[] = expanded ? items : items.slice(0, 1)
   const hidden = items.length - visible.length
 
   return (

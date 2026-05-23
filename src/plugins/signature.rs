@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Ed25519 plugin signature verification.
-//!
-//! Uses `ring` (already a dependency) for Ed25519 signing and verification.
-//! Plugin manifests may include a base64url-encoded Ed25519 signature over
-//! the canonical manifest bytes (TOML content without the `signature` field).
-//! Publisher public keys are stored in the config as hex-encoded strings.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

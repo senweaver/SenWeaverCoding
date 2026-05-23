@@ -1,46 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Intelligent task routing for multi-agent coordination.
-//!
-//! ## Overview
-//!
-//! The `TaskRouter` routes incoming tasks to the most suitable agent based on:
-//! - Capability matching (tool coverage)
-//! - Load balancing (least connections)
-//! - Affinity (same context agents)
-//! - Historical performance
-//!
-//! ## upgrades
-//!
-//! * **Strategy-aware scoring.**  [`RoutingStrategy`] is consumed by
-//!   [`TaskRouter::score_candidate`] to pick a weighting profile:
-//!   `CapabilityFirst` / `LeastLoad` / `AffinityFirst` collapse the
-//!   competing signals to a single weight so the named strategy does
-//!   what the CLI / config file advertises; `Balanced` keeps the
-//!   configured weights but normalizes them with the new
-//!   `success_rate_weight` so dials still sum to `1.0`.
-//! * **Health penalty as multiplicative gate.**
-//!   [`TaskRouter::health_penalty_for`] now discounts the final
-//!   score `(1 - penalty)` instead of being ignored.  Unhealthy
-//!   providers therefore only win a route when no healthy agent can
-//!   cover the required capabilities.
-//! * **Real [`LoadEstimate`].**  [`RoutingDecision::estimated_load`]
-//!   is populated from `agent.current_load` / `agent.max_concurrency`
-//!   so operators can read the effective load at decision time.
-//! * **Rolling success window.**  New `success_windows:
-//!   Arc<RwLock<HashMap<AgentId, VecDeque<bool>>>>` (capped at 500
-//!   samples per agent) feeds `past_success_rate`.  Callers update
-//!   it via [`TaskRouter::record_outcome`]; the
-//!   `multi_agent_runtime::submit_task_graph_with_context` integration
-//!   drives it from scheduler outcomes.
-//! * **Tiered capability matching.**  `score_capability` now
-//!   dispatches through a three-layer fallback: full-match (1.0),
-//!   group-match (weighted via [`CapabilityGroups`], default table
-//!   covering code-modification / rust-refactor / web-search bundles)
-//!   and bare intersection (max 0.5) so zero-overlap candidates are
-//!   still eligible at low confidence instead of being dropped.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;

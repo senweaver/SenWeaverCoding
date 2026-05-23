@@ -1,33 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WhatsApp Web channel using wa-rs (native Rust implementation)
-//!
-//! This channel provides direct WhatsApp Web integration with:
-//! - QR code and pair code linking
-//! - End-to-end encryption via Signal Protocol
-//! - Full Baileys parity (groups, media, presence, reactions, editing/deletion)
-//!
-//! # Feature Flag
-//!
-//! This channel requires the `whatsapp-web` feature flag:
-//! ```sh
-//! cargo build --features whatsapp-web
-//! ```
-//!
-//! # Configuration
-//!
-//! ```toml
-//! [channels_config.whatsapp]
-//! session_path = "~/.senweavercoding/whatsapp-session.db"  # Required for Web mode
-//! pair_phone = "15551234567"  # Optional: for pair code linking
-//! allowed_numbers = ["+1234567890", "*"]  # Same as Cloud API
-//! ```
-//!
-//! # Runtime Negotiation
-//!
-//! This channel is automatically selected when `session_path` is set in the config.
-//! The Cloud API channel is used when `phone_number_id` is set.
 
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use super::whatsapp_storage::RusqliteStore;

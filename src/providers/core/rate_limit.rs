@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Token-bucket rate limiter primitives shared across providers.
-//!
-//! Supports per-key limiting (e.g. per `(provider, model)` or per API key)
-//! through [`RateLimiterMap`], backed by `DashMap` for lock-free lookup.
 
 use std::hash::Hash;
 use std::sync::Arc;

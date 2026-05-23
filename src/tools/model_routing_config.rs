@@ -939,7 +939,7 @@ impl Tool for ModelRoutingConfigTool {
                     "remove_scenario" => Box::pin(self.handle_remove_scenario(&args)).await,
                     "upsert_agent" => Box::pin(self.handle_upsert_agent(&args)).await,
                     "remove_agent" => Box::pin(self.handle_remove_agent(&args)).await,
-                    _ => unreachable!("validated above"),
+                    other => anyhow::bail!("internal: unhandled model routing action '{other}'"),
                 }
             }
             _ => anyhow::bail!(

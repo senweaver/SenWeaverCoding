@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { usePluginStore } from '../../stores/pluginStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { Button } from '../shared/Button'
@@ -20,7 +21,7 @@ export function PluginList() {
   const fetchPluginDetail = usePluginStore((s) => s.fetchPluginDetail)
   const reloadPlugins = usePluginStore((s) => s.reloadPlugins)
   const sessions = useSessionStore((s) => s.sessions)
-  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const activeSessionId = useTabStore((s) => s.activeTabId)
   const addToast = useUIStore((s) => s.addToast)
   const t = useTranslation()
   const activeSession = sessions.find((session) => session.id === activeSessionId)

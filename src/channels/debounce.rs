@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Inbound message debouncing for rapid senders.
-//!
-//! When users type fast and send multiple messages in quick succession, each
-//! message would normally trigger a separate LLM call. [`MessageDebouncer`]
-//! accumulates rapid messages per sender within a configurable time window and
-//! emits them as a single concatenated message, reducing unnecessary agent runs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,7 +49,6 @@ impl MessageDebouncer {
 
         let mut entries = self.entries.lock().await;
         let key = sender_key.to_owned();
-        let _window = self.window;
 
         if let Some(entry) = entries.get_mut(&key) {
 

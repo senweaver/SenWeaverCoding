@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Session and write-mode metrics — Write Mode (plan/step/verify),
-//! DiffSession (applied/rollbacks), session unification
-//! (persist/replay/snapshot), evals histogram.
-//!
-//! | #  | Metric                                        | Type    |
-//! |----|-----------------------------------------------|---------|
-//! | 1  | `sen_write_mode_plans_total`                  | counter |
-//! | 2  | `sen_write_mode_plan_ok_total`                | counter |
-//! | 3  | `sen_write_mode_steps_total`                  | counter |
-//! | 4  | `sen_write_mode_step_executions_total`        | counter |
-//! | 5  | `sen_write_mode_verify_pass_total`            | counter |
-//! | 6  | `sen_write_mode_verify_fail_total`            | counter |
-//! | 7  | `sen_diff_session_applied_total`              | counter |
-//! | 8  | `sen_diff_session_rollbacks_total`            | counter |
-//! | 9  | `sen_evals_suite_seconds`                     | histogram (labelled by `suite`) |
 
 use std::sync::Mutex;
 use std::sync::OnceLock;

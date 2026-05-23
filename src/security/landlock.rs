@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Landlock sandbox (Linux kernel 5.13+ LSM)
-//!
-//! Landlock provides unprivileged sandboxing through the Linux kernel.
-//! This module uses the pure-Rust `landlock` crate for filesystem access control.
 
 #[cfg(all(feature = "sandbox-landlock", target_os = "linux"))]
 use landlock::{AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};

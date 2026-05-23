@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Server-Sent Events (SSE) transport — read via SSE stream, write via HTTP POST.
 
 use super::Transport;
 use anyhow::Result;

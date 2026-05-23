@@ -59,7 +59,7 @@ fn validate_provider_config(config: &crate::config::Config) -> Result<()> {
     }
 
     let temp = config.default_temperature;
-    if temp < 0.0 || temp > 2.0 {
+    if !(0.0..=2.0).contains(&temp) {
         bail!(
             "default_temperature must be between 0.0 and 2.0, got {}",
             temp

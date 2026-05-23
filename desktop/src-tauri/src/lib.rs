@@ -487,7 +487,6 @@ fn schedule_main_window_show_fallback(window: tauri::WebviewWindow) {
 #[tauri::command]
 fn reveal_in_explorer(path: String) -> Result<(), String> {
     use std::path::PathBuf;
-    use std::process::Command as StdCommand;
 
     let target = PathBuf::from(&path);
     let target_for_open: PathBuf = if target.exists() {
@@ -515,10 +514,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let mut cmd = StdCommand::new("explorer.exe");
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let mut cmd = senweavercoding::util::hidden_sync_command("explorer.exe");
         if is_file {
             cmd.arg(format!("/select,{}", target_for_open.display()));
         } else {
@@ -531,7 +527,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        let mut cmd = StdCommand::new("open");
+        let mut cmd = senweavercoding::util::hidden_sync_command("open");
         if is_file {
             cmd.arg("-R").arg(target_for_open.as_os_str());
         } else {
@@ -552,7 +548,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
         } else {
             target_for_open.clone()
         };
-        StdCommand::new("xdg-open")
+        senweavercoding::util::hidden_sync_command("xdg-open")
             .arg(dir_to_open.as_os_str())
             .spawn()
             .map_err(|e| format!("xdg-open spawn failed: {e}"))?;
@@ -621,6 +617,11 @@ pub fn run() {
             browser_dock::browser_dock_pin_test_target,
             browser_dock::browser_dock_clear_test_target,
             browser_dock::browser_dock_get_test_target,
+            browser_dock::browser_dock_release_agent_tab_for_session,
+            browser_dock::browser_dock_bind_tab_to_session,
+            browser_dock::browser_dock_unbind_tab_from_session,
+            browser_dock::browser_dock_present_session,
+            browser_dock::browser_dock_set_foreground_session,
         ]);
 
     let app_build = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

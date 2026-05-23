@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `/vector` slash command — inspect and exercise the `VectorIndex`
-//! backend directly from the CLI.
-//!
-//! Usage:
-//!   /vector upsert <id> <v1,v2,v3,...>
-//!   /vector search <v1,v2,v3,...> [limit]
-//!   /vector forget <id>
-//!   /vector stats
-//!
-//! The command operates on a process-global `LinearIndex` (the default
-//! backend).  When sqlite-vec persistence is needed, prefer the memory
-//! subsystem (which runs through `SqliteVecIndex`).
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use std::sync::LazyLock;
@@ -84,7 +72,11 @@ fn backend(ctx: &CommandContext) -> CommandResult {
         return CommandResult::ok(out);
     }
 
-    let name = target.unwrap();
+    let Some(name) = target else {
+        return CommandResult::err(
+            "/vector backend: expected a backend name argument".to_string(),
+        );
+    };
     let new_kind = match VectorBackend::from_str_lenient(&name) {
         Some(k) => k,
         None => {

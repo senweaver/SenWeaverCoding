@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! test-time compute (self-consistency).
-//!
-//! Given a prompt, generate `samples` candidate answers in parallel
-//! (each with an independent temperature jitter), then aggregate
-//! down to a single answer using the configured [`Aggregator`]:
-//!
-//! - [`Aggregator::MajorityVote`] — exact-string vote.  Ideal for
-//!   short, structured answers (classification labels, SQL queries,
-//!   function signatures).
-//! - [`Aggregator::EmbeddingCluster`] — cosine-similarity clustering
-//!   with a fixed centroid (`k = 1`) plus a threshold.  The cluster
-//!   medoid wins.  Works for long-form / paraphrased answers.
-//!
-//! The module is deliberately deterministic given the same input
-//! (no RNG inside aggregation) so unit tests are trivial and
-//! regression diffs are meaningful.
 
 use std::collections::HashMap;
 use std::sync::Arc;

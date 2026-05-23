@@ -1,21 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Syntactic verifier — tree-sitter parse-error detection.
-//!
-//! the verifier now actually consumes tree-sitter when the
-//! `code-intel` feature is on.  We walk the parse tree depth-first and
-//! collect every node where `is_error()` *or* `is_missing()` returns
-//! true; the missing-token branch is what catches "code that compiles
-//! to a tree but is structurally broken" — e.g. `fn main() { let x =
-//! 1 }` (Rust requires a `;` and tree-sitter inserts a MISSING node
-//! for it).
-//!
-//! When `code-intel` is disabled (or the language has no registered
-//! grammar) the verifier degrades gracefully to the bracket-balance
-//! heuristic that has shipped since D2.1.  The summary is
-//! tagged `degraded` so callers can distinguish a real pass from a
-//! best-effort one.
 
 use async_trait::async_trait;
 
@@ -182,7 +167,8 @@ pub(crate) fn heuristic_check(source: &str, _lang: Language) -> VerificationRepo
                     ')' => '(',
                     ']' => '[',
                     '}' => '{',
-                    _ => unreachable!(),
+
+                    _ => unreachable!("invariant: outer match guard restricts ch to closing bracket trio"),
                 };
                 match stack.pop() {
                     Some((o, _, _)) if o == expected => {}

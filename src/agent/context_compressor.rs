@@ -231,6 +231,7 @@ impl ContextCompressor {
             });
         }
 
+        let started_at = std::time::Instant::now();
         let mut passes_used = 0;
         for _ in 0..self.config.max_passes {
             let did_compress = self
@@ -245,6 +246,25 @@ impl ContextCompressor {
         }
 
         let tokens_after = estimate_tokens(history);
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        crate::observability::runtime_trace::record_event(
+            "context_compress",
+            None,
+            None,
+            Some(model),
+            None,
+            Some(passes_used > 0),
+            None,
+            serde_json::json!({
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
+                "threshold": threshold,
+                "context_window": self.context_window,
+                "passes_used": passes_used,
+                "duration_ms": elapsed_ms,
+                "message_count": history.len(),
+            }),
+        );
         Ok(CompressionResult {
             compressed: passes_used > 0,
             tokens_before,

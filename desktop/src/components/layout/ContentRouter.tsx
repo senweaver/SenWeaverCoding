@@ -2,6 +2,7 @@ import { useTabStore } from '../../stores/tabStore'
 import { EmptySession } from '../../pages/EmptySession'
 import { ActiveSession } from '../../pages/ActiveSession'
 import { ScheduledTasks } from '../../pages/ScheduledTasks'
+import { WorkerSession } from '../../pages/WorkerSession'
 
 export function ContentRouter() {
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -13,6 +14,10 @@ export function ContentRouter() {
 
   if (activeTabType === 'scheduled') {
     return <ScheduledTasks />
+  }
+
+  if (activeTabType === 'worker') {
+    return <WorkerSession workerId={activeTabId} />
   }
 
   return <ActiveSession />

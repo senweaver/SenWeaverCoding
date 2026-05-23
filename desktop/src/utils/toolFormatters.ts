@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Lightweight, side-effect-free formatters used by ToolCard and the
-// per-category views. Kept in one place so the rendering stays consistent
-// and the Explored summary can use the same conventions.
 
 function firstKey(input: unknown, keys: readonly string[]): unknown {
   if (!input || typeof input !== 'object') return undefined
@@ -299,17 +295,78 @@ export type WebSearchHit = {
   url: string
   snippet?: string
   host: string
+  source?: string
+  publishedAt?: string
+  engine?: string
+  index?: number
 }
 
 export type WebSearchSummary = {
   query: string
   provider?: string
   engine?: string
+  successfulEngines?: string[]
   hits: WebSearchHit[]
   raw: string
   looksLikeError: boolean
   errorMessage?: string
   fallbackHeader?: string
+}
+
+const WEB_SEARCH_ENVELOPE_RE =
+  /===WEB_SEARCH_JSON_BEGIN===\s*([\s\S]*?)\s*===WEB_SEARCH_JSON_END===/
+
+function parseWebSearchEnvelope(text: string): WebSearchSummary | null {
+  if (!text) return null
+  const match = text.match(WEB_SEARCH_ENVELOPE_RE)
+  if (!match || !match[1]) return null
+  let payload: unknown
+  try {
+    payload = JSON.parse(match[1].trim())
+  } catch {
+    return null
+  }
+  if (!payload || typeof payload !== 'object') return null
+  const obj = payload as Record<string, unknown>
+  const query = typeof obj.query === 'string' ? obj.query : ''
+  const successfulEngines = Array.isArray(obj.successful_engines)
+    ? (obj.successful_engines.filter((s) => typeof s === 'string') as string[])
+    : undefined
+  const rawHits = Array.isArray(obj.hits) ? obj.hits : []
+  const hits: WebSearchHit[] = []
+  for (const h of rawHits) {
+    if (!h || typeof h !== 'object') continue
+    const hobj = h as Record<string, unknown>
+    const title = typeof hobj.title === 'string' ? hobj.title.trim() : ''
+    const url = typeof hobj.url === 'string' ? hobj.url.trim() : ''
+    if (!title || !url) continue
+    const description =
+      typeof hobj.description === 'string' ? hobj.description.trim() : ''
+    const sourceRaw = typeof hobj.source === 'string' ? hobj.source.trim() : ''
+    const engineRaw = typeof hobj.engine === 'string' ? hobj.engine.trim() : ''
+    const publishedRaw =
+      typeof hobj.publishedAt === 'string' ? hobj.publishedAt.trim() : ''
+    const hostRaw = typeof hobj.host === 'string' ? hobj.host.trim() : ''
+    const indexRaw = typeof hobj.index === 'number' ? hobj.index : undefined
+    hits.push({
+      title,
+      url,
+      snippet: description || undefined,
+      host: hostRaw || safeHost(url),
+      source: sourceRaw || undefined,
+      engine: engineRaw || undefined,
+      publishedAt: publishedRaw || undefined,
+      index: indexRaw,
+    })
+  }
+  if (hits.length === 0 && !query) return null
+  return {
+    query,
+    successfulEngines,
+    hits,
+    raw: text,
+    looksLikeError: false,
+  }
 }
 
 const WEB_SEARCH_ERROR_PREFIXES = [
@@ -371,6 +428,11 @@ export function safeHost(url: string): string {
 }
 
 export function parseWebSearchResults(text: string): WebSearchSummary {
+  if (text) {
+    const envelope = parseWebSearchEnvelope(text)
+    if (envelope) return envelope
+  }
+
   const summary: WebSearchSummary = {
     query: '',
     hits: [],
@@ -388,6 +450,22 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
   const lines = text.split(/\r?\n/)
   let cursor = 0
   while (cursor < lines.length && !(lines[cursor] ?? '').trim()) cursor += 1
+
+  if (cursor < lines.length) {
+    const head = (lines[cursor] ?? '').trim()
+    const sourcesMatch = head.match(
+      /^Sources:\s*\d+\s*engine\(s\)\s*returned\s*\d+\s*aggregated\s*result\(s\)\s*[—-]\s*(.+)$/i,
+    )
+    if (sourcesMatch && sourcesMatch[1]) {
+      summary.successfulEngines = sourcesMatch[1]
+        .split(/,\s*/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+      cursor += 1
+      while (cursor < lines.length && !(lines[cursor] ?? '').trim()) cursor += 1
+    }
+  }
+
   if (cursor < lines.length) {
     const head = (lines[cursor] ?? '').trim()
     const fallbackMatch = head.match(/^\[Fallback\]\s*(.+)$/i)
@@ -399,7 +477,9 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
   }
   if (cursor < lines.length) {
     const head = (lines[cursor] ?? '').trim()
-    const headMatch = head.match(/^Search results for:\s*(.+?)(?:\s+\(via\s+([^)]+)\))?\.?$/i)
+    const headMatch = head.match(
+      /^(?:#\s*Web\s+Search\s+Results\s+for|Search\s+results\s+for):\s*(.+?)(?:\s+\(via\s+([^)]+)\))?\.?$/i,
+    )
     if (headMatch) {
       summary.query = (headMatch[1] ?? '').trim()
       if (headMatch[2]) summary.provider = headMatch[2].trim()
@@ -410,9 +490,15 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
       return summary
     }
   }
+
   while (cursor < lines.length) {
     const probe = (lines[cursor] ?? '').trim()
     if (!probe) {
+      cursor += 1
+      continue
+    }
+    const foundMatch = probe.match(/^Found\s+\d+\s+result/i)
+    if (foundMatch) {
       cursor += 1
       continue
     }
@@ -426,15 +512,22 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
   }
 
   let i = cursor
+  let indexCounter = 0
   while (i < lines.length) {
-    const numberMatch = lines[i]?.match(/^\s*(\d+)\.\s+(.+?)\s*$/)
+    const numberMatch =
+      lines[i]?.match(/^\s*(\d+)\.\s+(.+?)\s*$/) ??
+      lines[i]?.match(/^##\s*(\d+)\.\s+(.+?)\s*$/)
     if (!numberMatch) {
       i += 1
       continue
     }
+    indexCounter += 1
     const title = (numberMatch[2] ?? '').trim()
     let url = ''
     let snippet: string | undefined
+    let engine: string | undefined
+    let source: string | undefined
+    let publishedAt: string | undefined
 
     let j = i + 1
     while (j < lines.length) {
@@ -443,13 +536,41 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
         j += 1
         continue
       }
-      if (/^\s*\d+\.\s+/.test(next)) break
-      const indented = /^\s+\S/.test(next)
+      if (/^\s*\d+\.\s+/.test(next) || /^##\s*\d+\.\s+/.test(next)) break
+      const indented = /^\s+\S/.test(next) || /^[A-Z]/.test(next)
       if (!indented && !url) break
       const stripped = next.trim()
+
+      const urlMatch = stripped.match(/^URL:\s*(.+)$/i)
+      if (!url && urlMatch && urlMatch[1]) {
+        url = urlMatch[1].trim()
+        j += 1
+        continue
+      }
+      const engineFieldMatch = stripped.match(/^Engine:\s*(.+)$/i)
+      if (engineFieldMatch && engineFieldMatch[1]) {
+        engine = engineFieldMatch[1].trim()
+        j += 1
+        continue
+      }
+      const sourceFieldMatch = stripped.match(/^Source:\s*(.+)$/i)
+      if (sourceFieldMatch && sourceFieldMatch[1]) {
+        source = sourceFieldMatch[1].trim()
+        j += 1
+        continue
+      }
+      const publishedFieldMatch = stripped.match(/^Published:\s*(.+)$/i)
+      if (publishedFieldMatch && publishedFieldMatch[1]) {
+        publishedAt = publishedFieldMatch[1].trim()
+        j += 1
+        continue
+      }
       if (!url && /^[a-z][a-z0-9+\-.]*:\/\//i.test(stripped)) {
         url = stripped
-      } else if (url && !snippet) {
+        j += 1
+        continue
+      }
+      if (url && !snippet) {
         snippet = stripped
       } else if (url && snippet) {
         snippet = `${snippet} ${stripped}`.trim()
@@ -462,6 +583,10 @@ export function parseWebSearchResults(text: string): WebSearchSummary {
       url,
       snippet,
       host: safeHost(url),
+      source,
+      publishedAt,
+      engine,
+      index: indexCounter,
     })
     i = j
   }

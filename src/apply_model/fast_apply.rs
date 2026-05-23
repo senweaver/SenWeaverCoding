@@ -1,32 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Fast-apply tiered refiner.
-//!
-//! Cursor / Windsurf / Claude Code all run a *small, cheap, fast*
-//! model dedicated to "applying" a high-level diff to source code.
-//! The main reasoning model produces a rough patch; the fast-apply
-//! model rewrites the patch against the actual file so the heuristic
-//! locator in [`super::heuristic`] can land it.  Decoupling the two
-//! tiers is the single most-impactful latency / cost optimization on
-//! the inline-edit hot path.
-//!
-//! [`FastApplyRefiner`] wraps two [`super::LlmRefiner`] instances
-//! (typically backed by [`super::HttpLlmRefiner`] with different
-//! `model` strings):
-//!
-//! - **fast tier** — invoked first.  Runs against the user-configured
-//!   `fast_apply_model` with a tight timeout / low temperature so it
-//!   resolves common drift / context-mismatch cases in <2 s.
-//! - **full tier** — invoked when the fast tier raises an error or
-//!   the recursive cap is reached.  Falls back to the heavier
-//!   reasoning model so the runner remains correct even when the
-//!   fast model can't repair the diff.
-//!
-//! The refiner is also used by
-//! [`super::OpsApplier::apply_unified_diff_with_fast_path`] so any
-//! tool that wants to apply a unified diff can opt into the same
-//! tiered policy without re-implementing the loop.
 
 use std::sync::Arc;
 

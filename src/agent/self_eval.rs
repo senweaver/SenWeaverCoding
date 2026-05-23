@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! LLM-as-judge response quality evaluation.
-//!
-//! Provides heuristic and LLM-based scoring, feeding signals into the
-//! reinforcement engine for adaptive behavior.
 
 use crate::providers::traits::{ChatMessage, Provider};
 use schemars::JsonSchema;

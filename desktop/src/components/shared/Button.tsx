@@ -41,7 +41,7 @@ export function Button({
       disabled={disabled || loading}
       className={`
         inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-md)]
-        font-medium transition-colors duration-150 cursor-pointer
+        font-medium whitespace-nowrap transition-colors duration-150 cursor-pointer
         disabled:opacity-50 disabled:cursor-not-allowed
         ${variantStyles[variant]} ${sizeStyles[size]} ${className}
       `}

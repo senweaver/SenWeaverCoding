@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Microsoft 365 integration tool — Graph API access for Mail, Teams, Calendar,
-//! OneDrive, and SharePoint via a single action-dispatched tool surface.
-//!
-//! Auth is handled through direct HTTP calls to the Microsoft identity platform
-//! (client credentials or device code flow) with token caching.
 
 pub mod auth;
 pub mod graph_client;
@@ -36,7 +31,9 @@ impl Microsoft365Tool {
         sen_dir: &std::path::Path,
     ) -> anyhow::Result<Self> {
         let http_client =
-            crate::config::build_runtime_proxy_client_with_timeouts("tool.microsoft365", 60, 10);
+            crate::services::get_services()
+                .proxy_runtime()
+                .build_client_with_timeouts("tool.microsoft365", 60, 10);
         let token_cache = Arc::new(auth::TokenCache::new(config.clone(), sen_dir)?);
         Ok(Self {
             config,

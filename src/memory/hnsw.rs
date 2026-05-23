@@ -1,39 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! In-memory HNSW (Hierarchical Navigable Small World) vector index.
-//!
-//! Pure-Rust implementation of the HNSW algorithm (Malkov & Yashunin,
-//! 2016) with cosine-similarity scoring.  Designed as a drop-in
-//! [`crate::memory::vector_index::VectorIndex`] implementation for
-//! corpora of 10k–1M embeddings where the `LinearIndex` O(N·D) scan
-//! becomes the bottleneck.
-//!
-//! Algorithm summary:
-//!
-//! 1. Each node gets a level `L` drawn from `floor(-ln(U) · ml)`
-//!    where `U ∈ (0, 1)` and `ml = 1 / ln(M)`.
-//! 2. Layer `L` is populated with a sparse proximity graph; each
-//!    descending layer is progressively denser, with the bottom
-//!    layer (0) connecting every node.
-//! 3. Insert: greedy-search from the top level down to `L + 1`
-//!    using the single nearest as the new entry point; at levels
-//!    `L..=0` run an `ef_construction`-best search and keep the
-//!    closest `M` as bidirectional neighbours.
-//! 4. Search: greedy descent from the top to layer 1, then run an
-//!    `ef_search`-best beam search at layer 0, returning top-`k`.
-//!
-//! The implementation trades a small amount of optimisation for
-//! readability:
-//!   * `HashMap<String, usize>` for O(1) id → index lookup;
-//!   * pre-computed L2 norms for O(D) cosine;
-//!   * deterministic xorshift64 RNG so tests are reproducible.
-//!
-//! Delete semantics match the other backends: the node is marked
-//! tombstoned and skipped by searches, but the graph edges remain.
-//! Over time callers should rebuild when the tombstone ratio is
-//! material (≥ 25 %).  The index exposes [`HnswMemIndex::tombstone_ratio`]
-//! for that purpose.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};

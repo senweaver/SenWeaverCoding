@@ -75,7 +75,9 @@ impl MattermostChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_channel_proxy_client("channel.mattermost", self.proxy_url.as_deref())
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_channel_client("channel.mattermost", self.proxy_url.as_deref())
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {
@@ -217,10 +219,16 @@ impl Channel for MattermostChannel {
         });
 
         if let Some(root) = root_id {
-            body_map.as_object_mut().unwrap().insert(
-                "root_id".to_string(),
-                serde_json::Value::String(root.to_string()),
-            );
+            if let Some(obj) = body_map.as_object_mut() {
+                obj.insert(
+                    "root_id".to_string(),
+                    serde_json::Value::String(root.to_string()),
+                );
+            } else {
+                tracing::warn!(
+                    "Mattermost send: body_map is not a JSON object; skipping root_id"
+                );
+            }
         }
 
         let resp = self
@@ -360,9 +368,13 @@ impl Channel for MattermostChannel {
                 loop {
                     let mut body = serde_json::json!({ "channel_id": channel_id });
                     if let Some(ref pid) = parent_id {
-                        body.as_object_mut()
-                            .unwrap()
-                            .insert("parent_id".to_string(), serde_json::json!(pid));
+                        if let Some(obj) = body.as_object_mut() {
+                            obj.insert("parent_id".to_string(), serde_json::json!(pid));
+                        } else {
+                            tracing::warn!(
+                                "Mattermost typing: body is not a JSON object; skipping parent_id"
+                            );
+                        }
                     }
 
                     if let Ok(r) = client

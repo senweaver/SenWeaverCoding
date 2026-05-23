@@ -199,7 +199,10 @@ impl SopEngine {
             return Ok(self.finish_run(run_id, SopRunStatus::Completed, None));
         }
 
-        let run = self.active_runs.get_mut(run_id).unwrap();
+        let run = self
+            .active_runs
+            .get_mut(run_id)
+            .ok_or_else(|| anyhow::anyhow!("Active run vanished while advancing: {run_id}"))?;
         run.current_step = next_step_num;
 
         let step_idx = (next_step_num - 1) as usize;
@@ -376,7 +379,12 @@ impl SopEngine {
             return Ok(self.finish_run(run_id, SopRunStatus::Completed, None));
         }
 
-        let run = self.active_runs.get_mut(run_id).unwrap();
+        let run = self
+            .active_runs
+            .get_mut(run_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Active deterministic run vanished while advancing: {run_id}")
+            })?;
         run.current_step = next_step_num;
 
         let step_idx = (next_step_num - 1) as usize;
@@ -425,7 +433,15 @@ impl SopEngine {
             return Ok(self.finish_run(&state.run_id, SopRunStatus::Completed, None));
         }
 
-        let run = self.active_runs.get_mut(&state.run_id).unwrap();
+        let run = self
+            .active_runs
+            .get_mut(&state.run_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Active deterministic run vanished while resuming: {}",
+                    state.run_id
+                )
+            })?;
         run.current_step = next_step_num;
 
         let step_idx = (next_step_num - 1) as usize;
@@ -507,7 +523,7 @@ impl SopEngine {
         let dir = sop
             .location
             .as_deref()
-            .unwrap_or_else(|| temp_dir.as_path());
+            .unwrap_or(temp_dir.as_path());
         let state_file = dir.join(format!("{run_id}.state.json"));
         let json = serde_json::to_string_pretty(&state)?;
         std::fs::write(&state_file, json)?;
@@ -580,7 +596,16 @@ impl SopEngine {
         status: SopRunStatus,
         reason: Option<String>,
     ) -> SopRunAction {
-        let mut run = self.active_runs.remove(run_id).unwrap();
+        let Some(mut run) = self.active_runs.remove(run_id) else {
+            tracing::warn!(
+                "SOP finish_run called for missing run \"{run_id}\"; returning Failed action"
+            );
+            return SopRunAction::Failed {
+                run_id: run_id.to_string(),
+                sop_name: String::new(),
+                reason: reason.unwrap_or_else(|| "active run missing".to_string()),
+            };
+        };
         run.status = status;
         run.completed_at = Some(now_iso8601());
         let sop_name = run.sop_name.clone();

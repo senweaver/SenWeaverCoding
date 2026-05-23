@@ -1,34 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! ## Motivation
-//!
-//! The `MODEL_SWITCH_REQUEST` global static (`LazyLock<Arc<Mutex<...>>>`) in
-//! `loop_.rs` is a source of test pollution and makes concurrent reasoning harder.
-//! This module replaces it with a `tokio::task_local!` equivalent so that:
-//!
-//! - Each task invocation has its own isolated switch state
-//! - Tests cannot leak state between runs
-//! - The design follows the Rust idiom of passing context rather than reaching
-//!   for global mutable state
-//!
-//! ## Migration guide
-//!
-//! Old (global):
-//! ```ignore
-//! let state = get_model_switch_state(); // global static
-//! state.lock().unwrap().replace((provider, model));
-//! ```
-//!
-//! New (task-local):
-//! ```ignore
-//! let guard = ModelSwitchGuard::new();
-//! guard.scope(async {
-//!     guard.set("anthropic", "claude-sonnet-4");
-//!     // or use get_callback() with run_tool_call_loop
-//! }).await;
-//! ```
 
 use std::sync::Arc;
 use tokio::task_local;

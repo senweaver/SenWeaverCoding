@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ClawdTalk voice channel - real-time voice calling via Telnyx SIP infrastructure.
-//!
-//! ClawdTalk (https://clawdtalk.com) provides AI-powered voice conversations
-//! using Telnyx's global SIP network for low-latency, high-quality calls.
 
 use crate::config::traits::ChannelConfig;
 

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Reinforcement signal computation and policy adjustment.
-//!
-//! The central orchestrator for the self-evolution system. Aggregates signals
-//! from all feedback sources and produces actionable policy adjustments
-//! for the agent runtime.
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;

@@ -1,35 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Team collaboration protocol for multi-agent coordination.
-//!
-//! ## Overview
-//!
-//! A `Team` is a group of agents working toward shared goals under a
-//! defined role structure.  The team protocol provides:
-//!
-//! - **Role assignment**: Orchestrator, Specialist, Reviewer, Mediator
-//! - **Communication channels**: Broadcast, Direct, Group, Hierarchical
-//! - **Goal tracking**: decomposition, progress, alerts
-//!
-//! ## Roles
-//!
-//! | Role         | Responsibilities                          |
-//! |--------------|------------------------------------------|
-//! | Orchestrator | Task decomposition and assignment         |
-//! | Specialist   | Focused execution in a domain             |
-//! | Reviewer     | Validates other agents' outputs          |
-//! | Mediator     | Resolves conflicts between agents         |
-//!
-//! ## Usage
-//!
-//! ```ignore
-//! let team = Team::new("coding-team", TeamConfig::default());
-//! team.add_member("orchestrator".into(), Role::Orchestrator);
-//! team.add_goal(Goal::new("g1".into(), "implement auth".into()))?;
-//! team.broadcast(&"orchestrator".into(), MessagePayload::GoalAnnounced { goal_id: "g1".into() })?;
-//! ```
 
 use std::collections::HashMap;
 use std::time::Instant;

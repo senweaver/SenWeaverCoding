@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Persistent trust-score storage.
-//!
-//! Scores are kept in a JSON file (`trust_scores.json`) inside the workspace
-//! data directory.  Writes are atomic (write-to-temp then rename) so a crash
-//! mid-flush never corrupts the file.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

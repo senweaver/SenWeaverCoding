@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /mode command — switch between coding modes.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use crate::agent::coding_mode::CodingMode;
 

@@ -532,7 +532,15 @@ impl Tool for JiraTool {
         let operation = match action {
             "get_ticket" | "search_tickets" | "list_projects" | "myself" => ToolOperation::Read,
             "comment_ticket" => ToolOperation::Act,
-            _ => unreachable!(),
+            other => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "jira action '{other}' has no operation mapping (internal logic error)"
+                    )),
+                });
+            }
         };
 
         if let Err(error) = self.security.enforce_tool_operation(operation, "jira") {
@@ -607,7 +615,15 @@ impl Tool for JiraTool {
                 };
                 self.comment_ticket(issue_key, comment).await
             }
-            _ => unreachable!(),
+            other => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "jira action '{other}' passed validation but has no dispatch arm (internal logic error)"
+                    )),
+                });
+            }
         };
 
         match result {
@@ -715,7 +731,11 @@ fn shape_full(raw: &Value) -> Value {
         }
     }
 
-    result.as_object_mut().unwrap().remove("renderedFields");
+    if let Some(obj) = result.as_object_mut() {
+        obj.remove("renderedFields");
+    } else {
+        tracing::warn!("jira shape_full: result is not a JSON object; renderedFields not stripped");
+    }
     result
 }
 
@@ -834,7 +854,10 @@ fn parse_inline(text: &str, mentions: &HashMap<String, (String, String)>) -> Vec
                 if next.is_whitespace() {
                     break;
                 }
-                raw.push(chars.next().unwrap());
+                match chars.next() {
+                    Some(c) => raw.push(c),
+                    None => break,
+                }
             }
             let email = clean_email(&raw);
 

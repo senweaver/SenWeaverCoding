@@ -496,7 +496,7 @@ pub async fn run_quick_setup(
 }
 
 fn resolve_quick_setup_dirs_with_home(home: &Path) -> (PathBuf, PathBuf) {
-    if let Ok(custom_config_dir) = std::env::var("SEN_CONFIG_DIR") {
+    if let Some(custom_config_dir) = crate::util::get_env_var("SEN_CONFIG_DIR") {
         let trimmed = custom_config_dir.trim();
         if !trimmed.is_empty() {
             let config_dir = PathBuf::from(shellexpand::tilde(trimmed).as_ref());
@@ -504,7 +504,7 @@ fn resolve_quick_setup_dirs_with_home(home: &Path) -> (PathBuf, PathBuf) {
         }
     }
 
-    if let Ok(custom_workspace) = std::env::var("SEN_WORKSPACE") {
+    if let Some(custom_workspace) = crate::util::get_env_var("SEN_WORKSPACE") {
         let trimmed = custom_workspace.trim();
         if !trimmed.is_empty() {
             let expanded = shellexpand::tilde(trimmed);

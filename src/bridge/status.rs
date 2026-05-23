@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge status utilities — mirrors claude-code-typescript-src`bridge/bridgeStatusUtil.ts`.
-
 use super::types::BridgeStatus;
 
 pub fn status_label(status: BridgeStatus) -> &'static str {

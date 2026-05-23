@@ -8,6 +8,7 @@ import { ConfirmDialog } from '../shared/ConfirmDialog'
 import type { SessionListItem } from '../../types/session'
 import { useTabStore, SCHEDULED_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
+import { focusSession } from '../../lib/focusSession'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { isPlaceholderTitle, resolveSessionTitle } from '../../utils/sessionTitle'
 import { Spinner } from '../shared/Spinner'
@@ -250,7 +251,7 @@ export function Sidebar() {
             <button
               onClick={() => {
                 useTabStore.getState().openTab(session.id, displayTitle)
-                useChatStore.getState().connectToSession(session.id)
+                focusSession(session.id)
               }}
               onContextMenu={(e) => handleContextMenu(e, session.id)}
               title={displayTitle}
@@ -358,7 +359,7 @@ export function Sidebar() {
               const workDir = useSessionStore.getState().resolveWorkDirForNewSessionTab(currentTabId)
               const sessionId = await useSessionStore.getState().createSession(workDir)
               useTabStore.getState().openTab(sessionId, t('sidebar.newSession'))
-              useChatStore.getState().connectToSession(sessionId)
+              focusSession(sessionId)
             } catch (error) {
               addToast({
                 type: 'error',

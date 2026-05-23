@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Sub-agent configuration (moved out of monolithic `schema.rs`).
-//!
-//! `DelegateAgentConfig` describes a named sub-agent available to the
-//! `delegate` / `delegate_parallel` tools.  Moving this type into a
-//! domain sub-module is the concrete L4 split step: it reduces
-//! `schema.rs` by ~45 lines and gives the delegate subsystem a
-//! single-file home that can evolve independently.
-//!
-//! Legacy imports via `crate::config::schema::DelegateAgentConfig`
-//! continue to work thanks to a `pub use` re-export in `schema.rs`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

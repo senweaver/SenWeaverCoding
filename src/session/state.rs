@@ -1,42 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ??unified `SessionState` aggregate and the `SessionActor`
-//! façade that owns it.
-//!
-//! `SessionActor` is the single source of truth for a live agent
-//! session: it
-//!
-//! 1. serializes every [`SessionEvent`] through
-//!    [`SessionState::apply`] (bumping `state.version` and updating
-//!    `turns` / `edits` / `pending_approvals` / `metrics`),
-//! 2. appends each event to an on-disk
-//!    [`crate::session::persistence::SessionEventLog`] so the
-//!    process can die at any instant without data loss,
-//! 3. publishes a [`SessionDelta`] to every interested subscriber via
-//!    [`crate::session::sync::SessionSyncHub`] so CLI / TUI / GUI
-//!    renderers see the same event order the persistence layer did,
-//!    regardless of which presentation framework created the
-//!    subscription.
-//!
-//! Callers never touch the inner `RwLock` directly ??the only
-//! mutating path is [`SessionActor::apply`], which guarantees the
-//! "every broadcast also lands on disk" invariant that of
-//! the capability upgrade plan asks for.
-//!
-//! # Threading model
-//!
-//! * `state` is guarded by `parking_lot::RwLock` ??reads are
-//!   lock-free in practice and many UI polls (`snapshot`,
-//!   `turns_since`) do not block one another.
-//! * Writes are serialized: a single `apply` holds the write guard
-//!   across both the in-memory mutation and the `log.append()`
-//!   syscall so the `(version, jsonl_offset)` pair stays monotonic
-//!   even if a panic between those two steps would otherwise leave
-//!   the disk log ahead or behind the memory.
-//! * The hub is only notified *after* the log append succeeds so
-//!   subscribers are guaranteed to never observe a delta that could
-//!   not be rebuilt from disk on the next start.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -313,7 +277,14 @@ impl SessionState {
             | SessionEventKind::WritePlanCreated { .. }
             | SessionEventKind::WriteStepStarted { .. }
             | SessionEventKind::WriteStepFinished { .. }
-            | SessionEventKind::WriteVerify { .. } => {}
+            | SessionEventKind::WriteVerify { .. }
+            | SessionEventKind::ProviderRetry { .. }
+            | SessionEventKind::WorkerSpawned { .. }
+            | SessionEventKind::WorkerStatus { .. }
+            | SessionEventKind::WorkerProgress { .. }
+            | SessionEventKind::WorkerCompleted { .. }
+            | SessionEventKind::WorkerStopped { .. }
+            | SessionEventKind::ParentResumed { .. } => {}
         }
         self.version += 1;
         self.version

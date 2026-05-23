@@ -78,6 +78,25 @@ impl Tool for PowerShellTool {
             .unwrap_or(120)
             .min(600);
 
+        match self.security.validate_command_execution(command, false) {
+            Ok(_) => {}
+            Err(reason) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(reason),
+                });
+            }
+        }
+
+        if let Some(path) = self.security.forbidden_path_argument(command) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Path blocked by security policy: {path}")),
+            });
+        }
+
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,

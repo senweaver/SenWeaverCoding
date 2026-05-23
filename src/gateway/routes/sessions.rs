@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Sessions resource — exposes the currently-running background
-//! sessions managed by [`crate::cli::bg`].
-//!
-//! `GET /sessions` returns the list of registered session ids and
-//! their transport / state flags.  Backed by real data from
-//! [`crate::cli::bg::list_sessions`] — no placeholder values.
 
 use axum::{Json, Router, routing::get};
 use serde_json::{Value, json};

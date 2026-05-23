@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Loop-detection façade.
-//!
-//! The canonical stateful detector is `crate::agent::loop_detector::LoopDetector`.
-//! This module exposes a lightweight **stateless** helper —
-//! [`loop_verdict_from_history`] — for callers that already own the
-//! tool-call history as a slice of names.  The stateful variant remains
-//! the only safe choice inside `run_tool_call_loop`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopVerdict {

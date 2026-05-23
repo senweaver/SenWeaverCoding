@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! HTTP-based tool derived from a skill's `[[tools]]` section.
-//!
-//! Each `SkillTool` with `kind = "http"` is converted into a `SkillHttpTool`
-//! that implements the `Tool` trait. The command field is used as the URL
-//! template and args are substituted as query parameters or path segments.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;

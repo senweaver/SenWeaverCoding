@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Voice STT service — mirrors claude-code-typescript-src`services/voice.ts` and `services/voiceStreamSTT.ts`.
-// Provides speech-to-text integration for voice input mode.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

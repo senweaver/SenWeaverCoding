@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Init entrypoint — mirrors claude-code-typescript-src`entrypoints/init.ts`.
-// Project initialization: config scaffolding, AGENTS.md creation,
-// trust acceptance, and migration detection.
 
 use std::path::Path;
 

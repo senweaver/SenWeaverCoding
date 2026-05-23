@@ -1,16 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Provider health signal published periodically by
-//! [`crate::providers::reliable`] and consumed by
-//! [`crate::agent::task_router::TaskRouter`] (for routing score
-//! penalties) and [`crate::agent::supervisor::Supervisor`] (for
-//! back-off decisions).
-//!
-//! C.3 — the struct and broadcast hub are intentionally
-//! decoupled from the provider-specific aggregation code.  Producers
-//! call [`HealthBroadcaster::publish`]; consumers `subscribe()` and
-//! receive signals over a bounded `tokio::sync::broadcast` channel.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Fallback completion provider using OpenAI-style chat/completions
-//! endpoints.  When no FIM-capable model is available, we fall back
-//! to a "finish the code block" chat prompt.
 
 use async_trait::async_trait;
 use futures_util::stream;

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Core data models for the Verifiable Intent credential chain.
-//!
-//! These types mirror the normative specification (credential-format.md,
-//! constraints.md) while staying idiomatic Rust.  Monetary amounts use integer
-//! minor-units (cents) per ISO 4217 throughout to eliminate decimal ambiguity.
 
 use serde::{Deserialize, Serialize};
 

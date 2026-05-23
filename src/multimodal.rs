@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-use crate::config::{MultimodalConfig, build_runtime_proxy_client_with_timeouts};
+use crate::config::MultimodalConfig;
 use crate::providers::ChatMessage;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::Client;
@@ -140,7 +140,9 @@ pub async fn prepare_messages_for_provider(
         });
     }
 
-    let remote_client = build_runtime_proxy_client_with_timeouts("provider.ollama", 30, 10);
+    let remote_client = crate::services::get_services()
+        .proxy_runtime()
+        .build_client_with_timeouts("provider.ollama", 30, 10);
 
     let mut normalized_messages = Vec::with_capacity(messages.len());
     for message in messages {

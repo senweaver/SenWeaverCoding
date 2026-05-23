@@ -1,41 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Gemini CLI subprocess provider.
-//!
-//! Integrates with the Gemini CLI, spawning the `gemini` binary
-//! as a subprocess for each inference request. This allows using Google's
-//! Gemini models via the CLI without an interactive UI session.
-//!
-//! # Usage
-//!
-//! The `gemini` binary must be available in `PATH`, or its location must be
-//! set via the `GEMINI_CLI_PATH` environment variable.
-//!
-//! Gemini CLI is invoked as:
-//! ```text
-//! gemini --print -
-//! ```
-//! with prompt content written to stdin.
-//!
-//! # Limitations
-//!
-//! - **Conversation history**: Only the system prompt (if present) and the last
-//!   user message are forwarded. Full multi-turn history is not preserved because
-//!   the CLI accepts a single prompt per invocation.
-//! - **System prompt**: The system prompt is prepended to the user message with a
-//!   blank-line separator, as the CLI does not provide a dedicated system-prompt flag.
-//! - **Temperature**: The CLI does not expose a temperature parameter.
-//!   Only default values are accepted; custom values return an explicit error.
-//!
-//! # Authentication
-//!
-//! Authentication is handled by the Gemini CLI itself (its own credential store).
-//! No explicit API key is required by this provider.
-//!
-//! # Environment variables
-//!
-//! - `GEMINI_CLI_PATH` — override the path to the `gemini` binary (default: `"gemini"`)
 
 use crate::providers::traits::{ChatRequest, ChatResponse, Provider, TokenUsage};
 use async_trait::async_trait;
@@ -210,11 +175,9 @@ impl Provider for GeminiCliProvider {
             .chat_with_history(request.messages, model, temperature)
             .await?;
 
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: Vec::new(),
-            usage: Some(TokenUsage::default()),
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(
+            Some(text),
+            Some(TokenUsage::default()),
+        ))
     }
 }

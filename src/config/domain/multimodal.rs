@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Multimodal (image) handling configuration, migrated out of the
-//! monolithic `schema.rs`.
-//!
-//! Covers the `[multimodal]` TOML section: image attachment limits,
-//! vision provider/model routing, and remote-fetch gate.
-//!
-//! Legacy imports through `crate::config::schema::MultimodalConfig`
-//! keep working via a `pub use` re-export.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

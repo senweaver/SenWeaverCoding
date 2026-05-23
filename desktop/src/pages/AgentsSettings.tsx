@@ -44,9 +44,9 @@ export function AgentsSettings() {
   }, [fetchAll])
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+        <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.agents.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-1">
@@ -200,11 +200,11 @@ function AllowlistEditor({
   return (
     <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-3">
       <div className="mb-1 flex items-center justify-between">
-        <div className="text-[12px] font-semibold text-[var(--color-text-primary)]">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.agents.autoRun.allowlist.title')}
         </div>
       </div>
-      <p className="mb-2 text-[11px] leading-snug text-[var(--color-text-tertiary)]">
+      <p className="mb-2 text-xs leading-snug text-[var(--color-text-tertiary)]">
         {t('settings.agents.autoRun.allowlist.hint')}
       </p>
       <div className="flex items-center gap-2">
@@ -218,20 +218,20 @@ function AllowlistEditor({
             }
           }}
           placeholder={t('settings.agents.autoRun.allowlist.placeholder')}
-          className="h-8 flex-1 text-[12px]"
+          className="h-8 flex-1 text-xs"
           disabled={isSaving}
         />
         <Button
           variant="primary"
+          size="sm"
           onClick={() => void add()}
           disabled={isSaving || !draft.trim()}
-          className="h-8 text-[12px]"
         >
           {t('settings.agents.autoRun.allowlist.add')}
         </Button>
       </div>
       {list.length === 0 ? (
-        <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
+        <div className="mt-2 text-xs text-[var(--color-text-tertiary)]">
           {t('settings.agents.autoRun.allowlist.empty')}
         </div>
       ) : (
@@ -239,7 +239,7 @@ function AllowlistEditor({
           {list.map((name) => (
             <span
               key={name}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-0.5 text-[11px] text-[var(--color-text-primary)]"
+              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-0.5 text-xs text-[var(--color-text-primary)]"
             >
               <code className="font-mono">{name}</code>
               <button
@@ -275,10 +275,10 @@ function ToggleRow({
   return (
     <div className="flex items-start justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2.5">
       <div className="min-w-0 flex-1">
-        <div className="text-[13px] font-semibold text-[var(--color-text-primary)]">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
           {label}
         </div>
-        <div className="mt-0.5 text-[11px] leading-snug text-[var(--color-text-tertiary)]">
+        <div className="mt-0.5 text-xs leading-snug text-[var(--color-text-tertiary)]">
           {hint}
         </div>
       </div>
@@ -381,18 +381,18 @@ function AutoRunSection() {
       hint={t('settings.agents.section.permissionHint')}
     >
       <div className="mb-1 flex items-center justify-between">
-        <label htmlFor="auto-run-mode" className="text-[12px] font-semibold text-[var(--color-text-primary)]">
+        <label htmlFor="auto-run-mode" className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.agents.autoRun.modeLabel')}
         </label>
       </div>
-      <p className="mb-2 text-[11px] leading-snug text-[var(--color-text-tertiary)]">
+      <p className="mb-2 text-xs leading-snug text-[var(--color-text-tertiary)]">
         {t('settings.agents.autoRun.modeHint')}
       </p>
       <select
         id="auto-run-mode"
         value={uiSelectedValue}
         onChange={(e) => onSelectMode(e.target.value as PermissionMode)}
-        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] focus:border-[var(--color-brand)] focus:outline-none"
+        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-brand)] focus:outline-none"
       >
         {AUTO_RUN_OPTIONS.map((opt) => (
           <option key={opt.value} value={opt.value}>
@@ -400,7 +400,7 @@ function AutoRunSection() {
           </option>
         ))}
       </select>
-      <p className="mt-1 text-[11px] leading-snug text-[var(--color-text-tertiary)]">
+      <p className="mt-1 text-xs leading-snug text-[var(--color-text-tertiary)]">
         {t(
           AUTO_RUN_OPTIONS.find((o) => o.value === uiSelectedValue)?.hintKey
             ?? 'settings.agents.autoRun.opt.useAllowlistHint',
@@ -414,10 +414,10 @@ function AutoRunSection() {
       {data && (
         <>
           <div className="mt-4">
-            <div className="mb-1 text-[12px] font-semibold text-[var(--color-text-primary)]">
+            <div className="mb-1 text-xs font-semibold text-[var(--color-text-primary)]">
               {t('settings.agents.autoRun.modeTransitions.title')}
             </div>
-            <p className="mb-2 text-[11px] leading-snug text-[var(--color-text-tertiary)]">
+            <p className="mb-2 text-xs leading-snug text-[var(--color-text-tertiary)]">
               {t('settings.agents.autoRun.modeTransitions.hint')}
             </p>
             <div className="space-y-1.5">
@@ -462,7 +462,7 @@ function AutoRunSection() {
       )}
 
       {currentCoding && derivedLabel && (
-        <div className="mt-3 flex items-start gap-1.5 text-[11px] text-[var(--color-text-tertiary)]">
+        <div className="mt-3 flex items-start gap-1.5 text-xs text-[var(--color-text-tertiary)]">
           <span className="material-symbols-outlined text-[14px]">info</span>
           <span>
             {t('settings.agents.permission.codingHint', {
@@ -486,14 +486,14 @@ function AutoRunSection() {
               aria-modal="true"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center gap-3 border-b border-[var(--color-error)]/15 bg-[var(--color-error)]/8 px-5 py-4">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-error)]/12">
-                  <span className="material-symbols-outlined text-[22px] text-[var(--color-error)]">
+              <div className="flex items-center gap-3 border-b border-[var(--color-error)]/15 bg-[var(--color-error)]/8 px-4 py-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--color-error)]/12">
+                  <span className="material-symbols-outlined text-[18px] text-[var(--color-error)]">
                     warning
                   </span>
                 </div>
                 <div>
-                  <div className="text-sm font-bold text-[var(--color-text-primary)]">
+                  <div className="text-xs font-bold text-[var(--color-text-primary)]">
                     {t('permMode.enableBypassTitle')}
                   </div>
                   <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
@@ -531,11 +531,11 @@ function AutoRunSection() {
                 </ul>
               </div>
 
-              <div className="flex items-center justify-end gap-2 border-t border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-5 py-3">
+              <div className="flex items-center justify-end gap-2 border-t border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-2">
                 <button
                   type="button"
                   onClick={() => setConfirmBypass(false)}
-                  className="rounded-lg px-4 py-2 text-xs font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] h-7 px-2.5 text-xs font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
                 >
                   {t('common.cancel')}
                 </button>
@@ -545,7 +545,7 @@ function AutoRunSection() {
                     setConfirmBypass(false)
                     void applyMode('bypassPermissions')
                   }}
-                  className="rounded-lg bg-[var(--color-error)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:opacity-90"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] bg-[var(--color-error)] h-7 px-2.5 text-xs font-semibold text-white transition-colors hover:opacity-90"
                 >
                   {t('permMode.enableBypassBtn')}
                 </button>
@@ -1021,7 +1021,7 @@ function DirectivesSection({
               </div>
             </div>
           ))}
-          <Button variant="secondary" size="md" type="button" onClick={addDirective}>
+          <Button variant="secondary" size="sm" type="button" onClick={addDirective}>
             {t('settings.agents.field.addDirective')}
           </Button>
         </div>
@@ -1390,11 +1390,11 @@ function Section({
   children: React.ReactNode
 }) {
   return (
-    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
       <div>
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">{title}</h3>
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">{title}</h3>
         {hint && (
-          <p className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">{hint}</p>
+          <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">{hint}</p>
         )}
       </div>
       {children}
@@ -1416,7 +1416,7 @@ function Field({
       <span className="text-xs font-medium text-[var(--color-text-secondary)]">{label}</span>
       {children}
       {hint && (
-        <span className="block text-[11px] text-[var(--color-text-tertiary)]">{hint}</span>
+        <span className="block text-xs text-[var(--color-text-tertiary)]">{hint}</span>
       )}
     </label>
   )
@@ -1447,7 +1447,7 @@ function CheckboxRow({
       <span>
         <span className="text-[var(--color-text-primary)] font-medium">{label}</span>
         {hint && (
-          <span className="block text-[11px] text-[var(--color-text-tertiary)]">{hint}</span>
+          <span className="block text-xs text-[var(--color-text-tertiary)]">{hint}</span>
         )}
       </span>
     </label>
@@ -1501,7 +1501,7 @@ function Select({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
-      className="h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] disabled:opacity-60"
+      className="h-8 px-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] disabled:opacity-60"
     >
       {options.map((opt) => (
         <option key={opt} value={opt}>
@@ -1522,7 +1522,7 @@ function SaveBar({
   const t = useTranslation()
   return (
     <div className="flex items-center gap-2 pt-1">
-      <Button onClick={() => void onSave()} disabled={isSaving} size="md">
+      <Button onClick={() => void onSave()} disabled={isSaving} size="sm">
         {isSaving ? t('common.saving') : t('common.save')}
       </Button>
     </div>

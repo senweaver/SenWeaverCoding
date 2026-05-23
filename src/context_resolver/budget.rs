@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Token-budget ledger for context resolution.
-//!
-//! The resolver consults [`ContextBudget`] before fetching each tag
-//! so heavy items (folder dumps, 100k-line diffs) are clipped or
-//! replaced with summaries before they blow up the LLM window.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

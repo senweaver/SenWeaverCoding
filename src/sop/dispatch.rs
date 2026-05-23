@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Unified SOP event dispatch helpers.
-//!
-//! All event sources (MQTT, webhook, cron, peripheral) route through
-//! `dispatch_sop_event` so that locking, audit, and health bookkeeping
-//! happen in exactly one place.
 
 use parking_lot::Mutex;
 use std::sync::Arc;

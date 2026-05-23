@@ -37,10 +37,9 @@ impl NextcloudTalkChannel {
             app_token,
             bot_name: bot_name.to_ascii_lowercase(),
             allowed_users,
-            client: crate::config::build_channel_proxy_client(
-                "channel.nextcloud_talk",
-                proxy_url.as_deref(),
-            ),
+            client: crate::services::get_services()
+                .proxy_runtime()
+                .build_channel_client("channel.nextcloud_talk", proxy_url.as_deref()),
         }
     }
 

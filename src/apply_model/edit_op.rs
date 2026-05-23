@@ -1,27 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Unified Edit Intermediate Representation.
-//!
-//! [`EditOp`] is the single value type that every editing surface
-//! (file_edit / file_write / multi_edit / glob_edit / patch_apply /
-//! notebook_edit / inline_edit / write_mode / diff_session) lowers
-//! to before reaching [`super::ops_applier::OpsApplier`].
-//!
-//! The IR is intentionally byte-oriented: callers are expected to
-//! either supply a precise `byte_range` + `old_text` (cheap, exact)
-//! or a unified-diff hunk (relayed through
-//! [`super::heuristic::apply_unified_diff`]) when the location is
-//! still fuzzy.  Tools that previously hand-rolled their own
-//! search/replace/atomic logic now construct an
-//! [`EditBatch`] and delegate to OpsApplier so journal, rollback
-//! and validator paths are shared.
-//!
-//! The representation is `serde`-friendly; OpsApplier persists every
-//! [`EditOp`] in the per-batch JSONL journal under
-//! `<workspace>/.sen/edit_journal/<batch_id>.jsonl` so that an
-//! external tool (or a multi-agent supervisor) can replay /
-//! audit / rollback the batch independently of the in-process state.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};

@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
-//! Restores persisted desktop gateway SQLite transcripts into shaped
-//! [`crate::providers::ConversationMessage`] entries so downstream
-//! [`crate::agent::dispatcher::ToolDispatcher::to_provider_messages`] matches
-//! what the streamed loop produced originally.
 
 use crate::providers::{
     ChatMessage, ConversationMessage, ToolCall, ToolResultMessage,
@@ -176,6 +172,18 @@ pub(crate) fn hydrate_gateway_sqlite_messages(messages: &[ChatMessage]) -> Vec<C
             }
             _ => out.push(ConversationMessage::Chat(msg.clone())),
         }
+    }
+
+    let (frames, stub_rows) =
+        crate::agent::dangling_tool_repair::count_incomplete_followup_batches(&out);
+    if frames > 0 {
+        tracing::warn!(
+            target: "agent.sqlite_gateway_hydrate",
+            frames,
+            stub_rows,
+            "sqlite hydration produced incomplete assistant.tool_calls pairing; repairing in-place"
+        );
+        crate::agent::dangling_tool_repair::ensure_assistant_tool_replies_inplace(&mut out);
     }
 
     out

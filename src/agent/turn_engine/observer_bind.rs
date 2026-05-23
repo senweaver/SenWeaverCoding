@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Canonical `ObserverEvent` emission helpers for tool execution.
-//!
-//! Prior to D2.1, every code path that invoked a tool built
-//! its own `ObserverEvent::ToolCallStart` / `ToolCall` payloads.  The
-//! shape is small but drift produced subtle differences (e.g. missing
-//! arg summaries on the error path).  These helpers centralize the
-//! wire format so new call sites get it right by construction.
 
 use std::time::Duration;
 

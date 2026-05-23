@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Plugin host: discovery, loading, lifecycle management.
 
 use super::error::PluginError;
 use super::signature::{self, SignatureMode, VerificationResult};

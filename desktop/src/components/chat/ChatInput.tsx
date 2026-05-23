@@ -13,6 +13,7 @@ import { anyProviderHasModel } from '../../utils/modelAvailability'
 import { isValidRuntimeSelection } from '../../utils/runtimeSelection'
 import { CodingModeSelector } from '../controls/CodingModeSelector'
 import { ModelSelector } from '../controls/ModelSelector'
+import { CODING_MODE_ACCENT } from '../../types/codingMode'
 import type { AttachmentRef } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
 import { ProjectContextChip } from '../shared/ProjectContextChip'
@@ -21,6 +22,7 @@ import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { PrivacyBanner } from './PrivacyBanner'
 import { ReviewCard } from './ReviewCard'
+import { WorkersStrip } from './WorkersStrip'
 import { TokenUsageRing } from './TokenUsageRing'
 import { WorkspaceQueuePanel } from './WorkspaceQueuePanel'
 import {
@@ -31,6 +33,9 @@ import {
   resolveSlashUiAction,
 } from './composerUtils'
 import { useCredentialsStore } from '../../stores/credentialsStore'
+import { useBrowserPanelStore } from '../../stores/browserPanelStore'
+import { dockListTabs, type BrowserDockTabInfo } from '../../lib/browserDock'
+import { bindDebugTab, unbindDebugTab, bindPrototypeRef, unbindPrototypeRef } from '../../lib/debugTabBind'
 
 type GitInfo = { branch: string | null; repoName: string | null; workDir: string; changedFiles: number }
 
@@ -46,6 +51,8 @@ type Attachment = {
 type ChatInputProps = {
   variant?: 'default' | 'hero'
 }
+
+const EMPTY_DOCK_TABS: BrowserDockTabInfo[] = []
 
 export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const t = useTranslation()
@@ -75,12 +82,28 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const codingMode = useSettingsStore((s) => s.codingMode)
   const isPlanMode = codingMode === 'plan'
   const isDebugMode = codingMode === 'debug'
+  const modeAccent = CODING_MODE_ACCENT[codingMode]
   const credentialsList = useCredentialsStore((s) => s.credentials)
   const credentialsHasFetched = useCredentialsStore((s) => s.hasFetched)
   const credentialsIsLoading = useCredentialsStore((s) => s.isLoading)
   const fetchCredentials = useCredentialsStore((s) => s.fetchAll)
   const [credPanelOpen, setCredPanelOpen] = useState(false)
   const credPanelRef = useRef<HTMLDivElement>(null)
+  const [tabBindOpen, setTabBindOpen] = useState(false)
+  const tabBindRef = useRef<HTMLDivElement>(null)
+  const [refreshedDockTabs, setRefreshedDockTabs] = useState<BrowserDockTabInfo[] | null>(null)
+  const [protoBindOpen, setProtoBindOpen] = useState(false)
+  const protoBindRef = useRef<HTMLDivElement>(null)
+  const [refreshedProtoTabs, setRefreshedProtoTabs] = useState<BrowserDockTabInfo[] | null>(null)
+  const boundTabId = useBrowserPanelStore((s) =>
+    activeTabId ? s.panels[activeTabId]?.preferredTestTabId ?? null : null,
+  )
+  const protoTabId = useBrowserPanelStore((s) =>
+    activeTabId ? s.panels[activeTabId]?.prototypeRefTabId ?? null : null,
+  )
+  const dockTabsFromPanel = useBrowserPanelStore((s) =>
+    activeTabId ? s.panels[activeTabId]?.tabs ?? EMPTY_DOCK_TABS : EMPTY_DOCK_TABS,
+  )
   const activeSession = useSessionStore((state) => activeTabId ? state.sessions.find((session) => session.id === activeTabId) ?? null : null)
   const memberInfo = useTeamStore((s) => activeTabId ? s.getMemberBySessionId(activeTabId) : null)
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
@@ -113,6 +136,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     settingsCurrentModel,
   ])
   const [stopCooldown, setStopCooldown] = useState(false)
+  const [sendButtonHover, setSendButtonHover] = useState(false)
   const stopCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!isActive && !stopRequested) {
@@ -126,6 +150,8 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   useEffect(() => {
     if (!isDebugMode) {
       setCredPanelOpen(false)
+      setTabBindOpen(false)
+      setProtoBindOpen(false)
       return
     }
     if (!credentialsHasFetched && !credentialsIsLoading) {
@@ -152,6 +178,124 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       document.removeEventListener('keydown', handleKey)
     }
   }, [credPanelOpen])
+
+  useEffect(() => {
+    if (!tabBindOpen) return
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      const panel = tabBindRef.current
+      if (!panel || !target) return
+      if (panel.contains(target)) return
+      setTabBindOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTabBindOpen(false)
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [tabBindOpen])
+
+  const refreshDockTabsForBinder = useCallback(async () => {
+    if (!activeTabId) return
+    try {
+      const sessionTabs = await dockListTabs(activeTabId)
+      setRefreshedDockTabs(sessionTabs)
+      if (boundTabId != null) {
+        if (!sessionTabs.some((tab) => tab.id === boundTabId)) {
+          unbindDebugTab(activeTabId, boundTabId)
+        }
+      }
+    } catch (err) {
+      console.warn('[ChatInput] refresh dock tabs failed', err)
+    }
+  }, [activeTabId, boundTabId])
+
+  useEffect(() => {
+    if (!tabBindOpen) return
+    void refreshDockTabsForBinder()
+  }, [tabBindOpen, refreshDockTabsForBinder])
+
+  const handleBindTab = useCallback(
+    (tabId: number) => {
+      if (!activeTabId) return
+      if (boundTabId === tabId) {
+        setTabBindOpen(false)
+        return
+      }
+      bindDebugTab(activeTabId, tabId)
+      setTabBindOpen(false)
+    },
+    [activeTabId, boundTabId],
+  )
+
+  const handleUnbindTab = useCallback(() => {
+    if (!activeTabId || boundTabId == null) return
+    unbindDebugTab(activeTabId, boundTabId)
+    setTabBindOpen(false)
+  }, [activeTabId, boundTabId])
+
+  const refreshProtoTabsForBinder = useCallback(async () => {
+    if (!activeTabId) return
+    try {
+      const sessionTabs = await dockListTabs(activeTabId)
+      setRefreshedProtoTabs(sessionTabs)
+      if (protoTabId != null) {
+        if (!sessionTabs.some((tab) => tab.id === protoTabId)) {
+          unbindPrototypeRef(activeTabId)
+        }
+      }
+    } catch (err) {
+      console.warn('[ChatInput] refresh proto tabs failed', err)
+    }
+  }, [activeTabId, protoTabId])
+
+  useEffect(() => {
+    if (!protoBindOpen) return
+    void refreshProtoTabsForBinder()
+  }, [protoBindOpen, refreshProtoTabsForBinder])
+
+  useEffect(() => {
+    if (!protoBindOpen) return
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      const panel = protoBindRef.current
+      if (!panel || !target) return
+      if (panel.contains(target)) return
+      setProtoBindOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setProtoBindOpen(false)
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [protoBindOpen])
+
+  const handleBindProto = useCallback(
+    (tabId: number) => {
+      if (!activeTabId) return
+      if (protoTabId === tabId) {
+        setProtoBindOpen(false)
+        return
+      }
+      bindPrototypeRef(activeTabId, tabId)
+      setProtoBindOpen(false)
+    },
+    [activeTabId, protoTabId],
+  )
+
+  const handleUnbindProto = useCallback(() => {
+    if (!activeTabId) return
+    unbindPrototypeRef(activeTabId)
+    setProtoBindOpen(false)
+  }, [activeTabId])
 
   const insertCredentialPlaceholder = useCallback((name: string) => {
     const placeholder = `\${cred.${name}}`
@@ -205,6 +349,63 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   useEffect(() => {
     textareaRef.current?.focus()
   }, [isActive])
+
+  const prevDraftSessionRef = useRef<string | null>(null)
+  const setComposerDraft = useChatStore((s) => s.setComposerDraft)
+  useEffect(() => {
+    const prev = prevDraftSessionRef.current
+    const next = activeTabId ?? null
+    if (prev === next) {
+      prevDraftSessionRef.current = next
+      return
+    }
+    if (prev) {
+      setComposerDraft(prev, {
+        text: input,
+        attachments: attachments.map((att) => ({
+          type: att.type,
+          name: att.name,
+          data: att.data,
+          mimeType: att.mimeType,
+        })),
+        slashMenuOpen,
+      })
+    }
+    if (next) {
+      const draft = useChatStore.getState().sessions[next]?.composerDraft
+      if (draft) {
+        setInput(draft.text ?? '')
+        setAttachments(
+          (draft.attachments ?? [])
+            .filter((a) => a.type === 'image' || a.data)
+            .map((a, index) => ({
+              id: `draft-${next}-${index}-${Date.now()}`,
+              name: a.name,
+              type: a.type,
+              mimeType: a.mimeType,
+              previewUrl: a.type === 'image' ? a.data : undefined,
+              data: a.data,
+            })),
+        )
+        setSlashMenuOpen(!!draft.slashMenuOpen)
+      } else {
+        setInput('')
+        setAttachments([])
+        setSlashMenuOpen(false)
+      }
+    } else {
+      setInput('')
+      setAttachments([])
+      setSlashMenuOpen(false)
+    }
+    setFileSearchOpen(false)
+    setLocalSlashPanel(null)
+    setSlashFilter('')
+    setAtFilter('')
+    setAtCursorPos(-1)
+    setSlashSelectedIndex(0)
+    prevDraftSessionRef.current = next
+  }, [activeTabId, setComposerDraft])
 
   useEffect(() => {
     const el = composerRootRef.current
@@ -463,6 +664,9 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     setSlashMenuOpen(false)
     setFileSearchOpen(false)
     setLocalSlashPanel(null)
+    if (activeTabId) {
+      useChatStore.getState().clearComposerDraft(activeTabId)
+    }
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -649,6 +853,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             </button>
           </div>
         )}
+        {!isMemberSession && <WorkersStrip sessionId={activeTabId} />}
         {!isMemberSession && <ReviewCard />}
         {!isMemberSession && <WorkspaceQueuePanel sessionId={activeTabId} />}
         <div
@@ -740,48 +945,259 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           )}
 
           {!isMemberSession && isDebugMode && (
-            <div className="mb-1.5" ref={credPanelRef}>
-              <button
-                type="button"
-                onClick={() => setCredPanelOpen((v) => !v)}
-                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
-                title={t('debug.qa.insertCred')}
-              >
-                <span className="material-symbols-outlined text-[14px]">key</span>
-                {t('debug.qa.panelTitle')}
-                <span className="material-symbols-outlined text-[14px]">
-                  {credPanelOpen ? 'expand_less' : 'expand_more'}
-                </span>
-              </button>
-              {credPanelOpen && (
-                <div className="mt-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-2">
-                  <div className="text-[11px] text-[var(--color-text-tertiary)] mb-1.5">
-                    {t('credentials.placeholder.hint')}
+            <div className="mb-1.5 flex flex-wrap items-start gap-2">
+              <div className="relative" ref={credPanelRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTabBindOpen(false)
+                    setCredPanelOpen((v) => !v)
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+                  title={t('debug.qa.insertCred')}
+                >
+                  <span className="material-symbols-outlined text-[14px]">key</span>
+                  {t('debug.qa.panelTitle')}
+                  <span className="material-symbols-outlined text-[14px]">
+                    {credPanelOpen ? 'expand_less' : 'expand_more'}
+                  </span>
+                </button>
+                {credPanelOpen && (
+                  <div className="absolute z-20 mt-1.5 min-w-[280px] max-w-[420px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-2 shadow-md">
+                    <div className="text-[11px] text-[var(--color-text-tertiary)] mb-1.5">
+                      {t('credentials.placeholder.hint')}
+                    </div>
+                    {credentialsList.length === 0 ? (
+                      <div className="text-[11px] italic text-[var(--color-text-tertiary)] py-1">
+                        {t('credentials.empty')}
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {credentialsList.map((cred) => (
+                          <button
+                            key={cred.name}
+                            type="button"
+                            onClick={() => insertCredentialPlaceholder(cred.name)}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded border border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]"
+                            title={t('credentials.placeholder.insert').replace('{name}', cred.name)}
+                          >
+                            <span className="material-symbols-outlined text-[12px] text-[var(--color-text-secondary)]">
+                              key
+                            </span>
+                            {cred.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  {credentialsList.length === 0 ? (
-                    <div className="text-[11px] italic text-[var(--color-text-tertiary)] py-1">
-                      {t('credentials.empty')}
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap gap-1.5">
-                      {credentialsList.map((cred) => (
-                        <button
-                          key={cred.name}
-                          type="button"
-                          onClick={() => insertCredentialPlaceholder(cred.name)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded border border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]"
-                          title={t('credentials.placeholder.insert').replace('{name}', cred.name)}
-                        >
-                          <span className="material-symbols-outlined text-[12px] text-[var(--color-text-secondary)]">
-                            key
-                          </span>
-                          {cred.name}
-                        </button>
-                      ))}
-                    </div>
+                )}
+              </div>
+
+              <div className="relative" ref={tabBindRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCredPanelOpen(false)
+                    setProtoBindOpen(false)
+                    setTabBindOpen((v) => !v)
+                  }}
+                  className={
+                    'inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border ' +
+                    (boundTabId != null
+                      ? 'border-[var(--color-brand)]/50 bg-[var(--color-brand)]/10 text-[var(--color-brand)]'
+                      : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]')
+                  }
+                  title={t('debug.qa.bindTab.button')}
+                >
+                  <span className="material-symbols-outlined text-[14px]">tab</span>
+                  {t('debug.qa.bindTab.button')}
+                  {boundTabId != null && (
+                    <span className="ml-0.5 inline-flex items-center gap-0.5 rounded-full bg-[var(--color-brand)]/15 px-1.5 py-px text-[10px] font-mono">
+                      #{boundTabId}
+                    </span>
                   )}
-                </div>
-              )}
+                  <span className="material-symbols-outlined text-[14px]">
+                    {tabBindOpen ? 'expand_less' : 'expand_more'}
+                  </span>
+                </button>
+                {tabBindOpen && (
+                  <div className="absolute z-20 mt-1.5 min-w-[300px] max-w-[460px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-2 shadow-md">
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <div className="text-[11px] text-[var(--color-text-tertiary)]">
+                        {t('debug.qa.bindTab.hint')}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshDockTabsForBinder()}
+                        className="inline-flex items-center justify-center rounded border border-[var(--color-border)] p-0.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+                        title={t('debug.qa.bindTab.refresh')}
+                      >
+                        <span className="material-symbols-outlined text-[12px]">refresh</span>
+                      </button>
+                    </div>
+                    {(() => {
+                      const tabs = refreshedDockTabs ?? dockTabsFromPanel
+                      if (tabs.length === 0) {
+                        return (
+                          <div className="text-[11px] italic text-[var(--color-text-tertiary)] py-1">
+                            {t('debug.qa.bindTab.empty')}
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="flex flex-col gap-1 max-h-[220px] overflow-auto">
+                          {tabs.map((tab) => {
+                            const isBound = tab.id === boundTabId
+                            const ownerLabel = tab.owner === 'agent' ? t('debug.qa.bindTab.ownerAgent') : t('debug.qa.bindTab.ownerUser')
+                            const label = tab.title?.trim() || tab.url?.trim() || `(tab ${tab.id})`
+                            return (
+                              <button
+                                key={tab.id}
+                                type="button"
+                                onClick={() => handleBindTab(tab.id)}
+                                className={
+                                  'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors ' +
+                                  (isBound
+                                    ? 'border border-[var(--color-brand)]/40 bg-[var(--color-brand)]/10 text-[var(--color-brand)]'
+                                    : 'border border-transparent hover:border-[var(--color-border)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]')
+                                }
+                              >
+                                <span className="font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                                  #{tab.id}
+                                </span>
+                                <span className="rounded-full border border-[var(--color-border)] px-1.5 py-px text-[9px] uppercase tracking-wide text-[var(--color-text-tertiary)]">
+                                  {ownerLabel}
+                                </span>
+                                <span className="flex-1 truncate" title={tab.url ?? ''}>
+                                  {label}
+                                </span>
+                                {isBound && (
+                                  <span className="material-symbols-outlined text-[14px] text-[var(--color-brand)]">
+                                    check
+                                  </span>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )
+                    })()}
+                    {boundTabId != null && (
+                      <div className="mt-1.5 flex items-center justify-end">
+                        <button
+                          type="button"
+                          onClick={handleUnbindTab}
+                          className="inline-flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+                        >
+                          <span className="material-symbols-outlined text-[12px]">link_off</span>
+                          {t('debug.qa.bindTab.unbind')}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="relative" ref={protoBindRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCredPanelOpen(false)
+                    setTabBindOpen(false)
+                    setProtoBindOpen((v) => !v)
+                  }}
+                  className={
+                    'inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border ' +
+                    (protoTabId != null
+                      ? 'border-[var(--color-success)]/50 bg-[var(--color-success)]/10 text-[var(--color-success)]'
+                      : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]')
+                  }
+                  title={t('debug.qa.prototypeRef.button')}
+                >
+                  <span className="material-symbols-outlined text-[14px]">design_services</span>
+                  {t('debug.qa.prototypeRef.button')}
+                  {protoTabId != null && (
+                    <span className="ml-0.5 inline-flex items-center gap-0.5 rounded-full bg-[var(--color-success)]/15 px-1.5 py-px text-[10px] font-mono">
+                      #{protoTabId}
+                    </span>
+                  )}
+                  <span className="material-symbols-outlined text-[14px]">
+                    {protoBindOpen ? 'expand_less' : 'expand_more'}
+                  </span>
+                </button>
+                {protoBindOpen && (
+                  <div className="absolute z-20 mt-1.5 min-w-[300px] max-w-[460px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-2 shadow-md">
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <div className="text-[11px] text-[var(--color-text-tertiary)]">
+                        {t('debug.qa.prototypeRef.hint')}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshProtoTabsForBinder()}
+                        className="inline-flex items-center justify-center rounded border border-[var(--color-border)] p-0.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+                        title={t('debug.qa.bindTab.refresh')}
+                      >
+                        <span className="material-symbols-outlined text-[12px]">refresh</span>
+                      </button>
+                    </div>
+                    {(() => {
+                      const tabs = refreshedProtoTabs ?? dockTabsFromPanel
+                      if (tabs.length === 0) {
+                        return (
+                          <div className="text-[11px] italic text-[var(--color-text-tertiary)] py-1">
+                            {t('debug.qa.prototypeRef.empty')}
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="flex flex-col gap-1 max-h-[220px] overflow-auto">
+                          {tabs.map((tab) => {
+                            const isBound = tab.id === protoTabId
+                            const label = tab.title?.trim() || tab.url?.trim() || `(tab ${tab.id})`
+                            return (
+                              <button
+                                key={tab.id}
+                                type="button"
+                                onClick={() => handleBindProto(tab.id)}
+                                className={
+                                  'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors ' +
+                                  (isBound
+                                    ? 'border border-[var(--color-success)]/40 bg-[var(--color-success)]/10 text-[var(--color-success)]'
+                                    : 'border border-transparent hover:border-[var(--color-border)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]')
+                                }
+                              >
+                                <span className="font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                                  #{tab.id}
+                                </span>
+                                <span className="flex-1 truncate" title={tab.url ?? ''}>
+                                  {label}
+                                </span>
+                                {isBound && (
+                                  <span className="material-symbols-outlined text-[14px] text-[var(--color-success)]">
+                                    check
+                                  </span>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )
+                    })()}
+                    {protoTabId != null && (
+                      <div className="mt-1.5 flex items-center justify-end">
+                        <button
+                          type="button"
+                          onClick={handleUnbindProto}
+                          className="inline-flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+                        >
+                          <span className="material-symbols-outlined text-[12px]">link_off</span>
+                          {t('debug.qa.prototypeRef.unbind')}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -842,53 +1258,112 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
               {!isMemberSession && (
                 <TokenUsageRing sessionId={activeTabId ?? null} size={14} />
               )}
-              <button
-                onClick={actAsStopButton ? handleStopClick : handleSubmit}
-                disabled={
-                  actAsStopButton
-                    ? showStopping
-                    : !canSubmit
+              {(() => {
+                const useAccent = !isMemberSession && !!modeAccent
+                let bgIdle: string
+                let bgHover: string
+                let fg: string
+                if (actAsStopButton) {
+                  if (useAccent && modeAccent) {
+                    bgIdle = modeAccent.accent
+                    bgHover = modeAccent.accentHover
+                    fg = modeAccent.onAccent
+                  } else if (isPlanMode) {
+                    bgIdle = 'var(--color-plan-accent)'
+                    bgHover = 'var(--color-plan-accent-hover)'
+                    fg = 'var(--color-on-plan-accent)'
+                  } else {
+                    bgIdle = 'var(--color-error-container)'
+                    bgHover = 'var(--color-error-container)'
+                    fg = 'var(--color-on-error-container)'
+                  }
+                } else if (useAccent && modeAccent) {
+                  bgIdle = modeAccent.accent
+                  bgHover = modeAccent.accentHover
+                  fg = modeAccent.onAccent
+                } else if (isPlanMode && !isMemberSession) {
+                  bgIdle = 'var(--color-plan-accent)'
+                  bgHover = 'var(--color-plan-accent-hover)'
+                  fg = 'var(--color-on-plan-accent)'
+                } else {
+                  bgIdle = 'var(--color-text-primary)'
+                  bgHover = 'var(--color-text-primary)'
+                  fg = 'var(--color-surface)'
                 }
-                aria-label={
-                  actAsStopButton
-                    ? showStopping
-                      ? t('chat.stopping')
-                      : t('chat.stopTitle')
-                    : showNoModelBanner
-                      ? t('chat.noModel.sendTooltip')
-                      : isMemberSession ? t('common.send') : t('common.run')
-                }
-                title={
-                  actAsStopButton
-                    ? showStopping
-                      ? t('chat.stopping')
-                      : t('chat.stopTitle')
-                    : showNoModelBanner
-                      ? t('chat.noModel.sendTooltip')
-                      : isMemberSession ? t('common.send') : t('common.run')
-                }
-                className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50 ${
-                  actAsStopButton
-                    ? isPlanMode
-                      ? 'bg-[var(--color-plan-accent)] text-[var(--color-on-plan-accent-container)] shadow-[var(--shadow-button-primary)]'
-                      : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                    : isPlanMode && !isMemberSession
-                      ? 'bg-[var(--color-plan-accent)] text-[var(--color-on-plan-accent-container)] shadow-[var(--shadow-button-primary)]'
-                      : 'bg-[var(--color-text-primary)] text-[var(--color-surface)] shadow-[var(--shadow-button-primary)]'
-                }`}
-              >
-                <span
-                  className={`material-symbols-outlined text-[8px] ${
-                    showStopping ? 'animate-spin' : ''
-                  }`}
-                >
-                  {actAsStopButton
-                    ? showStopping
-                      ? 'progress_activity'
-                      : 'stop'
-                    : 'arrow_upward'}
-                </span>
-              </button>
+                const isDisabled = actAsStopButton ? showStopping : !canSubmit
+                const bg = sendButtonHover && !isDisabled ? bgHover : bgIdle
+                return (
+                  <button
+                    onClick={actAsStopButton ? handleStopClick : handleSubmit}
+                    onMouseEnter={() => setSendButtonHover(true)}
+                    onMouseLeave={() => setSendButtonHover(false)}
+                    disabled={isDisabled}
+                    aria-label={
+                      actAsStopButton
+                        ? showStopping
+                          ? t('chat.stopping')
+                          : t('chat.stopTitle')
+                        : showNoModelBanner
+                          ? t('chat.noModel.sendTooltip')
+                          : isMemberSession ? t('common.send') : t('common.run')
+                    }
+                    title={
+                      actAsStopButton
+                        ? showStopping
+                          ? t('chat.stopping')
+                          : t('chat.stopTitle')
+                        : showNoModelBanner
+                          ? t('chat.noModel.sendTooltip')
+                          : isMemberSession ? t('common.send') : t('common.run')
+                    }
+                    className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full shadow-[var(--shadow-button-primary)] transition-all disabled:cursor-not-allowed disabled:opacity-50"
+                    style={{ backgroundColor: bg, color: fg }}
+                  >
+                    {actAsStopButton ? (
+                      showStopping ? (
+                        <svg
+                          width="13"
+                          height="13"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="3"
+                          strokeLinecap="round"
+                          className="animate-spin"
+                          aria-hidden
+                        >
+                          <path d="M12 3a9 9 0 1 0 9 9" />
+                        </svg>
+                      ) : (
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          aria-hidden
+                        >
+                          <rect x="5" y="5" width="14" height="14" rx="2" />
+                        </svg>
+                      )
+                    ) : (
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden
+                      >
+                        <line x1="12" y1="20" x2="12" y2="5" />
+                        <polyline points="5,12 12,5 19,12" />
+                      </svg>
+                    )}
+                  </button>
+                )
+              })()}
             </div>
           </div>
         </div>

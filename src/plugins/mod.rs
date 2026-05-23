@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WASM plugin system for SenWeaverCoding.
-//!
-//! Plugins are WebAssembly modules loaded via Extism that can extend
-//! SenWeaverCoding with custom tools and channels. Enable with `--features plugins-wasm`.
 
 pub mod error;
 pub mod host;

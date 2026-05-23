@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shell adapters translating `SessionEvent` streams into UI-specific output.
-//!
-//! The three adapters here represent the "薄壳化" promise: each shell
-//! consumes the same typed event stream and is responsible **only** for
-//! rendering.  No business logic leaks into `cli_shell` / `tui_shell` /
-//! `gui_shell`.
-//!
-//! Adapters are intentionally minimal in this iteration — they expose a
-//! pure `render(event) -> String | Vec<u8>` API that downstream shells
-//! compose into their native I/O loops.
 
 use super::event::{SessionEvent, SessionEventKind};
 
@@ -165,6 +155,61 @@ fn render_cli_pretty(kind: &SessionEventKind) -> (String, bool) {
                 .unwrap_or_default();
             (format!("◈ opened {path}{hint} via {source}"), true)
         }
+        SessionEventKind::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            class,
+            message,
+            ..
+        } => {
+            let secs = (*wait_ms as f64) / 1000.0;
+            (
+                format!(
+                    "⏳ retrying ({class} {attempt}/{max_attempts}, next in {secs:.1}s): {message}"
+                ),
+                true,
+            )
+        }
+        SessionEventKind::WorkerSpawned {
+            worker_id, title, model, ..
+        } => (
+            format!("✦ worker spawned {worker_id} '{title}' ({model})"),
+            true,
+        ),
+        SessionEventKind::WorkerStatus {
+            worker_id, status, ..
+        } => (format!("• worker {worker_id} status={status}"), true),
+        SessionEventKind::WorkerProgress {
+            worker_id,
+            action,
+            detail,
+        } => (
+            format!("· worker {worker_id} {action}: {}", truncate(detail, 80)),
+            false,
+        ),
+        SessionEventKind::WorkerCompleted {
+            worker_id,
+            success,
+            summary,
+        } => {
+            let marker = if *success { "✓" } else { "✗" };
+            (
+                format!(
+                    "{marker} worker {worker_id} {}: {}",
+                    if *success { "completed" } else { "failed" },
+                    truncate(summary, 120)
+                ),
+                true,
+            )
+        }
+        SessionEventKind::WorkerStopped { worker_id, reason } => {
+            (format!("◼ worker {worker_id} stopped: {reason}"), true)
+        }
+        SessionEventKind::ParentResumed { reason } => (
+            format!("▶ parent resumed: {}", truncate(reason, 80)),
+            true,
+        ),
     }
 }
 
@@ -247,6 +292,58 @@ fn render_cli_plain(kind: &SessionEventKind) -> (String, bool) {
                     .map(|(l, c)| format!("{l}:{c}"))
                     .unwrap_or_else(|| "-".into())
             ),
+            true,
+        ),
+        SessionEventKind::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            class,
+            provider,
+            model,
+            ..
+        } => (
+            format!(
+                "[provider_retry class={class} attempt={attempt}/{max_attempts} wait_ms={wait_ms} provider={provider} model={model}]"
+            ),
+            true,
+        ),
+        SessionEventKind::WorkerSpawned {
+            worker_id, title, model, ..
+        } => (
+            format!("[worker_spawned id={worker_id} title={title} model={model}]"),
+            true,
+        ),
+        SessionEventKind::WorkerStatus {
+            worker_id, status, ..
+        } => (
+            format!("[worker_status id={worker_id} status={status}]"),
+            true,
+        ),
+        SessionEventKind::WorkerProgress {
+            worker_id, action, detail,
+        } => (
+            format!(
+                "[worker_progress id={worker_id} action={action} detail={}]",
+                truncate(detail, 80)
+            ),
+            false,
+        ),
+        SessionEventKind::WorkerCompleted {
+            worker_id, success, summary,
+        } => (
+            format!(
+                "[worker_completed id={worker_id} success={success} summary={}]",
+                truncate(summary, 120)
+            ),
+            true,
+        ),
+        SessionEventKind::WorkerStopped { worker_id, reason } => (
+            format!("[worker_stopped id={worker_id} reason={reason}]"),
+            true,
+        ),
+        SessionEventKind::ParentResumed { reason } => (
+            format!("[parent_resumed reason={}]", truncate(reason, 120)),
             true,
         ),
     }
@@ -433,6 +530,54 @@ pub fn render_tui(event: &SessionEvent) -> TuiLine {
             ),
             style_hint: TuiStyle::Dim,
         },
+        SessionEventKind::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            message,
+            ..
+        } => {
+            let secs = (*wait_ms as f64) / 1000.0;
+            TuiLine {
+                prefix: "⏳",
+                body: format!(
+                    "{message} (retry {attempt}/{max_attempts}, waiting {secs:.1}s)"
+                ),
+                style_hint: TuiStyle::Accent,
+            }
+        }
+        SessionEventKind::WorkerSpawned {
+            worker_id, title, model, ..
+        } => TuiLine {
+            prefix: "✦",
+            body: format!("worker {worker_id} '{title}' ({model})"),
+            style_hint: TuiStyle::Accent,
+        },
+        SessionEventKind::WorkerStatus { worker_id, status, .. } => TuiLine {
+            prefix: "•",
+            body: format!("worker {worker_id} status={status}"),
+            style_hint: TuiStyle::Dim,
+        },
+        SessionEventKind::WorkerProgress { worker_id, action, detail } => TuiLine {
+            prefix: "·",
+            body: format!("worker {worker_id} {action}: {detail}"),
+            style_hint: TuiStyle::Dim,
+        },
+        SessionEventKind::WorkerCompleted { worker_id, success, summary } => TuiLine {
+            prefix: if *success { "✓" } else { "✗" },
+            body: format!("worker {worker_id} done: {summary}"),
+            style_hint: if *success { TuiStyle::Success } else { TuiStyle::Error },
+        },
+        SessionEventKind::WorkerStopped { worker_id, reason } => TuiLine {
+            prefix: "◼",
+            body: format!("worker {worker_id} stopped: {reason}"),
+            style_hint: TuiStyle::Dim,
+        },
+        SessionEventKind::ParentResumed { reason } => TuiLine {
+            prefix: "▶",
+            body: format!("parent resumed: {reason}"),
+            style_hint: TuiStyle::Accent,
+        },
     }
 }
 
@@ -577,6 +722,62 @@ pub fn render_gui(event: &SessionEvent) -> GuiEvent {
                 cursor
                     .map(|(l, c)| format!("{l}:{c}"))
                     .unwrap_or_default()
+            ),
+            is_error: false,
+        },
+        SessionEventKind::WorkerSpawned {
+            worker_id, title, model, ..
+        } => GuiEvent {
+            kind: "worker_spawned",
+            body: format!("{worker_id}|{title}|{model}"),
+            is_error: false,
+        },
+        SessionEventKind::WorkerStatus {
+            worker_id, status, detail,
+        } => GuiEvent {
+            kind: "worker_status",
+            body: format!(
+                "{worker_id}|{status}|{}",
+                detail.as_deref().unwrap_or("")
+            ),
+            is_error: false,
+        },
+        SessionEventKind::WorkerProgress {
+            worker_id, action, detail,
+        } => GuiEvent {
+            kind: "worker_progress",
+            body: format!("{worker_id}|{action}|{detail}"),
+            is_error: false,
+        },
+        SessionEventKind::WorkerCompleted {
+            worker_id, success, summary,
+        } => GuiEvent {
+            kind: "worker_completed",
+            body: format!("{worker_id}|{success}|{summary}"),
+            is_error: !success,
+        },
+        SessionEventKind::WorkerStopped { worker_id, reason } => GuiEvent {
+            kind: "worker_stopped",
+            body: format!("{worker_id}|{reason}"),
+            is_error: false,
+        },
+        SessionEventKind::ParentResumed { reason } => GuiEvent {
+            kind: "parent_resumed",
+            body: reason.clone(),
+            is_error: false,
+        },
+        SessionEventKind::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            class,
+            provider,
+            model,
+            message,
+        } => GuiEvent {
+            kind: "provider_retry",
+            body: format!(
+                "{class}|{attempt}|{max_attempts}|{wait_ms}|{provider}|{model}|{message}"
             ),
             is_error: false,
         },

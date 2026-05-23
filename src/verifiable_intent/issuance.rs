@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! L2 and L3 credential issuance.
-//!
-//! Provides builders for constructing VI credentials with proper SD-JWT
-//! serialization and key binding. L1 issuance is out of scope (performed by
-//! external credential providers / issuers).
 
 use ring::signature::EcdsaKeyPair;
 use serde_json::json;

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Keybinding resolver — mirrors claude-code-typescript-src`keybindings/resolver.ts`.
 
 use super::defaults::default_bindings;
 use super::parser::ParsedKey;

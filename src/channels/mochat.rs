@@ -37,7 +37,9 @@ impl MochatChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("channel.mochat")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.mochat")
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {

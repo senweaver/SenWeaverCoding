@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware discovery — USB device enumeration and introspection.
-//!
-//! See `docs/hardware-peripherals-design.md` for the full design.
 
 pub mod device;
 pub mod gpio;

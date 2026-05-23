@@ -36,6 +36,53 @@ fn path_check(security: &SecurityPolicy, path: &str) -> Option<ToolResult> {
     None
 }
 
+async fn verify_resolved_path(
+    security: &SecurityPolicy,
+    path: &std::path::Path,
+    label: &str,
+) -> Option<ToolResult> {
+    if let Ok(meta) = tokio::fs::symlink_metadata(path).await {
+        if meta.file_type().is_symlink() {
+            return Some(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Refusing to operate through symlink: {label}")),
+            });
+        }
+    }
+    if let Ok(resolved) = tokio::fs::canonicalize(path).await {
+        if !security.is_resolved_path_allowed(&resolved) {
+            return Some(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Path escapes workspace boundary: {label}")),
+            });
+        }
+    }
+    None
+}
+
+async fn verify_dst_parent(
+    security: &SecurityPolicy,
+    dst_path: &std::path::Path,
+    label: &str,
+) -> Option<ToolResult> {
+    if let Some(parent) = dst_path.parent() {
+        if parent.exists() {
+            if let Ok(resolved_parent) = tokio::fs::canonicalize(parent).await {
+                if !security.is_resolved_path_allowed(&resolved_parent) {
+                    return Some(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Destination escapes workspace boundary: {label}")),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 pub struct CopyPathTool {
     security: Arc<SecurityPolicy>,
 }
@@ -103,6 +150,13 @@ impl Tool for CopyPathTool {
                 output: String::new(),
                 error: Some(format!("Source does not exist: {src}")),
             });
+        }
+
+        if let Some(r) = verify_resolved_path(&self.security, &src_path, src).await {
+            return Ok(r);
+        }
+        if let Some(r) = verify_dst_parent(&self.security, &dst_path, dst).await {
+            return Ok(r);
         }
 
         if !self.security.record_action() {
@@ -212,6 +266,13 @@ impl Tool for MovePathTool {
                 output: String::new(),
                 error: Some(format!("Source does not exist: {src}")),
             });
+        }
+
+        if let Some(r) = verify_resolved_path(&self.security, &src_path, src).await {
+            return Ok(r);
+        }
+        if let Some(r) = verify_dst_parent(&self.security, &dst_path, dst).await {
+            return Ok(r);
         }
 
         if !self.security.record_action() {

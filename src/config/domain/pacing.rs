@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Pacing / loop-detection configuration, migrated from monolithic schema.
-//!
-//! Controls the execution pacing of the agent loop for slow or local LLMs:
-//! per-step timeouts, loop-detection grace periods, and the sliding-window
-//! detector parameters.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Query engine module — mirrors claude-code's `query/` and `query.ts`.
-//
-// Provides query configuration, token budget management, dependency
-// injection for queries, and stop-hook evaluation.
 
 pub mod compact;
 pub mod config;

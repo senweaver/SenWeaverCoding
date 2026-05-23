@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// XML tag constants — mirrors claude-code-typescript-src`constants/xml.ts`.
-// Standard XML tags used in system prompts and tool outputs.
 
 pub const TAG_SYSTEM: (&str, &str) = ("<system>", "</system>");
 pub const TAG_ENVIRONMENT: (&str, &str) = ("<environment>", "</environment>");

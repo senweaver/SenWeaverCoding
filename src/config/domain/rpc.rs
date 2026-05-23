@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! RPC server configuration, migrated from monolithic schema.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

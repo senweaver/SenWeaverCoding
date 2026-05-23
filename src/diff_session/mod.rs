@@ -1,41 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! M4 ??Multi-file DiffSession with atomic apply + rollback.
-//!
-//! A `DiffSession` accumulates unified-diff edits across N files, lets
-//! the caller preview them as a batch, and either applies them
-//! **atomically** (all-or-nothing) or rolls back to the pre-session
-//! state.  The session captures the original bytes of every touched
-//! file in a `FileBackup` so rollback works even after the apply step
-//! has already mutated the working tree on disk.
-//!
-//! ??internal byte-level work is now delegated to
-//! [`crate::apply_model::OpsApplier`].  The public API (`new` /
-//! `stage` / `apply_all` / `rollback`) is preserved verbatim;
-//! `DiffSession` becomes the *thin adaptor* that turns a pile of
-//! `(path, unified-diff)` pairs into an [`EditBatch`] of
-//! `EditOp::ApplyHunk`s for OpsApplier to execute.  The legacy
-//! `restore_backups_atomic` path is kept as a defensive fallback
-//! when OpsApplier itself reports a rollback failure.
-//!
-//! Three public entry points:
-//!
-//! * [`DiffSession::new`] ??construct an empty session rooted at a
-//!   workspace path.
-//! * [`DiffSession::stage`] ??add a `(path, diff)` pair; captures the
-//!   backup lazily on first encounter.
-//! * [`DiffSession::apply_all`] ??apply every staged diff in order.
-//!   If **any** file fails, the session rolls every already-applied
-//!   file back to its pre-apply state and returns the triggering
-//!   error ??the working tree is indistinguishable from the start.
-//! * [`DiffSession::rollback`] ??voluntary rollback after a successful
-//!   apply (e.g. user rejects the batch).  Restores every backed-up
-//!   file from memory.
-//!
-//! Observability: every successful apply increments
-//! `sen_diff_session_applied_total`; every rollback increments
-//! `sen_diff_session_rollbacks_total`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -195,7 +160,7 @@ impl DiffSession {
         out
     }
 
-    pub fn apply_all(&mut self) -> Result<ApplyReport, DiffSessionError> {
+    pub async fn apply_all(&mut self) -> Result<ApplyReport, DiffSessionError> {
         if self.applied {
             return Err(DiffSessionError::AlreadyApplied);
         }
@@ -226,7 +191,7 @@ impl DiffSession {
         let batch_id = batch.batch_id.clone();
         let applier = self.ops_applier();
 
-        let result = run_async(async move { applier.apply_batch(batch).await });
+        let result = applier.apply_batch(batch).await;
         match result {
             Ok(_) => {
                 self.applied = true;
@@ -249,25 +214,19 @@ impl DiffSession {
         }
     }
 
-    pub fn rollback(&mut self) -> Result<(), DiffSessionError> {
+    pub async fn rollback(&mut self) -> Result<(), DiffSessionError> {
         if !self.applied {
             return Err(DiffSessionError::NotApplied);
         }
 
         if let Some(batch_id) = self.last_batch_id.clone() {
             let applier = self.ops_applier();
-            let result =
-                run_async(async move { applier.rollback(&batch_id).await });
-            match result {
-                Ok(()) => {
-                    self.applied = false;
-                    self.last_batch_id = None;
-                    session_write_mode_metrics::incr_diff_session_rollback();
-                    return Ok(());
-                }
-                Err(_) => {
-
-                }
+            let result = applier.rollback(&batch_id).await;
+            if result.is_ok() {
+                self.applied = false;
+                self.last_batch_id = None;
+                session_write_mode_metrics::incr_diff_session_rollback();
+                return Ok(());
             }
         }
 
@@ -446,22 +405,6 @@ impl DiffSession {
     }
 }
 
-fn run_async<F>(fut: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    use tokio::runtime::{Builder, Handle, RuntimeFlavor};
-    if let Ok(handle) = Handle::try_current() {
-        if matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread) {
-            return tokio::task::block_in_place(|| handle.block_on(fut));
-        }
-    }
-    let rt = Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build tokio runtime for diff_session");
-    rt.block_on(fut)
-}
 
 fn resolve_inside(root: &Path, path: &Path) -> Result<PathBuf, DiffSessionError> {
     let joined = if path.is_absolute() {

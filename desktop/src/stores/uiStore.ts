@@ -112,6 +112,7 @@ export type Toast = {
   message: string
   duration?: number
   action?: ToastAction
+  sessionId?: string
   onDismiss?: () => void
 }
 
@@ -264,7 +265,6 @@ export const useUIStore = create<UIStore>((set, get) => ({
     try {
       localStorage.setItem(RIGHT_SIDEBAR_OPEN_KEY, 'true')
     } catch {
-      /* ignore */
     }
     set({ workspaceFinderMode: mode, rightSidebarOpen: true })
   },
@@ -304,7 +304,6 @@ export const useUIStore = create<UIStore>((set, get) => ({
         try {
           target.onDismiss()
         } catch {
-          /* noop */
         }
       }
       return { toasts: s.toasts.filter((t) => t.id !== id) }

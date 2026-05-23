@@ -1,37 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! runtime configuration for the verification pipeline +
-//! recursive LLM refiner.
-//!
-//! These knobs live in `.sen/config.toml` so operators can tune them
-//! without recompiling.  We deliberately keep them in a *small,
-//! self-contained* module instead of bolting two more sections onto
-//! the canonical [`crate::config::schema::Config`] — the canonical
-//! config is already ~14k lines and adding optional, tooling-local
-//! knobs there would force every reader through schema validation
-//! that doesn't belong in the inline-edit / write-mode hot path.
-//!
-//! Layout (all sections are optional; sensible defaults are
-//! supplied so a missing `.sen/config.toml` keeps existing
-//! behaviour identical):
-//!
-//! ```toml
-//! [apply_model.refine]
-//! temperature = 0.0
-//! timeout_seconds = 30
-//! max_refine = 1
-//! max_recursive = 2
-//!
-//! [verification]
-//! # `stages` controls which pipeline stages get registered when the
-//! # inline-edit / write-mode / code-edit entry points build their
-//! # default pipeline.  Unknown stage names are ignored.
-//! stages = ["syntactic", "test_runner", "lsp_diag"]
-//! # `policy` accepts `"fail_fast"`, `"collect_all"`, or
-//! # `{ kind = "score_based", min_score = 0.5 }`.
-//! policy = "collect_all"
-//! ```
 
 use std::path::Path;
 use std::sync::Arc;

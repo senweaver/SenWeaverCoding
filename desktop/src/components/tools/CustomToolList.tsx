@@ -72,8 +72,8 @@ export function CustomToolList() {
         <p className="text-xs text-[var(--color-text-secondary)]">
           {t('settings.tools.listDescription')}
         </p>
-        <Button onClick={() => setMode({ kind: 'create' })}>
-          <span className="material-symbols-outlined text-[16px] mr-1">add</span>
+        <Button size="sm" onClick={() => setMode({ kind: 'create' })}>
+          <span className="material-symbols-outlined text-[14px] mr-1">add</span>
           {t('settings.tools.create')}
         </Button>
       </div>
@@ -85,7 +85,7 @@ export function CustomToolList() {
       )}
 
       {tools.length === 0 && !isLoading ? (
-        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-text-secondary)]">
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-4 text-center text-xs text-[var(--color-text-secondary)]">
           {t('settings.tools.empty')}
         </div>
       ) : (
@@ -97,7 +97,7 @@ export function CustomToolList() {
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
+                  <p className="text-xs font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
                     <code className="font-mono text-xs">custom_{tool.name}</code>
                     {!tool.enabled && (
                       <span className="text-[10px] uppercase tracking-wide rounded bg-[var(--color-surface-container-high)] px-1.5 py-[1px] text-[var(--color-text-tertiary)]">
@@ -110,7 +110,7 @@ export function CustomToolList() {
                       {tool.description}
                     </p>
                   )}
-                  <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1 font-mono truncate">
+                  <p className="text-xs text-[var(--color-text-tertiary)] mt-1 font-mono truncate">
                     {[tool.command, ...tool.args].join(' ')}
                   </p>
                 </div>
@@ -120,14 +120,14 @@ export function CustomToolList() {
                     size="sm"
                     onClick={() => setMode({ kind: 'edit', tool })}
                   >
-                    <span className="material-symbols-outlined text-[16px]">edit</span>
+                    <span className="material-symbols-outlined text-[14px]">edit</span>
                   </Button>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => setPendingDelete(tool)}
                   >
-                    <span className="material-symbols-outlined text-[16px]">delete</span>
+                    <span className="material-symbols-outlined text-[14px]">delete</span>
                   </Button>
                 </div>
               </div>

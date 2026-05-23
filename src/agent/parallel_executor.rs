@@ -1,64 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Parallel execution engine for multi-agent task coordination.
-//!
-//! ## Overview
-//!
-//! The `ParallelExecutor` executes tasks concurrently with:
-//! - Priority scheduling (real-time > batch)
-//! - Fair queuing (prevents starvation)
-//! - Result aggregation (FirstComplete, AllComplete, BestOfN, Voting, …)
-//!
-//! ## upgrades
-//!
-//! * **Permit-first scheduling.**  `submit` acquires the semaphore
-//!   permit *before* the task is recorded as running, so a success from
-//!   `submit` strictly implies "a worker slot is already ours".
-//! * **Panic-safe cleanup** via a `RunningGuard` RAII wrapper: if the
-//!   spawned task panics, unwinds, or is aborted mid-flight, the
-//!   `running` map is still drained and waiters are woken up — the
-//!   pre-0.3 executor would hang `await_result` forever in that case.
-//! * **Classified aggregation** via [`AggregatedOutput`] +
-//!   [`TaskFailure`]: every aggregation strategy now reports successes
-//!   and failures separately, so upstream code can compute quorum or
-//!   retry without parsing `Option<String>` error fields.
-//! * **Executor metrics** surface spawn / complete / panic / timeout
-//!   counters for the Prometheus exporter to consume.
-//!
-//! ## upgrades
-//!
-//! * **Chase-Lev work stealing.**  The flat
-//!   `BinaryHeap<QueuedTask>` queue is replaced with one
-//!   [`crossbeam_deque::Worker`] per worker thread plus a global
-//!   [`crossbeam_deque::Injector`] for overflow / rebalancing.  Each
-//!   worker pops from its local deque first, then steals from peers,
-//!   then drains from the injector; failures to find work are parked
-//!   on a per-worker [`tokio::sync::Notify`] and woken by `submit`.
-//! * **Future-factory queueing.**  `QueuedTask` owns a
-//!   `Box<dyn FnOnce() -> BoxFuture<'static, TaskOutput> + Send>` so
-//!   the actual task future is not constructed until a worker picks
-//!   it up — permits are acquired inside the worker loop right
-//!   before `tokio::spawn`, not during `submit` as in .
-//! * **Strategy fixes.**  [`voting_consensus`] now divides by the
-//!   combined success + failure count so disagreement on failed
-//!   runs cannot silently inflate consensus; [`best_of_n`] sorts by
-//!   `duration_ms` ascending so the returned slice is the fastest
-//!   `n` winners (previous insertion-order behaviour depended on
-//!   scheduler timing).
-//! * **Executor metrics.**  A new `stolen` counter mirrors into
-//!   [`crate::observability::scheduler_metrics`] so Prometheus
-//!   dashboards expose per-deque steal pressure alongside the
-//!   pre-existing spawn / complete / panic / timeout counters.
-//!
-//! ## Usage
-//!
-//! ```ignore
-//! let executor = ParallelExecutor::new(ExecutorConfig::default());
-//! let handle = executor.submit(task, Priority::NORMAL, None).await?;
-//! let result = executor.await_result(handle, Some(5)).await?;
-//! ```
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;

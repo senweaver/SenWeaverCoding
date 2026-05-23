@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Knowledge graph for capturing, organizing, and reusing expertise.
-//!
-//! SQLite-backed storage for knowledge nodes (patterns, decisions, lessons,
-//! experts, technologies) and directed edges (uses, replaces, extends,
-//! authored_by, applies_to). Supports full-text search, tag filtering,
-//! and relation traversal.
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};

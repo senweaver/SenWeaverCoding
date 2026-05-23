@@ -1,10 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Mirror of `crate::config::schema::LspConfig` and friends.
-//
-// Wire shape:
-// - GET /api/lsp -> { enabled, servers: LspServerRecord[] }
-// - WebSocket events use the snake_case discriminator that
-//   `serde(tag = "type", rename_all = "snake_case")` produces.
 
 export type LspInstallState =
   | { status: 'not_installed' }

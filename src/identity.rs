@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Identity system supporting Markdown and AIEOS (JSON) formats.
-//!
-//! AIEOS (AI Entity Object Specification) is a standardization framework for
-//! portable AI agent identity. This module handles loading and converting
-//! AIEOS v1.1 JSON to SenWeaverCoding's system prompt format.
 
 use crate::config::IdentityConfig;
 use anyhow::{Context, Result};
@@ -772,7 +767,9 @@ pub fn aieos_to_system_prompt(identity: &AieosIdentity) -> String {
                 let mut sorted_keys: Vec<_> = matrix.keys().collect();
                 sorted_keys.sort();
                 for trait_name in sorted_keys {
-                    let weight = matrix.get(trait_name).unwrap();
+                    let Some(weight) = matrix.get(trait_name) else {
+                        continue;
+                    };
                     let _ = writeln!(prompt, "- {}: {:.2}", trait_name, weight);
                 }
             }
@@ -938,7 +935,9 @@ pub fn aieos_to_system_prompt(identity: &AieosIdentity) -> String {
                 let mut sorted_keys: Vec<_> = favorites.keys().collect();
                 sorted_keys.sort();
                 for category in sorted_keys {
-                    let value = favorites.get(category).unwrap();
+                    let Some(value) = favorites.get(category) else {
+                        continue;
+                    };
                     let _ = writeln!(prompt, "- {}: {}", category, value);
                 }
             }

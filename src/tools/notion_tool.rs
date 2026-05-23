@@ -306,7 +306,15 @@ impl Tool for NotionTool {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 self.search(query).await
             }
-            _ => unreachable!(),
+            other => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "notion action '{other}' passed validation but has no dispatch arm (internal logic error)"
+                    )),
+                });
+            }
         };
 
         match result {

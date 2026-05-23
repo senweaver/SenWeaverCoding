@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! M6-Git timeline.
-//!
-//! Associates every symbol in a [`super::SymbolGraph`] with the most
-//! recent commit / author that touched its declaration line, using
-//! the system `git` CLI.  The module deliberately shells out rather
-//! than linking libgit2 unconditionally so the feature works on
-//! every build (the existing `git2` dependency is gated behind the
-//! `gui` feature).  When `git` is unavailable or the workspace is
-//! not a repo, the timeline degrades to `None` entries — callers
-//! must treat "no data" as a first-class state rather than an
-//! error.
 
 use std::collections::HashMap;
 use std::path::Path;

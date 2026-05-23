@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Session memory service — mirrors claude-code-typescript-src`services/SessionMemory/`.
-// Manages within-session memory extraction and retrieval separate from
-// the persistent memory backend.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

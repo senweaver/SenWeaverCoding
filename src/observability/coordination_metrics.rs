@@ -1,32 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Multi-agent coordination metrics.
-//!
-//! Covers four observable event families introduced for the
-//! multi-agent coordination subsystem:
-//!
-//! 1. **`LockManager` region acquisitions** — every
-//!    [`crate::agent::coordination::LockManager::acquire_region`]
-//!    invocation classifies the outcome as `ok / conflict / deadlock /
-//!    timeout` and bumps the matching counter.
-//! 2. **Blackboard message-bus** — broadcasts that landed
-//!    (`published`), subscribers that received them (`delivered`),
-//!    subscribers that fell behind (`lagged`), and journal-replay
-//!    deliveries that recovered missing events (`replayed`).
-//! 3. **`delegate_parallel`** — explicit fallback semantics expose
-//!    three new failure modes: `no_runtime`, `no_capability`,
-//!    `fallback`.
-//! 4. **CRDT proof-of-concept** — only populated when the
-//!    `crdt-coordination` feature is on, but the counters are always
-//!    declared so the Prometheus surface is stable.
-//!
-//! The module mirrors the [`super::subsystem_metrics`] /
-//! [`super::code_intel_metrics`] structure: a process-global
-//! [`OnceLock`]-backed registry of [`AtomicU64`] counters, an
-//! `incr_*` helper per counter, and a
-//! [`CoordinationSnapshot::render_prometheus_text`] method that the
-//! main Prometheus encoder appends to its output.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};

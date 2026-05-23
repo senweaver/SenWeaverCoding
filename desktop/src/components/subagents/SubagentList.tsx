@@ -76,8 +76,8 @@ export function SubagentList() {
         <p className="text-xs text-[var(--color-text-secondary)]">
           {t('settings.subagents.listDescription')}
         </p>
-        <Button onClick={() => setMode({ kind: 'create' })}>
-          <span className="material-symbols-outlined text-[16px] mr-1">add</span>
+        <Button size="sm" onClick={() => setMode({ kind: 'create' })}>
+          <span className="material-symbols-outlined text-[14px] mr-1">add</span>
           {t('settings.subagents.create')}
         </Button>
       </div>
@@ -89,7 +89,7 @@ export function SubagentList() {
       )}
 
       {agents.length === 0 && !isLoading ? (
-        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-text-secondary)]">
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-4 text-center text-xs text-[var(--color-text-secondary)]">
           {t('settings.subagents.empty')}
         </div>
       ) : (
@@ -101,10 +101,10 @@ export function SubagentList() {
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-[var(--color-text-primary)] truncate">
+                  <p className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
                     {agent.name}
                   </p>
-                  <p className="text-[11px] text-[var(--color-text-tertiary)] font-mono truncate">
+                  <p className="text-xs text-[var(--color-text-tertiary)] font-mono truncate">
                     {agent.provider}/{agent.model}
                   </p>
                 </div>
@@ -114,14 +114,14 @@ export function SubagentList() {
                     size="sm"
                     onClick={() => setMode({ kind: 'edit', agent })}
                   >
-                    <span className="material-symbols-outlined text-[16px]">edit</span>
+                    <span className="material-symbols-outlined text-[14px]">edit</span>
                   </Button>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => setPendingDelete(agent)}
                   >
-                    <span className="material-symbols-outlined text-[16px]">delete</span>
+                    <span className="material-symbols-outlined text-[14px]">delete</span>
                   </Button>
                 </div>
               </div>

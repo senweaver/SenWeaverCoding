@@ -181,6 +181,41 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("tavily_search", SAFE, "Search the web via Tavily"),
         ("exa_search", SAFE, "Search the web via Exa"),
         ("github_search", SAFE, "Search GitHub for code or issues"),
+        (
+            "github_advanced_search",
+            SAFE,
+            "Advanced GitHub search with the full advanced-search qualifier surface (owners/repos/language/stars/forks/license/path/extension/topic/state/labels/comments/author/reviewed-by …)",
+        ),
+        (
+            "workspace_deep_search",
+            SAFE,
+            "Local workspace DeepSearch with planner + BM25 + vector + structural + fuzzy recall and paragraph-level traced output",
+        ),
+        (
+            "enter_curator_mode",
+            SAFE,
+            "Enter Curator mode (extensive research + DOCX-grade document drafting)",
+        ),
+        (
+            "exit_curator_mode",
+            SAFE,
+            "Exit Curator mode and persist final.md/impl_blueprint.md/final.docx",
+        ),
+        (
+            "curator_collect",
+            SAFE,
+            "Persist research notes / sources for the active Curator session",
+        ),
+        (
+            "curator_template_list",
+            SAFE,
+            "List bundled Curator document templates (paper / solution / tech_report)",
+        ),
+        (
+            "curator_template_apply",
+            SAFE,
+            "Apply a bundled Curator template to a draft document",
+        ),
         ("http_request", MODERATE, "Make an arbitrary HTTP request"),
         ("text_browser", SAFE, "Open a URL in the text browser"),
         ("browser", MODERATE, "Drive the visual browser"),
@@ -342,7 +377,7 @@ pub fn tier_for(name: &str, surface: ToolSurfaceBaseline) -> BuiltinToolTier {
 
 pub fn known_tool_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = TOOL_TIERS.keys().copied().collect();
-    names.sort();
+    names.sort_unstable();
     names
 }
 
@@ -373,7 +408,7 @@ pub struct BuiltinDeferredRegistrationOptions<'a> {
     pub config: Option<&'a crate::config::Config>,
 }
 
-impl<'a> Default for BuiltinDeferredRegistrationOptions<'a> {
+impl Default for BuiltinDeferredRegistrationOptions<'_> {
     fn default() -> Self {
         Self {
             workspace_key: String::new(),

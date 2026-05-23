@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Executes a [`WritePlan`] step-by-step.
-//!
-//! The executor is deliberately *dumb*: it trusts the planner's step
-//! sequence and does not second-guess it.  Every step is observable
-//! (metrics + tracing span), fails fast on the first error,
-//! and records its output in [`StepOutcome`] so callers can render a
-//! UI summary with full fidelity.
-//!
-//! ??disk writes for `ApplyDiff` are routed through
-//! [`crate::apply_model::OpsApplier`] so they share the journal /
-//! rollback / lock invariants of every other editing surface.  The
-//! pluggable `apply_fn` signature is preserved (callers that supply
-//! a custom apply still get `(source, path, instruction, diff) ??//! new_contents`), but the default in-memory transformer now uses
-//! the [`crate::apply_model::HeuristicApplier`] trait method instead
-//! of calling `apply_unified_diff` directly, keeping the lone
-//! callsite for `apply_unified_diff` inside `apply_model`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -587,7 +571,7 @@ async fn write_full_replace(
 ) -> Result<String, String> {
     let batch = EditBatch::new(EditOrigin::WriteMode).with_op(EditOp::Replace {
         path: abs.to_path_buf(),
-        byte_range: 0..source.as_bytes().len(),
+        byte_range: 0..source.len(),
         old_text: source.to_string(),
         new_text: new_contents.to_string(),
         anchor: None,

@@ -2,9 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use super::traits::{Tool, ToolResult};
-use crate::config::{
-    Config, ProxyConfig, ProxyScope, runtime_proxy_config, set_runtime_proxy_config,
-};
+use crate::config::{Config, ProxyConfig, ProxyScope};
 use crate::security::SecurityPolicy;
 use crate::util::MaybeSet;
 use async_trait::async_trait;
@@ -143,7 +141,7 @@ impl ProxyConfigTool {
 
     fn handle_get(&self) -> anyhow::Result<ToolResult> {
         let file_proxy = self.load_config_without_env()?.proxy;
-        let runtime_proxy = runtime_proxy_config();
+        let runtime_proxy = crate::services::get_services().proxy_runtime().snapshot();
         Ok(ToolResult {
             success: true,
             output: serde_json::to_string_pretty(&json!({
@@ -248,7 +246,9 @@ impl ProxyConfigTool {
 
         cfg.proxy = proxy.clone();
         cfg.save().await?;
-        set_runtime_proxy_config(proxy.clone());
+        crate::services::get_services()
+            .proxy_runtime()
+            .replace(proxy.clone());
 
         if proxy.enabled && proxy.scope == ProxyScope::Environment {
             proxy.apply_to_process_env();
@@ -273,7 +273,9 @@ impl ProxyConfigTool {
         cfg.proxy.enabled = false;
         cfg.save().await?;
 
-        set_runtime_proxy_config(cfg.proxy.clone());
+        crate::services::get_services()
+            .proxy_runtime()
+            .replace(cfg.proxy.clone());
 
         let clear_env = args
             .get("clear_env")
@@ -311,7 +313,9 @@ impl ProxyConfigTool {
         }
 
         proxy.apply_to_process_env();
-        set_runtime_proxy_config(proxy.clone());
+        crate::services::get_services()
+            .proxy_runtime()
+            .replace(proxy.clone());
 
         Ok(ToolResult {
             success: true,
@@ -418,7 +422,7 @@ impl Tool for ProxyConfigTool {
                     "disable" => Box::pin(self.handle_disable(&args)).await,
                     "apply_env" => self.handle_apply_env(),
                     "clear_env" => self.handle_clear_env(),
-                    _ => unreachable!("handled above"),
+                    other => anyhow::bail!("internal: unhandled proxy action '{other}'"),
                 }
             }
             _ => anyhow::bail!(

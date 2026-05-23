@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Memory runtime sub-schema — retention, GC, and cache tuning.
-//!
-//! Sits alongside the existing `MemoryConfig` (storage backend selection)
-//! and captures **operational** memory knobs: retention windows, GC
-//! cadences, cache sizes, vector-index tuning.  Keeping these in their
-//! own sub-schema means operators can tune them via
-//! `memory_runtime.*` keys without editing the monolithic config.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

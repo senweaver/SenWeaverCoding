@@ -19,7 +19,7 @@ pub fn build_recycled_block(
         return None;
     }
     let store = engine.recycling_store()?;
-    let recent_limit = snapshot.recycling.max_retained.max(8).min(200);
+    let recent_limit = snapshot.recycling.max_retained.clamp(8, 200);
     let candidates = store.list_recent(recent_limit).ok()?;
     if candidates.is_empty() {
         return None;

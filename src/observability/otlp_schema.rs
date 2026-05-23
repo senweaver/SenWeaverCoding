@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! canonical OTLP span schema.
-//!
-//! The full `observability::otel` module wires `opentelemetry` /
-//! `opentelemetry_sdk` / `opentelemetry-otlp` as an optional feature.
-//! This module lives alongside it and defines a single source of
-//! truth for span **names** and **attribute keys** so every emitter
-//! (agent loop, tool execution, provider completion, memory search,
-//! gateway request, session event) produces events downstream
-//! consumers can correlate with a stable schema.
-//!
-//! Each span name follows the `<domain>.<verb>` convention; attributes
-//! are snake_case and lower-bound to stable keys.
 
 pub const SPAN_AGENT_TURN: &str = "agent.turn";
 

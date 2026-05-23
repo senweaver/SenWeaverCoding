@@ -1,30 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Event-driven TUI input plumbing.
-//!
-//! Replaces the -era `crossterm::event::poll(100ms)` busy-loop
-//! with a `tokio::task::spawn_blocking` worker that funnels
-//! [`crossterm::event::Event`]s into a `tokio::sync::mpsc`
-//! unbounded channel, so the main `run_tui_inner` task can
-//! [`tokio::select!`] on input, agent deltas, and a 16 ms redraw tick
-//! concurrently.
-//!
-//! # Why `spawn_blocking` and not `crossterm::event::EventStream`?
-//!
-//! `EventStream` (via `crossterm::event` + tokio bindings) has a known
-//! regression on Windows ConPTY hosts where events stop arriving after
-//! the first resize; see the `risk 4 — TUI event-loop` mitigation in
-//! the master plan.  The blocking worker pattern is portable across
-//! Linux/macOS/Windows and requires no new optional features.
-//!
-//! # Shutdown
-//!
-//! The worker polls in 50 ms ticks so it can notice the shared
-//! [`std::sync::atomic::AtomicBool`] shutdown flag shortly after the
-//! main loop exits.  Worst-case clean-up latency is ~50 ms; when
-//! `crossterm::event::read` is parked on a final key, the event is
-//! still delivered before the worker exits.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

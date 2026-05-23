@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! LLM-assisted diff refinement.
-//!
-//! When [`super::heuristic::HeuristicApplier`] fails to locate one or
-//! more hunks, this module can invoke a provider to "repair" the
-//! diff by rewriting it relative to the *actual* current file.
-//!
-//! M3 ships a real [`HttpLlmRefiner`] on top of the
-//! [`crate::providers::traits::Provider`] trait so any configured
-//! provider (OpenAI / Anthropic / Gemini / Groq / compatible) can
-//! serve refine requests without extra plumbing.  The
-//! [`ScriptedRefiner`] remains for deterministic unit tests.
 
 use std::sync::Arc;
 use std::time::Duration;

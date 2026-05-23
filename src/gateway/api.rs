@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! REST API handlers for the web dashboard.
-//!
-//! All `/api/*` routes require bearer token authentication (PairingGuard).
 
 use super::AppState;
 use axum::{
@@ -100,7 +97,10 @@ pub(super) fn require_auth(
 fn is_request_from_localhost(headers: &HeaderMap) -> bool {
     if let Some(fwd) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         let first_ip = fwd.split(',').next().unwrap_or("").trim();
-        return first_ip == "127.0.0.1" || first_ip == "::1";
+        if first_ip == "127.0.0.1" || first_ip == "::1" {
+            return true;
+        }
+        return false;
     }
     true
 }
@@ -2090,9 +2090,11 @@ pub async fn handle_api_session_messages(
 
     let mut body = serde_json::json!({ "messages": messages });
     if let Some(pr) = pending_rewind {
-        body.as_object_mut()
-            .unwrap()
-            .insert("pendingRewind".to_string(), pr);
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("pendingRewind".to_string(), pr);
+        } else {
+            tracing::warn!("session messages body is not a JSON object; skipping pendingRewind");
+        }
     }
     Json(body).into_response()
 }

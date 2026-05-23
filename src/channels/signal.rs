@@ -96,11 +96,9 @@ impl SignalChannel {
 
     fn http_client(&self) -> Client {
         let builder = Client::builder().connect_timeout(Duration::from_secs(10));
-        let builder = crate::config::apply_channel_proxy_to_builder(
-            builder,
-            "channel.signal",
-            self.proxy_url.as_deref(),
-        );
+        let builder = crate::services::get_services()
+            .proxy_runtime()
+            .apply_channel_to_builder(builder, "channel.signal", self.proxy_url.as_deref());
         builder.build().unwrap_or_else(|e| {
             tracing::error!("Signal HTTP client build failed: {e}, using default client");
             Client::new()

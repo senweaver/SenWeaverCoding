@@ -118,13 +118,13 @@ export function RuleList() {
         </div>
       )}
 
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm font-semibold text-[var(--color-text-primary)]">
+            <p className="text-xs font-semibold text-[var(--color-text-primary)]">
               {t('settings.rules.engineEnable')}
             </p>
-            <p className="text-[11px] text-[var(--color-text-tertiary)]">
+            <p className="text-xs text-[var(--color-text-tertiary)]">
               {t('settings.rules.engineEnableHint')}
             </p>
           </div>
@@ -141,7 +141,7 @@ export function RuleList() {
             {t('settings.rules.defaultPolicy')}
           </p>
           <select
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] h-8 px-2.5 text-xs"
             value={config?.defaultPolicy ?? 'allow'}
             onChange={(e) => void setDefaultPolicy(e.target.value as RulePolicy)}
           >
@@ -161,14 +161,14 @@ export function RuleList() {
         <p className="text-xs text-[var(--color-text-secondary)]">
           {t('settings.rules.listDescription')}
         </p>
-        <Button onClick={() => setMode({ kind: 'create' })}>
-          <span className="material-symbols-outlined text-[16px] mr-1">add</span>
+        <Button size="sm" onClick={() => setMode({ kind: 'create' })}>
+          <span className="material-symbols-outlined text-[14px] mr-1">add</span>
           {t('settings.rules.create')}
         </Button>
       </div>
 
       {(config?.rules.length ?? 0) === 0 && !isLoading ? (
-        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-text-secondary)]">
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-4 text-center text-xs text-[var(--color-text-secondary)]">
           {t('settings.rules.empty')}
         </div>
       ) : (
@@ -180,7 +180,7 @@ export function RuleList() {
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 space-y-1">
-                  <p className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
+                  <p className="text-xs font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
                     <code className="font-mono text-xs">{rule.toolPattern}</code>
                     <span
                       className={`text-[10px] uppercase tracking-wide rounded px-1.5 py-[1px] ${
@@ -196,7 +196,7 @@ export function RuleList() {
                     </p>
                   )}
                   {rule.contexts.length > 0 && (
-                    <p className="text-[11px] text-[var(--color-text-tertiary)] font-mono">
+                    <p className="text-xs text-[var(--color-text-tertiary)] font-mono">
                       {rule.contexts.join(', ')}
                     </p>
                   )}
@@ -207,14 +207,14 @@ export function RuleList() {
                     size="sm"
                     onClick={() => setMode({ kind: 'edit', index: idx, rule })}
                   >
-                    <span className="material-symbols-outlined text-[16px]">edit</span>
+                    <span className="material-symbols-outlined text-[14px]">edit</span>
                   </Button>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => setPendingDelete({ index: idx, rule })}
                   >
-                    <span className="material-symbols-outlined text-[16px]">delete</span>
+                    <span className="material-symbols-outlined text-[14px]">delete</span>
                   </Button>
                 </div>
               </div>

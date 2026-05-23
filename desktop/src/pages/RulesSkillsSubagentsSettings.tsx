@@ -18,7 +18,7 @@ export function RulesSkillsSubagentsSettings() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+        <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.rsk.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-1">
@@ -136,12 +136,12 @@ function SkillsTab() {
 
   return (
     <div className="space-y-4">
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
         <div>
-          <p className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <p className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.skills.promptModeTitle')}
           </p>
-          <p className="text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
+          <p className="text-xs text-[var(--color-text-tertiary)] leading-relaxed">
             {t('settings.skills.promptModeHint')}
           </p>
         </div>
@@ -164,23 +164,23 @@ function SkillsTab() {
         </div>
       </section>
 
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-2">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-2">
         <div>
-          <p className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <p className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.skills.disabledTitle')}
           </p>
-          <p className="text-[11px] text-[var(--color-text-tertiary)]">
+          <p className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.skills.disabledHint')}
           </p>
         </div>
         <input
-          className="w-full h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs"
+          className="w-full h-8 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs"
           value={disabledText}
           onChange={(e) => setDisabledText(e.target.value)}
           placeholder="skillA, skillB"
         />
         <div className="flex justify-end">
-          <Button onClick={handleSaveDisabled} disabled={isSaving}>
+          <Button size="sm" onClick={handleSaveDisabled} disabled={isSaving}>
             {isSaving ? t('common.saving') : t('common.save')}
           </Button>
         </div>
@@ -227,7 +227,7 @@ function PromptModeOption({
           </span>
         )}
       </div>
-      <span className="text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
+      <span className="text-xs text-[var(--color-text-tertiary)] leading-relaxed">
         {description}
       </span>
     </button>
@@ -248,7 +248,7 @@ function SubTabButton({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-3 py-2 text-xs transition-colors border-b-2 -mb-[1px] ${
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs transition-colors border-b-2 -mb-[1px] ${
         active
           ? 'border-[var(--color-brand)] text-[var(--color-text-primary)] font-medium'
           : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'

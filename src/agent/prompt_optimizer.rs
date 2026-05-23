@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Adaptive prompt optimization based on feedback history.
-//!
-//! Analyzes feedback patterns and generates prompt adjustments that
-//! improve response quality over time.
 
 use parking_lot::RwLock;
 use schemars::JsonSchema;

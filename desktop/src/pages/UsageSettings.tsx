@@ -44,6 +44,7 @@ const CODING_MODE_ICON: Record<CodingModeId, string> = {
   context: '🧠',
   mvai: '⚡',
   harness: '🛡',
+  curator: '📚',
 }
 
 function formatUsd(value: number): string {
@@ -257,10 +258,10 @@ export function UsageSettings() {
   const activeSessionCount = sessions.length
 
   return (
-    <div className="max-w-5xl space-y-6">
+    <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+          <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.usage.title')}
           </h2>
           <p className="text-xs text-[var(--color-text-secondary)] mt-1">
@@ -269,6 +270,7 @@ export function UsageSettings() {
         </div>
         <Button
           variant="secondary"
+          size="sm"
           onClick={handleRefresh}
           disabled={isLoading || runtimeLoading}
         >
@@ -353,12 +355,12 @@ export function UsageSettings() {
         t={t}
       />
 
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
         <header className="flex items-baseline justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.usage.providerSection')}
           </h3>
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.usage.providerHint')}
           </span>
         </header>
@@ -419,12 +421,12 @@ export function UsageSettings() {
         )}
       </section>
 
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
         <header className="flex items-baseline justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.usage.workspaceSection')}
           </h3>
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.usage.workspaceHint')}
           </span>
         </header>
@@ -482,12 +484,12 @@ export function UsageSettings() {
         )}
       </section>
 
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
         <header className="flex items-baseline justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.usage.lifetimeSection')}
           </h3>
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.usage.lifetimeHint')}
           </span>
         </header>
@@ -548,12 +550,12 @@ export function UsageSettings() {
         )}
       </section>
 
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
         <header className="flex items-baseline justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
             {t('settings.usage.sessionSection')}
           </h3>
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.usage.sessionHint')}
           </span>
         </header>
@@ -662,8 +664,8 @@ function SystemInfoCard({
 }) {
   if (!snapshot) {
     return (
-      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+      <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.usage.systemSection')}
         </h3>
         <p className="text-xs text-[var(--color-text-secondary)] py-4 text-center">
@@ -734,12 +736,12 @@ function SystemInfoCard({
   ]
 
   return (
-    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
       <header className="flex items-baseline justify-between">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.usage.systemSection')}
         </h3>
-        <span className="text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="text-xs text-[var(--color-text-tertiary)]">
           {t('settings.usage.systemHint')}
         </span>
       </header>
@@ -749,7 +751,7 @@ function SystemInfoCard({
             key={item.label}
             className="flex items-baseline justify-between gap-2 border-b border-[var(--color-border)]/20 pb-1 last:border-0"
           >
-            <dt className="text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)] shrink-0">
+            <dt className="text-xs uppercase tracking-wide text-[var(--color-text-tertiary)] shrink-0">
               {item.label}
             </dt>
             <dd
@@ -782,12 +784,12 @@ function BackgroundTasksSection({
   )
 
   return (
-    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
       <header className="flex items-baseline justify-between">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.usage.tasksSection')}
         </h3>
-        <span className="text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="text-xs text-[var(--color-text-tertiary)]">
           {snapshot
             ? `${snapshot.tasks.liveCount} ${t('settings.usage.tasksLiveSuffix')}`
             : t('settings.usage.systemLoading')}
@@ -856,12 +858,12 @@ function CodingModeSection({
   const noData = totals.totalTokens === 0 && totals.requestCount === 0
 
   return (
-    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-4">
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-4">
       <header className="flex items-baseline justify-between">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.usage.codingModeSection')}
         </h3>
-        <span className="text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="text-xs text-[var(--color-text-tertiary)]">
           {t('settings.usage.codingModeHint')}
         </span>
       </header>
@@ -1010,7 +1012,7 @@ function CodingModeKpi({
       }`}
     >
       <div className="flex items-baseline justify-between gap-2">
-        <p className="text-[11px] text-[var(--color-text-tertiary)] uppercase tracking-wide truncate">
+        <p className="text-xs text-[var(--color-text-tertiary)] uppercase tracking-wide truncate">
           <span className="mr-1">{icon}</span>
           {label}
         </p>
@@ -1018,10 +1020,10 @@ function CodingModeKpi({
           {stats ? `${formatNumber(stats.requestCount)} req` : '—'}
         </span>
       </div>
-      <p className="mt-1 text-lg font-semibold text-[var(--color-text-primary)] tabular-nums">
+      <p className="mt-1 text-xs font-semibold text-[var(--color-text-primary)] tabular-nums">
         {stats ? formatNumber(stats.totalTokens) : '0'}
       </p>
-      <p className="text-[11px] text-[var(--color-text-secondary)] mt-0.5">
+      <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
         {stats ? formatUsd(stats.costUsd) : t('settings.usage.codingModeNoData')}
       </p>
       <div className="mt-2 h-1.5 rounded-full bg-[var(--color-border)]/40 overflow-hidden">
@@ -1053,18 +1055,18 @@ function KpiCard({
           : 'border-[var(--color-border)] bg-[var(--color-surface-container)]'
       }`}
     >
-      <p className="text-[11px] text-[var(--color-text-tertiary)] uppercase tracking-wide">
+      <p className="text-xs text-[var(--color-text-tertiary)] uppercase tracking-wide">
         {label}
       </p>
       <p
         className={`mt-1 font-semibold text-[var(--color-text-primary)] tabular-nums ${
-          emphasis ? 'text-2xl' : 'text-xl'
+          emphasis ? 'text-xs' : 'text-xs'
         }`}
       >
         {value}
       </p>
       {hint && (
-        <p className="text-[11px] text-[var(--color-text-secondary)] mt-1">
+        <p className="text-xs text-[var(--color-text-secondary)] mt-1">
           {hint}
         </p>
       )}
@@ -1081,7 +1083,7 @@ function Th({
 }) {
   return (
     <th
-      className={`py-2 px-1 text-[11px] uppercase tracking-wide font-normal ${
+      className={`py-2 px-1 text-xs uppercase tracking-wide font-normal ${
         align === 'right' ? 'text-right' : 'text-left'
       }`}
     >

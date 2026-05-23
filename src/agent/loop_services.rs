@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `LoopServices` 装配 RagSource / LspContextSource /
-//! SymbolGraphLookup so the [`crate::context::builder::ContextBuilder`]
-//! can be wired with real backends from the agent main loop without each
-//! call site having to reimplement the glue.
-//!
-//! The three sources are intentionally lazy:
-//! * The LSP source delegates to the global [`crate::services::ServiceContainer`]
-//!   on every call so it always reflects the live LSP server state.
-//! * The symbol-graph source loads `<workspace>/.sen/symbol_graph.json`
-//!   once per process and caches it.  When the graph is missing or
-//!   stale the adapter returns an empty snapshot, which keeps the
-//!   context builder a no-op rather than failing the turn.
-//! * The RAG source wraps a [`crate::code_intel::search::heuristic::Search`]
-//!   index keyed by the workspace root.  The index itself is
-//!   stateless (every query rescans), so we only cache the wrapper
-//!   handle to avoid re-walking the workspace twice in the same turn.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -185,24 +169,56 @@ impl RagSource for CodeRagSource {
     }
 }
 
-static SYMBOL_GRAPH_CACHE: OnceLock<RwLock<Option<(PathBuf, Arc<SymbolGraph>)>>> = OnceLock::new();
-
-static CODE_RAG_CACHE: OnceLock<RwLock<Option<(PathBuf, Arc<dyn IncrementalIndex>)>>> =
+static SYMBOL_GRAPH_CACHE: OnceLock<RwLock<std::collections::HashMap<PathBuf, Arc<SymbolGraph>>>> =
     OnceLock::new();
 
-static CODE_RAG_VECTOR_CACHE: OnceLock<RwLock<Option<(PathBuf, SharedVectorCodeIndex)>>> =
-    OnceLock::new();
+static CODE_RAG_CACHE: OnceLock<
+    RwLock<std::collections::HashMap<PathBuf, Arc<dyn IncrementalIndex>>>,
+> = OnceLock::new();
 
-fn symbol_graph_cache() -> &'static RwLock<Option<(PathBuf, Arc<SymbolGraph>)>> {
-    SYMBOL_GRAPH_CACHE.get_or_init(|| RwLock::new(None))
+static CODE_RAG_VECTOR_CACHE: OnceLock<
+    RwLock<std::collections::HashMap<PathBuf, SharedVectorCodeIndex>>,
+> = OnceLock::new();
+
+fn symbol_graph_cache() -> &'static RwLock<std::collections::HashMap<PathBuf, Arc<SymbolGraph>>> {
+    SYMBOL_GRAPH_CACHE.get_or_init(|| {
+        tracing::debug!(
+            target: "agent.loop_services",
+            cache = "symbol_graph",
+            kind = "workspace-bucketed-global",
+            reason = "context-builder call-sites are not handed an AgentLoopServices instance",
+            "initialising workspace-bucketed global cache"
+        );
+        RwLock::new(std::collections::HashMap::new())
+    })
 }
 
-fn code_rag_cache() -> &'static RwLock<Option<(PathBuf, Arc<dyn IncrementalIndex>)>> {
-    CODE_RAG_CACHE.get_or_init(|| RwLock::new(None))
+fn code_rag_cache(
+) -> &'static RwLock<std::collections::HashMap<PathBuf, Arc<dyn IncrementalIndex>>> {
+    CODE_RAG_CACHE.get_or_init(|| {
+        tracing::debug!(
+            target: "agent.loop_services",
+            cache = "code_rag",
+            kind = "workspace-bucketed-global",
+            reason = "context-builder call-sites are not handed an AgentLoopServices instance",
+            "initialising workspace-bucketed global cache"
+        );
+        RwLock::new(std::collections::HashMap::new())
+    })
 }
 
-fn code_rag_vector_cache() -> &'static RwLock<Option<(PathBuf, SharedVectorCodeIndex)>> {
-    CODE_RAG_VECTOR_CACHE.get_or_init(|| RwLock::new(None))
+fn code_rag_vector_cache(
+) -> &'static RwLock<std::collections::HashMap<PathBuf, SharedVectorCodeIndex>> {
+    CODE_RAG_VECTOR_CACHE.get_or_init(|| {
+        tracing::debug!(
+            target: "agent.loop_services",
+            cache = "code_rag_vector",
+            kind = "workspace-bucketed-global",
+            reason = "context-builder call-sites are not handed an AgentLoopServices instance",
+            "initialising workspace-bucketed global cache"
+        );
+        RwLock::new(std::collections::HashMap::new())
+    })
 }
 
 fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
@@ -256,17 +272,16 @@ fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
     let index = VectorCodeIndex::new(embedder, VectorCodeIndexConfig::default());
     let arc: SharedVectorCodeIndex = Arc::new(index);
     if let Ok(mut guard) = code_rag_vector_cache().write() {
-        *guard = Some((root.to_path_buf(), arc.clone()));
+        guard.insert(root.to_path_buf(), arc.clone());
     }
     Some(arc)
 }
 
 fn cached_vector_index(root: &Path) -> Option<SharedVectorCodeIndex> {
-    if let Ok(guard) = code_rag_vector_cache().read()
-        && let Some((cached_root, idx)) = guard.as_ref()
-        && cached_root == root
-    {
-        return Some(idx.clone());
+    if let Ok(guard) = code_rag_vector_cache().read() {
+        if let Some(idx) = guard.get(root) {
+            return Some(idx.clone());
+        }
     }
     build_vector_index_for(root)
 }
@@ -279,16 +294,15 @@ pub fn lsp_context_source() -> Option<Arc<dyn LspContextSource>> {
 #[must_use]
 pub fn symbol_graph_source(workspace_root: &Path) -> Option<Arc<dyn SymbolGraphLookup>> {
     let root = workspace_root.to_path_buf();
-    if let Ok(guard) = symbol_graph_cache().read()
-        && let Some((cached_root, graph)) = guard.as_ref()
-        && cached_root == &root
-    {
-        return Some(Arc::new(SymbolGraphAdapter {
-            graph: graph.clone(),
-            workspace_root: root,
-            per_file_cap: 12,
-            dependents_cap: 5,
-        }));
+    if let Ok(guard) = symbol_graph_cache().read() {
+        if let Some(graph) = guard.get(&root) {
+            return Some(Arc::new(SymbolGraphAdapter {
+                graph: graph.clone(),
+                workspace_root: root,
+                per_file_cap: 12,
+                dependents_cap: 5,
+            }));
+        }
     }
 
     let loaded = match SymbolGraph::load(&root) {
@@ -298,7 +312,7 @@ pub fn symbol_graph_source(workspace_root: &Path) -> Option<Arc<dyn SymbolGraphL
     }?;
     let arc = Arc::new(loaded);
     if let Ok(mut guard) = symbol_graph_cache().write() {
-        *guard = Some((root.clone(), arc.clone()));
+        guard.insert(root.clone(), arc.clone());
     }
     Some(Arc::new(SymbolGraphAdapter {
         graph: arc,
@@ -318,15 +332,16 @@ pub fn rag_source(workspace_root: &Path) -> Option<Arc<dyn RagSource>> {
         }
     }
     let index: Arc<dyn IncrementalIndex> = {
-        if let Ok(guard) = code_rag_cache().read()
-            && let Some((cached_root, idx)) = guard.as_ref()
-            && cached_root == &root
-        {
-            idx.clone()
+        let cached = code_rag_cache()
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(&root).cloned());
+        if let Some(idx) = cached {
+            idx
         } else {
             let fresh: Arc<dyn IncrementalIndex> = Arc::new(HeuristicSearch::new(root.clone()));
             if let Ok(mut guard) = code_rag_cache().write() {
-                *guard = Some((root.clone(), fresh.clone()));
+                guard.insert(root.clone(), fresh.clone());
             }
             fresh
         }
@@ -344,13 +359,13 @@ pub fn rag_source(workspace_root: &Path) -> Option<Arc<dyn RagSource>> {
 
 pub fn invalidate_caches() {
     if let Ok(mut guard) = symbol_graph_cache().write() {
-        *guard = None;
+        guard.clear();
     }
     if let Ok(mut guard) = code_rag_cache().write() {
-        *guard = None;
+        guard.clear();
     }
     if let Ok(mut guard) = code_rag_vector_cache().write() {
-        *guard = None;
+        guard.clear();
     }
 }
 

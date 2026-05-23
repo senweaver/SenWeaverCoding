@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Policy engine for memory operations.
-//!
-//! Validates operations against configurable rules before they reach the
-//! backend. Enforces namespace quotas, category limits, read-only namespaces,
-//! and per-category retention rules.
 
 use super::traits::MemoryCategory;
 use crate::config::MemoryPolicyConfig;

@@ -5,12 +5,14 @@ import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { Button } from '../shared/Button'
 import { DiffViewer } from './DiffViewer'
+import { focusSession } from '../../lib/focusSession'
 
 type Props = {
   requestId: string
   toolName: string
   input: unknown
   description?: string
+  sessionId?: string | null
 }
 
 const TOOL_META: Record<string, { icon: string; label: string; color: string }> = {
@@ -104,10 +106,20 @@ function renderPermissionPreview(toolName: string, input: unknown) {
   return null
 }
 
-export function PermissionDialog({ requestId, toolName, input, description }: Props) {
+export function PermissionDialog({
+  requestId,
+  toolName,
+  input,
+  description,
+  sessionId: ownerSessionIdProp,
+}: Props) {
   const respondToPermission = useChatStore((s) => s.respondToPermission)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const pendingPermission = useChatStore((s) => activeTabId ? s.sessions[activeTabId]?.pendingPermission : undefined)
+  const ownerSessionId = ownerSessionIdProp ?? activeTabId
+  const pendingPermission = useChatStore((s) =>
+    ownerSessionId ? s.sessions[ownerSessionId]?.pendingPermission : undefined,
+  )
+  const isCrossSession = Boolean(ownerSessionId && ownerSessionId !== activeTabId)
   const t = useTranslation()
   const isPending = pendingPermission?.requestId === requestId
   const [showRaw, setShowRaw] = useState(false)
@@ -217,37 +229,50 @@ export function PermissionDialog({ requestId, toolName, input, description }: Pr
       {}
       {isPending && (
         <div className="flex items-center gap-2 border-t border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)] px-4 py-3">
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => activeTabId && respondToPermission(activeTabId, requestId, true)}
-            icon={
-              <span className="material-symbols-outlined text-[14px]">check</span>
-            }
-          >
-            {t('permission.allow')}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => activeTabId && respondToPermission(activeTabId, requestId, true, { rule: 'always' })}
-            icon={
-              <span className="material-symbols-outlined text-[14px]">verified</span>
-            }
-          >
-            {t('permission.allowForSession')}
-          </Button>
-          <div className="flex-1" />
-          <Button
-            variant="danger"
-            size="sm"
-            onClick={() => activeTabId && respondToPermission(activeTabId, requestId, false)}
-            icon={
-              <span className="material-symbols-outlined text-[14px]">close</span>
-            }
-          >
-            {t('permission.deny')}
-          </Button>
+          {isCrossSession ? (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => ownerSessionId && focusSession(ownerSessionId)}
+              icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
+            >
+              切换到该会话处理
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => ownerSessionId && respondToPermission(ownerSessionId, requestId, true)}
+                icon={
+                  <span className="material-symbols-outlined text-[14px]">check</span>
+                }
+              >
+                {t('permission.allow')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => ownerSessionId && respondToPermission(ownerSessionId, requestId, true, { rule: 'always' })}
+                icon={
+                  <span className="material-symbols-outlined text-[14px]">verified</span>
+                }
+              >
+                {t('permission.allowForSession')}
+              </Button>
+              <div className="flex-1" />
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => ownerSessionId && respondToPermission(ownerSessionId, requestId, false)}
+                icon={
+                  <span className="material-symbols-outlined text-[14px]">close</span>
+                }
+              >
+                {t('permission.deny')}
+              </Button>
+            </>
+          )}
         </div>
       )}
     </div>

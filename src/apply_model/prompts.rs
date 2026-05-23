@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! prompt templates for the LLM Apply Model refine loop.
-//!
-//! The refiner is invoked when [`crate::apply_model::HeuristicApplier`]
-//! fails to place a hunk (typically because the model generated a
-//! diff against slightly different context than the current file).
-//! The prompts below constrain the LLM to return *only* a unified
-//! diff so the downstream parser never has to strip prose.
 
 pub const REFINE_SYSTEM_PROMPT: &str = r"You are a patch-refiner.  The user will provide:
   1. The current file contents.

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `flow_run` tool — dispatches one of the built-in
-//! [`agent::flows`](crate::agent::flows) over the process-global
-//! `AgentHandle`.  The tool keeps its parameter surface tiny so LLMs
-//! can drive it reliably, and defers all heavy lifting to
-//! `PlanExecVerifyFlow`.
 
 use async_trait::async_trait;
 use serde_json::json;

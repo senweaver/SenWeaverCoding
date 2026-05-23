@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Vim operators — mirrors claude-code-typescript-src`vim/operators.ts`.
 
 use super::types::VimOperator;
 
@@ -58,10 +56,8 @@ pub fn apply_operator(
             let prefix = &text[lo..lo.saturating_add(2).min(text.len())];
             let remove = if prefix.starts_with("  ") {
                 2
-            } else if prefix.starts_with(' ') {
-                1
             } else {
-                0
+                usize::from(prefix.starts_with(' '))
             };
             if remove > 0 {
                 text.replace_range(lo..lo + remove, "");

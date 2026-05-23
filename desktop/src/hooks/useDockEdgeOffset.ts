@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: MIT
-//
-// Computes how far from the viewport's right edge a fixed-position
-// floater (toast, update banner, …) must be inset so it does not slide
-// underneath the embedded Tauri browser dock.  Returns 0 when no dock
-// is active for the current session.  Reactive to both
-// `browserPanelStore` updates AND viewport resizes — the dock's anchor
-// rect is in physical pixels but `window.innerWidth` is in CSS pixels;
-// since Tauri always sets `devicePixelRatio` to 1 on the main webview
-// they coincide, so we can compare directly.
 
 import { useEffect, useState } from 'react'
 
 import { useBrowserPanelStore } from '../stores/browserPanelStore'
+import { useTabStore } from '../stores/tabStore'
 
 function computeOffset(
   dockVisible: boolean,
@@ -24,12 +16,12 @@ function computeOffset(
 }
 
 export function useDockEdgeOffset(): number {
-  const activeSessionId = useBrowserPanelStore((s) => s.activeSessionId)
+  const activeTabId = useTabStore((s) => s.activeTabId)
   const dockVisible = useBrowserPanelStore((s) =>
-    activeSessionId ? s.panels[activeSessionId]?.visible ?? false : false,
+    activeTabId ? s.panels[activeTabId]?.visible ?? false : false,
   )
   const dockX = useBrowserPanelStore((s) =>
-    activeSessionId ? s.panels[activeSessionId]?.anchorRect?.x ?? null : null,
+    activeTabId ? s.panels[activeTabId]?.anchorRect?.x ?? null : null,
   )
 
   const [viewportWidth, setViewportWidth] = useState(() =>

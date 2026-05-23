@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// ServiceContainer — centralized service initialization and access.
-// Wires all services ported from claude-code-typescript-srcinto a single dependency-injectable
-// container that the agent core, commands, hooks, and TUI can consume.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -123,6 +118,15 @@ pub struct ServiceContainer {
 
     pub pending_plan: PendingPlan,
 
+    #[cfg(feature = "tool-curator")]
+    pub curator_state: crate::tools::curator::state::CuratorState,
+
+    #[cfg(feature = "tool-curator")]
+    pub pending_curator: crate::tools::curator::state::PendingCurator,
+
+    #[cfg(feature = "tool-curator")]
+    pub curator_mode_flag: crate::tools::curator::tools::CuratorModeFlag,
+
     pub todo_store: TodoStore,
 
     pub max_context_tokens: AtomicUsize,
@@ -146,6 +150,8 @@ pub struct ServiceContainer {
     pub tool_search_high_risk_blocked_total: Arc<std::sync::atomic::AtomicU64>,
     pub tool_search_total_latency_ms: Arc<std::sync::atomic::AtomicU64>,
     pub tool_search_latency_samples: Arc<std::sync::atomic::AtomicU64>,
+
+    pub proxy_runtime: Arc<crate::services::proxy_runtime::ProxyRuntime>,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -220,7 +226,13 @@ impl ServiceContainer {
                 std::collections::HashMap::new(),
             )),
             pending_plan: crate::tools::exit_plan_mode::new_pending_plan(),
-            todo_store: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            #[cfg(feature = "tool-curator")]
+            curator_state: crate::tools::curator::state::new_curator_state(),
+            #[cfg(feature = "tool-curator")]
+            pending_curator: crate::tools::curator::state::new_pending_curator(),
+            #[cfg(feature = "tool-curator")]
+            curator_mode_flag: std::sync::Arc::new(parking_lot::RwLock::new(false)),
+            todo_store: crate::tools::todo_write::new_todo_store(),
             max_context_tokens: AtomicUsize::new(128_000),
             runtime_flags: Arc::new(RuntimeFlags::default()),
             shared_config,
@@ -238,7 +250,13 @@ impl ServiceContainer {
             tool_search_high_risk_blocked_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_search_total_latency_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_search_latency_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+
+            proxy_runtime: crate::services::proxy_runtime::ProxyRuntime::global(),
         }
+    }
+
+    pub fn proxy_runtime(&self) -> &crate::services::proxy_runtime::ProxyRuntime {
+        &self.proxy_runtime
     }
 
     pub fn record_tool_search_invocation(&self, latency_ms: u64) {

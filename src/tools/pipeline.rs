@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Pipeline tool: collapses multi-step tool chains into a single inference call.
-//
-// The agent invokes `execute_pipeline` with a JSON payload describing steps,
-// and this tool executes them sequentially (or in parallel) with result
-// interpolation between steps.
 
 use crate::config::PipelineConfig;
 use crate::tools::traits::{Tool, ToolResult};
@@ -29,6 +24,28 @@ pub enum PipelineError {
         tool: String,
         message: String,
     },
+}
+
+impl crate::error::ErrorClassification for PipelineError {
+    fn category(&self) -> crate::error::ErrorCategory {
+        use crate::error::ErrorCategory;
+        match self {
+            PipelineError::UnknownTool(_) => ErrorCategory::NotFound,
+            PipelineError::TooManySteps(_) | PipelineError::InvalidTemplate(_) => {
+                ErrorCategory::Validation
+            }
+            PipelineError::StepFailed { message, .. } => {
+                let lower = message.to_lowercase();
+                if lower.contains("timeout") {
+                    ErrorCategory::Timeout
+                } else if lower.contains("cancel") {
+                    ErrorCategory::Cancelled
+                } else {
+                    ErrorCategory::Internal
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Commands module — mirrors claude-code's `commands/` and `commands.ts`.
-//
-// Provides slash-command infrastructure: registration, discovery,
-// filtering by availability/context, and execution. Each submodule
-// implements one or more slash commands.
-
 #[macro_use]
 mod macros;
 

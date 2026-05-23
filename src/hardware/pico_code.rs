@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Dynamic code tools: `device_read_code`, `device_write_code`, `device_exec`.
-//!
-//! These tools let the LLM read, write, and execute code on any connected
-//! hardware device.  The `DeviceRuntime` on each device determines which
-//! host-side tooling is used:
-//!
-//! - **MicroPython / CircuitPython** — `mpremote` for code read/write/exec.
-//! - **Arduino / Nucleus / Linux** — not yet implemented; returns a clear error.
-//!
-//! When the `device` parameter is omitted, each tool auto-selects the device
-//! only when **exactly one** device is registered.  If multiple devices are
-//! present the tool returns an error and requires an explicit `device` parameter.
 
 use super::device::{DeviceRegistry, DeviceRuntime};
 use crate::tools::traits::{Tool, ToolResult};

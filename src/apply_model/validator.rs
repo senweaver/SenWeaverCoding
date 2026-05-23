@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Post-apply validator.
-//!
-//! ships a fast, language-agnostic check (empty / unbalanced
-//! brackets) that is good enough to catch the catastrophic failures
-//! we see in practice when an LLM-produced diff drifts.  adds
-//! a *structured* result type — [`ValidationKind`] — and an
-//! optional tree-sitter back-end gated behind the `code-intel`
-//! feature.  Callers that know the language being edited (e.g. the
-//! inline-edit runner) should prefer
-//! [`validate_bytes_with_lang`]; the legacy [`validate_bytes`]
-//! continues to work and is implemented as a thin wrapper that
-//! passes `None` for the language so the heuristic check is used.
 
 use serde::{Deserialize, Serialize};
 

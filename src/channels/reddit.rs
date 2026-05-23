@@ -88,7 +88,9 @@ impl RedditChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("channel.reddit")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.reddit")
     }
 
     async fn refresh_access_token(&self) -> Result<()> {

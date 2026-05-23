@@ -28,7 +28,7 @@ import { ResizeHandleBrowser } from './ResizeHandleBrowser'
 import { ResizeHandles } from './ResizeHandles'
 import { StatusBar } from './StatusBar'
 import { useTabStore } from '../../stores/tabStore'
-import { useChatStore } from '../../stores/chatStore'
+import { focusSession } from '../../lib/focusSession'
 import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
 import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
@@ -40,6 +40,8 @@ import { TerminalPanel } from '../terminal/TerminalPanel'
 import { startBackgroundShellMirror } from '../../api/backgroundShell'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
+import { dockHide, dockSetForegroundSession } from '../../lib/browserDock'
+import { isTauriRuntime } from '../../lib/desktopRuntime'
 
 export function AppShell() {
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
@@ -150,7 +152,7 @@ export function AppShell() {
         const { activeTabId: activeId, tabs } = useTabStore.getState()
         const activeTab = tabs.find((tab) => tab.sessionId === activeId)
         if (activeId && activeTab?.type === 'session') {
-          useChatStore.getState().connectToSession(activeId)
+          focusSession(activeId)
         }
         if (abort.signal.aborted) {
           return
@@ -286,6 +288,30 @@ export function AppShell() {
       for (const id of resyncTimers) window.clearTimeout(id)
     }
   }, [isMaximized])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    dockSetForegroundSession(activeChatTabId ?? null).catch((err) => {
+      console.warn('[browserDock] set foreground session failed', err)
+    })
+    if (!activeChatTabId) {
+      dockHide().catch((err) => {
+        console.warn('[browserDock] dockHide on empty tab change failed', err)
+      })
+      return
+    }
+    const previousTabId = activeChatTabId
+    return () => {
+      useBrowserPanelStore.setState((state) => (
+        state.activeSessionId === previousTabId
+          ? { activeSessionId: null }
+          : state
+      ))
+      dockHide().catch((err) => {
+        console.warn('[browserDock] dockHide on active tab change failed', err)
+      })
+    }
+  }, [activeChatTabId])
 
   if (!ready) {
     const showHint = bootElapsedSecs >= 6

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Companion — mirrors claude-code-typescript-src`buddy/companion.ts`.
 
 use super::types::{BuddyConfig, BuddyMood};
 

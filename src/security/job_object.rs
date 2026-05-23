@@ -1,36 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Windows Job Object sandbox.
-//!
-//! `Job Objects` are a Windows kernel facility that lets a parent
-//! attach one or more child processes to a single, lifetime-bound
-//! group, then impose hard caps on:
-//!
-//! * total / per-process memory (`JOB_OBJECT_LIMIT_PROCESS_MEMORY` and
-//!   `JOB_OBJECT_LIMIT_JOB_MEMORY`),
-//! * maximum number of live processes inside the group
-//!   (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`),
-//! * CPU rate (`JobObjectCpuRateControlInformation` with the
-//!   `HARD_CAP` flag — units of `1/100 %`),
-//! * automatic kill-on-close so a panicking parent always tears down
-//!   the children it spawned (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
-//!
-//! This module provides three things:
-//!
-//! 1. [`JobLimits`] — a target-agnostic configuration value that callers
-//!    construct once and clone into per-spawn limits;
-//! 2. [`JobObjectGuard`] — an RAII handle that owns the underlying
-//!    `HANDLE` and runs `CloseHandle` (which triggers kill-on-close)
-//!    when it is dropped;
-//! 3. [`spawn_in_job`] — a high-level helper that creates a job, spawns
-//!    a `tokio::process::Command`, and assigns the resulting child to
-//!    the job atomically.
-//!
-//! On non-Windows targets (or when the `sandbox-windows-job` cargo
-//! feature is disabled) the surface still compiles but the
-//! [`JobObjectGuard`] becomes a zero-sized stub and `spawn_in_job`
-//! degrades to a plain `cmd.spawn()`, so call-sites stay portable.
 
 use std::time::Duration;
 
@@ -113,7 +83,9 @@ mod imp {
         handle: HANDLE,
     }
 
+    #[allow(unsafe_code)]
     unsafe impl Send for JobObjectGuard {}
+    #[allow(unsafe_code)]
     unsafe impl Sync for JobObjectGuard {}
 
     impl JobObjectGuard {
@@ -121,6 +93,7 @@ mod imp {
         pub fn create(limits: JobLimits) -> std::io::Result<Self> {
             let limits = limits.validated()?;
 
+            #[allow(unsafe_code)]
             let handle = unsafe {
                 CreateJobObjectW(None, windows::core::PCWSTR::null())
                     .map_err(|e| std::io::Error::other(format!("CreateJobObjectW failed: {e}")))?
@@ -157,6 +130,7 @@ mod imp {
 
             info.BasicLimitInformation.LimitFlags = flags;
 
+            #[allow(unsafe_code)]
             unsafe {
                 SetInformationJobObject(
                     self.handle,
@@ -185,6 +159,7 @@ mod imp {
                 },
             };
 
+            #[allow(unsafe_code)]
             unsafe {
                 SetInformationJobObject(
                     self.handle,
@@ -202,7 +177,7 @@ mod imp {
         }
 
         pub fn assign(&self, process_handle: HANDLE) -> std::io::Result<()> {
-
+            #[allow(unsafe_code)]
             unsafe {
                 AssignProcessToJobObject(self.handle, process_handle).map_err(|e| {
                     std::io::Error::other(format!("AssignProcessToJobObject failed: {e}"))
@@ -218,7 +193,7 @@ mod imp {
 
     impl Drop for JobObjectGuard {
         fn drop(&mut self) {
-
+            #[allow(unsafe_code)]
             unsafe {
                 let _ = CloseHandle(self.handle);
             }

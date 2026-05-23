@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Event Bus types - pub/sub system for agent lifecycle and inter-agent communication.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -244,7 +243,7 @@ impl Event {
             id: format!(
                 "evt-{}-{}",
                 Utc::now().timestamp_millis(),
-                uuid::Uuid::new_v4().to_string()[..8].to_string()
+                &uuid::Uuid::new_v4().to_string()[..8]
             ),
             source: source.into(),
             target,
@@ -441,6 +440,10 @@ impl EventHistory {
 
     pub fn clear(&mut self) {
         self.events.clear();
+    }
+
+    pub fn find_by_id(&self, id: EventId) -> Option<Event> {
+        self.events.iter().find(|e| e.id == id).cloned()
     }
 }
 

@@ -150,7 +150,9 @@ impl TranscriptionProvider for GroqProvider {
     async fn transcribe(&self, audio_data: &[u8], file_name: &str) -> Result<String> {
         let (normalized_name, mime) = validate_audio(audio_data, file_name)?;
 
-        let client = crate::config::build_runtime_proxy_client("transcription.groq");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("transcription.groq");
 
         let file_part = Part::bytes(audio_data.to_vec())
             .file_name(normalized_name)
@@ -209,7 +211,9 @@ impl TranscriptionProvider for OpenAiWhisperProvider {
     async fn transcribe(&self, audio_data: &[u8], file_name: &str) -> Result<String> {
         let (normalized_name, mime) = validate_audio(audio_data, file_name)?;
 
-        let client = crate::config::build_runtime_proxy_client("transcription.openai");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("transcription.openai");
 
         let file_part = Part::bytes(audio_data.to_vec())
             .file_name(normalized_name)
@@ -264,7 +268,9 @@ impl TranscriptionProvider for DeepgramProvider {
     async fn transcribe(&self, audio_data: &[u8], file_name: &str) -> Result<String> {
         let (_, mime) = validate_audio(audio_data, file_name)?;
 
-        let client = crate::config::build_runtime_proxy_client("transcription.deepgram");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("transcription.deepgram");
 
         let url = format!(
             "https://api.deepgram.com/v1/listen?model={}&punctuate=true",
@@ -331,7 +337,9 @@ impl TranscriptionProvider for AssemblyAiProvider {
     async fn transcribe(&self, audio_data: &[u8], file_name: &str) -> Result<String> {
         let (_, _) = validate_audio(audio_data, file_name)?;
 
-        let client = crate::config::build_runtime_proxy_client("transcription.assemblyai");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("transcription.assemblyai");
 
         let upload_resp = client
             .post("https://api.assemblyai.com/v2/upload")
@@ -479,7 +487,9 @@ impl TranscriptionProvider for GoogleSttProvider {
     async fn transcribe(&self, audio_data: &[u8], file_name: &str) -> Result<String> {
         let (normalized_name, _) = validate_audio(audio_data, file_name)?;
 
-        let client = crate::config::build_runtime_proxy_client("transcription.google");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("transcription.google");
 
         let encoding = match normalized_name
             .rsplit_once('.')
@@ -605,7 +615,9 @@ impl TranscriptionProvider for LocalWhisperProvider {
 
         let (normalized_name, mime) = resolve_audio_format(file_name)?;
 
-        let client = crate::config::build_runtime_proxy_client("transcription.local_whisper");
+        let client = crate::services::get_services()
+            .proxy_runtime()
+            .build_client("transcription.local_whisper");
 
         let file_part = Part::bytes(audio_data.to_vec())
             .file_name(normalized_name)

@@ -92,6 +92,11 @@ enum NativeContentOut {
     },
     #[serde(rename = "image")]
     Image { source: ImageSource },
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -288,7 +293,9 @@ impl AnthropicProvider {
                     | NativeContentOut::ToolResult { cache_control, .. } => {
                         *cache_control = Some(CacheControl::ephemeral());
                     }
-                    NativeContentOut::ToolUse { .. } | NativeContentOut::Image { .. } => {}
+                    NativeContentOut::ToolUse { .. }
+                    | NativeContentOut::Image { .. }
+                    | NativeContentOut::Thinking { .. } => {}
                 }
             }
         }
@@ -323,12 +330,19 @@ impl AnthropicProvider {
     }
 
     fn parse_assistant_tool_call_message(content: &str) -> Option<Vec<NativeContentOut>> {
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('[') {
+            return Self::parse_assistant_native_block_array(trimmed);
+        }
         let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
         let tool_calls = value
             .get("tool_calls")
             .and_then(|v| serde_json::from_value::<Vec<ProviderToolCall>>(v.clone()).ok())?;
 
         let mut blocks = Vec::new();
+        if let Some(block) = Self::thinking_block_from_envelope(&value) {
+            blocks.push(block);
+        }
         if let Some(text) = value
             .get("content")
             .and_then(serde_json::Value::as_str)
@@ -343,8 +357,12 @@ impl AnthropicProvider {
         for call in tool_calls {
             let input = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+            let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                Some(call.id),
+                crate::providers::sanitize::ProviderKind::Anthropic,
+            );
             blocks.push(NativeContentOut::ToolUse {
-                id: call.id,
+                id,
                 name: call.name,
                 input,
                 cache_control: None,
@@ -353,11 +371,135 @@ impl AnthropicProvider {
         Some(blocks)
     }
 
+    fn parse_assistant_native_block_array(content: &str) -> Option<Vec<NativeContentOut>> {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(content).ok()?;
+        if arr.is_empty() {
+            return None;
+        }
+        let mut blocks: Vec<NativeContentOut> = Vec::new();
+        let mut has_tool_use = false;
+        for item in arr {
+            let kind = match item.get("type").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => continue,
+            };
+            match kind {
+                "thinking" => {
+                    let thinking = item
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let signature = item
+                        .get("signature")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    if let Some(thinking) = thinking.filter(|s| !s.is_empty()) {
+                        blocks.push(NativeContentOut::Thinking {
+                            thinking,
+                            signature,
+                        });
+                    }
+                }
+                "text" => {
+                    let text = item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .filter(|s| !s.is_empty());
+                    if let Some(text) = text {
+                        blocks.push(NativeContentOut::Text {
+                            text,
+                            cache_control: None,
+                        });
+                    }
+                }
+                "tool_use" => {
+                    let raw_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("tool_use_id").and_then(|v| v.as_str()))
+                        .or_else(|| item.get("tool_call_id").and_then(|v| v.as_str()))
+                        .map(str::to_string);
+                    let name = match item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                    {
+                        Some(n) if !n.is_empty() => n,
+                        _ => continue,
+                    };
+                    let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                        raw_id,
+                        crate::providers::sanitize::ProviderKind::Anthropic,
+                    );
+                    let input = item
+                        .get("input")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                    has_tool_use = true;
+                    blocks.push(NativeContentOut::ToolUse {
+                        id,
+                        name,
+                        input,
+                        cache_control: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !has_tool_use {
+            return None;
+        }
+        Some(blocks)
+    }
+
+    fn extract_thinking_block(msg: &ChatMessage) -> Option<NativeContentOut> {
+        let thinking = msg
+            .metadata
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())?;
+        let signature = msg
+            .metadata
+            .get("thinking_signature")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        Some(NativeContentOut::Thinking {
+            thinking: thinking.to_string(),
+            signature: signature.to_string(),
+        })
+    }
+
+    fn thinking_block_from_envelope(value: &serde_json::Value) -> Option<NativeContentOut> {
+        let thinking = value
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())?;
+        let signature = value
+            .get("thinking_signature")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        Some(NativeContentOut::Thinking {
+            thinking: thinking.to_string(),
+            signature: signature.to_string(),
+        })
+    }
+
     fn parse_tool_result_message(content: &str) -> Option<NativeMessage> {
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('[') {
+            return Self::parse_tool_result_block_array(trimmed);
+        }
         let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
         let tool_use_id = value
-            .get("tool_call_id")
-            .and_then(serde_json::Value::as_str)?
+            .get("tool_use_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("tool_call_id").and_then(serde_json::Value::as_str))?
             .to_string();
         let result = value
             .get("content")
@@ -371,6 +513,39 @@ impl AnthropicProvider {
                 content: result,
                 cache_control: None,
             }],
+        })
+    }
+
+    fn parse_tool_result_block_array(content: &str) -> Option<NativeMessage> {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(content).ok()?;
+        let mut blocks: Vec<NativeContentOut> = Vec::new();
+        for v in arr {
+            if v.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+            let tool_use_id = v
+                .get("tool_use_id")
+                .and_then(|t| t.as_str())
+                .or_else(|| v.get("tool_call_id").and_then(|t| t.as_str()))
+                .map(str::to_string)
+                .filter(|s| !s.trim().is_empty())?;
+            let body = match v.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            blocks.push(NativeContentOut::ToolResult {
+                tool_use_id,
+                content: body,
+                cache_control: None,
+            });
+        }
+        if blocks.is_empty() {
+            return None;
+        }
+        Some(NativeMessage {
+            role: "user".to_string(),
+            content: blocks,
         })
     }
 
@@ -392,12 +567,22 @@ impl AnthropicProvider {
                             content: blocks,
                         });
                     } else if !msg.content.trim().is_empty() {
+                        let mut blocks: Vec<NativeContentOut> = Vec::new();
+                        if let Some(block) = Self::extract_thinking_block(msg) {
+                            blocks.push(block);
+                        }
+                        blocks.push(NativeContentOut::Text {
+                            text: msg.content.clone(),
+                            cache_control: None,
+                        });
                         native_messages.push(NativeMessage {
                             role: "assistant".to_string(),
-                            content: vec![NativeContentOut::Text {
-                                text: msg.content.clone(),
-                                cache_control: None,
-                            }],
+                            content: blocks,
+                        });
+                    } else if let Some(block) = Self::extract_thinking_block(msg) {
+                        native_messages.push(NativeMessage {
+                            role: "assistant".to_string(),
+                            content: vec![block],
                         });
                     }
                 }
@@ -416,15 +601,11 @@ impl AnthropicProvider {
                         continue;
                     };
 
-                    if native_messages
+                    let same_role = native_messages
                         .last()
-                        .is_some_and(|m| m.role == tool_msg.role)
-                    {
-                        native_messages
-                            .last_mut()
-                            .unwrap()
-                            .content
-                            .extend(tool_msg.content);
+                        .is_some_and(|m| m.role == tool_msg.role);
+                    if let (true, Some(last)) = (same_role, native_messages.last_mut()) {
+                        last.content.extend(tool_msg.content);
                     } else {
                         native_messages.push(tool_msg);
                     }
@@ -492,12 +673,9 @@ impl AnthropicProvider {
                         });
                     }
 
-                    if native_messages.last().is_some_and(|m| m.role == "user") {
-                        native_messages
-                            .last_mut()
-                            .unwrap()
-                            .content
-                            .extend(content_blocks);
+                    let same_role = native_messages.last().is_some_and(|m| m.role == "user");
+                    if let (true, Some(last)) = (same_role, native_messages.last_mut()) {
+                        last.content.extend(content_blocks);
                     } else {
                         native_messages.push(NativeMessage {
                             role: "user".to_string(),
@@ -568,7 +746,10 @@ impl AnthropicProvider {
                         .input
                         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
                     tool_calls.push(ProviderToolCall {
-                        id: block.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        id: crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                            block.id,
+                            crate::providers::sanitize::ProviderKind::Anthropic,
+                        ),
                         name,
                         arguments: arguments.to_string(),
                     });
@@ -596,12 +777,14 @@ impl AnthropicProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
-            "provider.anthropic",
-            120,
-            10,
-            &self.extra_headers,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts_and_headers(
+                "provider.anthropic",
+                120,
+                10,
+                &self.extra_headers,
+            )
     }
 
     fn build_streaming_request(request: &NativeChatRequest<'_>) -> serde_json::Value {
@@ -656,14 +839,19 @@ impl AnthropicProvider {
                             .and_then(|t| t.as_str())
                             .unwrap_or_default();
                         if block_type == "tool_use" {
-                            if let Some(id) = tool_id.take() {
+                            if tool_id.is_some() {
+                                let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                                    tool_id.take(),
+                                    crate::providers::sanitize::ProviderKind::Anthropic,
+                                );
                                 let name = tool_name.take().unwrap_or_default();
                                 let input = std::mem::take(&mut tool_input_json);
+                                let safe_input = sanitize_tool_call_arguments(input);
                                 let _ = tx
                                     .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
                                         id,
                                         name,
-                                        arguments: input,
+                                        arguments: safe_input,
                                     })))
                                     .await;
                             }
@@ -728,23 +916,32 @@ impl AnthropicProvider {
                     }
                 }
                 "content_block_stop" => {
-                    if let Some(id) = tool_id.take() {
+                    if tool_id.is_some() {
+                        let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                            tool_id.take(),
+                            crate::providers::sanitize::ProviderKind::Anthropic,
+                        );
                         let name = tool_name.take().unwrap_or_default();
                         let input = std::mem::take(&mut tool_input_json);
+                        let safe_input = sanitize_tool_call_arguments(input);
                         let _ = tx
                             .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
                                 id,
                                 name,
-                                arguments: input,
+                                arguments: safe_input,
                             })))
                             .await;
                     }
                 }
                 "message_stop" => {
+                    flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx)
+                        .await;
                     let _ = tx.send(Ok(StreamEvent::Final)).await;
                     return;
                 }
                 "error" => {
+                    flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx)
+                        .await;
                     let msg = event
                         .get("error")
                         .and_then(|e| e.get("message"))
@@ -757,8 +954,52 @@ impl AnthropicProvider {
             }
         }
 
+        flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx).await;
         let _ = tx.send(Ok(StreamEvent::Final)).await;
     }
+}
+
+fn sanitize_tool_call_arguments(raw: String) -> String {
+    if raw.is_empty() {
+        return "{}".to_string();
+    }
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(_) => raw,
+        Err(err) => {
+            tracing::warn!(
+                target: "providers.anthropic.stream",
+                error = %err,
+                raw_len = raw.len(),
+                "anthropic SSE produced incomplete tool_input JSON; substituting empty object"
+            );
+            "{}".to_string()
+        }
+    }
+}
+
+async fn flush_pending_tool_call(
+    tool_id: &mut Option<String>,
+    tool_name: &mut Option<String>,
+    tool_input_json: &mut String,
+    tx: &tokio::sync::mpsc::Sender<StreamResult<StreamEvent>>,
+) {
+    if tool_id.is_none() && tool_name.is_none() && tool_input_json.is_empty() {
+        return;
+    }
+    let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+        tool_id.take(),
+        crate::providers::sanitize::ProviderKind::Anthropic,
+    );
+    let name = tool_name.take().unwrap_or_default();
+    let input = std::mem::take(tool_input_json);
+    let safe_input = sanitize_tool_call_arguments(input);
+    let _ = tx
+        .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
+            id,
+            name,
+            arguments: safe_input,
+        })))
+        .await;
 }
 
 #[async_trait]
@@ -834,9 +1075,17 @@ impl Provider for AnthropicProvider {
             )
         })?;
 
-        let messages_owned = request.messages.to_vec();
+        let messages_owned = std::sync::Arc::new(
+            crate::providers::sanitize::sanitize_messages_before_send_for_provider(
+                request.messages.to_vec(),
+                model,
+                self.max_tokens as usize,
+                None,
+                crate::providers::sanitize::ProviderKind::Anthropic,
+            ),
+        );
         let (system_prompt, mut messages) = {
-            let messages_for_blocking = messages_owned.clone();
+            let messages_for_blocking = std::sync::Arc::clone(&messages_owned);
             tokio::task::spawn_blocking(move || Self::convert_messages(&messages_for_blocking))
                 .await
                 .map_err(|e| anyhow::anyhow!("anthropic convert_messages join error: {e}"))?
@@ -898,6 +1147,10 @@ impl Provider for AnthropicProvider {
             prompt_caching: true,
             responses_api: false,
         }
+    }
+
+    fn message_format_kind(&self) -> crate::providers::sanitize::ProviderKind {
+        crate::providers::sanitize::ProviderKind::Anthropic
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -1036,9 +1289,17 @@ impl Provider for AnthropicProvider {
             }
         };
 
-        let (system_prompt, mut messages) = Self::convert_messages(request.messages);
-        if Self::should_cache_conversation(request.messages)
-            || Self::should_cache_last_attachment(request.messages)
+        let sanitized_messages =
+            crate::providers::sanitize::sanitize_messages_before_send_for_provider(
+                request.messages.to_vec(),
+                model,
+                self.max_tokens as usize,
+                None,
+                crate::providers::sanitize::ProviderKind::Anthropic,
+            );
+        let (system_prompt, mut messages) = Self::convert_messages(&sanitized_messages);
+        if Self::should_cache_conversation(&sanitized_messages)
+            || Self::should_cache_last_attachment(&sanitized_messages)
         {
             Self::apply_cache_to_last_message(&mut messages);
         }

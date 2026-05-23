@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Out-bound PII sanitizer for the Debug coding mode.
-//
-// This module provides a single, deterministic redaction layer that sits
-// at the LLM boundary. It is intentionally protocol-agnostic: it operates
-// on plain strings and on the JSON envelopes that this codebase uses for
-// assistant tool_calls and tool result messages, so the same sanitizer
-// works for both the OpenAI Chat Completions wire shape (tool_calls /
-// tool) and the Anthropic Messages wire shape (tool_use / tool_result)
-// after they have been normalized into our unified ChatMessage list.
-//
-// Sanitization is stable: repeated runs over already-redacted text are
-// no-ops, and every match is replaced by a category-named placeholder so
-// the downstream model can still reason about the *kind* of value that
-// was elided.
-
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -334,123 +318,109 @@ fn apply_rule(input: &str, rule: &SanitizerRule, report: &mut SanitizationReport
 }
 
 fn build_rules() -> Vec<SanitizerRule> {
-    let mut rules: Vec<SanitizerRule> = Vec::new();
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::PrivateKey,
-        regex: Regex::new(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
-        )
-        .expect("private key regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::Jwt,
-        regex: Regex::new(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")
-            .expect("jwt regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::AuthHeader,
-        regex: Regex::new(
-            r"(?im)^(?P<key>Authorization|Proxy-Authorization|X-Api-Key|X-Auth-Token)(?P<assign>\s*:\s*)(?P<open>)(?P<value>[^\r\n]+)(?P<close>)$",
-        )
-        .expect("auth header regex"),
-        validator: None,
-        replacement: ReplacementMode::KvKeepKey,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::Bearer,
-        regex: Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9\-_\.=:+/]{16,}").expect("bearer regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::ApiKey,
-        regex: Regex::new(
-            r"\b(?:sk-[A-Za-z0-9_\-]{16,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|rk_(?:live|test)_[A-Za-z0-9]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{20,}|ya29\.[A-Za-z0-9\-_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_\-]{20,}|xox[abprs]-[A-Za-z0-9\-]{10,}|EAACEdEose0cBA[A-Za-z0-9]{20,})\b",
-        )
-        .expect("api key regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::KvSecret,
-        regex: Regex::new(
-            r#"(?i)(?P<key>password|passwd|pwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|auth[_-]?token|session[_-]?token|private[_-]?key)(?P<assign>\s*[:=]\s*)(?:(?P<open>")(?P<value>[^"\r\n]{4,256})(?P<close>")|(?P<open2>')(?P<value2>[^'\r\n]{4,256})(?P<close2>')|(?P<value3>[A-Za-z0-9!#$%&*+\-./:?@^_~\\|]{4,256}))"#,
-        )
-        .expect("kv secret regex"),
-        validator: None,
-        replacement: ReplacementMode::KvKeepKey,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::UrlPassword,
-        regex: Regex::new(
-            r"(?i)(?P<scheme>[a-z][a-z0-9+.\-]*)://(?P<user>[A-Za-z0-9._~%\-]+):(?P<pwd>[^\s@/]+)@",
-        )
-        .expect("url password regex"),
-        validator: None,
-        replacement: ReplacementMode::UrlPassword,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::IdCard,
-        regex: Regex::new(r"(?:^|[^0-9A-Za-z])((?:[1-9]\d{16}[\dXx])|(?:[1-9]\d{14}))(?:$|[^0-9A-Za-z])")
-            .expect("id card regex"),
-        validator: Some(validate_china_id_card),
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::BankCard,
-        regex: Regex::new(r"(?:^|[^0-9])((?:\d[ \-]?){12,18}\d)(?:$|[^0-9])")
-            .expect("bank card regex"),
-        validator: Some(validate_luhn),
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::Phone,
-        regex: Regex::new(r"(?:^|[^0-9+])(\+?(?:86)?1[3-9]\d{9})(?:$|[^0-9])")
-            .expect("phone regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::Email,
-        regex: Regex::new(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
-            .expect("email regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::Ipv4,
-        regex: Regex::new(
-            r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
-        )
-        .expect("ipv4 regex"),
-        validator: Some(validate_non_loopback_ipv4),
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules.push(SanitizerRule {
-        kind: PiiKind::MacAddress,
-        regex: Regex::new(r"\b(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b").expect("mac regex"),
-        validator: None,
-        replacement: ReplacementMode::Plain,
-    });
-
-    rules
+    vec![
+        SanitizerRule {
+            kind: PiiKind::PrivateKey,
+            regex: Regex::new(
+                r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
+            )
+            .expect("private key regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::Jwt,
+            regex: Regex::new(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")
+                .expect("jwt regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::AuthHeader,
+            regex: Regex::new(
+                r"(?im)^(?P<key>Authorization|Proxy-Authorization|X-Api-Key|X-Auth-Token)(?P<assign>\s*:\s*)(?P<open>)(?P<value>[^\r\n]+)(?P<close>)$",
+            )
+            .expect("auth header regex"),
+            validator: None,
+            replacement: ReplacementMode::KvKeepKey,
+        },
+        SanitizerRule {
+            kind: PiiKind::Bearer,
+            regex: Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9\-_\.=:+/]{16,}").expect("bearer regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::ApiKey,
+            regex: Regex::new(
+                r"\b(?:sk-[A-Za-z0-9_\-]{16,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|rk_(?:live|test)_[A-Za-z0-9]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{20,}|ya29\.[A-Za-z0-9\-_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_\-]{20,}|xox[abprs]-[A-Za-z0-9\-]{10,}|EAACEdEose0cBA[A-Za-z0-9]{20,})\b",
+            )
+            .expect("api key regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::KvSecret,
+            regex: Regex::new(
+                r#"(?i)(?P<key>password|passwd|pwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|auth[_-]?token|session[_-]?token|private[_-]?key)(?P<assign>\s*[:=]\s*)(?:(?P<open>")(?P<value>[^"\r\n]{4,256})(?P<close>")|(?P<open2>')(?P<value2>[^'\r\n]{4,256})(?P<close2>')|(?P<value3>[A-Za-z0-9!#$%&*+\-./:?@^_~\\|]{4,256}))"#,
+            )
+            .expect("kv secret regex"),
+            validator: None,
+            replacement: ReplacementMode::KvKeepKey,
+        },
+        SanitizerRule {
+            kind: PiiKind::UrlPassword,
+            regex: Regex::new(
+                r"(?i)(?P<scheme>[a-z][a-z0-9+.\-]*)://(?P<user>[A-Za-z0-9._~%\-]+):(?P<pwd>[^\s@/]+)@",
+            )
+            .expect("url password regex"),
+            validator: None,
+            replacement: ReplacementMode::UrlPassword,
+        },
+        SanitizerRule {
+            kind: PiiKind::IdCard,
+            regex: Regex::new(r"(?:^|[^0-9A-Za-z])((?:[1-9]\d{16}[\dXx])|(?:[1-9]\d{14}))(?:$|[^0-9A-Za-z])")
+                .expect("id card regex"),
+            validator: Some(validate_china_id_card),
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::BankCard,
+            regex: Regex::new(r"(?:^|[^0-9])((?:\d[ \-]?){12,18}\d)(?:$|[^0-9])")
+                .expect("bank card regex"),
+            validator: Some(validate_luhn),
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::Phone,
+            regex: Regex::new(r"(?:^|[^0-9+])(\+?(?:86)?1[3-9]\d{9})(?:$|[^0-9])")
+                .expect("phone regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::Email,
+            regex: Regex::new(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+                .expect("email regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::Ipv4,
+            regex: Regex::new(
+                r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
+            )
+            .expect("ipv4 regex"),
+            validator: Some(validate_non_loopback_ipv4),
+            replacement: ReplacementMode::Plain,
+        },
+        SanitizerRule {
+            kind: PiiKind::MacAddress,
+            regex: Regex::new(r"\b(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b").expect("mac regex"),
+            validator: None,
+            replacement: ReplacementMode::Plain,
+        },
+    ]
 }
 
 fn validate_china_id_card(value: &str) -> bool {
@@ -517,7 +487,7 @@ fn validate_luhn(value: &str) -> bool {
         }
         sum += d;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 fn validate_non_loopback_ipv4(value: &str) -> bool {

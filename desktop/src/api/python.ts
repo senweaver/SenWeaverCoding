@@ -137,7 +137,6 @@ export const pythonApi = {
         const parsed = JSON.parse((msg as MessageEvent<string>).data) as PythonEnvEvent
         onEvent(parsed)
       } catch {
-        // ignore malformed event
       }
     })
     return source

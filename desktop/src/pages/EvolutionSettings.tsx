@@ -132,9 +132,9 @@ export function EvolutionSettings() {
   }, [lastPersistAutoEnabledAt, addToast, t])
 
   return (
-    <div className="max-w-4xl flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">
+        <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
           {t('settings.evolution.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-tertiary)]">
@@ -242,10 +242,10 @@ function ModelPicker({
         ))}
       </select>
       {helperText && (
-        <span className="text-[11px] text-[var(--color-text-tertiary)]">{helperText}</span>
+        <span className="text-xs text-[var(--color-text-tertiary)]">{helperText}</span>
       )}
       {noModels && (
-        <span className="text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="text-xs text-[var(--color-text-tertiary)]">
           {t('settings.evolution.modelPicker.goToAdapterSettings')}
         </span>
       )}
@@ -302,10 +302,10 @@ function SectionShell({
   children: React.ReactNode
 }) {
   return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-4">
+    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-3">
       <div className="flex items-start justify-between mb-3">
         <div>
-          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">{title}</h3>
+          <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">{title}</h3>
           {description && (
             <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">{description}</p>
           )}
@@ -413,10 +413,11 @@ function PersistenceCard({
         width={420}
         footer={
           <>
-            <Button variant="secondary" onClick={() => { setPurgeOpen(null); setConfirmText('') }}>
+            <Button variant="secondary" size="sm" onClick={() => { setPurgeOpen(null); setConfirmText('') }}>
               Cancel
             </Button>
             <Button
+              size="sm"
               onClick={() => void handlePurge()}
               disabled={confirmText !== 'I_UNDERSTAND' || busy}
               loading={busy}
@@ -439,7 +440,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-2">
       <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)]">{label}</div>
-      <div className="text-base font-semibold text-[var(--color-text-primary)]">{value}</div>
+      <div className="text-xs font-semibold text-[var(--color-text-primary)]">{value}</div>
     </div>
   )
 }
@@ -613,6 +614,7 @@ function MaintenanceCard({ persistEnabled }: { persistEnabled: boolean }) {
             />
           </div>
           <Button
+            size="sm"
             onClick={() => void handleDistill()}
             disabled={!turnId.trim() || !persistEnabled || busy !== null}
             loading={busy === 'distill'}
@@ -626,6 +628,7 @@ function MaintenanceCard({ persistEnabled }: { persistEnabled: boolean }) {
           </span>
           <Button
             variant="secondary"
+            size="sm"
             onClick={() => void handleRescore()}
             disabled={!persistEnabled || busy !== null}
             loading={busy === 'rescore'}
@@ -855,7 +858,7 @@ function ExportCard({
           value={format}
           onChange={(e) => setFormat(e.target.value as EvolutionExportFormatId)}
           disabled={!persistEnabled || formats.length === 0}
-          className="text-xs px-3 py-1.5 rounded-md bg-[var(--color-surface-container)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none"
+          className="text-xs h-8 px-2.5 rounded-md bg-[var(--color-surface-container)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none"
         >
           {formats.map((f) => (
             <option key={f.id} value={f.id}>
@@ -863,12 +866,12 @@ function ExportCard({
             </option>
           ))}
         </select>
-        <Button onClick={() => void handleCreate()} loading={busy} disabled={!persistEnabled}>
+        <Button size="sm" onClick={() => void handleCreate()} loading={busy} disabled={!persistEnabled}>
           {t('settings.evolution.export.create')}
         </Button>
       </div>
       <div>
-        <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+        <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
           {t('settings.evolution.export.recent')}
         </div>
         {exports.length === 0 ? (
@@ -995,7 +998,7 @@ function CloudTargetsCard({
         </div>
       )}
 
-      <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+      <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
         {t('settings.evolution.cloud.history')}
       </div>
       {pushHistory.length === 0 ? (
@@ -1059,10 +1062,11 @@ function CloudTargetsCard({
         width={380}
         footer={
           <>
-            <Button variant="secondary" onClick={() => setPushPickerForTarget(null)}>
+            <Button variant="secondary" size="sm" onClick={() => setPushPickerForTarget(null)}>
               Cancel
             </Button>
             <Button
+              size="sm"
               onClick={async () => {
                 if (pushPickerForTarget && pushExportId) {
                   await push(pushPickerForTarget.id, pushExportId)
@@ -1080,7 +1084,7 @@ function CloudTargetsCard({
         <select
           value={pushExportId}
           onChange={(e) => setPushExportId(e.target.value)}
-          className="w-full text-xs px-3 py-2 rounded-md bg-[var(--color-surface-container)] border border-[var(--color-border)] text-[var(--color-text-primary)]"
+          className="w-full text-xs h-8 px-2.5 rounded-md bg-[var(--color-surface-container)] border border-[var(--color-border)] text-[var(--color-text-primary)]"
         >
           {exports.map((e) => (
             <option key={e.id} value={e.id}>
@@ -1140,23 +1144,23 @@ function CloudTargetEditor({
       width={520}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={() => void handleSubmit()} disabled={!name || submitting} loading={submitting}>
+          <Button size="sm" onClick={() => void handleSubmit()} disabled={!name || submitting} loading={submitting}>
             Save
           </Button>
         </>
       }
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 text-xs">
         <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} />
         <div>
           <label className="text-xs font-medium text-[var(--color-text-primary)] mb-1 block">Kind</label>
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as CloudTarget['kind'])}
-            className="w-full text-xs px-3 py-2 rounded-md bg-[var(--color-surface-container)] border border-[var(--color-border)] text-[var(--color-text-primary)]"
+            className="w-full text-xs h-8 px-2.5 rounded-md bg-[var(--color-surface-container)] border border-[var(--color-border)] text-[var(--color-text-primary)]"
           >
             <option value="openai_files">OpenAI Files</option>
             <option value="huggingface_dataset">Hugging Face Dataset</option>
@@ -1216,7 +1220,7 @@ function SliderRow({
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full accent-[var(--color-brand)]"
       />
-      {hint && <span className="text-[10px] text-[var(--color-text-tertiary)]">{hint}</span>}
+      {hint && <span className="text-xs text-[var(--color-text-tertiary)]">{hint}</span>}
     </div>
   )
 }
@@ -1406,7 +1410,7 @@ function RecyclingCard({
           />
         </div>
         <div className="flex flex-col gap-2">
-          <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
+          <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)]">
             {t('settings.evolution.recycling.privacy')}
           </div>
           <ToggleRow
@@ -1436,7 +1440,7 @@ function RecyclingCard({
           />
         </div>
         <div className="flex flex-col gap-2">
-          <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
+          <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)]">
             {t('settings.evolution.recycling.weights')}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1470,7 +1474,7 @@ function RecyclingCard({
           </div>
         </div>
         <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3">
-          <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
+          <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)]">
             {t('settings.evolution.recycling.recent')} ·{' '}
             {t('settings.evolution.recycling.total', { count: String(total) })}
           </div>
@@ -1694,7 +1698,7 @@ function ReflectionCard({
           </div>
         )}
         {summary && (
-          <div className="flex flex-wrap gap-3 text-[11px] text-[var(--color-text-secondary)]">
+          <div className="flex flex-wrap gap-3 text-xs text-[var(--color-text-secondary)]">
             <span>
               <span className="text-[var(--color-text-tertiary)]">
                 {t('settings.evolution.reflection.summary.lastRunAt')}:
@@ -1821,7 +1825,7 @@ function ReflectionCard({
           onChange={(v) => void updateReflectionConfig({ includeUserThumbsDown: v })}
         />
         <div className="flex flex-col gap-2">
-          <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
+          <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)]">
             {t('settings.evolution.reflection.writeback')}
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1831,7 +1835,7 @@ function ReflectionCard({
                 <button
                   key={target}
                   onClick={() => toggleTarget(target, !active)}
-                  className={`text-xs px-3 py-1.5 rounded-md border transition-all ${
+                  className={`text-xs h-7 px-2.5 rounded-md border transition-all ${
                     active
                       ? 'border-[var(--color-brand)] bg-[var(--color-brand)]/15 text-[var(--color-brand)]'
                       : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
@@ -1844,11 +1848,12 @@ function ReflectionCard({
           </div>
         </div>
         <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3">
-          <span className="text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)]">
+          <span className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)]">
             {t('settings.evolution.reflection.recent')}
           </span>
           <div className="flex flex-col items-end gap-1">
             <Button
+              size="sm"
               onClick={() => void handleRun()}
               disabled={runDisabled}
               loading={busy}
@@ -1863,7 +1868,7 @@ function ReflectionCard({
             {!hasModels && (
               <a
                 href="#/settings/providers"
-                className="text-[10px] text-[var(--color-text-tertiary)] underline"
+                className="text-xs text-[var(--color-text-tertiary)] underline"
               >
                 {t('settings.evolution.modelEmpty.gotoProviders')}
               </a>
@@ -1932,12 +1937,12 @@ function ReflectionCard({
                     {run.trigger} · {run.depth} · turns {run.turnsAnalyzed} · {formatRelativeTime(run.startedAt)}
                   </div>
                   {run.summary && (
-                    <div className="text-[11px] text-[var(--color-text-secondary)] mt-1 line-clamp-2">
+                    <div className="text-xs text-[var(--color-text-secondary)] mt-1 line-clamp-2">
                       {run.summary}
                     </div>
                   )}
                   {skipLabel && (
-                    <div className="text-[11px] text-[var(--color-error)] mt-1 line-clamp-2">
+                    <div className="text-xs text-[var(--color-error)] mt-1 line-clamp-2">
                       {skipLabel}
                     </div>
                   )}

@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared bridge types for communication between UI frontends (TUI / GUI)
-//! and the agent runtime. Both `tui` and `gui` features reference these types.
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]

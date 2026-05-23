@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `lsp_symbols` tool — focused wrapper around document-symbol queries.
-//!
-//! the generic `lsp` tool exposes many operations; the
-//! agent pipeline benefits from a single-purpose tool that:
-//!
-//! 1. Takes just a `path` (and an optional `language` hint).
-//! 2. Auto-detects the language from the extension when not supplied.
-//! 3. Calls `LspService::document_symbols` and returns the pre-
-//!    formatted outline via [`services::lsp::format_document_symbols`].
-//! 4. Gracefully degrades when no tier-1 server is available, with a
-//!    structured error instead of a panic.
 
 use super::traits::{Tool, ToolResult};
 use crate::services::lsp::{self, LspService};

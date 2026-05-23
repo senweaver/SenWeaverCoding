@@ -35,7 +35,7 @@ struct Message {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     images: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "crate::providers::sanitize::skip_serializing_tool_calls")]
     tool_calls: Option<Vec<OutgoingToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<String>,
@@ -152,7 +152,9 @@ impl OllamaProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.ollama", 300, 10)
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.ollama", 300, 10)
     }
 
     fn resolve_request_details(&self, model: &str) -> anyhow::Result<(String, bool)> {
@@ -660,7 +662,14 @@ impl Provider for OllamaProvider {
     ) -> anyhow::Result<String> {
         let (normalized_model, should_auth) = self.resolve_request_details(model)?;
 
-        let api_messages = self.convert_messages(messages);
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let api_messages = self.convert_messages(&sanitized_messages);
 
         let response = self
             .send_request(
@@ -702,7 +711,14 @@ impl Provider for OllamaProvider {
     ) -> anyhow::Result<ChatResponse> {
         let (normalized_model, should_auth) = self.resolve_request_details(model)?;
 
-        let api_messages = self.convert_messages(messages);
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let api_messages = self.convert_messages(&sanitized_messages);
 
         let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
@@ -766,12 +782,7 @@ impl Provider for OllamaProvider {
                 response.message.thinking.as_deref(),
             )
         };
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: vec![],
-            usage,
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(Some(text), usage))
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -810,12 +821,7 @@ impl Provider for OllamaProvider {
         let text = self
             .chat_with_history(request.messages, model, temperature)
             .await?;
-        Ok(ChatResponse {
-            text: Some(text),
-            tool_calls: vec![],
-            usage: None,
-            reasoning_content: None,
-        })
+        Ok(ChatResponse::text_only(Some(text), None))
     }
 }
 

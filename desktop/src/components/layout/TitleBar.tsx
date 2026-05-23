@@ -13,7 +13,7 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
-import { useChatStore } from '../../stores/chatStore'
+import { focusSession } from '../../lib/focusSession'
 import { useUIStore } from '../../stores/uiStore'
 import { useUpdateStore } from '../../stores/updateStore'
 
@@ -140,7 +140,7 @@ export function TitleBar() {
       const workDir = useSessionStore.getState().resolveWorkDirForNewSessionTab(currentTabId)
       const sessionId = await useSessionStore.getState().createSession(workDir)
       useTabStore.getState().openTab(sessionId, t('menu.file.newSession'))
-      useChatStore.getState().connectToSession(sessionId)
+      focusSession(sessionId)
     } catch (error) {
       addToast({
         type: 'error',
@@ -170,7 +170,7 @@ export function TitleBar() {
       useSessionStore.getState().setUserPinnedSessionWorkDir(path)
       const sessionId = await useSessionStore.getState().createSession(path)
       useTabStore.getState().openTab(sessionId, t('menu.file.newSession'))
-      useChatStore.getState().connectToSession(sessionId)
+      focusSession(sessionId)
     } catch (error) {
       addToast({
         type: 'error',
@@ -273,7 +273,7 @@ export function TitleBar() {
   return (
     <div className="flex h-[var(--titlebar-height)] w-full shrink-0 select-none border-b border-[var(--color-border)] bg-[var(--color-surface)]">
       {showMacTrafficLights ? (
-        <MacTrafficLightsStrip />
+        <MacTrafficLightsStrip t={t} />
       ) : (
         <div className="w-2 shrink-0" aria-hidden="true" />
       )}
@@ -289,7 +289,7 @@ export function TitleBar() {
         <div className="min-w-8 flex-1" data-tauri-drag-region aria-hidden="true" />
       </div>
 
-      {showWindowsCaption && <WindowsCaptionButtons isMaximized={captionMaximized} />}
+      {showWindowsCaption && <WindowsCaptionButtons isMaximized={captionMaximized} t={t} />}
 
       <AnchoredDropdown anchorRef={fileBtnRef} panelRef={filePanelRef} open={openMenu === 'file'}>
         <MenuRow onClick={() => void newSession()}>{t('menu.file.newSession')}</MenuRow>
@@ -431,27 +431,32 @@ async function tauriCaptionAction(kind: 'minimize' | 'toggle-maximize' | 'close'
   else await w.close()
 }
 
-function MacTrafficLightsStrip() {
+type T = ReturnType<typeof useTranslation>
+
+function MacTrafficLightsStrip({ t }: { t: T }) {
+  const closeLabel = t('titlebar.window.close')
+  const minimizeLabel = t('titlebar.window.minimize')
+  const zoomLabel = t('titlebar.window.zoom')
   return (
     <div className="flex h-full w-[78px] shrink-0 items-center gap-2 px-3 pt-px">
       <button
         type="button"
-        title="Close"
-        aria-label="Close"
+        title={closeLabel}
+        aria-label={closeLabel}
         onClick={() => void tauriCaptionAction('close')}
         className="h-[11px] w-[11px] shrink-0 rounded-full bg-[#ff5f57] ring-1 ring-black/[0.12] hover:brightness-95 dark:ring-black/35"
       />
       <button
         type="button"
-        title="Minimize"
-        aria-label="Minimize"
+        title={minimizeLabel}
+        aria-label={minimizeLabel}
         onClick={() => void tauriCaptionAction('minimize')}
         className="h-[11px] w-[11px] shrink-0 rounded-full bg-[#febc2f] ring-1 ring-black/[0.12] hover:brightness-95 dark:ring-black/35"
       />
       <button
         type="button"
-        title="Zoom"
-        aria-label="Zoom"
+        title={zoomLabel}
+        aria-label={zoomLabel}
         onClick={() => void tauriCaptionAction('toggle-maximize')}
         className="h-[11px] w-[11px] shrink-0 rounded-full bg-[#28c840] ring-1 ring-black/[0.12] hover:brightness-95 dark:ring-black/35"
       />
@@ -459,13 +464,18 @@ function MacTrafficLightsStrip() {
   )
 }
 
-function WindowsCaptionButtons({ isMaximized }: { isMaximized: boolean }) {
+function WindowsCaptionButtons({ isMaximized, t }: { isMaximized: boolean; t: T }) {
+  const minimizeLabel = t('titlebar.window.minimize')
+  const maximizeLabel = isMaximized
+    ? t('titlebar.window.restore')
+    : t('titlebar.window.maximize')
+  const closeLabel = t('titlebar.window.close')
   return (
     <div className="flex h-full shrink-0">
       <button
         type="button"
-        title="Minimize"
-        aria-label="Minimize"
+        title={minimizeLabel}
+        aria-label={minimizeLabel}
         onClick={() => void tauriCaptionAction('minimize')}
         className="inline-flex h-full w-[46px] items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
       >
@@ -475,8 +485,8 @@ function WindowsCaptionButtons({ isMaximized }: { isMaximized: boolean }) {
       </button>
       <button
         type="button"
-        title={isMaximized ? 'Restore down' : 'Maximize'}
-        aria-label={isMaximized ? 'Restore down' : 'Maximize'}
+        title={maximizeLabel}
+        aria-label={maximizeLabel}
         onClick={() => void tauriCaptionAction('toggle-maximize')}
         className="inline-flex h-full w-[46px] items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
       >
@@ -493,8 +503,8 @@ function WindowsCaptionButtons({ isMaximized }: { isMaximized: boolean }) {
       </button>
       <button
         type="button"
-        title="Close"
-        aria-label="Close"
+        title={closeLabel}
+        aria-label={closeLabel}
         onClick={() => void tauriCaptionAction('close')}
         className="inline-flex h-full w-[46px] items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:bg-[#e81123] hover:text-white"
       >

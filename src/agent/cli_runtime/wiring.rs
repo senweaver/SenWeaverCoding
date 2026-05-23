@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Stateless wiring helpers extracted from [`crate::agent::loop_::run`].
-//!
-//! Each helper is intentionally narrow: it takes a `&Config` slice and
-//! returns an owned `Arc<dyn Trait>`.  No mutable state, no async
-//! (besides what the constructors demand), no implicit global
-//! registrations beyond what the helper documents.
 
 use std::sync::Arc;
 

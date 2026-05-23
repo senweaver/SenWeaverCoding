@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Memory snapshot — export/import core memories as human-readable Markdown.
-//!
-//! **Atomic Soul Export**: dumps `MemoryCategory::Core` from SQLite into
-//! `MEMORY_SNAPSHOT.md` so the agent's "soul" is always Git-visible.
-//!
-//! **Auto-Hydration**: if `brain.db` is missing but `MEMORY_SNAPSHOT.md` exists,
-//! re-indexes all entries back into a fresh SQLite database.
 
 use anyhow::Result;
 use chrono::Local;

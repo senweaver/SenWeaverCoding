@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Dangling Tool Call Repair - fixes incomplete tool call histories.
-//!
-//! When an agent session loses tool results (interruption, `trim_history`, gateway
-//! hydration quirks), assistant messages that still embed `tool_calls` must still
-//! be followed by **`tool`/`ToolResults`** lines for **every** `tool_call_id` or
-//! strict OpenAI-style APIs (DeepSeek-v4-pro, etc.) return HTTP 400.
-//!
-//! Repairs run:
-//! - at turn preamble ([`repair_dangling_tool_calls`]); and again
-//! - after transcript trim / orphan repair ([`ensure_assistant_tool_replies_inplace`])
 
 use std::collections::HashSet;
 
@@ -82,18 +72,22 @@ pub fn ensure_assistant_tool_replies_inplace(history: &mut Vec<ConversationMessa
     let mut patches: usize = 0;
     let mut i = 0usize;
     while i < history.len() {
+        if let ConversationMessage::AssistantToolCalls { tool_calls, .. } = &mut history[i] {
+            for call in tool_calls.iter_mut() {
+                if call.id.trim().is_empty() {
+                    call.id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                        None,
+                        crate::providers::sanitize::ProviderKind::Other,
+                    );
+                }
+            }
+        }
+
         let required: Option<Vec<String>> = match &history[i] {
             ConversationMessage::AssistantToolCalls { tool_calls, .. } if !tool_calls.is_empty() => {
                 let ids = tool_calls
                     .iter()
-                    .filter_map(|c| {
-                        let id = c.id.trim();
-                        if id.is_empty() {
-                            None
-                        } else {
-                            Some(c.id.clone())
-                        }
-                    })
+                    .map(|c| c.id.clone())
                     .collect::<Vec<_>>();
                 if ids.is_empty() {
                     None

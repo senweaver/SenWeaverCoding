@@ -66,9 +66,9 @@ export function HooksSettings() {
   }
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+        <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {t('settings.hooks.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-1">
@@ -162,10 +162,10 @@ export function HooksSettings() {
       </Section>
 
       <div className="flex items-center gap-2">
-        <Button onClick={handleSave} disabled={isLoading || isSaving}>
+        <Button size="sm" onClick={handleSave} disabled={isLoading || isSaving}>
           {isSaving ? t('common.saving') : t('common.save')}
         </Button>
-        <Button variant="ghost" onClick={() => void fetch()} disabled={isLoading}>
+        <Button variant="ghost" size="sm" onClick={() => void fetch()} disabled={isLoading}>
           {t('common.reload')}
         </Button>
       </div>
@@ -175,8 +175,8 @@ export function HooksSettings() {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-4 space-y-3">
-      <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
+      <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
         {title}
       </h3>
       {children}
@@ -200,7 +200,7 @@ function Field({
       </span>
       {children}
       {hint && (
-        <span className="block text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="block text-xs text-[var(--color-text-tertiary)]">
           {hint}
         </span>
       )}
@@ -233,7 +233,7 @@ function CheckboxRow({
       <span>
         <span className="text-[var(--color-text-primary)] font-medium">{label}</span>
         {hint && (
-          <span className="block text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="block text-xs text-[var(--color-text-tertiary)]">
             {hint}
           </span>
         )}

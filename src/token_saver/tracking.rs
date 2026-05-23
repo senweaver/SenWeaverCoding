@@ -5,15 +5,16 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
 
 const DB_FILE: &str = "token_saver/tracking.db";
 
 static CONN: Mutex<Option<(PathBuf, Connection)>> = Mutex::new(None);
 
 fn open_or_reuse(data_dir: &Path) -> Result<()> {
-    let mut guard = CONN.lock().expect("token_saver tracking mutex poisoned");
+    let mut guard = CONN.lock();
     let target = data_dir.join(DB_FILE);
     if let Some((p, _)) = guard.as_ref() {
         if p == &target {
@@ -61,7 +62,7 @@ pub fn record(
         .map(|d| d.as_secs())
         .unwrap_or(0) as i64;
 
-    let mut guard = CONN.lock().expect("token_saver tracking mutex poisoned");
+    let mut guard = CONN.lock();
     if let Some((_, conn)) = guard.as_mut() {
         let trimmed = command.chars().take(512).collect::<String>();
         conn.execute(
@@ -83,7 +84,7 @@ pub struct Aggregate {
 
 pub fn aggregate(window_seconds: u64, data_dir: &Path) -> Result<Aggregate> {
     open_or_reuse(data_dir)?;
-    let mut guard = CONN.lock().expect("token_saver tracking mutex poisoned");
+    let mut guard = CONN.lock();
     let (_, conn) = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no db"))?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -111,7 +112,7 @@ pub fn aggregate(window_seconds: u64, data_dir: &Path) -> Result<Aggregate> {
 
 pub fn reset(data_dir: &Path) -> Result<u64> {
     open_or_reuse(data_dir)?;
-    let mut guard = CONN.lock().expect("token_saver tracking mutex poisoned");
+    let mut guard = CONN.lock();
     let (_, conn) = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no db"))?;
     let n = conn.execute("DELETE FROM token_savings", [])? as u64;
     Ok(n)
@@ -138,7 +139,7 @@ impl CategoryAggregate {
 
 pub fn aggregate_by_category(data_dir: &Path) -> Result<Vec<CategoryAggregate>> {
     open_or_reuse(data_dir)?;
-    let mut guard = CONN.lock().expect("token_saver tracking mutex poisoned");
+    let mut guard = CONN.lock();
     let (_, conn) = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no db"))?;
     let mut stmt = conn.prepare(
         "SELECT category, COUNT(*) AS hits, COALESCE(SUM(tokens_before),0), \

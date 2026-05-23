@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// CLI entrypoint — mirrors cc-typescript-src `entrypoints/cli.tsx`.
-// Bootstraps the interactive terminal REPL, headless/SDK, remote, or
-// background session.
 
 use std::path::PathBuf;
 
@@ -143,6 +139,10 @@ impl CliEntrypoint {
         });
         let _ = crate::event_bus::integration::init_global_bus();
 
+        {
+            crate::workers::init_global_supervisor(cwd.clone());
+            crate::workers::scan_and_recover_at(&cwd);
+        }
         let multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
         {
             use crate::agent::registry::{AgentCapability, AgentInfo};

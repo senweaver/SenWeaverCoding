@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Report template tool — standalone access to template engine.
-//!
-//! Exposes the report template engine directly so agents can render
-//! templates with custom variable maps without going through ProjectIntelTool.
 
 use super::report_templates;
 use super::traits::{Tool, ToolResult};

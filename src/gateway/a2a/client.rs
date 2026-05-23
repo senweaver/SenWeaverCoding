@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! A2A Protocol Client  - for making outbound agent-to-agent requests.
-//!
-//! This client handles discovering agents, sending tasks, and
-//! checking task status on remote A2A-compliant agents.
 
 use reqwest::Client;
 use std::net::IpAddr;
@@ -179,15 +175,18 @@ impl A2aClient {
     ) -> Result<A2aTask, A2aClientError> {
         let task_url = format!("{}/a2a/tasks/{}", agent_url.trim_end_matches('/'), task_id);
 
-        let response =
-            self.http
-                .get(&task_url)
-                .send()
-                .await
-                .map_err(|e| A2aClientError::RequestFailed {
-                    url: task_url.clone(),
-                    source: e,
-                })?;
+        let policy = crate::util::retry::RetryPolicy::http();
+        let response = crate::util::retry::retry(&policy, |_attempt| {
+            let url = task_url.clone();
+            let http = self.http.clone();
+            async move {
+                http.get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| A2aClientError::RequestFailed { url, source: e })
+            }
+        })
+        .await?;
 
         if response.status().as_u16() == 404 {
             return Err(A2aClientError::TaskNotFound {
@@ -377,6 +376,45 @@ pub enum A2aClientError {
 
     #[error("Polling timeout for task '{task_id}' after {max_polls} attempts")]
     PollingTimeout { task_id: TaskId, max_polls: u32 },
+}
+
+impl crate::error::ErrorClassification for A2aClientError {
+    fn category(&self) -> crate::error::ErrorCategory {
+        use crate::error::ErrorCategory;
+        match self {
+            A2aClientError::RequestFailed { source, .. } => {
+                if source.is_timeout() {
+                    ErrorCategory::Timeout
+                } else if source.is_connect() || source.is_request() {
+                    ErrorCategory::Network
+                } else {
+                    ErrorCategory::Provider
+                }
+            }
+            A2aClientError::AgentNotFound { .. } | A2aClientError::TaskNotFound { .. } => {
+                ErrorCategory::NotFound
+            }
+            A2aClientError::AgentListFailed { status, .. }
+            | A2aClientError::TaskSendFailed { status, .. }
+            | A2aClientError::TaskQueryFailed { status, .. }
+            | A2aClientError::TaskCancelFailed { status, .. } => {
+                if *status == 429 {
+                    ErrorCategory::RateLimit
+                } else if *status == 401 || *status == 403 {
+                    ErrorCategory::Permission
+                } else if (500..600).contains(status) {
+                    ErrorCategory::Provider
+                } else {
+                    ErrorCategory::Validation
+                }
+            }
+            A2aClientError::InvalidUrl { .. } | A2aClientError::SsrfBlocked { .. } => {
+                ErrorCategory::Validation
+            }
+            A2aClientError::InvalidResponse { .. } => ErrorCategory::Provider,
+            A2aClientError::PollingTimeout { .. } => ErrorCategory::Timeout,
+        }
+    }
 }
 
 pub async fn discover_external_agents(

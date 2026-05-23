@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Proxy relay — mirrors claude-code-typescript-src`upstreamproxy/relay.ts`.
-// Relays HTTP requests through an upstream proxy.
 
 use super::config::ProxyConfig;
 

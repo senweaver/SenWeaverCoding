@@ -1,36 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ??append-only JSONL event log + periodic snapshot for
-//! a single [`crate::session::state::SessionState`].
-//!
-//! File layout under the workspace (or the configured overrides):
-//!
-//! ```text
-//! .sen/sessions/<session-id>/
-//!     events.jsonl           # current active log, append-only
-//!     events.<version>.jsonl # rotated logs, kept as bounded history
-//!     snapshot.json          # latest `SessionState` snapshot
-//! ```
-//!
-//! Persistence contract: every [`crate::session::state::SessionActor::apply`]
-//! call writes exactly one line to `events.jsonl` ??one
-//! [`SessionEvent`] per line, `serde_json::to_string` flat form.
-//! Every [`SNAPSHOT_EVERY`] appends we additionally dump the current
-//! aggregated `SessionState` into `snapshot.json`, then rotate
-//! `events.jsonl` ??`events.<version>.jsonl` so the active log does
-//! not grow without bound.
-//!
-//! Replay (`SessionEventLog::replay`) is the inverse: it prefers the
-//! snapshot as the base state and then tails the active log on top.
-//! The rotated logs are kept purely for manual recovery.
-//!
-//! The log is **not** fsync'd per append ??treats "crash
-//! without fsync ??lose at most a few seconds of events" as
-//! acceptable because all producers are also emitting the same
-//! events on the broadcast bus.  A future hardening pass can opt
-//! into periodic `BufWriter::flush` + `File::sync_data` via the
-//! `flush` method.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -81,7 +51,7 @@ impl SessionEventLog {
         if existing > 0 {
 
             let reader = BufReader::new(File::open(&events_path)?);
-            start_seq = reader.lines().filter_map(Result::ok).count() as u64;
+            start_seq = reader.lines().map_while(Result::ok).count() as u64;
         }
 
         Ok(Self {
@@ -122,10 +92,7 @@ impl SessionEventLog {
             w.flush()?;
         }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let bumped = self.since_snapshot.fetch_add(1, Ordering::SeqCst) + 1;
-        if bumped >= self.snapshot_every {
-
-        }
+        let _bumped = self.since_snapshot.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(seq)
     }
 

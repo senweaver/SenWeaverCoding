@@ -1,23 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Datasheet management for industry devices connected via Aardvark.
-//!
-//! When a user identifies a new device (e.g. "I have an LM75 temperature
-//! sensor"), the [`DatasheetTool`] calls [`DatasheetManager`] to:
-//!
-//! 1. **search** — query the web for the device datasheet PDF URL.
-//! 2. **download** — fetch the PDF and save it to
-//!    `~/.senweavercoding/hardware/datasheets/<device>.pdf`.
-//! 3. **list** — enumerate all locally cached datasheets.
-//! 4. **read** — return the local path of a cached datasheet so the LLM can
-//!    reference it with the `read_file` tool or a future RAG pipeline.
-//!
-//! # Note on PDF extraction
-//!
-//! Full in-process PDF parsing is available when the `rag-pdf` feature is
-//! enabled (adds `pdf-extract`).  Without that feature, the tool returns the
-//! PDF file path and instructs the LLM to use a future RAG step.
 
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;

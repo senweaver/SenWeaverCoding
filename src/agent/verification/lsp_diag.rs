@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! LSP diagnostic verifier.
-//!
-//! The verifier is parameterised over a [`LspDiagnosticFetcher`] so
-//! tests can inject a deterministic fake and the production path can
-//! wire in a real `LspService`.  The fetcher returns
-//! already-decoded LSP diagnostics — the verifier only mediates the
-//! trait boundary so the rest of the pipeline can stay unchanged.
 
 use async_trait::async_trait;
 

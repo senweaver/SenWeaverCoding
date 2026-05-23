@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Process-wide bootstrap state, analogous to claude-code-typescript-src`bootstrap/state.ts`.
 
 use parking_lot::RwLock;
 use std::collections::HashMap;

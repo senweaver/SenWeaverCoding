@@ -1,14 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `code_search` tool — workspace full-text search.
-//!
-//! wraps [`crate::code_intel::search`] with a simple
-//! tool contract.  By default the tool uses the heuristic back-end
-//! (always available).  When the binary is built with the
-//! `code-search` feature, call-sites that own a long-lived
-//! [`TantivyIndex`] can swap it in via the services container; the
-//! tool then automatically uses the indexed path.
 
 use super::traits::{Tool, ToolResult};
 use crate::code_intel::search::{IncrementalIndex, heuristic};

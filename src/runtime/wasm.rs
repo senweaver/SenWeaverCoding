@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WASM sandbox runtime — in-process tool isolation via `wasmi`.
-//!
-//! Provides capability-based sandboxing without Docker or external runtimes.
-//! Each WASM module runs with:
-//! - **Fuel limits**: prevents infinite loops (each instruction costs 1 fuel)
-//! - **Memory caps**: configurable per-module memory ceiling
-//! - **No filesystem access**: by default, tools are pure computation
-//! - **No network access**: unless explicitly allowlisted hosts are configured
-//!
-//! # Feature gate
-//! This module is only compiled when `--features runtime-wasm` is enabled.
-//! The default SenWeaverCoding binary excludes it to maintain the 4.6 MB size target.
 
 use super::traits::RuntimeAdapter;
 use crate::config::WasmRuntimeConfig;

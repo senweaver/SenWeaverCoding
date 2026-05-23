@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Shared turn-setup helpers extracted from `Agent::turn` and
-//! `Agent::turn_streamed` to reduce duplication without a full rewrite.
-//!
-//! The functions here are pure (no `Self`) and handle the "hot-reload
-//! preamble" — the ~50 lines at the top of both turn variants that:
-//! 1. Read the latest config from `shared_config`.
-//! 2. Detect provider / api_key / api_url / model changes.
-//! 3. Decide whether a provider reload is required.
-//!
-//! Centralizing this logic means a bug fix in the hot-reload path applies
-//! to both `turn()` and `turn_streamed()` simultaneously.
 
 use crate::security::secret_string::SecretString;
 

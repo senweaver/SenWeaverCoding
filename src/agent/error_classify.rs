@@ -5,7 +5,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 static NO_MODEL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)no[_\s\-]?model[_\s\-]?configured|please\s+add\s+at\s+least\s+one\s+model|未添加模型").unwrap()
+    Regex::new(r"(?i)no[_\s\-]?model[_\s\-]?configured|please\s+add\s+at\s+least\s+one\s+model|未添加模型")
+        .expect("no-model-configured error regex must compile")
 });
 
 pub fn is_no_model_error(message: &str) -> bool {

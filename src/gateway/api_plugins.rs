@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Plugin management API routes (requires `plugins-wasm` feature).
 
 #[cfg(feature = "plugins-wasm")]
 pub mod plugin_routes {

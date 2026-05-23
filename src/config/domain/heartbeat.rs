@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Heartbeat configuration, migrated from monolithic schema.
-//!
-//! Controls periodic health-ping operations that can proactively drive
-//! the agent to take action during quiet periods, and the adjacent
-//! "dead man's switch" alerting.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

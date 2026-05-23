@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Cursor motions — word/line/doc boundaries.  UI-agnostic.
-//!
-//! These are the primitives behind Vim's `w`/`b`/`e`/`$`/`0`/`G`/`gg` and
-//! their equivalents in the TUI and GUI key handlers.  Everything operates
-//! on a shared `TextBuffer` and `Position` so all three UIs behave
-//! identically.
 
 use super::buffer::{Position, TextBuffer};
 
@@ -47,11 +41,7 @@ pub fn next_word_start(buffer: &TextBuffer, pos: Position) -> Position {
     let mut line_idx = pos.line.min(line_count - 1);
     let mut col = pos.col;
 
-    loop {
-        let line_text = match buffer.line_slice(line_idx) {
-            Some(s) => s,
-            None => break,
-        };
+    while let Some(line_text) = buffer.line_slice(line_idx) {
 
         let line_len = line_text.len_chars();
         if col >= line_len {

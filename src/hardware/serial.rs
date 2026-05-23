@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware serial transport — newline-delimited JSON over USB CDC.
-//!
-//! Implements the [`Transport`] trait with **lazy port opening**: the port is
-//! opened for each `send()` call and closed immediately after the response is
-//! received. This means multiple tools can use the same device path without
-//! one holding the port exclusively.
-//!
-//! Wire protocol (SenWeaverCoding serial JSON):
-//! ```text
-//! Host → Device:  {"cmd":"gpio_write","params":{"pin":25,"value":1}}\n
-//! Device → Host:  {"ok":true,"data":{"pin":25,"value":1,"state":"HIGH"}}\n
-//! ```
-//!
-//! All I/O is wrapped in `tokio::time::timeout` — no blocking reads.
 
 use super::{
     protocol::{ZcCommand, ZcResponse},

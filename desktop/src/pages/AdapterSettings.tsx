@@ -161,8 +161,8 @@ export function AdapterSettings() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-12 text-[var(--color-text-tertiary)]">
-        <span className="material-symbols-outlined animate-spin text-[20px] mr-2">
+      <div className="flex items-center justify-center py-12 text-xs text-[var(--color-text-tertiary)]">
+        <span className="material-symbols-outlined animate-spin text-[18px] mr-2">
           progress_activity
         </span>
         {t('common.loading')}
@@ -171,9 +171,9 @@ export function AdapterSettings() {
   }
 
   return (
-    <div className="space-y-8 max-w-5xl">
+    <div className="space-y-4">
       {}
-      <p className="text-sm text-[var(--color-text-secondary)]">
+      <p className="text-xs text-[var(--color-text-secondary)]">
         {t('settings.adapters.descriptionFull')}
       </p>
 
@@ -184,9 +184,9 @@ export function AdapterSettings() {
           label={t('settings.adapters.generalSection')}
           desc={t('settings.adapters.generalSectionDesc')}
         />
-        <div className="p-4 space-y-5">
+        <div className="p-3 space-y-4">
           <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--color-text-primary)]">
+            <label className="text-xs font-medium text-[var(--color-text-primary)]">
               {t('settings.adapters.defaultProject')}
             </label>
             <DirectoryPicker value={defaultProjectDir} onChange={setDefaultProjectDir} />
@@ -195,7 +195,7 @@ export function AdapterSettings() {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-3">
             <NumberField
               label={t('settings.adapters.fields.messageTimeoutSecs')}
               hint={t('settings.adapters.hints.messageTimeoutSecs')}
@@ -253,20 +253,20 @@ export function AdapterSettings() {
           </div>
 
           <div className="flex items-center gap-3 pt-1">
-            <Button onClick={saveTopSection} loading={saving === '__top'}>
+            <Button size="sm" onClick={saveTopSection} loading={saving === '__top'}>
               {t('settings.adapters.save')}
             </Button>
             {saveStatus['__top'] === 'saved' && (
-              <span className="text-sm text-[var(--color-success)]">
-                <span className="material-symbols-outlined text-[16px] align-middle mr-1">
+              <span className="text-xs text-[var(--color-success)]">
+                <span className="material-symbols-outlined text-[14px] align-middle mr-1">
                   check_circle
                 </span>
                 {t('settings.adapters.saved')}
               </span>
             )}
             {saveStatus['__top'] === 'error' && (
-              <span className="text-sm text-[var(--color-error)]">
-                <span className="material-symbols-outlined text-[16px] align-middle mr-1">
+              <span className="text-xs text-[var(--color-error)]">
+                <span className="material-symbols-outlined text-[14px] align-middle mr-1">
                   error
                 </span>
                 {saveError['__top']}
@@ -283,16 +283,16 @@ export function AdapterSettings() {
           label={t('settings.adapters.pairing')}
           desc={t('settings.adapters.pairingDesc')}
         />
-        <div className="p-4 space-y-4">
+        <div className="p-3 space-y-4">
           <div className="flex items-center gap-3">
-            <Button onClick={handleGenerateCode} loading={isGeneratingCode}>
+            <Button size="sm" onClick={handleGenerateCode} loading={isGeneratingCode}>
               {pairingCode || isPairingActive
                 ? t('settings.adapters.regenerateCode')
                 : t('settings.adapters.generateCode')}
             </Button>
             {pairingCode && (
               <div className="flex items-center gap-2">
-                <span className="font-mono text-2xl font-bold tracking-[0.3em] text-[var(--color-brand)]">
+                <span className="font-mono text-xs font-bold tracking-[0.3em] text-[var(--color-brand)]">
                   {pairingCode}
                 </span>
                 <span className="text-xs text-[var(--color-text-tertiary)]">
@@ -309,11 +309,11 @@ export function AdapterSettings() {
           </div>
 
           <div>
-            <h4 className="text-sm font-medium text-[var(--color-text-primary)] mb-2">
+            <h4 className="text-xs font-medium text-[var(--color-text-primary)] mb-2">
               {t('settings.adapters.pairedUsers')}
             </h4>
             {allPairedUsers.length === 0 ? (
-              <p className="text-sm text-[var(--color-text-tertiary)]">
+              <p className="text-xs text-[var(--color-text-tertiary)]">
                 {t('settings.adapters.noPairedUsers')}
               </p>
             ) : (
@@ -327,7 +327,7 @@ export function AdapterSettings() {
                       <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--color-surface)] text-[var(--color-text-secondary)]">
                         {t(`settings.adapters.platform.${user.platform}` as TranslationKey)}
                       </span>
-                      <span className="text-sm text-[var(--color-text-primary)]">
+                      <span className="text-xs text-[var(--color-text-primary)]">
                         {user.displayName}
                       </span>
                       <span className="text-xs text-[var(--color-text-tertiary)]">
@@ -355,10 +355,10 @@ export function AdapterSettings() {
         return (
           <section key={cat.id} className="space-y-3">
             <header className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)] inline-flex items-center justify-center w-5 h-5 overflow-hidden">
+              <span className="material-symbols-outlined text-[16px] text-[var(--color-text-secondary)] inline-flex items-center justify-center w-5 h-5 overflow-hidden">
                 {cat.icon}
               </span>
-              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+              <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
                 {t(cat.i18nLabel as TranslationKey)}
               </h3>
               <span className="text-xs text-[var(--color-text-tertiary)]">({list.length})</span>
@@ -430,12 +430,12 @@ export function AdapterSettings() {
 
 function SectionHeader({ icon, label, desc }: { icon: string; label: string; desc?: string }) {
   return (
-    <div className="flex items-start gap-2 px-4 py-3 bg-[var(--color-surface-hover)] border-b border-[var(--color-border)]">
-      <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)] mt-0.5">
+    <div className="flex items-start gap-2 px-3 py-2 bg-[var(--color-surface-hover)] border-b border-[var(--color-border)]">
+      <span className="material-symbols-outlined text-[16px] text-[var(--color-text-secondary)] mt-0.5">
         {icon}
       </span>
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-semibold text-[var(--color-text-primary)]">{label}</div>
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">{label}</div>
         {desc && <p className="text-xs text-[var(--color-text-tertiary)]">{desc}</p>}
       </div>
     </div>
@@ -482,14 +482,14 @@ function ChannelCard({
       <button
         type="button"
         onClick={onToggleOpen}
-        className="w-full px-4 py-3 flex items-center gap-3 hover:bg-[var(--color-surface-hover)] transition-colors text-left cursor-pointer"
+        className="w-full px-3 py-2.5 flex items-center gap-3 hover:bg-[var(--color-surface-hover)] transition-colors text-left cursor-pointer"
       >
-        <span className="material-symbols-outlined text-[22px] text-[var(--color-text-secondary)] shrink-0 inline-flex items-center justify-center w-6 h-6 overflow-hidden">
+        <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)] shrink-0 inline-flex items-center justify-center w-6 h-6 overflow-hidden">
           {definition.icon}
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-[var(--color-text-primary)] truncate">
+            <span className="text-xs font-medium text-[var(--color-text-primary)] truncate">
               {t(definition.i18nName as TranslationKey)}
             </span>
             <StatusPill configured={isConfigured} disabled={featureMissing} />
@@ -505,16 +505,16 @@ function ChannelCard({
             </p>
           )}
         </div>
-        <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] shrink-0">
+        <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)] shrink-0">
           {isOpen ? 'expand_less' : 'expand_more'}
         </span>
       </button>
 
       {isOpen && (
-        <div className="border-t border-[var(--color-border)] p-4 space-y-4 bg-[var(--color-surface-hover)]/30">
+        <div className="border-t border-[var(--color-border)] p-3 space-y-3 bg-[var(--color-surface-hover)]/30">
           {featureMissing && (
             <div className="flex items-start gap-2 rounded-lg border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5 px-3 py-2">
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-warning)]">
+              <span className="material-symbols-outlined text-[16px] text-[var(--color-warning)]">
                 warning
               </span>
               <p className="text-xs text-[var(--color-text-secondary)]">
@@ -531,7 +531,7 @@ function ChannelCard({
           />
 
           <div className="flex items-center gap-3 pt-1 border-t border-[var(--color-border)]">
-            <Button onClick={onSave} loading={isSaving} disabled={featureMissing}>
+            <Button size="sm" onClick={onSave} loading={isSaving} disabled={featureMissing}>
               {t('settings.adapters.save')}
             </Button>
             {isConfigured && (
@@ -612,9 +612,9 @@ function NumberField({
             onChange(Number.isFinite(n) ? n : undefined)
           }
         }}
-        className="h-9 w-full px-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] outline-none"
+        className="h-8 w-full px-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-xs text-[var(--color-text-primary)] focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] outline-none"
       />
-      {hint && <p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">{hint}</p>}
+      {hint && <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">{hint}</p>}
     </div>
   )
 }
@@ -638,7 +638,7 @@ function SelectField({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 w-full px-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] outline-none cursor-pointer"
+        className="h-8 w-full px-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-xs text-[var(--color-text-primary)] focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] outline-none cursor-pointer"
       >
         <option value=""></option>
         {options.map((o) => (
@@ -672,7 +672,7 @@ function CheckboxField({
       />
       <div className="flex-1 min-w-0">
         <span className="text-xs text-[var(--color-text-primary)]">{label}</span>
-        {hint && <p className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">{hint}</p>}
+        {hint && <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">{hint}</p>}
       </div>
     </label>
   )

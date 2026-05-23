@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Flash SenWeaverCoding Arduino firmware via arduino-cli.
-//!
-//! Ensures arduino-cli is available (installs via brew on macOS if missing),
-//! installs the AVR core, compiles and uploads the base firmware.
 
 use anyhow::{Context, Result};
 use std::process::Command;

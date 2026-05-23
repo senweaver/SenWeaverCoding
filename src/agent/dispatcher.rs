@@ -244,6 +244,29 @@ impl ToolDispatcher for NativeToolDispatcher {
                     tool_calls,
                     reasoning_content,
                 } => {
+                    if tool_calls.is_empty() {
+                        let mut map = serde_json::Map::new();
+                        if let Some(t) = text.as_ref().filter(|s| !s.is_empty()) {
+                            map.insert(
+                                "content".to_string(),
+                                serde_json::Value::String(t.clone()),
+                            );
+                        }
+                        if let Some(rc) =
+                            reasoning_content.as_ref().filter(|s| !s.is_empty())
+                        {
+                            map.insert(
+                                "reasoning_content".to_string(),
+                                serde_json::Value::String(rc.clone()),
+                            );
+                        }
+                        let body = if map.is_empty() {
+                            text.clone().unwrap_or_default()
+                        } else {
+                            serde_json::Value::Object(map).to_string()
+                        };
+                        return vec![ChatMessage::assistant(body)];
+                    }
 
                     let content_value = match text {
                         Some(t) if !t.is_empty() => serde_json::Value::String(t.clone()),
@@ -256,18 +279,21 @@ impl ToolDispatcher for NativeToolDispatcher {
                     if let Some(rc) = reasoning_content.as_ref().filter(|s| !s.is_empty()) {
                         payload["reasoning_content"] = serde_json::Value::String(rc.clone());
                     }
+                    crate::providers::sanitize::ensure_tool_call_id_pair_in_assistant_envelope(
+                        &mut payload,
+                    );
                     vec![ChatMessage::assistant(payload.to_string())]
                 }
                 ConversationMessage::ToolResults(results) => results
                     .iter()
                     .map(|result| {
-                        ChatMessage::tool(
-                            serde_json::json!({
-                                "tool_call_id": result.tool_call_id,
-                                "content": result.content,
-                            })
-                            .to_string(),
-                        )
+                        let mut envelope = serde_json::json!({
+                            "tool_call_id": result.tool_call_id,
+                            "tool_use_id": result.tool_call_id,
+                            "content": result.content,
+                        });
+                        crate::providers::sanitize::ensure_tool_id_pair(&mut envelope);
+                        ChatMessage::tool(envelope.to_string())
                     })
                     .collect(),
             })

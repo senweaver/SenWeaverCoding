@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `code_xfile_refactor` tool — cross-file symbol refactors guided
-//! by the SymbolGraph.  The tool supports two modes:
-//!
-//! - `preview` — compute the list of files that would change and a
-//!               per-file diff, without touching disk.
-//! - `apply`   — perform the rename, capture each modified file's
-//!               pre-edit snapshot, and push a [`Checkpoint`] so the
-//!               `flow_rollback` tool can undo the refactor.
-//!
-//! Text replacement uses regex word-boundary matching so common
-//! partial-match hazards (`foo` vs `foobar`) are avoided.  LSP-aware
-//! rename is the natural extension — the tool surface already takes
-//! the form `symbol + new_name + workspace` that an LSP back-end
-//! would accept verbatim — but is deliberately out of scope for
-//! D6.4 since the built-in fallback is deterministic and testable
-//! without a language server running in CI.
 
 use std::fs;
 use std::path::{Path, PathBuf};

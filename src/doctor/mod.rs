@@ -633,7 +633,8 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     if let Some(hint) = config
         .memory
         .embedding_model
-        .strip_prefix("hint:")
+        .strip_prefix("route:")
+        .or_else(|| config.memory.embedding_model.strip_prefix("hint:"))
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -666,7 +667,10 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     let mut agent_names: Vec<_> = config.agents.keys().collect();
     agent_names.sort();
     for name in agent_names {
-        let agent = config.agents.get(name).unwrap();
+        let Some(agent) = config.agents.get(name) else {
+            tracing::warn!("doctor: agent \"{name}\" disappeared while validating; skipping");
+            continue;
+        };
         if let Some(reason) = provider_validation_error(&agent.provider) {
             items.push(DiagItem::warn(
                 cat,

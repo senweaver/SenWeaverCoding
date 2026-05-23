@@ -14,7 +14,7 @@ import {
   type AgentMonitorGroupBy,
 } from '../../stores/agentMonitorStore'
 import { useTabStore } from '../../stores/tabStore'
-import { useChatStore } from '../../stores/chatStore'
+import { focusSession } from '../../lib/focusSession'
 import { useUIStore } from '../../stores/uiStore'
 import {
   AGENT_STATUS_META,
@@ -40,6 +40,41 @@ function workspaceBasename(path: string): string {
   const parts = trimmed.split(/[\\/]/)
   return parts[parts.length - 1] || trimmed
 }
+
+function fileBasename(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, '')
+  if (!trimmed) return ''
+  const parts = trimmed.split(/[\\/]/)
+  return parts[parts.length - 1] || trimmed
+}
+
+function formatElapsed(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0s'
+  const total = Math.floor(seconds)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h > 0) return `${h}h${m.toString().padStart(2, '0')}m`
+  if (m > 0) return `${m}m${s.toString().padStart(2, '0')}s`
+  return `${s}s`
+}
+
+function formatTokenCount(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return '0'
+  if (count < 1000) return count.toString()
+  if (count < 10_000) return `${(count / 1000).toFixed(1)}k`
+  if (count < 1_000_000) return `${Math.round(count / 1000)}k`
+  return `${(count / 1_000_000).toFixed(1)}m`
+}
+
+const ACTIVE_STATUSES = new Set<AgentStatus>([
+  'running',
+  'thinking',
+  'tool',
+  'waiting',
+  'waiting_resource',
+  'queued',
+])
 
 export function AgentMonitorPanel() {
   const t = useTranslation()
@@ -69,15 +104,23 @@ export function AgentMonitorPanel() {
     return <CollapsedDot summary={summary} title={t('agentMonitor.title')} />
   }
 
+  const outerClass = expanded
+    ? 'px-3 pb-2 flex flex-col min-h-0'
+    : 'px-3 pb-2 flex-none'
+  const outerStyle = expanded ? { maxHeight: '50%' } : undefined
+  const cardClass = expanded
+    ? 'rounded-[12px] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] flex flex-col min-h-0 overflow-hidden'
+    : 'rounded-[12px] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]'
+
   return (
-    <div className="px-3 pb-2">
-      <div className="rounded-[12px] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+    <div className={outerClass} style={outerStyle}>
+      <div className={cardClass}>
         <button
           type="button"
           onClick={toggleExpanded}
           aria-expanded={expanded}
           aria-label={expanded ? t('agentMonitor.collapse') : t('agentMonitor.expand')}
-          className="flex w-full items-center gap-2 rounded-[12px] px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
+          className="flex w-full flex-none items-center gap-2 rounded-t-[12px] px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
         >
           <span
             className="material-symbols-outlined text-[15px] text-[var(--color-text-secondary)] transition-transform duration-150"
@@ -96,8 +139,8 @@ export function AgentMonitorPanel() {
         </button>
 
         {expanded && (
-          <div className="border-t border-[var(--color-border)]/60 px-2 pb-2 pt-2">
-            <div className="mb-2 flex items-center gap-1">
+          <div className="flex flex-1 min-h-0 flex-col border-t border-[var(--color-border)]/60 px-2 pb-2 pt-2">
+            <div className="mb-2 flex flex-none items-center gap-1">
               <div className="flex flex-1 items-center gap-0.5 rounded-[10px] bg-[var(--color-surface-container)] p-0.5">
                 {FILTER_TABS.map((tab) => {
                   const active = filterMode === tab.mode
@@ -178,7 +221,7 @@ export function AgentMonitorPanel() {
                   : t('agentMonitor.emptyActive')}
               </div>
             ) : (
-              <div className="max-h-[260px] overflow-y-auto pr-0.5">
+              <div className="agent-monitor-scroll flex-1 min-h-0 overflow-y-auto pr-0.5">
                 {buckets.map((bucket) => (
                   <BucketSection
                     key={bucket.key}
@@ -330,6 +373,12 @@ function AgentRow({ snapshot }: { snapshot: AgentSnapshot }) {
   const statusLabel = t(meta.i18nKey as TranslationKey)
   const wsLabel = snapshot.workDir ? workspaceBasename(snapshot.workDir) : ''
   const title = resolveSessionTitle(snapshot.title, t('sidebar.untitled'))
+  const showDetails = ACTIVE_STATUSES.has(snapshot.status)
+  const showElapsed =
+    showDetails && snapshot.elapsedSeconds > 0 && snapshot.status !== 'queued'
+  const tokens = snapshot.cumulativeTokens
+  const showTokens = showDetails && tokens > 0
+
   const tooltipParts: string[] = [`${title} · ${statusLabel}`]
   if (snapshot.workDir) tooltipParts.push(snapshot.workDir)
   if (snapshot.toolName && snapshot.status === 'tool') {
@@ -361,6 +410,19 @@ function AgentRow({ snapshot }: { snapshot: AgentSnapshot }) {
   if (snapshot.codingMode) {
     tooltipParts.push(`${t('agentMonitor.codingMode')}: ${snapshot.codingMode}`)
   }
+  if (snapshot.pendingEditCount > 0) {
+    tooltipParts.push(
+      t('agentMonitor.detail.edits', { count: snapshot.pendingEditCount }),
+    )
+    if (snapshot.lastEditPath) {
+      tooltipParts.push(
+        t('agentMonitor.detail.lastEdit', { path: snapshot.lastEditPath }),
+      )
+    }
+  }
+  if (tokens > 0) {
+    tooltipParts.push(t('agentMonitor.detail.tokens', { count: tokens.toLocaleString() }))
+  }
   if (snapshot.isAttached) {
     tooltipParts.push(t('agentMonitor.attached'))
   } else {
@@ -369,7 +431,7 @@ function AgentRow({ snapshot }: { snapshot: AgentSnapshot }) {
 
   const handleClick = () => {
     useTabStore.getState().openTab(snapshot.sessionId, title)
-    useChatStore.getState().connectToSession(snapshot.sessionId)
+    focusSession(snapshot.sessionId)
   }
 
   return (
@@ -377,34 +439,171 @@ function AgentRow({ snapshot }: { snapshot: AgentSnapshot }) {
       type="button"
       onClick={handleClick}
       title={tooltipParts.join('\n')}
-      className={`group/row flex w-full items-center gap-2 rounded-[8px] px-2 py-1 text-left text-[11px] transition-colors ${
+      className={`group/row flex w-full flex-col items-stretch gap-0.5 rounded-[8px] px-2 py-1 text-left text-[11px] transition-colors ${
         snapshot.isAttached
           ? 'bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)]'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)]'
       }`}
     >
-      <StatusGlyph status={snapshot.status} />
-      <span className="flex-1 truncate font-medium tracking-[-0.01em]">{title}</span>
-      {wsLabel && (
-        <span className="flex-shrink-0 truncate text-[10px] text-[var(--color-text-tertiary)] opacity-80">
-          {wsLabel}
-        </span>
-      )}
-      {snapshot.queueLen > 0 && (
-        <span
-          className="flex-shrink-0 inline-flex items-center gap-0.5 rounded-full px-1 text-[10px] tabular-nums"
-          style={{
-            backgroundColor: 'color-mix(in srgb, var(--color-secondary) 14%, transparent)',
-            color: 'var(--color-secondary)',
-          }}
-        >
-          <span className="material-symbols-outlined text-[10px]" aria-hidden="true">
-            schedule
+      <div className="flex w-full items-center gap-2">
+        <StatusGlyph status={snapshot.status} />
+        <span className="flex-1 truncate font-medium tracking-[-0.01em]">{title}</span>
+        {wsLabel && (
+          <span className="flex-shrink-0 truncate text-[10px] text-[var(--color-text-tertiary)] opacity-80">
+            {wsLabel}
           </span>
-          {snapshot.queueLen}
-        </span>
+        )}
+        {snapshot.queueLen > 0 && (
+          <span
+            className="flex-shrink-0 inline-flex items-center gap-0.5 rounded-full px-1 text-[10px] tabular-nums"
+            style={{
+              backgroundColor: 'color-mix(in srgb, var(--color-secondary) 14%, transparent)',
+              color: 'var(--color-secondary)',
+            }}
+          >
+            <span className="material-symbols-outlined text-[10px]" aria-hidden="true">
+              schedule
+            </span>
+            {snapshot.queueLen}
+          </span>
+        )}
+      </div>
+      {showDetails && (
+        <div className="ml-[20px] flex min-w-0 items-center gap-x-1 overflow-hidden text-[10px] leading-none text-[var(--color-text-tertiary)]">
+          {snapshot.codingMode && <ModeBadge mode={snapshot.codingMode} />}
+          {showElapsed && (
+            <span
+              className="inline-flex flex-shrink-0 items-center gap-0.5 tabular-nums"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
+              <DetailIcon glyph="schedule" />
+              {formatElapsed(snapshot.elapsedSeconds)}
+            </span>
+          )}
+          <ActivityDescriptor snapshot={snapshot} />
+          {showTokens && (
+            <span
+              className="inline-flex flex-shrink-0 items-center gap-0.5 tabular-nums opacity-90"
+              title={t('agentMonitor.detail.tokens', { count: tokens.toLocaleString() })}
+            >
+              <DetailIcon glyph="token" />
+              {formatTokenCount(tokens)}
+            </span>
+          )}
+          {snapshot.pendingEditCount > 0 && (
+            <span
+              className="inline-flex flex-shrink-0 items-center gap-0.5 tabular-nums"
+              style={{ color: 'var(--color-warning)' }}
+              title={
+                snapshot.lastEditPath
+                  ? t('agentMonitor.detail.lastEdit', { path: snapshot.lastEditPath })
+                  : t('agentMonitor.detail.edits', { count: snapshot.pendingEditCount })
+              }
+            >
+              <DetailIcon glyph="edit_note" />
+              {snapshot.pendingEditCount}
+            </span>
+          )}
+        </div>
       )}
     </button>
+  )
+}
+
+function ActivityDescriptor({ snapshot }: { snapshot: AgentSnapshot }) {
+  const t = useTranslation()
+  let text = ''
+  let icon = ''
+  let color: string | undefined
+  switch (snapshot.status) {
+    case 'tool':
+      icon = 'build'
+      text = snapshot.toolName
+        ? t('agentMonitor.detail.tool', { name: snapshot.toolName })
+        : t('agentMonitor.status.tool')
+      color = 'var(--color-tertiary)'
+      break
+    case 'thinking':
+      icon = 'psychology'
+      text = snapshot.statusVerb || t('agentMonitor.detail.thinking')
+      color = 'var(--color-brand)'
+      break
+    case 'running':
+      icon = 'play_circle'
+      text = snapshot.statusVerb || t('agentMonitor.detail.streaming')
+      color = 'var(--color-success)'
+      break
+    case 'waiting':
+      icon = 'pan_tool'
+      text = t('agentMonitor.detail.permissionPending')
+      color = 'var(--color-warning)'
+      break
+    case 'waiting_resource': {
+      icon = 'hourglass_top'
+      const fw = snapshot.firstResourceWait
+      if (fw) {
+        if (fw.kind === 'file') {
+          text = t('agentMonitor.detail.waitingFile', {
+            target: fileBasename(fw.target) || fw.target,
+          })
+        } else if (fw.kind === 'shell') {
+          text = t('agentMonitor.detail.waitingShell')
+        } else {
+          text = t('agentMonitor.detail.waitingBrowser')
+        }
+      } else {
+        text = t('agentMonitor.status.waiting_resource')
+      }
+      color = 'var(--color-warning)'
+      break
+    }
+    case 'queued':
+      icon = 'schedule'
+      text = t('agentMonitor.detail.queued', { count: snapshot.queueLen })
+      color = 'var(--color-secondary)'
+      break
+    default:
+      return null
+  }
+  if (!text) return null
+  return (
+    <span
+      className="inline-flex min-w-0 flex-1 items-center gap-0.5"
+      style={color ? { color } : undefined}
+    >
+      <DetailIcon glyph={icon} />
+      <span className="truncate">{text}</span>
+    </span>
+  )
+}
+
+function DetailIcon({ glyph }: { glyph: string }) {
+  return (
+    <span
+      className="material-symbols-outlined flex-shrink-0"
+      style={{
+        fontSize: '9px',
+        lineHeight: 1,
+        fontVariationSettings: "'opsz' 20, 'wght' 400",
+      }}
+      aria-hidden="true"
+    >
+      {glyph}
+    </span>
+  )
+}
+
+function ModeBadge({ mode }: { mode: string }) {
+  return (
+    <span
+      className="inline-flex flex-shrink-0 items-center rounded-[4px] px-1 text-[9px] font-semibold uppercase tracking-wide"
+      style={{
+        backgroundColor: 'color-mix(in srgb, var(--color-brand) 14%, transparent)',
+        color: 'var(--color-brand)',
+      }}
+    >
+      {mode}
+    </span>
   )
 }
 

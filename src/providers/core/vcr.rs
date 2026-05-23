@@ -1,44 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Provider request/response record-and-replay framework ("VCR").
-//!
-//! most provider regressions are subtle (a schema tweak,
-//! a rate-limit header rename, a streaming-frame boundary change).
-//! They are easy to write unit tests **against a recorded cassette**
-//! but very hard to keep exercised against live APIs.  This module
-//! introduces a uniform JSON-cassette format that every provider
-//! (`openai`, `anthropic`, `google`, `azure`, `ollama`, `compatible`)
-//! can share.
-//!
-//! ## Cassette layout
-//!
-//! ```json
-//! {
-//!   "provider": "openai",
-//!   "case": "chat.basic",
-//!   "recorded_at": 1737472800,
-//!   "interactions": [
-//!     {
-//!       "request": {
-//!         "method": "POST",
-//!         "url": "https://api.openai.com/v1/chat/completions",
-//!         "headers": [ ["content-type", "application/json"] ],
-//!         "body": "{\"model\":\"gpt-4o\",\"messages\":[...]}"
-//!       },
-//!       "response": {
-//!         "status": 200,
-//!         "headers": [ ["content-type", "application/json"] ],
-//!         "body": "{\"id\":\"chatcmpl-...\"}"
-//!       }
-//!     }
-//!   ]
-//! }
-//! ```
-//!
-//! Secrets are never recorded: [`SENSITIVE_HEADERS`] are scrubbed at
-//! recording time and the replay layer refuses to load a cassette
-//! that still contains them.
 
 use std::collections::BTreeMap;
 use std::io;

@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Classified tool error causes.
-//!
-//! introduces [`ToolErrorCause`] as the first step of the
-//! error-type layering work item.  It is paired with the new
-//! [`crate::error::AgentError::Tool`] variant and is preferred over
-//! the historical `AgentError::ToolDispatchFailed(String)` path
-//! because it keeps the specific failure category and allows callers
-//! to match on programmatic variants (timeout, cancelled, RBAC, etc.)
-//! instead of parsing free-form strings.
-//!
-//! Internal tools may continue to return `anyhow::Result` during a
-//! migration window; the [`From<anyhow::Error> for
-//! crate::error::AgentError`](../error/enum.AgentError.html#impl-From%3CError%3E-for-AgentError)
-//! conversion best-efforts a downcast to preserve the original cause.
 
 use thiserror::Error;
 

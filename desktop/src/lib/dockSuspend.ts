@@ -1,20 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Process-global suspend/resume mechanism for the embedded Tauri browser
-// dock.  The dock is an OS-level child WebView that always paints above
-// the main app's HTML, so any HTML overlay (modal, full-screen confirm,
-// toast positioned to the right edge) that overlaps the dock's rect
-// would otherwise be physically obscured.  Modals invoke `pushSuspend`
-// when they mount; on the 0->1 transition we snapshot the dock's
-// current rect and call `dockHide()` to slide all tab webviews off
-// screen while keeping their state alive.  When the last suspender
-// releases (1->0) we call `dockSetRect(snapshot)` to restore the dock
-// to exactly where it was — the underlying tab is preserved so the
-// user does not see a navigation reset.
-//
-// `useDockSuspend(active)` is the React hook wrapper; pass `true`
-// while the overlay is mounted/visible and the hook will manage
-// reference-counted lifecycle automatically.
 
 import { dockHide, dockSetRect, type BrowserDockRect } from './browserDock'
 import { useBrowserPanelStore } from '../stores/browserPanelStore'

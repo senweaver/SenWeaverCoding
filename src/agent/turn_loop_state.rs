@@ -1,25 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `TurnLoopState` — cross-iteration state aggregated from
-//! [`Agent::turn_streamed`]'s local variables.
-//!
-//! The goal is to shrink the main `turn_streamed` body toward ≤ 150
-//! LOC by pulling the six-plus tracked local variables into a single
-//! struct that helper methods can take by `&mut`.  The 7-helper
-//! split (see the plan) can then reference this struct instead of
-//! passing seven individual references around.
-//!
-//! ## Design notes
-//!
-//! * Constructed once per turn inside `turn_streamed`; dropped at
-//!   turn exit.
-//! * Not `Clone` — holds `ToolLoopDedup` whose internal state is
-//!   intentionally single-owner per turn.
-//! * `LoopDetector` stays alongside because its semantic is
-//!   orthogonal to dedup: dedup compares tool-call signatures while
-//!   `LoopDetector` compares aggregated tool-output content.  We
-//!   want both signals.
 
 use crate::agent::executor_core::ToolLoopDedup;
 use crate::agent::loop_detector::{LoopDetector, LoopDetectorConfig};

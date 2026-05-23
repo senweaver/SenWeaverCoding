@@ -1,9 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! CLI / tool result output formatting (distinct from loaded prompt styles in [`super::types`]).
-//!
-//! Use [`OutputStyle`] for how tool results and agent responses are formatted on the wire or console.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Network transports for remote CLI sessions.
-//!
-//! Defines the `Transport` trait and provides WebSocket, SSE, and
-//! batch-upload implementations.
 
 pub mod batch_uploader;
 pub mod sse;

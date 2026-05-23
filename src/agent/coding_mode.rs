@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Coding mode state machine — twelve switchable programming workflows for the CLI editor.
-//!
-//! Each mode configures:
-//! - A system prompt injection (behavioural rules for the LLM)
-//! - An optional tool allowlist (restricting which tools the agent may call)
-//! - An approval policy override (auto-approve, supervised, or blocked)
-//! - Post-tool-call hooks (auto-verify for TDD/Debug, auto-plan for Spec)
-//! - A display label shown in the REPL prompt
 
 use super::builtin_skills;
 use parking_lot::RwLock;
@@ -44,6 +36,8 @@ pub enum CodingMode {
     Mvai,
 
     Harness,
+
+    Curator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +89,7 @@ impl CodingMode {
             "context" | "ce" | "context-eng" => Some(Self::ContextEng),
             "mvai" => Some(Self::Mvai),
             "harness" | "hn" | "hs" => Some(Self::Harness),
+            "curator" | "cu" | "curate" | "curation" => Some(Self::Curator),
             _ => None,
         }
     }
@@ -492,8 +487,8 @@ impl CodingMode {
                  failing test exists, write the test first, run it, and only then implement.\n\
                  - Skipping verification (\"this should work\") is forbidden — every Red and Green \
                  transition MUST be evidenced by a test-command run in the same turn.\n\
-                 - Opening Baidu / Google / Bing in `browser` and screen-scraping the search \
-                 result list is forbidden — call `web_search` instead.\n\n{}\n\n{web_research}\n\n{verification}",
+                 - Opening Baidu / Google / Bing in `browser` and reading the search \
+                 result list yourself is forbidden — call `web_search` instead.\n\n{}\n\n{web_research}\n\n{verification}",
                 builtin_skills::tdd_rules()
             ),
             Self::Debug => format!(
@@ -530,6 +525,51 @@ impl CodingMode {
                  GitHub issue, and quote the URL in your hypothesis ranking.  Do \
                  NOT skip Stage 1 (Reproduce) — web research complements local \
                  evidence, it does not replace it.\n\n\
+                 ### QA Test Engineer Persona (auto-expand the test matrix)\n\
+                 When the user only says \"test this site / test this system / 测一下这个网站\" \
+                 (no detailed objectives), you MUST act as a senior software QA engineer and \
+                 **auto-expand the test matrix yourself**. Never reply \"what do you want to test?\". \
+                 You own the planning, the user only provides the URL + entry credentials.\n\
+                 Built-in 10-dimension matrix (cover ALL unless the user pinned `focus_tags`):\n\
+                 1. Functional correctness — the happy path of each major feature works as advertised.\n\
+                 2. UI visuals & interactions — layout integrity, hover/focus states, tooltips, modals.\n\
+                 3. Forms & validation — required fields, type / length / pattern, error messages, RTL / emoji / zero-width.\n\
+                 4. Navigation & routing — links, breadcrumbs, browser back/forward, deep links, 404s.\n\
+                 5. Error handling & boundaries — 4xx / 5xx responses, network failure, empty state, optimistic UI rollback.\n\
+                 6. Accessibility (a11y) — semantic landmarks, alt text, ARIA roles, keyboard-only navigation, focus order, contrast.\n\
+                 7. Performance — first paint / interactive, long tasks, layout thrash, memory growth on repeated navigation.\n\
+                 8. Security basics — XSS reflection probes on every text input, CSRF tokens on forms, open redirect, \
+                    error message leakage, password autofill safety, mixed-content.\n\
+                 9. Network anomaly recovery — offline, slow 3G throttle, 5xx retry behavior, request abort/resume.\n\
+                 10. Responsive & cross-viewport — quickly re-run the smoke happy-path at mobile (375x812) and tablet (768x1024).\n\n\
+                 Built-in discovery path (default exploration order, no permission needed):\n\
+                 landing → primary entry → login/signup → core CRUD/feature → settings/profile → \
+                 logout → 404/403/500 → mobile viewport pass.\n\n\
+                 Mandatory workflow:\n\
+                 a. `debug_test_report action=start ...` (capture `run_id`).\n\
+                 b. **Immediately** call `debug_test_report action=add_test_plan dimensions=[…] cases_outline=[…]` \
+                    submitting the 10-dimension matrix above (or only the user-pinned ones) plus an \
+                    outline of the cases you intend to run. Never skip this step.\n\
+                 c. Walk the matrix dimension-by-dimension, each case executes through the standard \
+                    browser actions (`open_tab / snapshot / assert / screenshot / console_logs / network_idle`). \
+                    Every bug found triggers an immediate `add_finding` + `attach_screenshot`.\n\
+                 d. After each dimension wraps, call `add_case` to record the rolled-up case verdict.\n\
+                 e. When the matrix is fully exercised, batch-emit `add_analysis_note` events \
+                    (category=root_cause|performance|security|a11y|ux|risk) and `add_runbook_section` events \
+                    (section_kind=context|preconditions|test_data|sop_steps|expected|regression_checklist|troubleshooting).\n\
+                 f. Call `debug_test_report action=finalize`. Surface **all three** output paths in the \
+                    final turn: `report.md` (测试报告), `analysis.md` (分析报告), `runbook.md` (操作文档). \
+                    The three documents are non-negotiable — never finalize without first emitting at \
+                    least one `add_analysis_note` and one `add_runbook_section`.\n\n\
+                 ### Credential References\n\
+                 The user can either type credentials directly into the chat or pre-store them in \
+                 the persistent vault (Settings → Credentials) and reference them as \
+                 `${{cred.<name>}}` placeholders. The browser tool resolves the placeholder inside \
+                 the dock only — the LLM never sees the raw secret. When the user types a real \
+                 password into the chat, the LLM-boundary PII sanitizer redacts it on the way out \
+                 and the persistent vault entry (if any) carries the canonical value. Use only the \
+                 placeholder names the user actually referenced or asked you to use; never invent \
+                 a `${{cred.*}}` name or call `credential_vault list` to enumerate.\n\n\
                  ### QA Automation Track (professional web QA)\n\
                  When the user asks for QA testing, regression sweeps, end-to-end browser tests, \
                  or any structured \"please verify <flow> works\" task, run the following protocol \
@@ -573,22 +613,35 @@ impl CodingMode {
                  not see the raw value either way.\n\n\
                  ### User-Pre-Authenticated Track\n\
                  Trigger: the user says \"I am already logged in / 已登录 / 已登入 / cookies are set\", \
-                 or supplies only a URL with no credential placeholders. In this case the user has \
-                 manually authenticated inside the embedded browser dock and you must take over their \
-                 existing tab instead of asking for credentials.\n\
-                 1. Call `browser action=list_tabs` to enumerate every tab. Each entry includes \
+                 or supplies only a URL with no credential placeholders, OR the user has bound an \
+                 existing dock tab to this session through the ChatInput \"Tab 绑定\" affordance. \
+                 In any of these cases the user has manually authenticated inside the embedded \
+                 browser dock and you must take over their existing tab instead of asking for \
+                 credentials.\n\
+                 1. **Always try `browser action=open_tab` (or any first browser action) first**: \
+                    when a tab has been bound to this session, the dock automatically routes your \
+                    call to that bound tab without you doing anything special. The response carries \
+                    `{{owner, takeover}}` — if `takeover=true`, the UI is now showing a pulsing \
+                    badge to the user. **No need to `list_tabs` first** when the user has bound.\n\
+                 2. If no tab has been bound and you still suspect a pre-auth tab exists, call \
+                    `browser action=list_tabs` to enumerate every tab. Each entry includes \
                     `tab_id`, `url`, `title`, `is_active`, and `owner` (`user` or `agent`).\n\
-                 2. Pick the tab whose URL best matches the user's target (prefer same origin / path). \
+                 3. Pick the tab whose URL best matches the user's target (prefer same origin / path). \
                     If multiple tabs match, prefer `owner=user` over `agent` and report the choice \
                     explicitly in your turn summary.\n\
-                 3. Call `browser action=attach_tab tab_id=<id>`. Every subsequent browser call in \
-                    this session will default to that tab. The response carries `{{owner, takeover}}` — \
-                    if `takeover=true`, the UI is now showing a pulsing badge to the user.\n\
-                 4. Proceed with the QA Automation Track above, but SKIP credential injection \
+                 4. Call `browser action=attach_tab tab_id=<id>`. Every subsequent browser call in \
+                    this session will default to that tab.\n\
+                 5. Proceed with the QA Automation Track above, but SKIP credential injection \
                     entirely. Do NOT ask the user for credentials, do NOT use `${{cred.*}}` placeholders \
                     for login, and do NOT call `clear_storage` on a user-owned tab unless the user \
                     explicitly asks for a logout.\n\
-                 5. For destructive workflows, never click buttons labelled `删除 | 注销账户 | 取消订阅 | \
+                 6. **Multi-tab per session**: a single test run frequently produces additional \
+                    tabs (links that open in a new window, `target=_blank`, post-login redirects). \
+                    The dock automatically claims any new tab opened from your currently active \
+                    bound/agent tab into this session — call `browser action=list_tabs` whenever \
+                    you suspect a new tab appeared and pick the one with the matching URL via \
+                    `browser action=attach_tab` to continue working there.\n\
+                 7. For destructive workflows, never click buttons labelled `删除 | 注销账户 | 取消订阅 | \
                     提交支付 | 转账 | 充值 | 退订 | 重置 | 删除账户 | Delete | Cancel subscription | Pay | \
                     Transfer | Reset account`. Ask the user before triggering any of these on a logged-in tab.\n\n\
                  ### Full-Site QA Coverage Protocol\n\
@@ -642,7 +695,7 @@ impl CodingMode {
                  1. Run `code_to_spec(action=\"summarize\", paths=[\".\"])` first to understand the codebase\n\
                  2. Run `code_to_spec(action=\"analyze\", paths=[\"./src\"])` to map the dependency structure\n\
                  3. Create SPEC.md with `code_to_spec(action=\"generate\", paths=[\".\"], title=\"<task>\", description=\"<desc>\")`\n\
-                 4. Use `incremental_optimize(action=\"checkpoint\", description=\"Agent: <phase> started\")` at phase boundaries\n\
+                 4. Use `incremental_optimize(action=\"checkpoint\", description=\"Agent: <step> started\")` at step boundaries\n\
                  5. Use `incremental_optimize(action=\"suggest\")` after each implementation batch for optimization hints\n\
                  6. Final synthesis: `incremental_optimize(action=\"report\", description=\"Agent Task Complete: <name>\")`\n\n\
                  ### Web-Facing Tasks (UI verification ONLY)\n\
@@ -656,8 +709,8 @@ impl CodingMode {
                  information that lives on the open web (\"what are the common sorting algorithms\", \
                  \"latest version of crate X\", \"what does this CVE say\"), call `web_search` first \
                  (and `web_fetch` for the chosen result), exactly as described in the Web Research \
-                 Discipline below. Opening Baidu/Google/Bing in `browser` and screen-scraping the \
-                 result list is forbidden — it bypasses the search tool's provider failover and \
+                 Discipline below. Opening Baidu/Google/Bing in `browser` and reading the \
+                 result list manually is forbidden — it bypasses the search tool's provider failover and \
                  gives the user a worse trace.\n\n{web_research}\n\n{verification}",
                 builtin_skills::agent_rules()
             ),
@@ -683,12 +736,12 @@ impl CodingMode {
                  capture impact.\n\
                  - Forbidden: emitting 20+ near-identical `file_edit` calls when a single `glob_edit` \
                  would do the job.\n\n\
-                 ### Architectural References (web research, not browser scraping)\n\
+                 ### Architectural References (web research, not direct browser fetching)\n\
                  RFCs, framework changelogs, vendor design docs, pattern catalogs, security \
                  advisories — anything that justifies a load-bearing architectural choice — \
                  MUST be sourced via `web_search` followed by `web_fetch` on the chosen URL, \
                  then quoted in the design narrative. NEVER use `browser` to open a search \
-                 engine and screen-scrape the result list — that bypasses the search tool's \
+                 engine and read the result list manually — that bypasses the search tool's \
                  provider failover and gives the user a worse trace. Reserve `browser` for \
                  the UI-validation step below.\n\n\
                  ### Web-Facing Architecture (validate via the embedded dock)\n\
@@ -722,18 +775,18 @@ impl CodingMode {
             ),
             Self::ContextEng => format!(
                 "\n\n## Mode: Context Engineering (explore-first, precision-strike)\n\n\
-                 CRITICAL: You MUST follow the four-phase protocol. Do NOT write code \
-                 before completing the Explore and Map phases.\n\n\
+                 CRITICAL: You MUST follow the four-step protocol. Do NOT write code \
+                 before completing the Explore and Map steps.\n\n\
                  {}\n\n\
-                 ### Explore Phase — Local + Web (both, not either)\n\
-                 The Explore phase is dual-track:\n\
+                 ### Explore Step — Local + Web (both, not either)\n\
+                 The Explore step is dual-track:\n\
                  - **Local explore**: `dir_list`, `glob_search`, `code_search`, `code_outline`, \
                  `code_graph_query`, `Read` — you map the in-repo surface.\n\
                  - **Web explore**: when the task touches an external API / framework / spec \
                  / CVE / vendor product, run `web_search` (and follow up with `web_fetch` for \
                  the chosen result URL) to anchor your understanding to primary sources. \
                  Capture the cited URLs in the Map artefact alongside the local file paths.\n\n\
-                 Web evidence is **explore-only**. It NEVER enters the Strike phase as a \
+                 Web evidence is **explore-only**. It NEVER enters the Strike step as a \
                  substitute for a real diff — Strike still has to be a precision edit to a \
                  single in-repo file backed by local evidence. NEVER use `browser` to perform \
                  a web search; `browser` is reserved for actually exercising a UI you are \
@@ -756,7 +809,7 @@ impl CodingMode {
                  leading doc-comment of the interface file so reviewers can re-derive every \
                  method signature from primary evidence. NEVER use `browser` to perform a \
                  web search — `browser` would not even be allowed in MVAI's tool allowlist, \
-                 and trying to scrape a search engine page is a wasted round trip.\n\n\
+                 and trying to fetch a search engine page through it is a wasted round trip.\n\n\
                  ### Step 2 — Implementation\n\
                  Only after the interface file exists (or has been read into context this session) \
                  may you write the implementation file. The implementation MUST satisfy the \
@@ -777,36 +830,144 @@ impl CodingMode {
             Self::Harness => format!(
                 "\n\n## Mode: Harness (Engineering-Grade Workflow)\n\n\
                  {}\n\n\
-                 ### Phase 1 — Spec\n\
+                 ### Spec\n\
                  1. `code_to_spec(action=\"summarize\", paths=[\".\"])` to get the high-level map.\n\
                  2. `code_to_spec(action=\"analyze\", paths=[\"./src\"])` to extract dependencies.\n\
                  3. `code_to_spec(action=\"generate\", paths=[\".\"], title=\"<task>\", description=\"<desc>\")` to land SPEC.md.\n\
                  4. `update_plan(action=\"set\", steps=[...])` then `update_plan(action=\"save\", plan_name=\"harness-<task>\")`.\n\n\
-                 ### Phase 2 — Skill Lookup\n\
+                 ### Skill Lookup\n\
                  - `read_skill(query=\"<problem domain>\")` to surface relevant skill recipes.\n\
                  - For each skill returned, call `skill_tool(name=...)` or `skill_http(...)` as the recipe specifies.\n\
                  - Do NOT improvise solutions when an applicable skill exists.\n\n\
-                 ### Phase 3 — Delegated Execution\n\
-                 For independent sub-tasks identified in Phase 1, use \
+                 ### Delegated Execution\n\
+                 For independent sub-tasks identified in the Spec step, use \
                  `agent_delegate(prompt=\"<sub-task>\", ...)` to run them in parallel/sequence as appropriate. \
                  Ensure each delegation is scoped to a single deliverable; do NOT delegate vague \
                  \"keep working\" prompts.\n\n\
-                 ### Phase 4 — Synthesis\n\
+                 ### Synthesis\n\
                  1. `agent_summary(...)` to consolidate sub-task outputs.\n\
                  2. `agent_compact(...)` to compress the final state for handoff if needed.\n\
                  3. `incremental_optimize(action=\"report\", description=\"Harness Task Complete: <name>\")` for the audit trail.\n\
                  4. `update_plan(action=\"save\", plan_name=\"harness-<task>\")` with all steps marked completed.\n\n\
                  ### Forbidden\n\
-                 Skipping any phase. Verify after each phase before moving to the next; you \
+                 Skipping any step. Verify after each step before moving to the next; you \
                  auto-approve, so verification is the only safety net.\n\n\
-                 ### Phase-Wide Web Research\n\
-                 Phase 1 / Phase 2 / Phase 4 all benefit from web research when \
+                 ### Cross-Step Web Research\n\
+                 Spec / Skill Lookup / Synthesis all benefit from web research when \
                  the task touches external APIs, recent specs, or third-party \
-                 frameworks: in Phase 1 use `web_search` to verify scope (does \
-                 this library still exist?), in Phase 2 use `web_fetch` to read \
-                 skill / library docs, and in Phase 4 cite primary sources in \
+                 frameworks: in the Spec step use `web_search` to verify scope (does \
+                 this library still exist?), in the Skill Lookup step use `web_fetch` to read \
+                 skill / library docs, and in the Synthesis step cite primary sources in \
                  the synthesis report.\n\n{web_research}\n\n{verification}",
                 builtin_skills::harness_rules()
+            ),
+            Self::Curator => format!(
+                "\n\n## Mode: Curator (Research-Heavy Document Authoring)\n\n\
+                 You are in **Curator** mode. The deliverable is a professional document \
+                 (paper / solution / technical report) backed by extensive evidence — NOT \
+                 code. Source code edits outside the `.senweavercoding/curators/<slug>/` \
+                 directory are forbidden in this mode. The workspace MAY contain other \
+                 sibling slugs from earlier Curator tasks — leave them alone; only work \
+                 inside the active slug's directory.\n\n\
+                 ### Workflow (must be followed strictly, in order)\n\
+                 1. **Intent**: Restate the user goal in 1–3 sentences and choose the target \
+                 template (`paper` / `solution` / `tech_report`). Call `enter_curator_mode(intent=..., template=...)` \
+                 to materialize `.senweavercoding/curators/<slug>/` with `research_notes.md`, `sources.md`, `draft.md`, \
+                 `final.md`, `impl_blueprint.md`. Multiple parallel tasks in the same \
+                 workspace each get a unique slug (auto-suffixed `-2`, `-3`, …).\n\
+                 2. **Web Collect**: Use `curator_deep_collect(query=..., max_sources=5)` as the \
+                 default entrypoint — it runs `web_search` with multi-engine fan-out and \
+                 auto-fetches the top URLs in one shot, writing both `research_notes.md` and \
+                 `sources.md`. Use bare `web_search` (with `category` = `academic` / `code` / `cn` / \
+                 `news` per the question) + `web_fetch` + `curator_collect(kind=\"source\")` only \
+                 for follow-up drill-downs after the deep collect pass.\n\
+                 3. **Local Collect**: Use `workspace_deep_search` to mine the local workspace, plus \
+                 `glob_search` / `content_search` / `file_read` for precise excerpts. For each useful \
+                 finding call `curator_collect(kind=\"note\", path=..., lines=..., excerpt=..., commentary=...)`.\n\
+                 4. **Organize**: Synthesize the captured material into an outline inside `draft.md` \
+                 with explicit section headings; cross-reference each claim against entries in \
+                 `sources.md` and `research_notes.md`.\n\
+                 5. **Draft**: Expand the outline into full prose; every non-trivial claim MUST cite \
+                 either a `[Sn]` source identifier or a `path:lineStart-lineEnd` workspace location.\n\
+                 6. **Polish**: Tighten language, verify all citations resolve, refresh \
+                 `impl_blueprint.md` (the contract for the eventual Agent-mode implementation), then \
+                 emit the final document via `exit_curator_mode`.\n\n\
+                 ### Hard Quality Gates (REQUIRED before `exit_curator_mode`)\n\
+                 - ≥ 5 distinct `web_search` calls (different angles / languages / categories), \
+                 most easily satisfied by 1-2 `curator_deep_collect` passes plus targeted follow-ups.\n\
+                 - ≥ 8 long-form web pages fetched via `web_fetch` or `curator_deep_collect`.\n\
+                 - ≥ 1 `workspace_deep_search` if the intent references the local workspace.\n\
+                 - Every kept source in `sources.md` with `[Sn]`, title, URL, captured timestamp, \
+                 and a one-line takeaway — `curator_collect` / `curator_deep_collect` handle this \
+                 automatically. Do not invent `[Sn]` ids manually.\n\n\
+                 ### Early-Exit Rule (IMPORTANT — avoid analysis paralysis)\n\
+                 The moment ALL of the following are true, your VERY NEXT action MUST be \
+                 `exit_curator_mode` with the polished `final_content` and `impl_blueprint` \
+                 arguments — do NOT spend more thinking budget second-guessing whether to add \
+                 another search round:\n\
+                 - `sources.md` already contains ≥ 5 distinct `[Sn]` entries.\n\
+                 - `draft.md` is fleshed out (not just an outline — every section has real prose).\n\
+                 - The user's question is substantively answered.\n\n\
+                 Prefer ONE-PASS writing: when you sit down to draft, produce the full, \
+                 publication-ready `final.md` content in that single response rather than \
+                 rewriting and re-thinking iteratively. Long thinking with short output is a \
+                 failure mode — write the whole document at once.\n\n\
+                 ### Output Contract\n\
+                 `exit_curator_mode` writes `final.md`, `impl_blueprint.md`, and `final.docx` under \
+                 `<workspace>/.senweavercoding/curators/<slug>/`. The DOCX uses the standard template chosen at entry. \
+                 The CURATOR_MARKDOWN_BEGIN/END envelope renders the active curator card in the IDE.\n\n\
+                 ### Content Rules (HARD, applies to ALL Curator templates — paper / solution / tech_report)\n\
+                 The deliverable is a **design / research / decision document**, NOT a code dump. \
+                 The reader must finish each section understanding **what** the system does, \
+                 **why** the choice was made, and **how** it is measured — not by reading other \
+                 people's source code. Substance lives in **prose, tables, diagrams, and data**, \
+                 not in pasted source files.\n\
+                 - **No real source code**: zero language-tagged fenced blocks for implementation \
+                 languages (`go` / `golang` / `java` / `kotlin` / `kt` / `python` / `py` / `rust` / \
+                 `rs` / `c` / `cpp` / `cxx` / `c++` / `csharp` / `cs` / `c#` / `javascript` / `js` / \
+                 `jsx` / `typescript` / `ts` / `tsx` / `swift` / `objective-c` / `objc` / `ruby` / \
+                 `rb` / `php` / `scala` / `perl` / `dart` / `lua` / `haskell` / `hs` / `elixir` / \
+                 `ex` / `exs` / `erlang` / `erl`). If you genuinely need to express logic, write \
+                 ≤10-line *pseudocode* in a plain ```text``` block, or use a Mermaid \
+                 flowchart / sequence diagram instead.\n\
+                 - **No verbatim source quotes**: never reference real files as `path/file.ext:Lstart-Lend`. \
+                 No `func GetAdaptor` / `def handle_request` / `class Foo:` style copy-pastes from \
+                 external repositories.\n\
+                 - **No specific OSS project names by brand outside an explicit comparison table**: \
+                 do not write \"Sen API\", \"One-API\", \"newswapi\", \"LiteLLM\", \"OpenRouter\", \
+                 \"Portkey\", \"vLLM\", \"FastChat\", \"LangChain\", \"llama.cpp\", \"Ollama\", \
+                 \"Ray Serve\", \"Triton\", \"TGI\", etc. as if they are part of the solution. \
+                 Use generic descriptions instead: \"a Go-based LLM gateway open-source project\", \
+                 \"a Python multi-provider LLM proxy library\". If vendor names are required, \
+                 keep them inside a single «Alternatives / Comparison» table — ≤3 textual mentions \
+                 outside that table in the whole document.\n\
+                 - **Prose density**: each `###` subsection should weigh in at ≥2 paragraphs of \
+                 substantive prose before any table/diagram. Bullet-only sections are a sign of \
+                 thin content — flesh them out.\n\
+                 - **What to write instead**: functional description (user-facing behavior, \
+                 inputs / outputs / edge cases), technical principle (algorithm / protocol / \
+                 data structure / key parameters), quantified KPIs with measurement methodology, \
+                 data & API schemas (declared in ```text``` or ```json```/```yaml```), \
+                 implementation considerations (dependency families, failure modes, retry / \
+                 limit policies, observability hooks), deployment topology, operations & \
+                 acceptance criteria.\n\
+                 - **Allowed** fenced blocks (ALL templates): ```bash``` / ```sh``` for \
+                 deployment / verification commands; ```yaml``` / ```toml``` / ```json``` / \
+                 ```ini``` / ```nginx``` / ```dockerfile``` for *config samples*; ```mermaid``` \
+                 for diagrams; ```text``` for ≤10-line pseudocode, EBNF, request/response schemas.\n\n\
+                 ### Forbidden\n\
+                 - Editing files OUTSIDE the active `.senweavercoding/curators/<slug>/` directory.\n\
+                 - Running shell commands, browser sessions, or code generation.\n\
+                 - Producing a document where claims lack source/path citations.\n\
+                 - Calling `exit_curator_mode` before the Hard Quality Gates above are met.\n\
+                 - Stalling on additional research rounds once the Early-Exit Rule conditions \
+                 are satisfied — that is the leading cause of long-thinking-short-output sessions.\n\n\
+                 ### Handoff Contract\n\
+                 After `exit_curator_mode`, the user can switch to Agent mode to execute the \
+                 implementation. Agent mode is required by contract to mirror `impl_blueprint.md` \
+                 exactly; if you discover the blueprint is incomplete during the Polish phase, \
+                 expand it BEFORE exiting so the downstream implementation is unambiguous.\n\n\
+                 {web_research}\n\n{verification}"
             ),
         }
     }
@@ -819,6 +980,7 @@ impl CodingMode {
             Self::Spec => Some(Self::spec_tools()),
             Self::Mvai => Some(Self::mvai_tools()),
             Self::Harness => Some(Self::harness_tools()),
+            Self::Curator => Some(Self::curator_tools()),
             Self::Agent => None,
             _ => None,
         }
@@ -830,6 +992,11 @@ impl CodingMode {
                 browser: false,
                 shell: false,
                 may_write: false,
+            },
+            Self::Curator => ResourceProfile {
+                browser: false,
+                shell: false,
+                may_write: true,
             },
             Self::Debug => ResourceProfile {
                 browser: true,
@@ -870,6 +1037,7 @@ impl CodingMode {
             Self::Pair => PostToolBehavior::Checkpoint,
             Self::ContextEng => PostToolBehavior::ImpactAnalysis,
             Self::Spec => PostToolBehavior::PlanRefresh,
+            Self::Curator => PostToolBehavior::PlanRefresh,
             _ => PostToolBehavior::None,
         }
     }
@@ -894,7 +1062,7 @@ impl CodingMode {
     }
 
     pub fn injects_context_budget(&self) -> bool {
-        true
+        false
     }
 
     pub fn max_iterations_override(&self) -> usize {
@@ -915,6 +1083,7 @@ impl CodingMode {
             Self::ContextEng => "context",
             Self::Mvai => "mvai",
             Self::Harness => "harness",
+            Self::Curator => "curator",
         }
     }
 
@@ -932,6 +1101,7 @@ impl CodingMode {
             Self::ContextEng => "📊",
             Self::Mvai => "🔗",
             Self::Harness => "⚙",
+            Self::Curator => "📚",
         }
     }
 
@@ -949,6 +1119,7 @@ impl CodingMode {
             Self::ContextEng => "Context",
             Self::Mvai => "MVAI",
             Self::Harness => "Harness",
+            Self::Curator => "Curator",
         }
     }
 
@@ -991,6 +1162,9 @@ impl CodingMode {
             Self::Harness => {
                 "Engineering-grade harness — spec generation, skill orchestration, session checkpoints and multi-agent delegation, with auto-approval and verification."
             }
+            Self::Curator => {
+                "Research curator — extensively mines the web and local workspace, then authors a professional paper / solution / technical report with DOCX export. Stops after the document lands so a later switch to Agent mode can implement the blueprint verbatim."
+            }
         }
     }
 
@@ -1008,6 +1182,7 @@ impl CodingMode {
             Self::ContextEng,
             Self::Mvai,
             Self::Harness,
+            Self::Curator,
         ]
     }
 
@@ -1016,6 +1191,7 @@ impl CodingMode {
             Self::Agent,
             Self::Spec,
             Self::Plan,
+            Self::Curator,
             Self::Ask,
             Self::Debug,
             Self::Harness,
@@ -1025,7 +1201,13 @@ impl CodingMode {
     pub fn is_visible(&self) -> bool {
         matches!(
             self,
-            Self::Agent | Self::Spec | Self::Plan | Self::Ask | Self::Debug | Self::Harness
+            Self::Agent
+                | Self::Spec
+                | Self::Plan
+                | Self::Ask
+                | Self::Debug
+                | Self::Harness
+                | Self::Curator
         )
     }
 
@@ -1199,6 +1381,13 @@ impl CodingMode {
         tools.insert("agent_summary");
         tools.insert("agent_compact");
         tools
+    }
+
+    fn curator_tools() -> HashSet<&'static str> {
+        crate::security::permissions::CURATOR_MODE_ALLOWED_TOOLS
+            .iter()
+            .copied()
+            .collect()
     }
 }
 

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Guardrails type re-exports and supplementary types.
 
 use serde::{Deserialize, Serialize};
 

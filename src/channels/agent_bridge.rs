@@ -1,19 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Stable bridge between the channels layer and the agent loop.
-//!
-//! This module provides a clean interface that channels use to invoke the agent,
-//! decoupling them from the internal implementation details of `loop_.rs`.
-//!
-//! ## Design
-//!
-//! `ChannelAgentBridge` is the trait that all bridges must implement.
-//! `ChannelAgentBridgeImpl` is the production implementation that delegates
-//! to `AgentLoopCore`.
-//!
-//! Channels should only import from this module, not from `agent::loop_`.
 
 pub use crate::agent::TurnEvent;
 pub use crate::agent::loop_core::AgentLoopCore;

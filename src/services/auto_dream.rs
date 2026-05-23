@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Auto dream service — mirrors claude-code-typescript-src`services/autoDream/`.
-// Schedules and manages background autonomous tasks ("dreams") that
-// the agent runs when idle or on a timer.
-
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

@@ -1,20 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! `incremental_optimize` tool — Incremental Optimization Workflow for the Harness mode.
-//!
-//! Tracks code changes, analyzes their impact, generates optimization suggestions,
-//! and verifies improvements through a structured loop.
-//! Part of the Harness engineering-grade workflow (Layer 5: Capability Enhancement).
-//!
-//! Actions:
-//! - `checkpoint`: Record current state before changes
-//! - `track`: Record files changed and their diff summary
-//! - `suggest`: Generate optimization suggestions for tracked changes
-//! - `verify`: Run verification commands and report results
-//! - `report`: Generate an incremental optimization report
-//! - `status`: Show current optimization status
 
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;
@@ -188,7 +174,7 @@ impl IncrementalOptimizeTool {
                 });
             }
 
-            if content.contains("unwrap()") && !content.contains("?") {
+            if content.contains("unwrap()") && !content.contains('?') {
                 suggestions.push(OptimizationSuggestion {
                     id: format!("s{}-err-001", self.next_id()),
                     target_file: change.file.clone(),
@@ -238,7 +224,7 @@ impl IncrementalOptimizeTool {
                     !l.trim().is_empty()
                         && !l.trim().starts_with("//")
                         && !l.trim().starts_with("/*")
-                        && !l.trim().starts_with("*")
+                        && !l.trim().starts_with('*')
                 })
                 .collect();
             if code_lines.len() > 100 {
@@ -282,13 +268,13 @@ impl IncrementalOptimizeTool {
             lines.push("**Current checkpoint**: none (call 'checkpoint' first)".to_string());
         }
 
-        lines.push("".to_string());
+        lines.push(String::new());
         lines.push("### Changes\n".to_string());
 
         if state.changes.is_empty() {
             lines.push("No changes tracked yet.".to_string());
         } else {
-            for (_i, change) in state.changes.iter().enumerate() {
+            for change in &state.changes {
                 let verified_icon = if change.verified { "✅" } else { "⬜" };
                 let change_type_str = match change.change_type {
                     ChangeType::Added => "A",
@@ -306,7 +292,7 @@ impl IncrementalOptimizeTool {
             }
         }
 
-        lines.push("".to_string());
+        lines.push(String::new());
         lines.push("### Suggestions\n".to_string());
 
         if state.suggestions.is_empty() {
@@ -647,7 +633,7 @@ impl Tool for IncrementalOptimizeTool {
                         std::time::Duration::from_secs(120),
                         crate::util::hidden_async_command(shell)
                             .args([shell_arg, cmd])
-                            .current_dir(&self.project_workspace())
+                            .current_dir(self.project_workspace())
                             .env_clear()
                             .envs(std::env::vars().filter(|(k, _)| {
                                 matches!(

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type MouseEvent } from 'react'
 import type { ToolViewProps } from './ToolViewProps'
 import { useTranslation } from '../../../i18n'
 import {
@@ -17,6 +17,8 @@ import {
   isEngineId,
   type EngineId,
 } from './engineIcons'
+import { isTauriRuntime } from '../../../lib/desktopRuntime'
+import { useBrowserPanelStore } from '../../../stores/browserPanelStore'
 
 type AvatarColor = { bg: string; fg: string }
 
@@ -88,6 +90,9 @@ function collectEngineIds(summary: WebSearchSummary): EngineId[] {
     seen.add(id)
     order.push(id)
   }
+  if (summary.successfulEngines && summary.successfulEngines.length > 0) {
+    for (const name of summary.successfulEngines) push(engineIdFromName(name))
+  }
   push(engineIdFromName(summary.engine))
   push(engineIdFromName(summary.provider))
   if (summary.fallbackHeader) {
@@ -102,6 +107,14 @@ function collectEngineIds(summary: WebSearchSummary): EngineId[] {
         .filter(Boolean)
       for (const t of tokens) push(engineIdFromName(t))
     }
+  }
+  if (order.length === 0) {
+    const hitsBySource = new Set<EngineId>()
+    for (const hit of summary.hits) {
+      const id = engineIdFromName(hit.source ?? null)
+      if (id) hitsBySource.add(id)
+    }
+    for (const id of hitsBySource) push(id)
   }
   return order
 }
@@ -145,6 +158,12 @@ function HostAvatar({ host, size = 14 }: { host: string; size?: number }) {
   )
 }
 
+function googleFaviconUrl(host: string, size: number): string {
+  const encoded = encodeURIComponent(host.trim())
+  const sz = size <= 16 ? 32 : size <= 32 ? 64 : 128
+  return `https://www.google.com/s2/favicons?domain=${encoded}&sz=${sz}`
+}
+
 function HostFavicon({
   host,
   size = 16,
@@ -155,23 +174,43 @@ function HostFavicon({
   rounded?: 'full' | 'sm'
 }) {
   const localIcon = useMemo(() => engineIconForHost(host), [host])
-  const [errored, setErrored] = useState(false)
+  const [stage, setStage] = useState<'local' | 'remote' | 'avatar'>(
+    localIcon ? 'local' : host ? 'remote' : 'avatar',
+  )
   const radiusClass = rounded === 'full' ? 'rounded-full' : 'rounded-sm'
 
-  if (!host || !localIcon || errored) {
+  if (!host || stage === 'avatar') {
     return <HostAvatar host={host} size={size} />
+  }
+
+  if (stage === 'local' && localIcon) {
+    return (
+      <img
+        src={localIcon}
+        alt={host}
+        title={host}
+        width={size}
+        height={size}
+        loading="lazy"
+        decoding="async"
+        onError={() => setStage('remote')}
+        className={`${radiusClass} shrink-0 bg-[var(--color-surface-container-high)]/40 object-contain`}
+        style={{ width: size, height: size }}
+      />
+    )
   }
 
   return (
     <img
-      src={localIcon}
+      src={googleFaviconUrl(host, size)}
       alt={host}
       title={host}
       width={size}
       height={size}
       loading="lazy"
       decoding="async"
-      onError={() => setErrored(true)}
+      referrerPolicy="no-referrer"
+      onError={() => setStage('avatar')}
       className={`${radiusClass} shrink-0 bg-[var(--color-surface-container-high)]/40 object-contain`}
       style={{ width: size, height: size }}
     />
@@ -238,6 +277,7 @@ export function WebSearchHeader(props: ToolViewProps) {
   const t = useTranslation()
   const summary = useMemo(() => readSummary(props), [props])
   const query = summary.query || fallbackQuery(props)
+  const engineIds = useMemo(() => collectEngineIds(summary), [summary])
   const hostChips = uniqueHosts(summary.hits, 5)
   const isError = result?.isError === true || summary.looksLikeError
   const dotClass = isError
@@ -251,6 +291,11 @@ export function WebSearchHeader(props: ToolViewProps) {
     : isError
       ? t('tool.web.searchFailed')
       : t('tool.web.searchDone')
+
+  const showEngineIcons = engineIds.length > 0
+  const enginesTooltip = showEngineIcons
+    ? engineIds.map((id) => engineLabelFor(id)).join(' \u00b7 ')
+    : undefined
 
   return (
     <span className="flex min-w-0 flex-1 items-center gap-2">
@@ -270,7 +315,22 @@ export function WebSearchHeader(props: ToolViewProps) {
           {truncate(query, 80)}
         </span>
       )}
-      {hostChips.length > 0 && (
+      {showEngineIcons ? (
+        <span
+          className="ml-auto flex shrink-0 items-center -space-x-1"
+          aria-label={t('tool.web.enginesUsedLabel')}
+          title={enginesTooltip}
+        >
+          {engineIds.slice(0, 6).map((id) => (
+            <span
+              key={id}
+              className="rounded-full ring-2 ring-[var(--color-surface-container-lowest)]"
+            >
+              <EngineIcon id={id} size={16} rounded="full" />
+            </span>
+          ))}
+        </span>
+      ) : hostChips.length > 0 ? (
         <span className="ml-auto flex shrink-0 items-center -space-x-1">
           {hostChips.map((host) => (
             <span
@@ -281,7 +341,7 @@ export function WebSearchHeader(props: ToolViewProps) {
             </span>
           ))}
         </span>
-      )}
+      ) : null}
       {summary.hits.length > 0 && !isError && (
         <span className="shrink-0 text-[11px] text-[var(--color-text-tertiary)]">
           {t('tool.web.readPages', { count: summary.hits.length })}
@@ -341,9 +401,11 @@ export function WebSearchDetail(props: ToolViewProps) {
     )
   }
 
+  const parentSessionId = props.parentSessionId ?? null
+
   return (
     <div className="space-y-3">
-      {(summary.fallbackHeader || engineIds.length > 0) && (
+      {(summary.fallbackHeader || engineIds.length > 0 || (summary.successfulEngines && summary.successfulEngines.length > 0)) && (
         <div className="flex min-w-0 items-center gap-2 text-[11px]">
           {engineIds.length > 0 && (
             <span
@@ -359,6 +421,17 @@ export function WebSearchDetail(props: ToolViewProps) {
                   <EngineIcon id={id} size={14} rounded="full" />
                 </span>
               ))}
+            </span>
+          )}
+          {summary.successfulEngines && summary.successfulEngines.length > 0 && (
+            <span
+              className="min-w-0 truncate text-[var(--color-text-tertiary)]"
+              title={summary.successfulEngines.join(', ')}
+            >
+              {t('tool.web.enginesUsedLabel')}
+              <span className="ml-1 font-medium text-[var(--color-text-secondary)]">
+                {summary.successfulEngines.length}
+              </span>
             </span>
           )}
           {summary.fallbackHeader && (
@@ -378,57 +451,134 @@ export function WebSearchDetail(props: ToolViewProps) {
             )}
         </div>
       )}
-      <ol className="space-y-3.5">
+      <ol className="space-y-2">
         {summary.hits.map((hit, index) => (
-          <li
+          <WebSearchHitCard
             key={`${hit.url || 'noref'}-${index}`}
-            className="group min-w-0 rounded-md px-1 py-0.5 hover:bg-[var(--color-surface-container-high)]/40"
-          >
-            <div className="flex min-w-0 items-start gap-3">
-              <span className="mt-1 shrink-0">
-                <HostFavicon
-                  host={hit.host || safeHost(hit.url)}
-                  size={18}
-                  rounded="sm"
-                />
-              </span>
-              <div className="min-w-0 flex-1 space-y-1">
-                {hit.url ? (
-                  <a
-                    href={hit.url}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="block truncate text-[14px] font-medium text-[var(--color-text-primary)] group-hover:text-[var(--color-text-accent)] hover:underline"
-                    title={hit.title}
-                  >
-                    {hit.title || hit.url}
-                  </a>
-                ) : (
-                  <span className="block truncate text-[14px] font-medium text-[var(--color-text-primary)]">
-                    {hit.title || '(untitled)'}
-                  </span>
-                )}
-                {hit.url && (
-                  <div
-                    className="truncate text-[11.5px] text-[var(--color-text-tertiary)]"
-                    title={hit.url}
-                  >
-                    {hit.url}
-                  </div>
-                )}
-                {hit.snippet && (
-                  <p
-                    className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)] line-clamp-3"
-                    title={hit.snippet}
-                  >
-                    {hit.snippet}
-                  </p>
-                )}
-              </div>
-            </div>
-          </li>
+            hit={hit}
+            index={hit.index ?? index + 1}
+            parentSessionId={parentSessionId}
+            openLabel={t('tool.web.openInBuiltinBrowser')}
+          />
         ))}
       </ol>
     </div>
   )
+}
+
+function WebSearchHitCard({
+  hit,
+  index,
+  parentSessionId,
+  openLabel,
+}: {
+  hit: WebSearchHit
+  index: number
+  parentSessionId: string | null
+  openLabel: string
+}) {
+  const host = hit.host || safeHost(hit.url)
+  const sourceLabel = hit.source && hit.source.trim().length > 0 ? hit.source : host
+  const handleOpen = async (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.defaultPrevented) return
+    if (
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.shiftKey ||
+      event.button !== 0
+    ) {
+      return
+    }
+    if (!hit.url) {
+      event.preventDefault()
+      return
+    }
+    event.preventDefault()
+    await openHitUrl(parentSessionId, hit.url)
+  }
+  return (
+    <li>
+      <a
+        href={hit.url || '#'}
+        title={openLabel}
+        target="_blank"
+        rel="noreferrer noopener"
+        onClick={handleOpen}
+        className="group block min-w-0 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-surface-container-lowest)] p-3 transition-colors hover:border-[var(--color-text-accent)]/40 hover:bg-[var(--color-surface-container-low)] focus:border-[var(--color-text-accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--color-text-accent)]/30"
+      >
+        <div className="flex min-w-0 items-center gap-2 text-[11.5px] text-[var(--color-text-tertiary)]">
+          <HostFavicon host={host} size={14} rounded="sm" />
+          <span
+            className="min-w-0 truncate font-medium text-[var(--color-text-secondary)]"
+            title={sourceLabel}
+          >
+            {truncate(sourceLabel, 64)}
+          </span>
+          {hit.publishedAt && (
+            <>
+              <span className="text-[var(--color-text-tertiary)]">·</span>
+              <span
+                className="shrink-0 text-[11px] text-[var(--color-text-tertiary)]"
+                title={hit.publishedAt}
+              >
+                {truncate(hit.publishedAt, 24)}
+              </span>
+            </>
+          )}
+          <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-[var(--color-surface-container-high)]/70 px-2 py-[1px] text-[10.5px] font-semibold text-[var(--color-text-secondary)]">
+            {index}
+          </span>
+        </div>
+        <div
+          className="mt-2 truncate text-[14px] font-semibold text-[var(--color-text-primary)] group-hover:text-[var(--color-text-accent)] group-hover:underline"
+          title={hit.title}
+        >
+          {hit.title || hit.url || '(untitled)'}
+        </div>
+        {hit.snippet && (
+          <p
+            className="mt-1.5 text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)] line-clamp-2"
+            title={hit.snippet}
+          >
+            {hit.snippet}
+          </p>
+        )}
+      </a>
+    </li>
+  )
+}
+
+async function openHitUrl(parentSessionId: string | null, url: string): Promise<void> {
+  if (!url) return
+  try {
+    if (isTauriRuntime()) {
+      const sessionId =
+        parentSessionId ?? useBrowserPanelStore.getState().activeSessionId
+      if (sessionId) {
+        const store = useBrowserPanelStore.getState()
+        try {
+          await store.openForTool(sessionId, { source: 'tool', url })
+          await store.navigate(sessionId, url)
+          return
+        } catch (err) {
+          console.warn('[web_search] inline browser navigate failed', err)
+        }
+      }
+      try {
+        const mod = await import('@tauri-apps/plugin-shell')
+        await mod.open(url)
+        return
+      } catch (err) {
+        console.warn('[web_search] shell.open failed', err)
+      }
+    }
+  } catch (err) {
+    console.warn('[web_search] openHitUrl unexpected', err)
+  }
+  try {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  } catch (err) {
+    console.warn('[web_search] window.open fallback failed', err)
+  }
 }

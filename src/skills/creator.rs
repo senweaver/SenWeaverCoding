@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Autonomous skill creation from successful multi-step task executions.
-//
-// After the agent completes a multi-step tool-call sequence, this module
-// can persist the execution as a reusable skill definition (SKILL.toml)
-// under `~/.senweavercoding/workspace/skills/<slug>/`.
 
 use crate::config::SkillCreationConfig;
 use crate::memory::embeddings::EmbeddingProvider;

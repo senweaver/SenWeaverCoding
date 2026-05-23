@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Agent-related configuration types extracted from `schema.rs`.
-//!
-//! This module contains AgentConfig, ToolFilterGroup, and related types.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

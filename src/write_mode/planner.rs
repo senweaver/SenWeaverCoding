@@ -1,16 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Planners turn a [`PlanContext`] into a concrete [`WritePlan`].
-//!
-//! Two implementations ship:
-//!
-//! * [`LlmWritePlanner`] ??production planner that prompts an LLM
-//!   provider and parses the JSON response.
-//! * [`HeuristicPlanner`] ??deterministic fallback (and default test
-//!   double).  Inspects the goal string for a single target path and
-//!   emits a 4-step plan: `read_file ??apply_diff ??run_command ??//!   verify`.  Useful when the LLM is unavailable and for test
-//!   fixtures that need a known-shape plan.
 
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -64,9 +54,8 @@ impl WritePlanner for HeuristicPlanner {
             },
         ];
         session_write_mode_metrics::add_write_mode_steps(steps.len() as u64);
-        validate_plan(&ctx.goal, steps).map(|plan| {
+        validate_plan(&ctx.goal, steps).inspect(|_plan| {
             session_write_mode_metrics::incr_write_mode_plan_ok();
-            plan
         })
     }
 }

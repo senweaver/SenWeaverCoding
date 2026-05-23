@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Memdir — filesystem-backed auto-memory around CLAUDE.md / AGENTS.md / MEMORY.md.
-//!
-//! Mirrors cc-typescript-src's `memdir/` module. Discovers and loads
-//! memory instruction files from the workspace and its parent directories,
-//! building a combined prompt for the agent.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};

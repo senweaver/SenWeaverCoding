@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `/metrics` slash command — render the current Prometheus-style metrics.
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 

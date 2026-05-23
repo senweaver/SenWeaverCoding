@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! RPC method handlers and shared context.
-//!
-//! Each method handler takes the parsed `Value` params and returns a
-//! `RpcResult<Value>` (compatible with the codec layer's error type).
-//!
-//! ## Adding a new method
-//!
-//! 1. Add the method name string constant to `METHODS`.
-//! 2. Implement an async handler fn: `async fn handle_<name>(&self, params) -> RpcResult`.
-//! 3. Add the match arm in `RpcCtx::handle_method`.
 
 use crate::agent::agent::{Agent, TurnEvent};
 use crate::config::Config;
@@ -328,16 +317,14 @@ impl RpcCtx {
             }
         };
 
-        let mut session = match {
+        let session_opt = {
             let mut sessions = state.sessions.lock().await;
             sessions.remove(&session_id)
-        } {
-            Some(s) => s,
-            None => {
-                self.write_error(Value::Null, RpcError::session_not_found(&session_id))
-                    .await;
-                return;
-            }
+        };
+        let Some(mut session) = session_opt else {
+            self.write_error(Value::Null, RpcError::session_not_found(&session_id))
+                .await;
+            return;
         };
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(100);
@@ -376,7 +363,11 @@ impl RpcCtx {
                     )
                     .await;
                 }
-                TurnEvent::ToolCall { name, args } => {
+                TurnEvent::ToolCall {
+                    name,
+                    args,
+                    tool_call_id: _,
+                } => {
                     self.write_notification(
                         "session/event",
                         serde_json::json!({
@@ -388,7 +379,12 @@ impl RpcCtx {
                     )
                     .await;
                 }
-                TurnEvent::ToolResult { name, output, success } => {
+                TurnEvent::ToolResult {
+                    name,
+                    output,
+                    success,
+                    tool_call_id: _,
+                } => {
                     let is_error = !success
                         || crate::agent::tool_event_status::output_indicates_error(&output);
                     self.write_notification(
@@ -555,6 +551,112 @@ impl RpcCtx {
                             "type": "debug_pii_stats",
                             "total": report.total(),
                             "counts": report.to_label_map(),
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    wait_ms,
+                    class,
+                    provider,
+                    model,
+                    message,
+                } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "provider_retry",
+                            "attempt": attempt,
+                            "maxAttempts": max_attempts,
+                            "waitMs": wait_ms,
+                            "class": class,
+                            "provider": provider,
+                            "model": model,
+                            "message": message,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerSpawned {
+                    parent_tool_use_id,
+                    worker_id,
+                    title,
+                    model,
+                } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "worker_spawned",
+                            "parentToolUseId": parent_tool_use_id,
+                            "workerId": worker_id,
+                            "title": title,
+                            "model": model,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerStatus { worker_id, status, detail } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "worker_status",
+                            "workerId": worker_id,
+                            "status": status,
+                            "detail": detail,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerProgress { worker_id, action, detail } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "worker_progress",
+                            "workerId": worker_id,
+                            "action": action,
+                            "detail": detail,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerCompleted { worker_id, success, summary } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "worker_completed",
+                            "workerId": worker_id,
+                            "success": success,
+                            "summary": summary,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::WorkerStopped { worker_id, reason } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "worker_stopped",
+                            "workerId": worker_id,
+                            "reason": reason,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::ParentResumed { reason } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "parent_resumed",
+                            "reason": reason,
                         }),
                     )
                     .await;

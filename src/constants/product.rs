@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Product constants — mirrors claude-code-typescript-src`constants/product.ts`.
 
 pub const PRODUCT_NAME: &str = "SenWeaverCoding";
 

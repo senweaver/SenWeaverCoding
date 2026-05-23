@@ -1,15 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Bottom Terminal Panel store.
-// Holds visibility, height, and an ordered list of tabs (interactive
-// PTY tabs + a single read-only "Agent" mirror tab fed by the
-// /api/background-shell/stream broadcast).
-//
-// xterm.js Terminal instances themselves are never put inside the
-// store (they are stateful, non-serialisable, and have their own
-// lifetime). Instead the store keeps lightweight tab descriptors and
-// exposes a small imperative ring buffer + writer registry so the
-// agent-mirror tab can replay history when its <XtermView> mounts.
 
 import { create } from 'zustand'
 
@@ -17,10 +6,24 @@ const STORAGE_KEY_OPEN = 'sen-terminal-panel-open'
 const STORAGE_KEY_HEIGHT = 'sen-terminal-panel-height'
 
 export const TERMINAL_AGENT_MIRROR_TAB_ID = 'agent-mirror'
+export const TERMINAL_AGENT_MIRROR_GLOBAL_BUCKET = '__global__'
 const MIRROR_BUFFER_MAX = 4096
 const HEIGHT_MIN = 120
 const HEIGHT_MAX = 800
 const HEIGHT_DEFAULT = 260
+
+export function mirrorTabIdForSession(sessionId: string | null | undefined): string {
+  if (!sessionId) return TERMINAL_AGENT_MIRROR_TAB_ID
+  return `${TERMINAL_AGENT_MIRROR_TAB_ID}:${sessionId}`
+}
+
+export function sessionIdFromMirrorTabId(tabId: string): string | null {
+  if (tabId === TERMINAL_AGENT_MIRROR_TAB_ID) return null
+  if (tabId.startsWith(`${TERMINAL_AGENT_MIRROR_TAB_ID}:`)) {
+    return tabId.slice(TERMINAL_AGENT_MIRROR_TAB_ID.length + 1)
+  }
+  return null
+}
 
 export type TerminalTabKind = 'pty' | 'agent-mirror'
 export type TerminalTabStatus = 'starting' | 'running' | 'exited' | 'error'
@@ -35,13 +38,39 @@ export type TerminalTab = {
 }
 
 export type AgentMirrorEvent =
-  | { type: 'spawned'; id: string; command: string }
-  | { type: 'chunk'; id: string; stream: 'stdout' | 'stderr'; line: string }
-  | { type: 'heartbeat'; id: string; elapsedSecs: number }
-  | { type: 'exited'; id: string; elapsedSecs: number; exitCode: number | null }
+  | { type: 'spawned'; id: string; command: string; sessionId?: string | null }
+  | { type: 'chunk'; id: string; stream: 'stdout' | 'stderr'; line: string; sessionId?: string | null }
+  | { type: 'heartbeat'; id: string; elapsedSecs: number; sessionId?: string | null }
+  | { type: 'exited'; id: string; elapsedSecs: number; exitCode: number | null; sessionId?: string | null }
 
-const mirrorBuffer: string[] = []
-const mirrorWriters = new Set<(chunk: string) => void>()
+const mirrorBuffersBySession = new Map<string, string[]>()
+const mirrorWritersBySession = new Map<string, Set<(chunk: string) => void>>()
+
+function bucketKey(sessionId: string | null | undefined): string {
+  return sessionId ?? TERMINAL_AGENT_MIRROR_GLOBAL_BUCKET
+}
+
+function getOrCreateMirrorBuffer(sessionId: string | null | undefined): string[] {
+  const key = bucketKey(sessionId)
+  let buf = mirrorBuffersBySession.get(key)
+  if (!buf) {
+    buf = []
+    mirrorBuffersBySession.set(key, buf)
+  }
+  return buf
+}
+
+function getOrCreateMirrorWriters(
+  sessionId: string | null | undefined,
+): Set<(chunk: string) => void> {
+  const key = bucketKey(sessionId)
+  let writers = mirrorWritersBySession.get(key)
+  if (!writers) {
+    writers = new Set()
+    mirrorWritersBySession.set(key, writers)
+  }
+  return writers
+}
 
 function safeRead(key: string): string | null {
   if (typeof window === 'undefined') return null
@@ -57,7 +86,6 @@ function safeWrite(key: string, value: string) {
   try {
     window.localStorage.setItem(key, value)
   } catch {
-    /* ignore quota errors */
   }
 }
 
@@ -89,9 +117,10 @@ type State = {
   setTabStatus: (id: string, status: TerminalTabStatus) => void
   setTabTitle: (id: string, title: string) => void
   setTabCwd: (id: string, cwd: string) => void
-  ensureAgentMirrorTab: () => string
+  ensureAgentMirrorTab: (sessionId?: string | null) => string
   appendAgentMirrorEvent: (event: AgentMirrorEvent) => void
-  clearAgentMirror: () => void
+  clearAgentMirror: (sessionId?: string | null) => void
+  syncAgentMirrorForChatSession: (sessionId: string | null | undefined) => void
 }
 
 export const useTerminalPanelStore = create<State>((set, get) => ({
@@ -174,38 +203,52 @@ export const useTerminalPanelStore = create<State>((set, get) => ({
     }))
   },
 
-  ensureAgentMirrorTab: () => {
-    const existing = get().tabs.find((t) => t.id === TERMINAL_AGENT_MIRROR_TAB_ID)
+  ensureAgentMirrorTab: (sessionId) => {
+    const tabId = mirrorTabIdForSession(sessionId)
+    const existing = get().tabs.find((t) => t.id === tabId)
     if (existing) return existing.id
     const tab: TerminalTab = {
-      id: TERMINAL_AGENT_MIRROR_TAB_ID,
+      id: tabId,
       kind: 'agent-mirror',
       title: '',
       status: 'running',
     }
     set((s) => ({
       tabs: [tab, ...s.tabs],
-      activeTabId: s.activeTabId ?? TERMINAL_AGENT_MIRROR_TAB_ID,
+      activeTabId: s.activeTabId ?? tabId,
     }))
-    return TERMINAL_AGENT_MIRROR_TAB_ID
+    return tabId
   },
 
   appendAgentMirrorEvent: (event) => {
-    get().ensureAgentMirrorTab()
+    get().ensureAgentMirrorTab(event.sessionId ?? null)
     const text = formatMirrorEvent(event)
     if (!text) return
-    pushMirrorChunk(text)
+    pushMirrorChunk(event.sessionId ?? null, text)
   },
 
-  clearAgentMirror: () => {
-    mirrorBuffer.length = 0
-    mirrorWriters.forEach((w) => {
+  clearAgentMirror: (sessionId) => {
+    const buf = getOrCreateMirrorBuffer(sessionId ?? null)
+    buf.length = 0
+    const writers = getOrCreateMirrorWriters(sessionId ?? null)
+    writers.forEach((w) => {
       try {
         w('\x1b[2J\x1b[H')
       } catch {
-        /* writer may have been disposed */
       }
     })
+  },
+
+  syncAgentMirrorForChatSession: (sessionId) => {
+    if (!sessionId) return
+    const targetTabId = mirrorTabIdForSession(sessionId)
+    get().ensureAgentMirrorTab(sessionId)
+    const current = get().activeTabId
+    if (current && sessionIdFromMirrorTabId(current) === null && current !== TERMINAL_AGENT_MIRROR_TAB_ID) {
+      return
+    }
+    if (current === targetTabId) return
+    set({ activeTabId: targetTabId })
   },
 }))
 
@@ -228,25 +271,31 @@ function formatMirrorEvent(event: AgentMirrorEvent): string | null {
   }
 }
 
-function pushMirrorChunk(text: string) {
-  mirrorBuffer.push(text)
-  while (mirrorBuffer.length > MIRROR_BUFFER_MAX) mirrorBuffer.shift()
-  mirrorWriters.forEach((w) => {
+function pushMirrorChunk(sessionId: string | null | undefined, text: string) {
+  const buf = getOrCreateMirrorBuffer(sessionId)
+  buf.push(text)
+  while (buf.length > MIRROR_BUFFER_MAX) buf.shift()
+  const writers = getOrCreateMirrorWriters(sessionId)
+  writers.forEach((w) => {
     try {
       w(text)
     } catch {
-      /* swallow writer errors so one stale ref does not block others */
     }
   })
 }
 
-export function readMirrorBuffer(): string[] {
-  return mirrorBuffer.slice()
+export function readMirrorBuffer(sessionId?: string | null): string[] {
+  const buf = mirrorBuffersBySession.get(bucketKey(sessionId ?? null))
+  return buf ? buf.slice() : []
 }
 
-export function registerMirrorWriter(write: (chunk: string) => void): () => void {
-  mirrorWriters.add(write)
+export function registerMirrorWriter(
+  write: (chunk: string) => void,
+  sessionId?: string | null,
+): () => void {
+  const writers = getOrCreateMirrorWriters(sessionId ?? null)
+  writers.add(write)
   return () => {
-    mirrorWriters.delete(write)
+    writers.delete(write)
   }
 }

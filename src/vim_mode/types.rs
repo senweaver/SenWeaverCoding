@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Vim mode types — mirrors claude-code-typescript-src`vim/types.ts`.
 
 use serde::{Deserialize, Serialize};
 

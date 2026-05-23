@@ -133,14 +133,21 @@ export function ReviewCard() {
           {pendingEdits.map((edit) => {
             const workspaceRoot = isWorkspaceRootPath(edit.path)
             const { dir, tail, separator } = splitPathForDisplay(edit.path)
+            const isCuratorPath = /(?:^|[\\/])curator[\\/]/i.test(edit.path)
+            const rowCls = isCuratorPath
+              ? 'flex items-center gap-2 border-b border-[var(--color-border)]/20 px-3 py-1.5 last:border-b-0 bg-[var(--color-curator-accent)]/8 border-l-2 border-l-[var(--color-curator-accent)]/70'
+              : 'flex items-center gap-2 border-b border-[var(--color-border)]/20 px-3 py-1.5 last:border-b-0'
+            const iconCls = isCuratorPath
+              ? 'material-symbols-outlined shrink-0 text-[14px] text-[var(--color-curator-accent)]'
+              : 'material-symbols-outlined shrink-0 text-[14px] text-[var(--color-outline)]'
             return (
               <div
                 key={edit.path}
-                className="flex items-center gap-2 border-b border-[var(--color-border)]/20 px-3 py-1.5 last:border-b-0"
+                className={rowCls}
                 title={edit.path}
               >
-                <span className="material-symbols-outlined shrink-0 text-[14px] text-[var(--color-outline)]">
-                  description
+                <span className={iconCls}>
+                  {isCuratorPath ? 'auto_stories' : 'description'}
                 </span>
                 {workspaceRoot ? (
                   <span className="min-w-0 flex-1 truncate font-[var(--font-mono)] text-[12px] italic text-[var(--color-text-tertiary)]">

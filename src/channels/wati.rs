@@ -38,7 +38,9 @@ impl WatiChannel {
             api_url,
             tenant_id,
             allowed_numbers,
-            client: crate::config::build_channel_proxy_client("channel.wati", proxy_url.as_deref()),
+            client: crate::services::get_services()
+                .proxy_runtime()
+                .build_channel_client("channel.wati", proxy_url.as_deref()),
             transcription_manager: None,
         }
     }

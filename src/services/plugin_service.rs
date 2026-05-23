@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Plugin lifecycle service — mirrors claude-code-typescript-src`services/plugins/`.
-// Manages plugin discovery, loading, enabling/disabling, and health checks.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

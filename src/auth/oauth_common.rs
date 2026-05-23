@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Common OAuth2 utilities shared across providers.
-//!
-//! This module contains shared functionality for OAuth2 authentication:
-//! - PKCE (Proof Key for Code Exchange) state generation
-//! - URL encoding/decoding
-//! - Query parameter parsing
 
 use base64::Engine;
 use sha2::{Digest, Sha256};

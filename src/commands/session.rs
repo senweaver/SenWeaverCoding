@@ -1,22 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `/session` command — showcase the `AgentSession` + shell renderer
-//! integration in the currently-running CLI.
-//!
-//! The main interactive loop still uses `Agent::turn` directly for
-//! historical reasons; this command demonstrates the alternative
-//! event-stream driven path by wiring a short demonstration turn end
-//! to end:
-//!
-//! 1. Create an `AgentSession`.
-//! 2. Spawn a task that emits synthetic `SessionEvent`s mirroring what
-//!    a real turn would produce.
-//! 3. Consume the event stream and render via `session::shell`.
-//!
-//! This is not just docs — running `/session demo` exercises the real
-//! `AgentSession::subscribe` / `SessionEventSink` / `render_cli`
-//! pipeline and surfaces any wiring bugs immediately.
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Generic OpenAI-compatible provider.
-//! Most LLM APIs follow the same `/v1/chat/completions` format.
-//! This module provides a single implementation that works for all of them.
 
 use crate::multimodal;
 use crate::providers::traits::{
@@ -291,10 +288,11 @@ impl OpenAiCompatibleProvider {
 
             let builder = Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout))
-                .connect_timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(std::time::Duration::from_secs(5))
                 .default_headers(headers);
-            let builder =
-                crate::config::apply_runtime_proxy_to_builder(builder, "provider.compatible");
+            let builder = crate::services::get_services()
+                .proxy_runtime()
+                .apply_to_builder(builder, "provider.compatible");
 
             return builder.build().unwrap_or_else(|error| {
                 tracing::warn!(
@@ -304,7 +302,52 @@ impl OpenAiCompatibleProvider {
             });
         }
 
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.compatible", timeout, 10)
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.compatible", timeout, 5)
+    }
+
+    fn stream_http_client(&self) -> Client {
+        let has_user_agent = self.user_agent.is_some();
+        let has_extra_headers = !self.extra_headers.is_empty();
+
+        let mut headers = HeaderMap::new();
+        if has_user_agent || has_extra_headers {
+            if let Some(ua) = self.user_agent.as_deref() {
+                if let Ok(value) = HeaderValue::from_str(ua) {
+                    headers.insert(USER_AGENT, value);
+                }
+            }
+            for (key, value) in &self.extra_headers {
+                match (
+                    reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    (Ok(name), Ok(val)) => {
+                        headers.insert(name, val);
+                    }
+                    _ => {
+                        tracing::warn!(header = key, "Skipping invalid extra header name or value");
+                    }
+                }
+            }
+        }
+
+        let mut builder = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .read_timeout(std::time::Duration::from_secs(90))
+            .pool_idle_timeout(std::time::Duration::from_secs(15));
+        if !headers.is_empty() {
+            builder = builder.default_headers(headers);
+        }
+        let builder = crate::services::get_services()
+            .proxy_runtime()
+            .apply_to_builder(builder, "provider.compatible.stream");
+
+        builder.build().unwrap_or_else(|error| {
+            tracing::warn!("Failed to build proxied stream client: {error}");
+            self.http_client()
+        })
     }
 
     fn chat_completions_url(&self) -> String {
@@ -479,7 +522,20 @@ impl OpenAiCompatibleProvider {
     fn reserved_output_tokens(&self, model: &str) -> usize {
         let window = self.context_window_for(model);
         let configured = self.max_tokens.map(|v| v as usize);
-        let default_reserve = (window / 8).clamp(512, 4096);
+        let in_curator = crate::services::try_get_services()
+            .map(|s| {
+                matches!(
+                    *s.coding_mode.read(),
+                    crate::agent::coding_mode::CodingMode::Curator
+                )
+            })
+            .unwrap_or(false);
+        let (lo, hi) = if in_curator {
+            (4096usize, 32768usize)
+        } else {
+            (512usize, 16384usize)
+        };
+        let default_reserve = (window / 8).clamp(lo, hi);
         let raw = configured.unwrap_or(default_reserve);
         let max_reserve = window.saturating_sub(512).max(512);
         raw.clamp(256, max_reserve)
@@ -739,10 +795,7 @@ struct Function {
     arguments: Option<String>,
 }
 
-#[inline]
-fn skip_serializing_tool_calls(tc: &Option<Vec<ToolCall>>) -> bool {
-    tc.as_ref().map_or(true, Vec::is_empty)
-}
+use crate::providers::sanitize::skip_serializing_tool_calls;
 
 #[derive(Debug, Serialize)]
 struct NativeChatRequest {
@@ -987,6 +1040,9 @@ impl OpenAiCompatibleProvider {
         messages: &[ChatMessage],
         model: &str,
     ) -> anyhow::Result<String> {
+        if self.responses_endpoint_marked_missing() {
+            anyhow::bail!(RESPONSES_ENDPOINT_MISSING_MARKER);
+        }
         let (instructions, input) = build_responses_prompt(messages);
         if input.is_empty() {
             anyhow::bail!(
@@ -1010,7 +1066,21 @@ impl OpenAiCompatibleProvider {
             .await?;
 
         if !response.status().is_success() {
-            let error = response.text().await?;
+            let status = response.status();
+            let error = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::NOT_FOUND
+                || error.contains("url.not_found")
+                || error.to_ascii_lowercase().contains("page not found")
+            {
+                self.mark_responses_endpoint_missing();
+                tracing::info!(
+                    target: "providers.compatible.responses",
+                    provider = %self.name,
+                    status = %status,
+                    "Responses API endpoint not available on upstream; disabling fallback for this provider instance"
+                );
+                anyhow::bail!(RESPONSES_ENDPOINT_MISSING_MARKER);
+            }
             anyhow::bail!("{} Responses API error: {error}", self.name);
         }
 
@@ -1019,6 +1089,26 @@ impl OpenAiCompatibleProvider {
 
         extract_responses_text(responses)
             .ok_or_else(|| anyhow::anyhow!("No response from {} Responses API", self.name))
+    }
+
+    fn responses_endpoint_marker_key(&self) -> String {
+        format!("{}::{}", self.name.to_ascii_lowercase(), self.base_url)
+    }
+
+    fn responses_endpoint_marked_missing(&self) -> bool {
+        let store = responses_endpoint_missing_store();
+        store
+            .read()
+            .map(|set| set.contains(&self.responses_endpoint_marker_key()))
+            .unwrap_or(false)
+    }
+
+    fn mark_responses_endpoint_missing(&self) {
+        let key = self.responses_endpoint_marker_key();
+        let store = responses_endpoint_missing_store();
+        if let Ok(mut set) = store.write() {
+            set.insert(key);
+        }
     }
 
     fn convert_tool_specs(
@@ -1559,16 +1649,22 @@ impl Provider for OpenAiCompatibleProvider {
         {
             Ok(response) => response,
             Err(chat_error) => {
-                if self.supports_responses_fallback {
+                if self.supports_responses_fallback && !self.responses_endpoint_marked_missing() {
                     let sanitized = super::sanitize_api_error(&chat_error.to_string());
+                    let provider_name = self.name.clone();
                     return self
                         .chat_via_responses(credential, &fallback_messages, model)
                         .await
                         .map_err(|responses_err| {
-                            anyhow::anyhow!(
-                                "{} chat completions transport error: {sanitized} (responses fallback failed: {responses_err})",
-                                self.name
-                            )
+                            if is_responses_endpoint_missing_error(&responses_err) {
+                                anyhow::anyhow!(
+                                    "{provider_name} chat completions transport error: {sanitized}"
+                                )
+                            } else {
+                                anyhow::anyhow!(
+                                    "{provider_name} chat completions transport error: {sanitized} (responses fallback failed: {responses_err})"
+                                )
+                            }
                         });
                 }
 
@@ -1601,15 +1697,24 @@ impl Provider for OpenAiCompatibleProvider {
                 .await;
             }
 
-            if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
+            if status == reqwest::StatusCode::NOT_FOUND
+                && self.supports_responses_fallback
+                && !self.responses_endpoint_marked_missing()
+            {
+                let provider_name = self.name.clone();
                 return self
                     .chat_via_responses(credential, &fallback_messages, model)
                     .await
                     .map_err(|responses_err| {
-                        anyhow::anyhow!(
-                            "{} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})",
-                            self.name
-                        )
+                        if is_responses_endpoint_missing_error(&responses_err) {
+                            anyhow::anyhow!(
+                                "{provider_name} API error ({status}): {sanitized}"
+                            )
+                        } else {
+                            anyhow::anyhow!(
+                                "{provider_name} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})"
+                            )
+                        }
                     });
             }
 
@@ -1700,16 +1805,22 @@ impl Provider for OpenAiCompatibleProvider {
         {
             Ok(response) => response,
             Err(chat_error) => {
-                if self.supports_responses_fallback {
+                if self.supports_responses_fallback && !self.responses_endpoint_marked_missing() {
                     let sanitized = super::sanitize_api_error(&chat_error.to_string());
+                    let provider_name = self.name.clone();
                     return self
                         .chat_via_responses(credential, &effective_messages, model)
                         .await
                         .map_err(|responses_err| {
-                            anyhow::anyhow!(
-                                "{} chat completions transport error: {sanitized} (responses fallback failed: {responses_err})",
-                                self.name
-                            )
+                            if is_responses_endpoint_missing_error(&responses_err) {
+                                anyhow::anyhow!(
+                                    "{provider_name} chat completions transport error: {sanitized}"
+                                )
+                            } else {
+                                anyhow::anyhow!(
+                                    "{provider_name} chat completions transport error: {sanitized} (responses fallback failed: {responses_err})"
+                                )
+                            }
                         });
                 }
 
@@ -1736,15 +1847,24 @@ impl Provider for OpenAiCompatibleProvider {
                 return Box::pin(self.chat_with_history(messages, model, temperature)).await;
             }
 
-            if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
+            if status == reqwest::StatusCode::NOT_FOUND
+                && self.supports_responses_fallback
+                && !self.responses_endpoint_marked_missing()
+            {
+                let provider_name = self.name.clone();
                 return self
                     .chat_via_responses(credential, &effective_messages, model)
                     .await
                     .map_err(|responses_err| {
-                        anyhow::anyhow!(
-                            "{} API error (chat completions unavailable; responses fallback failed: {responses_err})",
-                            self.name
-                        )
+                        if is_responses_endpoint_missing_error(&responses_err) {
+                            anyhow::anyhow!(
+                                "{provider_name} API error ({status}): {sanitized}"
+                            )
+                        } else {
+                            anyhow::anyhow!(
+                                "{provider_name} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})"
+                            )
+                        }
                     });
             }
 
@@ -1795,7 +1915,8 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             messages.to_vec()
         };
-        let effective_messages = super::traits::enforce_context_budget_native_with_window(
+        let effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
             pre_budget,
             model,
             self.reserved_output_tokens(model),
@@ -1826,12 +1947,7 @@ impl Provider for OpenAiCompatibleProvider {
                 "model is on the legacy/no-tools allowlist; routing through chat_with_history without native tools"
             );
             let text = self.chat_with_history(messages, model, temperature).await?;
-            return Ok(ProviderChatResponse {
-                text: Some(text),
-                tool_calls: vec![],
-                usage: None,
-                reasoning_content: None,
-            });
+            return Ok(ProviderChatResponse::text_only(Some(text), None));
         }
 
         let request = ApiChatRequest {
@@ -1869,12 +1985,7 @@ impl Provider for OpenAiCompatibleProvider {
                     self.name
                 );
                 let text = self.chat_with_history(messages, model, temperature).await?;
-                return Ok(ProviderChatResponse {
-                    text: Some(text),
-                    tool_calls: vec![],
-                    usage: None,
-                    reasoning_content: None,
-                });
+                return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
         };
 
@@ -1907,12 +2018,7 @@ impl Provider for OpenAiCompatibleProvider {
                     "native tools rejected by upstream ({sanitized}); retrying via chat_with_history"
                 );
                 let text = self.chat_with_history(messages, model, temperature).await?;
-                return Ok(ProviderChatResponse {
-                    text: Some(text),
-                    tool_calls: vec![],
-                    usage: None,
-                    reasoning_content: None,
-                });
+                return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
 
             anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
@@ -1992,12 +2098,7 @@ impl Provider for OpenAiCompatibleProvider {
             let text = self
                 .chat_with_history(&guided, model, temperature)
                 .await?;
-            return Ok(ProviderChatResponse {
-                text: Some(text),
-                tool_calls: vec![],
-                usage: None,
-                reasoning_content: None,
-            });
+            return Ok(ProviderChatResponse::text_only(Some(text), None));
         }
 
         let tools = if allow_native_tools {
@@ -2010,7 +2111,8 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             request.messages.to_vec()
         };
-        let effective_messages = super::traits::enforce_context_budget_native_with_window(
+        let effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
             pre_budget,
             model,
             self.reserved_output_tokens(model),
@@ -2050,22 +2152,23 @@ impl Provider for OpenAiCompatibleProvider {
         {
             Ok(response) => response,
             Err(chat_error) => {
-                if self.supports_responses_fallback {
+                if self.supports_responses_fallback && !self.responses_endpoint_marked_missing() {
                     let sanitized = super::sanitize_api_error(&chat_error.to_string());
+                    let provider_name = self.name.clone();
                     return self
                         .chat_via_responses(credential, &effective_messages, model)
                         .await
-                        .map(|text| ProviderChatResponse {
-                            text: Some(text),
-                            tool_calls: vec![],
-                            usage: None,
-                            reasoning_content: None,
-                        })
+                        .map(|text| ProviderChatResponse::text_only(Some(text), None))
                         .map_err(|responses_err| {
-                            anyhow::anyhow!(
-                                "{} native chat transport error: {sanitized} (responses fallback failed: {responses_err})",
-                                self.name
-                            )
+                            if is_responses_endpoint_missing_error(&responses_err) {
+                                anyhow::anyhow!(
+                                    "{provider_name} native chat transport error: {sanitized}"
+                                )
+                            } else {
+                                anyhow::anyhow!(
+                                    "{provider_name} native chat transport error: {sanitized} (responses fallback failed: {responses_err})"
+                                )
+                            }
                         });
                 }
 
@@ -2098,29 +2201,28 @@ impl Provider for OpenAiCompatibleProvider {
                 let text = self
                     .chat_with_history(&fallback_messages, model, temperature)
                     .await?;
-                return Ok(ProviderChatResponse {
-                    text: Some(text),
-                    tool_calls: vec![],
-                    usage: None,
-                    reasoning_content: None,
-                });
+                return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
 
-            if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
+            if status == reqwest::StatusCode::NOT_FOUND
+                && self.supports_responses_fallback
+                && !self.responses_endpoint_marked_missing()
+            {
+                let provider_name = self.name.clone();
                 return self
                     .chat_via_responses(credential, &effective_messages, model)
                     .await
-                    .map(|text| ProviderChatResponse {
-                        text: Some(text),
-                        tool_calls: vec![],
-                        usage: None,
-                        reasoning_content: None,
-                    })
+                    .map(|text| ProviderChatResponse::text_only(Some(text), None))
                     .map_err(|responses_err| {
-                        anyhow::anyhow!(
-                            "{} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})",
-                            self.name
-                        )
+                        if is_responses_endpoint_missing_error(&responses_err) {
+                            anyhow::anyhow!(
+                                "{provider_name} API error ({status}): {sanitized}"
+                            )
+                        } else {
+                            anyhow::anyhow!(
+                                "{provider_name} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})"
+                            )
+                        }
                     });
             }
 
@@ -2183,7 +2285,8 @@ impl Provider for OpenAiCompatibleProvider {
             }
         };
 
-        let raw_messages_owned = request.messages.to_vec();
+        let raw_messages_owned: std::sync::Arc<Vec<ChatMessage>> =
+            std::sync::Arc::new(request.messages.to_vec());
         let raw_tools_owned: Option<Vec<crate::tools::ToolSpec>> =
             request.tools.map(|t| t.to_vec());
 
@@ -2191,10 +2294,10 @@ impl Provider for OpenAiCompatibleProvider {
         let has_tools = raw_tools_owned.as_ref().is_some_and(|t| !t.is_empty());
         let allow_native_tools = has_tools && model_supports_native;
 
-        let mut effective_messages = if self.merge_system_into_user {
+        let mut effective_messages: Vec<ChatMessage> = if self.merge_system_into_user {
             Self::flatten_system_messages(&raw_messages_owned)
         } else {
-            raw_messages_owned.clone()
+            raw_messages_owned.as_ref().clone()
         };
 
         if !model_supports_native && has_tools {
@@ -2213,7 +2316,8 @@ impl Provider for OpenAiCompatibleProvider {
                 Some(self.context_window_for(model)),
             );
         } else {
-            effective_messages = super::traits::enforce_context_budget_native_with_window(
+            effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+                self,
                 effective_messages,
                 model,
                 self.reserved_output_tokens(model),
@@ -2301,15 +2405,16 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         let url = self.chat_completions_url();
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let auth_header = self.auth_header.clone();
         let count_tokens = options.count_tokens;
         let provider_clone = self.clone();
         let model_owned = model.to_string();
-        let fallback_messages = effective_messages.clone();
+        let effective_arc: std::sync::Arc<Vec<ChatMessage>> = std::sync::Arc::new(effective_messages);
+        let fallback_messages = std::sync::Arc::clone(&effective_arc);
         let fallback_tools = raw_tools_owned.clone();
         let fallback_temperature = temperature;
-        let thinking_retry_messages = raw_messages_owned.clone();
+        let thinking_retry_messages = std::sync::Arc::clone(&raw_messages_owned);
         let thinking_retry_tools = raw_tools_owned.clone();
         let thinking_retry_options = options;
 
@@ -2497,7 +2602,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         let url = self.chat_completions_url();
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let auth_header = self.auth_header.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
@@ -2649,7 +2754,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         let url = self.chat_completions_url();
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let auth_header = self.auth_header.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
@@ -2751,6 +2856,23 @@ impl Provider for OpenAiCompatibleProvider {
 }
 
 fn thinking_blacklist_store()
+-> &'static std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| {
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()))
+    })
+}
+
+pub(crate) const RESPONSES_ENDPOINT_MISSING_MARKER: &str = "responses_endpoint_missing";
+
+pub(crate) fn is_responses_endpoint_missing_error(err: &anyhow::Error) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains(RESPONSES_ENDPOINT_MISSING_MARKER)
+}
+
+fn responses_endpoint_missing_store()
 -> &'static std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>> {
     static STORE: std::sync::OnceLock<
         std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,

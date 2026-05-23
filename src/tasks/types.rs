@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Core task types — mirrors claude-code-typescript-src`Task.ts`.
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::watch;

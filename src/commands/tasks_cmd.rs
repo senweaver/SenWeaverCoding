@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /tasks command — mirrors claude-code-typescript-src`commands/tasks/`.
-// Manage background tasks: list, kill, inspect.
-
 use super::registry::{CommandContext, CommandResult};
 use anyhow::Result;
 
@@ -56,7 +52,7 @@ pub async fn handle(ctx: CommandContext) -> CommandResult {
             let cwd = std::env::current_dir().unwrap_or_default();
             match inspect_session(&cwd, id).await {
                 Ok(info) => {
-                    let lines = vec![
+                    let lines = [
                         format!("Task ID: {}", info.id),
                         format!("Status: {}", info.status),
                         format!("Started: {}", info.started_at),

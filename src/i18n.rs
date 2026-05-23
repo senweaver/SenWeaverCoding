@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Internationalization support for tool descriptions.
-//!
-//! Loads tool descriptions from TOML locale files in `tool_descriptions/`.
-//! Falls back to English when a locale file or specific key is missing,
-//! and ultimately falls back to the hardcoded `tool.description()` value
-//! if no file-based description exists.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -120,8 +114,8 @@ fn load_locale_file(locale: &str, search_dirs: &[PathBuf]) -> HashMap<String, St
 
     for dir in search_dirs {
         let path = dir.join(&filename);
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => match toml::from_str::<DescriptionFile>(&contents) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            match toml::from_str::<DescriptionFile>(&contents) {
                 Ok(parsed) => {
                     debug!(path = %path.display(), keys = parsed.tools.len(), "loaded locale file");
                     return parsed.tools;
@@ -129,9 +123,6 @@ fn load_locale_file(locale: &str, search_dirs: &[PathBuf]) -> HashMap<String, St
                 Err(e) => {
                     debug!(path = %path.display(), error = %e, "failed to parse locale file");
                 }
-            },
-            Err(_) => {
-
             }
         }
     }

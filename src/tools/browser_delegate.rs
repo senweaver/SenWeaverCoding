@@ -1,17 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Browser delegation tool.
-//!
-//! Delegates browser-based tasks to a browser-capable CLI subprocess (e.g.
-//! Claude Code with `claude-in-chrome` MCP tools) for interacting with
-//! corporate web applications (Teams, Outlook, Jira, Confluence) that lack
-//! direct API access.
-//!
-//! The tool spawns the configured CLI binary in non-interactive mode, passing
-//! a structured prompt that instructs it to use browser automation. A
-//! persistent Chrome profile can be configured so SSO sessions survive across
-//! invocations.
 
 use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
@@ -19,8 +8,12 @@ use async_trait::async_trait;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::time::{Duration, timeout};
+
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://[^\s\)\]\},\"'`<>]+"#).expect("browser_delegate URL regex must compile")
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserDelegateConfig {
@@ -106,8 +99,7 @@ impl BrowserDelegateTool {
     }
 
     fn validate_task_urls(&self, task: &str) -> anyhow::Result<()> {
-        let url_re = Regex::new(r#"https?://[^\s\)\]\},\"'`<>]+"#).expect("valid regex");
-        for m in url_re.find_iter(task) {
+        for m in URL_RE.find_iter(task) {
             self.validate_url(m.as_str())?;
         }
         Ok(())

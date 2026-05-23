@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `multi_edit` tool — routes the cross-file batch through
-//! [`crate::apply_model::OpsApplier`] (`atomic=true`) so the previous
-//! hand-rolled "validate → write → rollback on failure" pipeline is
-//! replaced by the journal-backed engine shared with every other
-//! editing surface.  The legacy mtime / symlink / autonomy checks are
-//! preserved verbatim because they describe surface-level pre-conditions
-//! that OpsApplier intentionally does not duplicate.
+
 use super::edit_history::EditHistory;
 use super::traits::{Tool, ToolResult};
 use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
@@ -133,6 +127,7 @@ impl Tool for MultiEditTool {
 
         let mut batch = EditBatch::new(EditOrigin::MultiEditTool).with_atomic(true);
         let mut summary_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut emit_records: Vec<(Option<Vec<u8>>, Vec<u8>)> = Vec::new();
         let mut planned_paths: Vec<std::path::PathBuf> = Vec::new();
         for edit in edits.iter() {
             if let Some(p) = edit.get("path").and_then(|v| v.as_str()) {
@@ -287,10 +282,14 @@ impl Tool for MultiEditTool {
                 tokio::fs::create_dir_all(parent).await.ok();
             }
 
+            let mut emit_payload: (Option<Vec<u8>>, Vec<u8>) = (
+                original.as_ref().map(|s| s.as_bytes().to_vec()),
+                new_content.as_bytes().to_vec(),
+            );
             let op = match original {
                 Some(orig) => EditOp::Replace {
                     path: path.clone(),
-                    byte_range: 0..orig.as_bytes().len(),
+                    byte_range: 0..orig.len(),
                     old_text: orig,
                     new_text: new_content,
                     anchor: None,
@@ -303,12 +302,24 @@ impl Tool for MultiEditTool {
             };
             batch.push(op);
             summary_paths.push(path);
+            emit_records.push(std::mem::take(&mut emit_payload));
         }
 
+        let emit_records_for_apply = emit_records;
+        let batch_id_for_emit = batch.batch_id.clone();
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
-                for p in &summary_paths {
+                for (p, (before, after)) in
+                    summary_paths.iter().zip(emit_records_for_apply.into_iter())
+                {
                     crate::session::record_write_for_current_session(p);
+                    crate::agent::file_edit_emitter::emit_file_edit(
+                        p,
+                        before.as_deref(),
+                        Some(after.as_slice()),
+                        Some(batch_id_for_emit.clone()),
+                    )
+                    .await;
                 }
                 let summary: Vec<String> = summary_paths
                     .iter()

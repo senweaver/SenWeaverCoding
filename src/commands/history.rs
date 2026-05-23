@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// /history command — mirrors claude-code-typescript-src`commands/history/`.
-// Shows or manages conversation history.
-
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use std::path::PathBuf;
 

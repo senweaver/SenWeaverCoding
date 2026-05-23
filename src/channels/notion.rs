@@ -76,8 +76,14 @@ impl NotionChannel {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid Notion API key header value: {e}"))?,
         );
-        headers.insert("Notion-Version", NOTION_VERSION.parse().unwrap());
-        headers.insert("Content-Type", "application/json".parse().unwrap());
+        headers.insert(
+            "Notion-Version",
+            reqwest::header::HeaderValue::from_static(NOTION_VERSION),
+        );
+        headers.insert(
+            "Content-Type",
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
         Ok(headers)
     }
 

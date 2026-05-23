@@ -56,9 +56,22 @@ type SeverityKey = 'error' | 'warning' | 'info' | 'hint'
 const ALL_SEVERITIES: SeverityKey[] = ['error', 'warning', 'info', 'hint']
 type ScopeMode = 'openTabs' | 'workspace'
 
+const EMPTY_DIAGNOSTICS_BY_URI: Record<
+  string,
+  { serverId: string; version: number | null; diagnostics: LspDiagnostic[] }
+> = Object.freeze({}) as Record<
+  string,
+  { serverId: string; version: number | null; diagnostics: LspDiagnostic[] }
+>
+
 export function ProblemsPanel({ workDir, onJump }: Props) {
   const t = useTranslation()
-  const diagnosticsByUri = useLspStore((s) => s.diagnosticsByUri)
+  const diagnosticsByUri = useLspStore((s) => {
+    if (workDir && workDir.length > 0) {
+      return s.diagnosticsByWorkspace[workDir] ?? EMPTY_DIAGNOSTICS_BY_URI
+    }
+    return s.diagnosticsByUri
+  })
   const openTabs = useWorkspaceFilesStore((s) => s.openTabs)
   const [collapsed, setCollapsed] = useState(false)
   const [enabledSeverities, setEnabledSeverities] = useState<Set<SeverityKey>>(

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Device types and registry — stable aliases for discovered hardware.
-//!
-//! The LLM always refers to devices by alias (`"pico0"`, `"arduino0"`), never
-//! by raw `/dev/` paths. The `DeviceRegistry` assigns these aliases at startup
-//! and provides lookup + context building for tool execution.
 
 use super::transport::Transport;
 use std::collections::HashMap;

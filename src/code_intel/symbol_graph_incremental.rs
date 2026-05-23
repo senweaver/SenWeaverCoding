@@ -1,28 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! M9 ??incremental [`SymbolGraph`] maintenance.
-//!
-//! Full-repo scans are expensive (seconds for medium repos, double-
-//! digit seconds once the repo grows past ~2k files).  Incremental
-//! maintenance watches for per-file changes, batches them with a
-//! debounce window, and rewrites only the affected rows before
-//! persisting the graph.
-//!
-//! The implementation exposes the full *algorithmic* surface
-//! (dirty tracker + debouncer + persist-rate-limiter) but does **not**
-//! take a hard dependency on the `notify` crate ??the filesystem
-//! watcher is provided as a trait ([`FileWatcher`]) so unit tests can
-//! drive it without touching the filesystem.  A production adapter
-//! backed by `notify` lives behind an optional feature and is wired
-//! in by the CLI/GUI bootstrap.
-//!
-//! Wiring story:
-//!
-//! ```text
-//! FileWatcher -> DirtySet -> Debouncer -> IncrementalBuilder -> persist()
-//!                                         ??//!                                         └── honours MIN_PERSIST_INTERVAL
-//! ```
 
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashSet;

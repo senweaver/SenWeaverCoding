@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Token optimization integration layer.
-//!
-//! Wires together the ToolOutputCompressor, TokenBudgetManager,
-//! and the existing context compression / history pruning into
-//! a unified optimization pipeline. This is the single entry point
-//! for all token-saving operations inspired by RTK.
 
 use super::token_budget::{TokenBudgetConfig, TokenBudgetManager};
 use super::tool_output_compressor::{

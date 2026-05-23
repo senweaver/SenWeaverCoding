@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! JSON-RPC 2.0 codec types.
-//!
-//! Handles serialization/deserialization of JSON-RPC 2.0 request, response,
-//! notification, and error objects.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

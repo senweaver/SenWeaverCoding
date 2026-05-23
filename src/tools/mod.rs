@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool subsystem for agent-callable capabilities.
-//!
-//! This module implements the tool execution surface exposed to the LLM during
-//! agentic loops. Each tool implements the [`Tool`] trait defined in [`traits`],
-//! which requires a name, description, JSON parameter schema, and an async
-//! `execute` method returning a structured [`ToolResult`].
-//!
-//! Tools are assembled into registries by [`default_tools`] (shell, file read/write)
-//! and [`all_tools`] (full set including memory, browser, cron, HTTP, delegation,
-//! and optional integrations). Security policy enforcement is injected via
-//! [`SecurityPolicy`](crate::security::SecurityPolicy) at construction time.
-//!
-//! # Extension
-//!
-//! To add a new tool, implement [`Tool`] in a new submodule and register it in
-//! [`all_tools_with_runtime`]. See `AGENTS.md` for the full change playbook.
 
 pub mod ask_question;
 pub mod ask_user;
@@ -63,6 +47,7 @@ pub mod data_management;
 pub mod debug_test_report;
 pub mod delegate;
 pub mod delegate_parallel;
+pub mod spawn_workers;
 pub mod diagnostics;
 pub mod dir_list;
 #[cfg(feature = "tool-search-social")]
@@ -81,6 +66,9 @@ pub mod flow_run;
 pub mod fs_ops;
 pub mod gemini_cli;
 pub mod git_operations;
+#[cfg(feature = "tool-curator")]
+pub mod curator;
+pub mod github_advanced_search;
 pub mod github_search;
 pub mod glob_edit;
 pub mod glob_search;
@@ -209,8 +197,11 @@ pub mod view_image;
 #[cfg(feature = "tool-utility-misc")]
 pub mod weather_tool;
 pub mod web_fetch;
+pub mod web_search;
 mod web_search_provider_routing;
 pub mod web_search_tool;
+#[cfg(feature = "tool-workspace-deep")]
+pub mod workspace_deep_search;
 pub mod workspace_tool;
 pub mod worktree_enter;
 pub mod worktree_exit;
@@ -278,6 +269,7 @@ pub use flow_run::FlowRunTool;
 pub use fs_ops::{CopyPathTool, CreateDirectoryTool, DeletePathTool, MovePathTool};
 pub use gemini_cli::GeminiCliTool;
 pub use git_operations::GitOperationsTool;
+pub use github_advanced_search::GitHubAdvancedSearchTool;
 pub use github_search::GitHubSearchTool;
 pub use glob_edit::GlobEditTool;
 pub use glob_search::GlobSearchTool;
@@ -306,8 +298,6 @@ pub use llm_task::LlmTaskTool;
 pub use lsp::LspTool;
 pub use lsp_rename::LspRenameTool;
 pub use mcp_client::McpRegistry;
-#[allow(deprecated)]
-pub use mcp_deferred::BUILTIN_CORE_TOOL_NAMES;
 pub use mcp_deferred::{
     ActivatedToolSet, DeferredBuiltinToolSet, DeferredMcpToolSet, build_deferred_builtin_section,
     build_deferred_builtin_section_with_surface, build_deferred_tools_section,
@@ -701,6 +691,10 @@ pub fn all_tools_with_runtime(
         ),
         Arc::new(GlobSearchTool::new(security.clone())),
         Arc::new(ContentSearchTool::new(security.clone())),
+        #[cfg(feature = "tool-workspace-deep")]
+        Arc::new(workspace_deep_search::WorkspaceDeepSearchTool::new(
+            security.clone(),
+        )),
         #[cfg(feature = "tool-cron")]
         Arc::new(CronAddTool::new(config.clone(), security.clone())),
         #[cfg(feature = "tool-cron")]
@@ -766,6 +760,72 @@ pub fn all_tools_with_runtime(
                 .with_workspace_root(security.workspace_root_handle()),
             )
         },
+        #[cfg(feature = "tool-curator")]
+        {
+            let svc = crate::services::try_get_services();
+            let curator_flag = svc
+                .as_ref()
+                .map(|s| s.curator_mode_flag.clone())
+                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(false)));
+            let curator_state = svc
+                .as_ref()
+                .map(|s| s.curator_state.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+            Arc::new(crate::tools::curator::EnterCuratorModeTool::new(
+                curator_flag,
+                curator_state,
+                security.workspace_root_handle(),
+            ))
+        },
+        #[cfg(feature = "tool-curator")]
+        {
+            let svc = crate::services::try_get_services();
+            let state = svc
+                .as_ref()
+                .map(|s| s.curator_state.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+            Arc::new(crate::tools::curator::CuratorCollectTool::new(
+                state,
+                security.clone(),
+            ))
+        },
+        #[cfg(feature = "tool-curator")]
+        Arc::new(crate::tools::curator::CuratorTemplateListTool::new()),
+        #[cfg(feature = "tool-curator")]
+        {
+            let svc = crate::services::try_get_services();
+            let state = svc
+                .as_ref()
+                .map(|s| s.curator_state.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+            Arc::new(crate::tools::curator::CuratorTemplateApplyTool::new(
+                state,
+                security.clone(),
+            ))
+        },
+        #[cfg(feature = "tool-curator")]
+        {
+            let svc = crate::services::try_get_services();
+            let curator_flag = svc
+                .as_ref()
+                .map(|s| s.curator_mode_flag.clone())
+                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(false)));
+            let curator_state = svc
+                .as_ref()
+                .map(|s| s.curator_state.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+            let pending_curator = svc
+                .as_ref()
+                .map(|s| s.pending_curator.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_pending_curator);
+            Arc::new(crate::tools::curator::ExitCuratorModeTool::new(
+                curator_flag,
+                Arc::clone(&plan_mode_flag),
+                curator_state,
+                pending_curator,
+                security.clone(),
+            ))
+        },
         Arc::new(SleepTool::new()),
         Arc::new(FlowRunTool::new()),
         Arc::new(FlowRollbackTool::new()),
@@ -778,7 +838,7 @@ pub fn all_tools_with_runtime(
         Arc::new(TodoWriteTool::new(
             crate::services::try_get_services()
                 .map(|svc| svc.todo_store.clone())
-                .unwrap_or_else(|| Arc::new(RwLock::new(Vec::new()))),
+                .unwrap_or_else(crate::tools::todo_write::new_todo_store),
         )),
         Arc::new(NowTool::new()),
         Arc::new(ReadUserRuleTool::new()),
@@ -834,6 +894,9 @@ pub fn all_tools_with_runtime(
             root_config.web_search.timeout_secs,
         )),
         Arc::new(GitHubSearchTool::from_env(
+            root_config.web_search.timeout_secs,
+        )),
+        Arc::new(GitHubAdvancedSearchTool::from_env(
             root_config.web_search.timeout_secs,
         )),
         #[cfg(feature = "tool-search-social")]
@@ -987,8 +1050,9 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    if web_fetch_config.enabled {
-        tool_arcs.push(Arc::new(WebFetchTool::new(
+    #[allow(unused_variables)]
+    let web_fetch_tool: Option<Arc<WebFetchTool>> = if web_fetch_config.enabled {
+        let tool = Arc::new(WebFetchTool::new(
             security.clone(),
             web_fetch_config.allowed_domains.clone(),
             web_fetch_config.blocked_domains.clone(),
@@ -996,8 +1060,12 @@ pub fn all_tools_with_runtime(
             web_fetch_config.timeout_secs,
             web_fetch_config.firecrawl.clone(),
             web_fetch_config.allowed_private_hosts.clone(),
-        )));
-    }
+        ));
+        tool_arcs.push(tool.clone());
+        Some(tool)
+    } else {
+        None
+    };
 
     if root_config.text_browser.enabled {
         tool_arcs.push(Arc::new(TextBrowserTool::new(
@@ -1007,8 +1075,9 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    if root_config.web_search.enabled {
-        tool_arcs.push(Arc::new(WebSearchTool::new_with_config(
+    #[allow(unused_variables)]
+    let web_search_tool: Option<Arc<WebSearchTool>> = if root_config.web_search.enabled {
+        let tool = Arc::new(WebSearchTool::new_with_config(
             root_config.web_search.provider.clone(),
             root_config.web_search.brave_api_key.clone(),
             root_config.web_search.searxng_instance_url.clone(),
@@ -1016,6 +1085,25 @@ pub fn all_tools_with_runtime(
             root_config.web_search.timeout_secs,
             root_config.config_path.clone(),
             root_config.secrets.encrypt,
+        ));
+        tool_arcs.push(tool.clone());
+        Some(tool)
+    } else {
+        None
+    };
+
+    #[cfg(feature = "tool-curator")]
+    if let (Some(ws), Some(wf)) = (web_search_tool.as_ref(), web_fetch_tool.as_ref()) {
+        let svc = crate::services::try_get_services();
+        let curator_state = svc
+            .as_ref()
+            .map(|s| s.curator_state.clone())
+            .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+        tool_arcs.push(Arc::new(crate::tools::curator::CuratorDeepCollectTool::new(
+            curator_state,
+            security.clone(),
+            ws.clone(),
+            wf.clone(),
         )));
     }
 
@@ -1364,6 +1452,14 @@ pub fn all_tools_with_runtime(
             delegate_parallel_tool.with_parent_tools(Arc::clone(handle));
     }
     tool_arcs.push(Arc::new(delegate_parallel_tool));
+
+    {
+        let live_cfg = crate::config::live::LiveConfig::new(root_config.clone());
+        tool_arcs.push(Arc::new(crate::tools::spawn_workers::SpawnWorkersTool::new(
+            Arc::clone(&config),
+            Some(live_cfg),
+        )));
+    }
 
     if !root_config.swarms.is_empty() {
         let swarm_agents: HashMap<String, DelegateAgentConfig> = agents

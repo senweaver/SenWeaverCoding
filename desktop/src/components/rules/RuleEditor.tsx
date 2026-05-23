@@ -59,7 +59,7 @@ export function RuleEditor({ initial, isSaving, onSubmit, onCancel }: Props) {
   return (
     <div className="space-y-4">
       <header className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
           {isEdit ? t('settings.rules.editTitle') : t('settings.rules.createTitle')}
         </h3>
       </header>
@@ -80,7 +80,7 @@ export function RuleEditor({ initial, isSaving, onSubmit, onCancel }: Props) {
 
       <Field label={t('settings.rules.fieldPolicy')} required>
         <select
-          className="h-10 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm"
+          className="h-8 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs"
           value={draft.policy}
           onChange={(e) => setDraft({ ...draft, policy: e.target.value as RulePolicy })}
         >
@@ -109,10 +109,10 @@ export function RuleEditor({ initial, isSaving, onSubmit, onCancel }: Props) {
       </Field>
 
       <div className="flex items-center justify-end gap-2">
-        <Button variant="ghost" onClick={onCancel}>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           {t('common.cancel')}
         </Button>
-        <Button onClick={handleSubmit} disabled={isSaving}>
+        <Button size="sm" onClick={handleSubmit} disabled={isSaving}>
           {isSaving ? t('common.saving') : t('common.save')}
         </Button>
       </div>
@@ -139,7 +139,7 @@ function Field({
       </span>
       {children}
       {hint && (
-        <span className="block text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="block text-xs text-[var(--color-text-tertiary)]">
           {hint}
         </span>
       )}

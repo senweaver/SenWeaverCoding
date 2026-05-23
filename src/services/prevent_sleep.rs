@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Prevent sleep service — mirrors claude-code-typescript-src`services/preventSleep.ts`.
-// Prevents the OS from sleeping while the agent is actively processing
-// long-running tasks.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

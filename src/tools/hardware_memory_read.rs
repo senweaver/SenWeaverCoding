@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware memory read tool — read actual memory/register values from Nucleo via probe-rs.
-//!
-//! Use when user asks to "read register values", "read memory at address", "dump lower memory", etc.
-//! Requires probe feature and Nucleo connected via USB.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
@@ -104,7 +100,17 @@ impl Tool for HardwareMemoryReadTool {
 
         #[cfg(feature = "probe")]
         {
-            match probe_read_memory(chip.unwrap(), _address, _length) {
+            let Some(chip_name) = chip else {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Memory read only supports nucleo-f401re, nucleo-f411re. Got: {}",
+                        board
+                    )),
+                });
+            };
+            match probe_read_memory(chip_name, _address, _length) {
                 Ok(output) => {
                     return Ok(ToolResult {
                         success: true,

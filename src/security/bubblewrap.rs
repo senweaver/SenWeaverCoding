@@ -1,7 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Bubblewrap sandbox (user namespaces for Linux/macOS)
 
 use crate::security::traits::Sandbox;
 use std::process::Command;

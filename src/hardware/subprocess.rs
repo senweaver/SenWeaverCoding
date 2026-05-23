@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! SubprocessTool — wraps any external binary as a [`Tool`].
-//!
-//! Plugins do not need to be written in Rust. Any executable that follows the
-//! SenWeaverCoding subprocess protocol is a valid tool:
-//!
-//! **Protocol (stdin/stdout, one line each):**
-//! ```text
-//! Host → binary stdin:  {"device":"pico0","pin":5}\n
-//! Binary → stdout:      {"success":true,"output":"done","error":null}\n
-//! ```
-//!
-//! Error protocol:
-//! - **Timeout (10 s)** — process is killed; `ToolResult::error` contains timeout message.
-//! - **Non-zero exit** — process is killed; `ToolResult::error` contains stderr.
-//! - **Empty / unparseable stdout** — `ToolResult::error` describes the failure.
-//!
-//! The schema advertised to the LLM is auto-generated from [`ToolManifest::parameters`].
 
 use super::manifest::ToolManifest;
 use crate::tools::traits::{Tool, ToolResult};

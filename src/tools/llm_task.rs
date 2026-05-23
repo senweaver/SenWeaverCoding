@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Lightweight LLM task tool for structured JSON-only sub-calls.
-//!
-//! Runs a single prompt through an LLM provider with no tool access and
-//! optionally validates the response against a caller-supplied JSON Schema.
-//! Ideal for structured data extraction in workflows.
 
 use super::traits::{Tool, ToolResult};
 use crate::providers::{self, Provider};

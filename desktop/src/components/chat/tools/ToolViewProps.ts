@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Shared prop types and helper utilities for the per-category tool views.
-// All `*View` components under `desktop/src/components/chat/tools/` accept
-// the same shape, so `ToolCard` can pick a renderer purely from the
-// tool name.
 
 import type { TranslationKey } from '../../../i18n'
 import type { UIMessage } from '../../../types/chat'
@@ -20,6 +15,10 @@ export type ToolViewProps = {
   isStreaming?: boolean
 
   compact?: boolean
+
+  parentSessionId?: string | null
+
+  toolTimestamp?: number
 
   childCalls?: ToolUseMessage[]
 

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Vim motions — mirrors claude-code-typescript-src`vim/motions.ts`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
@@ -64,9 +62,7 @@ pub fn resolve_motion(motion: Motion, text: &str, cursor: usize, count: u32) -> 
         Motion::WordBackward => {
             let mut pos = char_pos;
             for _ in 0..count {
-                if pos > 0 {
-                    pos -= 1;
-                }
+                pos = pos.saturating_sub(1);
 
                 while pos > 0 && !chars[pos].is_alphanumeric() {
                     pos -= 1;
@@ -110,9 +106,7 @@ pub fn resolve_motion(motion: Motion, text: &str, cursor: usize, count: u32) -> 
         Motion::FindCharBackward(c) => {
             let mut pos = char_pos;
             for _ in 0..count {
-                if pos > 0 {
-                    pos -= 1;
-                }
+                pos = pos.saturating_sub(1);
                 while pos > 0 && chars[pos] != c {
                     pos -= 1;
                 }

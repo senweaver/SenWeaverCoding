@@ -1,23 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! fast, safe patch application engine.
-//!
-//! Apply Model is the common substrate behind:
-//!   * `tools::file_edit` / `tools::patch_apply` / `tools::multi_edit`,
-//!   * `inline_edit::runner` Cmd+K diff application, and
-//!   * `agent::flows::builtins::CodeEditFlow` write step.
-//!
-//! The engine is deliberately provider-independent: the LLM supplies
-//! a unified diff (or a structured edit), Apply Model converts it into
-//! a safe byte-level mutation that honours line-number drift and UTF-8
-//! boundaries.
-//!
-//! The default implementation is a pure-Rust heuristic matcher
-//! ([`heuristic::HeuristicApplier`]).  `apply-model-llm`
-//! feature enables a follow-up refinement pass using the provider
-//! layer — the trait point is reserved in [`llm_refine`] for that
-//! expansion.
 
 pub mod edit_op;
 

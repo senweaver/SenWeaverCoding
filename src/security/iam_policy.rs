@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! IAM-aware policy enforcement for Nevis role-to-permission mapping.
-//!
-//! Evaluates tool and workspace access based on Nevis roles using a
-//! deny-by-default policy model. All policy decisions are audit-logged.
 
 use super::nevis::NevisIdentity;
 use anyhow::{Result, bail};

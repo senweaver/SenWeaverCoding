@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Incident response playbook definitions and execution engine.
-//!
-//! Playbooks define structured response procedures for security incidents.
-//! Each playbook has named steps, some of which require human approval before
-//! execution. Playbooks are loaded from JSON files in the configured directory.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;

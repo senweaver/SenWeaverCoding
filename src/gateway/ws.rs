@@ -1,24 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! WebSocket agent chat handler.
-//!
-//! Connect: `ws://host:port/ws/chat?session_id=ID&name=My+Session`
-//!
-//! Protocol:
-//! ```text
-//! Server -> Client: {"type":"session_start","session_id":"...","name":"...","resumed":true,"message_count":42}
-//! Client -> Server: {"type":"message","content":"Hello"}
-//! Server -> Client: {"type":"chunk","content":"Hi! "}
-//! Server -> Client: {"type":"tool_call","name":"shell","args":{...}}
-//! Server -> Client: {"type":"tool_result","name":"shell","output":"..."}
-//! Server -> Client: {"type":"done","full_response":"..."}
-//! ```
-//!
-//! Query params:
-//! - `session_id` — resume or create a session (default: new UUID)
-//! - `name` — optional human-readable label for the session
-//! - `token` — bearer auth token (alternative to Authorization header)
 
 use super::AppState;
 use axum::{
@@ -488,10 +470,19 @@ async fn process_chat_message(
                 TurnEvent::Thinking { delta } => {
                     serde_json::json!({ "type": "thinking", "content": delta })
                 }
-                TurnEvent::ToolCall { name, args } => {
+                TurnEvent::ToolCall {
+                    name,
+                    args,
+                    tool_call_id: _,
+                } => {
                     serde_json::json!({ "type": "tool_call", "name": name, "args": args })
                 }
-                TurnEvent::ToolResult { name, output, success } => {
+                TurnEvent::ToolResult {
+                    name,
+                    output,
+                    success,
+                    tool_call_id: _,
+                } => {
                     serde_json::json!({
                         "type": "tool_result",
                         "name": name,
@@ -597,6 +588,65 @@ async fn process_chat_message(
                         "counts": report.to_label_map(),
                     })
                 }
+                TurnEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    wait_ms,
+                    class,
+                    provider,
+                    model,
+                    message,
+                } => {
+                    serde_json::json!({
+                        "type": "provider_retry",
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "waitMs": wait_ms,
+                        "class": class,
+                        "provider": provider,
+                        "model": model,
+                        "message": message,
+                    })
+                }
+                TurnEvent::WorkerSpawned {
+                    parent_tool_use_id,
+                    worker_id,
+                    title,
+                    model,
+                } => serde_json::json!({
+                    "type": "worker_spawned",
+                    "parentToolUseId": parent_tool_use_id,
+                    "workerId": worker_id,
+                    "title": title,
+                    "model": model,
+                }),
+                TurnEvent::WorkerStatus { worker_id, status, detail } => serde_json::json!({
+                    "type": "worker_status",
+                    "workerId": worker_id,
+                    "status": status,
+                    "detail": detail,
+                }),
+                TurnEvent::WorkerProgress { worker_id, action, detail } => serde_json::json!({
+                    "type": "worker_progress",
+                    "workerId": worker_id,
+                    "action": action,
+                    "detail": detail,
+                }),
+                TurnEvent::WorkerCompleted { worker_id, success, summary } => serde_json::json!({
+                    "type": "worker_completed",
+                    "workerId": worker_id,
+                    "success": success,
+                    "summary": summary,
+                }),
+                TurnEvent::WorkerStopped { worker_id, reason } => serde_json::json!({
+                    "type": "worker_stopped",
+                    "workerId": worker_id,
+                    "reason": reason,
+                }),
+                TurnEvent::ParentResumed { reason } => serde_json::json!({
+                    "type": "parent_resumed",
+                    "reason": reason,
+                }),
             };
             let _ = sender.send(Message::Text(ws_msg.to_string().into())).await;
         }

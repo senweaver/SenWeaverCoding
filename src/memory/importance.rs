@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Heuristic importance scorer for non-LLM paths.
-//!
-//! Assigns importance scores (0.0–1.0) based on memory category and keyword
-//! signals. Used when LLM-based consolidation is unavailable or as a fast
-//! first-pass scorer.
 
 use super::traits::MemoryCategory;
 

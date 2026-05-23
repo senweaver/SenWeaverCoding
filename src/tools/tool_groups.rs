@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Tool Groups - named tool groups for organized tool management.
-//!
-//! Allows tools to be organized into named groups that can be
-//! selectively activated per agent, session, or context.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

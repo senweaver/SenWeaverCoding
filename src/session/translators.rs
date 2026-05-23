@@ -1,29 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Translators between the unified [`SessionEvent`] bus and the
-//! per-frontend legacy event types (`AgentEvent` for TUI/GUI).
-//!
-//! This module enables the **soft-bridge** strategy from milestone M4/M5:
-//! UI frontends keep their existing `AgentEvent`-consuming rendering
-//! code, but the plumbing underneath switches to `AgentSession` so the
-//! three frontends share a single event source.  When the final
-//! hard-cut migration happens (post-M11) the translator is deleted and
-//! frontends subscribe to `SessionEvent` directly.
-//!
-//! ## Coverage
-//!
-//! Every variant of `SessionEventKind` is mapped.  Variants with no
-//! direct `AgentEvent` counterpart (e.g. `TurnStarted`, `ContextCompressed`)
-//! collapse into the closest equivalent (`Thinking`, `StatusUpdate`).
-//!
-//! ## Non-goals
-//!
-//! * `AgentEvent` variants with no session equivalent
-//!   (`TodoUpdate`, `PlanCreated`, `BackgroundShell`, `SubagentSpawn`,
-//!   `ApprovalRequest`, …) cannot be produced from `SessionEvent`
-//!   alone.  Those remain driven through the legacy `turn_streamed`
-//!   path or, post-migration, through richer session events.
 
 use crate::agent::bridge_types::AgentEvent;
 use crate::session::{SessionEvent, SessionEventKind};
@@ -182,6 +159,73 @@ pub fn session_to_agent_events(event: &SessionEvent) -> Vec<AgentEvent> {
                     .map(|(l, c)| format!(" @ {l}:{c}"))
                     .unwrap_or_default()
             ),
+        }],
+        SessionEventKind::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_ms,
+            class,
+            provider,
+            model,
+            message,
+        } => vec![AgentEvent::StatusUpdate {
+            action: "provider_retry".into(),
+            detail: format!(
+                "{class} attempt={attempt}/{max_attempts} wait_ms={wait_ms} provider={provider} model={model}: {message}"
+            ),
+        }],
+        SessionEventKind::WorkerSpawned {
+            worker_id,
+            title,
+            model,
+            ..
+        } => vec![AgentEvent::StatusUpdate {
+            action: "worker_spawned".into(),
+            detail: format!("{worker_id} '{title}' ({model})"),
+        }],
+        SessionEventKind::WorkerStatus {
+            worker_id,
+            status,
+            detail,
+        } => vec![AgentEvent::StatusUpdate {
+            action: "worker_status".into(),
+            detail: format!(
+                "{worker_id} status={status}{}",
+                detail
+                    .as_deref()
+                    .map(|d| format!(" detail={d}"))
+                    .unwrap_or_default()
+            ),
+        }],
+        SessionEventKind::WorkerProgress {
+            worker_id,
+            action,
+            detail,
+        } => vec![AgentEvent::StatusUpdate {
+            action: "worker_progress".into(),
+            detail: format!("{worker_id} {action}: {detail}"),
+        }],
+        SessionEventKind::WorkerCompleted {
+            worker_id,
+            success,
+            summary,
+        } => vec![AgentEvent::StatusUpdate {
+            action: if *success {
+                "worker_completed".into()
+            } else {
+                "worker_failed".into()
+            },
+            detail: format!("{worker_id}: {summary}"),
+        }],
+        SessionEventKind::WorkerStopped { worker_id, reason } => {
+            vec![AgentEvent::StatusUpdate {
+                action: "worker_stopped".into(),
+                detail: format!("{worker_id}: {reason}"),
+            }]
+        }
+        SessionEventKind::ParentResumed { reason } => vec![AgentEvent::StatusUpdate {
+            action: "parent_resumed".into(),
+            detail: reason.clone(),
         }],
     }
 }

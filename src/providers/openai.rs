@@ -81,7 +81,7 @@ struct NativeMessage {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "crate::providers::sanitize::skip_serializing_tool_calls")]
     tool_calls: Option<Vec<NativeToolCall>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +259,12 @@ impl OpenAiProvider {
             .iter()
             .map(|m| {
                 if m.role == "assistant" {
+                    let trimmed = m.content.trim_start();
+                    if trimmed.starts_with('[') {
+                        if let Some(native) = Self::convert_assistant_native_blocks(trimmed) {
+                            return native;
+                        }
+                    }
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                         if let Some(tool_calls_value) = value.get("tool_calls") {
                             if let Ok(parsed_calls) =
@@ -269,7 +275,12 @@ impl OpenAiProvider {
                                 let tool_calls = parsed_calls
                                     .into_iter()
                                     .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
+                                        id: Some(
+                                            crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                                                Some(tc.id),
+                                                crate::providers::sanitize::ProviderKind::OpenAi,
+                                            ),
+                                        ),
                                         kind: Some("function".to_string()),
                                         function: NativeFunctionCall {
                                             name: tc.name,
@@ -285,11 +296,16 @@ impl OpenAiProvider {
                                     .get("reasoning_content")
                                     .and_then(serde_json::Value::as_str)
                                     .map(ToString::to_string);
+                                let tool_calls = if tool_calls.is_empty() {
+                                    None
+                                } else {
+                                    Some(tool_calls)
+                                };
                                 return NativeMessage {
                                     role: "assistant".to_string(),
                                     content,
                                     tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
+                                    tool_calls,
                                     reasoning_content,
                                 };
                             }
@@ -298,10 +314,19 @@ impl OpenAiProvider {
                 }
 
                 if m.role == "tool" {
+                    let trimmed = m.content.trim_start();
+                    if trimmed.starts_with('[') {
+                        if let Some(native) = Self::convert_tool_result_native_blocks(trimmed) {
+                            return native;
+                        }
+                    }
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                         let tool_call_id = value
                             .get("tool_call_id")
                             .and_then(serde_json::Value::as_str)
+                            .or_else(|| {
+                                value.get("tool_use_id").and_then(serde_json::Value::as_str)
+                            })
                             .map(ToString::to_string);
                         let content = value
                             .get("content")
@@ -328,6 +353,125 @@ impl OpenAiProvider {
             .collect()
     }
 
+    fn convert_assistant_native_blocks(content: &str) -> Option<NativeMessage> {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(content).ok()?;
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut reasoning_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<NativeToolCall> = Vec::new();
+
+        for item in arr {
+            let kind = match item.get("type").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => continue,
+            };
+            match kind {
+                "text" => {
+                    if let Some(s) = item.get("text").and_then(|v| v.as_str()) {
+                        if !s.is_empty() {
+                            text_parts.push(s.to_string());
+                        }
+                    }
+                }
+                "thinking" => {
+                    if let Some(s) = item.get("thinking").and_then(|v| v.as_str()) {
+                        if !s.is_empty() {
+                            reasoning_parts.push(s.to_string());
+                        }
+                    }
+                }
+                "tool_use" => {
+                    let raw_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("tool_use_id").and_then(|v| v.as_str()))
+                        .or_else(|| item.get("tool_call_id").and_then(|v| v.as_str()))
+                        .map(str::to_string);
+                    let name = match item.get("name").and_then(|v| v.as_str()) {
+                        Some(n) if !n.is_empty() => n.to_string(),
+                        _ => continue,
+                    };
+                    let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                        raw_id,
+                        crate::providers::sanitize::ProviderKind::OpenAi,
+                    );
+                    let input_val = item.get("input").cloned().unwrap_or_else(|| {
+                        serde_json::Value::Object(serde_json::Map::new())
+                    });
+                    let arguments = serde_json::to_string(&input_val)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    tool_calls.push(NativeToolCall {
+                        id: Some(id),
+                        kind: Some("function".to_string()),
+                        function: NativeFunctionCall { name, arguments },
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if tool_calls.is_empty() && text_parts.is_empty() && reasoning_parts.is_empty() {
+            return None;
+        }
+
+        let content = if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join("\n"))
+        };
+        let reasoning_content = if reasoning_parts.is_empty() {
+            None
+        } else {
+            Some(reasoning_parts.join("\n"))
+        };
+        let tool_calls = if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        };
+
+        Some(NativeMessage {
+            role: "assistant".to_string(),
+            content,
+            tool_call_id: None,
+            tool_calls,
+            reasoning_content,
+        })
+    }
+
+    fn convert_tool_result_native_blocks(content: &str) -> Option<NativeMessage> {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(content).ok()?;
+        let mut tool_call_id: Option<String> = None;
+        let mut body_parts: Vec<String> = Vec::new();
+        for item in arr {
+            if item.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                continue;
+            }
+            if tool_call_id.is_none() {
+                tool_call_id = item
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("tool_call_id").and_then(|v| v.as_str()))
+                    .map(str::to_string);
+            }
+            let part = match item.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            if !part.is_empty() {
+                body_parts.push(part);
+            }
+        }
+        let id = tool_call_id?;
+        Some(NativeMessage {
+            role: "tool".to_string(),
+            content: Some(body_parts.join("\n")),
+            tool_call_id: Some(id),
+            tool_calls: None,
+            reasoning_content: None,
+        })
+    }
+
     fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
         let text = message.effective_content();
         let reasoning_content = message.reasoning_content.clone();
@@ -336,7 +480,10 @@ impl OpenAiProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| ProviderToolCall {
-                id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                id: crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                    tc.id,
+                    crate::providers::sanitize::ProviderKind::OpenAi,
+                ),
                 name: tc.function.name,
                 arguments: tc.function.arguments,
             })
@@ -351,12 +498,14 @@ impl OpenAiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
-            "provider.openai",
-            120,
-            10,
-            &self.extra_headers,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts_and_headers(
+                "provider.openai",
+                120,
+                10,
+                &self.extra_headers,
+            )
     }
 }
 
@@ -430,10 +579,18 @@ impl Provider for OpenAiProvider {
 
         let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
 
+        let sanitized_messages =
+            crate::providers::sanitize::sanitize_messages_before_send_for_provider(
+                request.messages.to_vec(),
+                model,
+                self.max_tokens.unwrap_or(0) as usize,
+                None,
+                crate::providers::sanitize::ProviderKind::OpenAi,
+            );
         let tools = Self::convert_tools(request.tools);
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages),
+            messages: Self::convert_messages(&sanitized_messages),
             temperature: adjusted_temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -491,6 +648,15 @@ impl Provider for OpenAiProvider {
 
         let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
 
+        let sanitized_messages =
+            crate::providers::sanitize::sanitize_messages_before_send_for_provider(
+                messages.to_vec(),
+                model,
+                self.max_tokens.unwrap_or(0) as usize,
+                None,
+                crate::providers::sanitize::ProviderKind::OpenAi,
+            );
+
         let native_tools: Option<Vec<NativeToolSpec>> = if tools.is_empty() {
             None
         } else {
@@ -505,7 +671,7 @@ impl Provider for OpenAiProvider {
 
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(messages),
+            messages: Self::convert_messages(&sanitized_messages),
             temperature: adjusted_temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,

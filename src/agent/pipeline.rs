@@ -1,29 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//!
-//! Multi-stage parallel task pipeline execution.
-//!
-//! ## Overview
-//!
-//! The pipeline system decomposes a complex task into stages, each of which
-//! can contain multiple parallel tasks.  Stages execute in order, but tasks
-//! within a stage run concurrently.  Results from a stage are available to
-//! subsequent stages.
-//!
-//! ## Stage Types
-//!
-//! | Type          | Description                                      |
-//! |---------------|--------------------------------------------------|
-//! | Sequential    | Tasks run one-by-one in order                    |
-//! | Parallel      | Tasks run concurrently (bounded by max_parallel)   |
-//! | FanOut        | One input fans out to N parallel tasks           |
-//! | FanIn         | N parallel tasks merge into one result             |
-//!
-//! ## Backpressure
-//!
-//! Each stage has a configurable buffer size.  If the buffer fills up,
-//! the pipeline pauses the upstream stage until capacity is available.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -291,7 +268,28 @@ impl Pipeline {
             StageKind::Parallel => {
                 let mut handles = Vec::new();
                 for task in &stage.tasks {
-                    let permit = semaphore.clone().acquire_owned().await.unwrap();
+                    let permit = match semaphore.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!(
+                                target = "agent.pipeline",
+                                stage = %stage.name,
+                                task = %task.id,
+                                error = %e,
+                                "pipeline semaphore closed; task failed without execution"
+                            );
+                            results.push(TaskResult {
+                                task_id: task.id.clone(),
+                                output: serde_json::Value::Null,
+                                success: false,
+                                error: Some(format!(
+                                    "pipeline semaphore closed before acquire: {e}"
+                                )),
+                                duration_ms: 0,
+                            });
+                            continue;
+                        }
+                    };
                     let executor = executor.clone();
                     let input = self.resolve_input(task, context);
                     let task_id = task.id.clone();

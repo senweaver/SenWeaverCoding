@@ -1,31 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Attempt to load the `sqlite-vec` SQLite extension and expose an
-//! O(log N) `vec0` virtual table when available.
-//!
-//! The sqlite-vec extension (https://github.com/asg017/sqlite-vec) ships
-//! as a loadable shared library that adds a `vec0` virtual table for
-//! fast approximate nearest-neighbour search.  This module:
-//!
-//! 1. Tries to load the extension from a list of well-known filenames
-//!    across `$SEN_VEC0_PATH`, the process directory, and system
-//!    defaults.
-//! 2. When loaded, creates a `vec_memories_hnsw` virtual table via
-//!    `CREATE VIRTUAL TABLE IF NOT EXISTS … USING vec0(...)`.
-//! 3. When the load fails (extension missing, load_extension disabled,
-//!    ABI mismatch), returns a typed error and leaves the database
-//!    untouched so callers fall through to `SqliteVecIndex`'s
-//!    brute-force fallback.
-//!
-//! # Safety / build
-//!
-//! Extension loading requires SQLite to be compiled with
-//! `SQLITE_ALLOW_LOAD_EXTENSION` and requires calling
-//! `conn.load_extension_enable()` before trying to load.  `rusqlite`
-//! exposes that behind the `load_extension` feature; when the feature
-//! is off (current default), all entry points in this module return
-//! `VecExtError::NotSupportedBuild`.
 
 use std::path::PathBuf;
 

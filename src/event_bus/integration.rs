@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! EventBus integration helpers for agent and gateway systems.
-//!
-//! Provides a global EventBus instance and convenience functions
-//! for publishing events from anywhere in the system.
 
 use std::sync::LazyLock;
 

@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Coordinator mode — restricted tool sets for coordination-only agents.
-//!
-//! In coordinator mode, the agent uses a limited set of tools focused on
-//! planning, delegation, and communication rather than direct code changes.
 
 #![allow(unused_imports)]
 pub mod delegation;

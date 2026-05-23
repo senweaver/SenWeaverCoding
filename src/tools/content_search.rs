@@ -1021,14 +1021,14 @@ fn pure_rust_search(
                         }
                     }
 
-                    for i in start..=end {
+                    for (i, line) in lines.iter().enumerate().take(end + 1).skip(start) {
                         let line_number = i + 1;
                         let sep = if i == m { ':' } else { '-' };
                         use std::fmt::Write as _;
                         let _ = writeln!(
                             &mut out,
                             "{path_display}{sep}{line_number}{sep}{}",
-                            lines[i]
+                            line
                         );
                         last_emitted = Some(i);
                         total_emitted += 1;
@@ -1084,7 +1084,7 @@ fn collect_files(
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if file_type.is_dir() {
-            if PURE_RUST_SKIP_DIRS.iter().any(|skip| *skip == name) {
+            if PURE_RUST_SKIP_DIRS.contains(&name) {
                 continue;
             }
             collect_files(&path, include, deadline, out)?;

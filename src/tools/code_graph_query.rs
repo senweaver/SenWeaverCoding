@@ -1,20 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `code_graph_query` tool — reads the persisted SymbolGraph (and
-//! optionally the git timeline) and answers three query kinds:
-//!
-//! - `callers_of(name)`     — which symbols call `name`.
-//! - `implementors_of(name)` — which symbols implement the trait /
-//!                             base class `name`.
-//! - `recent_changes`        — the N most recently-touched symbols
-//!                             across the workspace (optionally
-//!                             filtered by symbol name).
-//!
-//! If `.sen/symbol_graph.json` doesn't exist yet, the tool builds
-//! and persists one on the fly so the first call bootstraps the
-//! cache.  The timeline is recomputed per invocation — it's cheap
-//! enough on a single file's worth of blame.
 
 use std::path::PathBuf;
 

@@ -1,30 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! M10 ??unified rename refactor path.
-//!
-//! Historically the `code_xfile_refactor` tool used a regex scan to
-//! propose textual replacements across files.  That works for simple
-//! cases but breaks in the presence of shadowing, imports, and
-//! macro-generated symbols.  This module introduces a single
-//! entrypoint that:
-//!
-//!   1. Asks the language server (via [`lsp_pool::find`]) whether
-//!      it supports `textDocument/rename`.
-//!   2. When the server is available, performs the LSP rename and
-//!      translates the response into a cross-file [`RenameEdit`]
-//!      set.
-//!   3. When the server is unavailable / rejects the request, falls
-//!      back to the previous regex scan, reported clearly to the
-//!      caller so they know accuracy is reduced.
-//!   4. Pushes a [`Checkpoint`](crate::agent::flows::Checkpoint) into
-//!      the global store *before* returning, so
-//!      `tools::flow_rollback` can undo the change.
-//!
-//! The actual LSP RPC plumbing lives in [`super::lsp`]; this module
-//! wires the policy.  The trait surface is provider-agnostic so a
-//! future LSP backend (e.g. the `lsp-server` crate) can slot in
-//! without touching call-sites.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

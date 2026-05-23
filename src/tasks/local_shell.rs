@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// LocalShellTask — spawns a background shell command.
-// Mirrors claude-code-typescript-src`tasks/LocalShellTask/`.
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -60,7 +56,7 @@ impl LocalShellTask {
         crate::runtime::spawn_supervised("tasks.local_shell.run", async move {
             let _shell_guard = if let Some(ctx) = session_ctx_for_task.as_ref() {
                 if let Some(manager) = crate::session::global_workspace_resources() {
-                    match manager
+                    manager
                         .acquire(
                             &ctx.workspace_key,
                             crate::session::ResourceKind::Shell,
@@ -68,10 +64,7 @@ impl LocalShellTask {
                             &ctx.title,
                         )
                         .await
-                    {
-                        Ok(g) => Some(g),
-                        Err(_) => None,
-                    }
+                        .ok()
                 } else {
                     None
                 }
@@ -93,8 +86,8 @@ impl LocalShellTask {
 
 async fn run_shell_command(
     command: &str,
-    cwd: &PathBuf,
-    output_file: &PathBuf,
+    cwd: &Path,
+    output_file: &Path,
     mut cancel_rx: watch::Receiver<bool>,
     timeout_ms: Option<u64>,
 ) -> anyhow::Result<i32> {
@@ -111,7 +104,7 @@ async fn run_shell_command(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let out_path = output_file.clone();
+    let out_path = output_file.to_path_buf();
 
     let writer_handle =
         crate::runtime::task_manager::spawn_supervised("tasks.local_shell_io", async move {

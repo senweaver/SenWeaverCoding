@@ -1,20 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Mode-specific behavioural helpers shared by `run_tool_call_loop`
-//! (canonical CLI/daemon path) and `Agent::turn_streamed` (GUI path).
-//!
-//! Without this module, the two loops would drift: the canonical loop
-//! injects context-budget notes, mode-specific auto-verify nudges,
-//! Pair-mode checkpoints, ContextEng impact-analysis reminders, and
-//! honours `ModeApprovalPolicy::AutoApprove`, while `turn_streamed`
-//! historically only handled the system-prompt injection and a
-//! generic auto-verify message.
-//!
-//! The helpers below are pure functions over the read-only state
-//! (mode + history + max-context) and return `Option<String>` system
-//! messages. Callers decide where to push the message into their
-//! history.
 
 use super::coding_mode::{CodingMode, ModeApprovalPolicy, PostToolBehavior};
 use crate::observability::runtime_trace;
@@ -109,13 +95,6 @@ pub fn mode_blocks_tool(mode: CodingMode, tool_name: &str) -> Option<String> {
     None
 }
 
-fn estimate_tokens_filtered(history: &[ChatMessage], is_system: bool) -> usize {
-    history
-        .iter()
-        .filter(|m| (m.role == "system") == is_system)
-        .map(|m| m.content.len().div_ceil(4) + 4)
-        .sum()
-}
 
 fn extract_reminder_marker(msg: &str) -> Option<&str> {
     let trimmed = msg.trim_start();
@@ -138,60 +117,11 @@ pub fn replace_or_push_system_reminder(history: &mut Vec<ChatMessage>, msg: Stri
 
 pub fn build_context_budget_message(
     mode: CodingMode,
-    history: &[ChatMessage],
-    max_context_tokens: usize,
+    _history: &[ChatMessage],
+    _max_context_tokens: usize,
 ) -> Option<String> {
-    if !mode.injects_context_budget() {
-        return None;
-    }
-    let sys_tokens = estimate_tokens_filtered(history, true);
-    let hist_tokens = estimate_tokens_filtered(history, false);
-    let total = sys_tokens + hist_tokens;
-    let remaining = max_context_tokens.saturating_sub(total);
-    let pct = if max_context_tokens > 0 {
-        (remaining * 100) / max_context_tokens
-    } else {
-        0
-    };
-    let warning = if pct < 20 {
-        " WARNING: Context budget low. Summarize or drop old context before proceeding."
-    } else {
-        ""
-    };
-
-    let mut read_files: Vec<String> = Vec::new();
-    for msg in history.iter() {
-        if let Some(idx) = msg.content.find("\"file_read\"") {
-            if let Some(path_start) = msg.content[idx..].find("\"path\"") {
-                let after = &msg.content[idx + path_start..];
-                if let Some(val_start) = after.find('"') {
-                    let rest = &after[val_start + 1..];
-                    if let Some(val_end) = rest.find('"') {
-                        let path = &rest[..val_end];
-                        if !path.is_empty() && !read_files.contains(&path.to_string()) {
-                            read_files.push(path.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let files_note = if read_files.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " Files already in context ({}): {}",
-            read_files.len(),
-            read_files.join(", ")
-        )
-    };
-    Some(format!(
-        "[Context Budget] System: ~{}k tokens. History: ~{}k tokens. \
-         Remaining: ~{}k tokens ({pct}% free).{warning}{files_note}",
-        sys_tokens / 1000,
-        hist_tokens / 1000,
-        remaining / 1000,
-    ))
+    let _ = mode;
+    None
 }
 
 pub fn is_file_mutation_tool(name: &str) -> bool {
@@ -330,7 +260,19 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              If you loaded the plan from disk and the in-memory tracker is empty, fire \
              `update_plan(action=\"set\", steps=[…])` ONCE at the very start to seed it, \
              then proceed step-by-step. Use `skipped` (with a `notes` reason) for steps \
-             that turn out unnecessary — never silently leave them `pending`.",
+             that turn out unnecessary — never silently leave them `pending`.\n\n\
+             [Curator Handoff — CRITICAL] If the user has just clicked Build on a Curator \
+             document (the workspace contains a fresh `.senweavercoding/curators/<slug>/final.md` + \
+             `impl_blueprint.md`, or the user said \"implement the curator doc / build it / \
+             ship the report\"), `.senweavercoding/curators/<slug>/impl_blueprint.md` is the BINDING contract — \
+             read it FIRST via `file_read`, then read `final.md` and the entries in \
+             `sources.md` / `research_notes.md` for context. The implementation that lands \
+             this turn MUST mirror impl_blueprint.md verbatim: every module, every \
+             interface, every build & verification command stated in the blueprint must \
+             be honoured. Do NOT silently substitute a different design. If the blueprint \
+             is ambiguous or contradicts itself, surface that with `ask_question` BEFORE \
+             writing code; do not improvise an alternate spec. The final deliverable is a \
+             fully runnable engineering project that materialises the document.",
         ),
         CodingMode::Pair => Some(
             "[Pair Reminder] After every tool batch the runtime WILL pause and return \
@@ -354,7 +296,7 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              the embedded `browser` dock. \
              Architectural references (RFCs / changelogs / pattern catalogs / CVEs) → \
              `web_search` FIRST (then `web_fetch` on the canonical URL); quote the \
-             cited URL in the design narrative. NEVER use `browser` to scrape a \
+             cited URL in the design narrative. NEVER use `browser` to query a \
              search engine.",
         ),
         CodingMode::ContextEng => Some(
@@ -440,6 +382,65 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
                  explain what would change and suggest switching to Agent / Harness, \
                  but do not perform it.",
         ),
+        CodingMode::Curator => Some(
+            "[Curator Reminder] You are authoring a research-grade document, NOT code. \
+             This turn MUST end with EITHER continued curator-only tool calls OR the \
+             final `exit_curator_mode(slug=..., template=...)`. \
+             \n\nEARLY-EXIT RULE (read this BEFORE planning more research): \
+             If `sources.md` already has ≥ 5 distinct `[Sn]` entries AND `draft.md` is \
+             fleshed out with real prose (not just an outline), your VERY NEXT action \
+             this turn MUST be `exit_curator_mode` with the polished `final_content` \
+             and `impl_blueprint` arguments. Do NOT spend another full turn deliberating \
+             whether to add a 6th search round — write the full document NOW in one pass. \
+             Long thinking with short output is a known failure mode; the cure is to \
+             commit and emit the complete `final.md` in a single response.\n\n\
+             HARD QUALITY GATES (only the minimum bar before exit is allowed; collect \
+             more ONLY if these are not yet met):\n\
+             - At least 5 distinct `web_search` calls covering different query angles \
+               (vary keywords, language zh/en, category web/academic/code/cn/news, \
+               time_range). Prefer `multi=true` (the default) so each call fans out \
+               across 5-6 complementary engines automatically. ONE `curator_deep_collect` \
+               call typically satisfies this in a single shot.\n\
+             - At least 8 long-form web pages fetched via `web_fetch` (or via \
+               `curator_deep_collect`, which combines search + top-N web_fetch in one \
+               call — strongly preferred for first-pass collection).\n\
+             - At least 1 `workspace_deep_search` over any local sources the intent \
+               references (use it whenever the user mentions a workspace path).\n\
+             - Every kept source recorded in `sources.md` with id `[Sn]`, title, URL, \
+               `accessed_at` timestamp, and a one-line `takeaway`. `curator_collect` \
+               and `curator_deep_collect` already do this — never invent `[Sn]` ids \
+               by hand.\n\n\
+             STRICT WORKFLOW (collapse phases together when the early-exit rule fires): \
+             (1) Intent → `enter_curator_mode` if not already active. \
+             (2) Web Collect (preferred entrypoint): \
+                 `curator_deep_collect(query=..., max_sources=5, snippet_chars=2500)` \
+                 — this runs multi-engine search + auto web_fetch on the top URLs \
+                 and writes to research_notes.md + sources.md in one shot. Use \
+                 `web_search` + `web_fetch` + `curator_collect` only for narrow \
+                 follow-up drill-downs the deep collect pass missed. \
+             (3) Local Collect (only if the intent references the workspace): \
+                 `workspace_deep_search` then narrower `content_search` / \
+                 `glob_search` / `file_read`; capture excerpts via \
+                 `curator_collect(kind=\"note\", path=..., lines=..., excerpt=...)`. \
+             (4) Write the COMPLETE `final.md` in ONE response — do NOT stop at an \
+                 outline. Then write `impl_blueprint.md` describing the implementation \
+                 contract precisely. Drafts are an internal artifact, not the goal. \
+             (5) Cite every non-trivial claim as either `[Sn]` from `sources.md` or \
+                 `path:lineStart-lineEnd` from the workspace. \
+             (6) Call `exit_curator_mode` IMMEDIATELY after `final.md` and \
+                 `impl_blueprint.md` are written; the user will switch to Agent mode \
+                 next and the implementation must mirror the blueprint verbatim.\n\n\
+             DELIVERABLE PIPELINE CONTRACT (executed atomically inside `exit_curator_mode`): \
+             input validation → quality gate → evidence gate → write final.md → \
+             write impl_blueprint.md → render final.docx with the chosen template → \
+             verify the DOCX (size + ZIP magic) → emit Review-Panel file_edit events for \
+             ALL three artifacts → flip mode flag and surface the Curator card. \
+             Any failure short-circuits and returns `success=false` with a concrete \
+             remediation hint — the Curator card is NEVER shown unless every artifact is \
+             present and verified. NEVER pass `allow_docx_skip=true` unless the user has \
+             EXPLICITLY accepted a Markdown-only deliverable; doing so produces a \
+             degraded Curator card and is treated as an SLA violation.",
+        ),
     }
 }
 
@@ -447,7 +448,8 @@ pub fn pinned_test_target_reminder(mode: CodingMode) -> Option<String> {
     if mode != CodingMode::Debug {
         return None;
     }
-    let tab_id = crate::tools::browser::current_test_target_tab()?;
+    let session_id = crate::session::current_session_context()?.session_id;
+    let tab_id = crate::tools::browser::current_test_target_tab(&session_id)?;
     Some(format!(
         "[Debug Test Target] User has pinned tab #{tab_id} as the QA target. \
          Drive ALL automated testing on tab_id={tab_id}: pass `tab_id={tab_id}` to every \
@@ -458,6 +460,59 @@ pub fn pinned_test_target_reminder(mode: CodingMode) -> Option<String> {
          Use `browser action=get_test_target` to re-confirm the pin if you lose track. \
          The user's UI also displays a `Test Target` badge so they can verify."
     ))
+}
+
+pub fn prototype_ref_reminder(mode: CodingMode) -> Option<String> {
+    if mode != CodingMode::Debug {
+        return None;
+    }
+    let session_id = crate::session::current_session_context()?.session_id;
+    let proto_tab = crate::tools::browser::current_prototype_ref_tab(&session_id)?;
+    Some(format!(
+        "[Prototype Reference] User has bound tab #{proto_tab} as the UI prototype reference. \
+         This tab contains the target design from a prototype tool (Modao/Figma/Axure/etc.). \
+         When testing UI implementation, you MUST take a screenshot of the prototype tab \
+         (use `browser action=screenshot tab_id={proto_tab}`) and compare it against the \
+         test target tab to verify layout, spacing, colors, typography, and interactions \
+         match the prototype design. Report any deviations between the implementation and \
+         the prototype as professional QA findings. This is SEPARATE from the test target — \
+         the test target (Tab 绑定) is the page being tested, while this prototype reference \
+         is the design spec to compare against."
+    ))
+}
+
+pub fn web_research_active_reminder(
+    _mode: CodingMode,
+    web_search_enabled: bool,
+    _web_fetch_enabled: bool,
+) -> Option<&'static str> {
+    if !web_search_enabled {
+        return None;
+    }
+    Some(
+        "[Web Research Routing] When the user asks about external facts (`今日热点 / 热点新闻 / \
+         trending / what's new today / latest <X> / recent <Y> 2026 / hot search`), follow this \
+         protocol strictly:\n\
+         (1) ALWAYS call `web_search` FIRST with the user's intent verbatim. Use the appropriate \
+             `category`:\n   \
+             - News / hot topics / today's events  \u{2192} `category=\"news\"`\n   \
+             - Tech blog posts / Chinese tech blogs \u{2192} `category=\"lifestyle\"` (CSDN / Juejin / SegmentFault)\n   \
+             - Academic / paper / research          \u{2192} `category=\"academic\"`\n   \
+             - Forum / Q&A / opinion                \u{2192} `category=\"forum\"`\n   \
+             - Code / library / SDK                 \u{2192} `category=\"code\"`\n\
+         (2) DO NOT directly `web_fetch` hot-search/news aggregator pages such as \
+             `top.baidu.com`, `tophub.today`, `s.weibo.com`, `trends.google.com`, `news.qq.com`, \
+             `news.sina.com.cn`, `news.163.com`, `toutiao.com`, `36kr.com`, `thepaper.cn`, \
+             `news.ycombinator.com`. These return raw HTML and the runtime URL-guard will refuse \
+             them when `web_search` has not been tried yet (the refusal carries the corrected \
+             call).\n\
+         (3) `web_search` does multi-engine concurrent fan-out and returns structured per-page \
+             results with title + URL + snippet. ONLY after that, if you need the full article \
+             body, call `web_fetch` on the specific result URL the user is interested in. ONE \
+             call per URL \u{2014} do NOT spawn parallel `web_fetch` against every result.\n\
+         (4) Cite the search engine name + URL alongside any factual claim in the assistant \
+             reply.",
+    )
 }
 
 pub fn web_research_disabled_reminder(

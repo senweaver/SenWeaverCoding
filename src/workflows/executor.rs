@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Workflow Executor  - Execute workflow runs with step dispatch.
-//!
-//! This module provides the core workflow execution engine that:
-//! - Executes workflow steps sequentially or in parallel
-//! - Handles FanOut/Collect patterns for parallel execution
-//! - Manages conditional branching and loop iteration
-//! - Handles errors according to ErrorMode
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -211,7 +204,10 @@ impl WorkflowEngine {
                     }
 
                     let results = if fanout_futures.len() == 1 {
-                        vec![fanout_futures.into_iter().next().unwrap().await]
+                        match fanout_futures.into_iter().next() {
+                            Some(fut) => vec![fut.await],
+                            None => Vec::new(),
+                        }
                     } else {
                         let mut receivers = Vec::new();
                         for (idx, fut) in fanout_futures.into_iter().enumerate() {

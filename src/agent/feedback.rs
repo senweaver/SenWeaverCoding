@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Multi-signal feedback collection and reward aggregation.
-//!
-//! Combines multiple feedback sources (PRM judge, user reactions, tool
-//! outcomes, next-state evidence) into a scalar reward used for
-//! policy adjustment.
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;

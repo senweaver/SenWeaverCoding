@@ -1,36 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ??`OpsApplier` is the single execution engine that every
-//! editing surface dispatches into.
-//!
-//! Architecture (top-down):
-//! 1. The originating tool builds an [`super::edit_op::EditBatch`].
-//! 2. `OpsApplier::apply_batch` resolves a [`LockProvider`]
-//!    (= [`NoopLockProvider`], = `LockManager`-backed),
-//!    captures pre-images for every touched file, writes a
-//!    `pending` JSONL journal under
-//!    `<workspace>/.sen/edit_journal/<batch_id>.jsonl`, applies each
-//!    op sequentially, validates the result through a
-//!    [`BatchValidator`] (= [`NoopBatchValidator`],
-//!    will inject the syntactic verifier), commits the journal, and
-//!    returns a structured [`BatchOutcome`].
-//! 3. On any failure the engine performs a deterministic rollback
-//!    by replaying the captured pre-images.  Rollback semantics are
-//!    `atomic=true` by default; with `atomic=false` the partial
-//!    success is reported via `BatchOutcome::degraded`.
-//! 4. `OpsApplier::dry_run` runs the same pipeline without touching
-//!    disk and returns a [`BatchPreview`] containing per-op unified
-//!    diffs that callers can render in confirmation UIs.
-//!
-//! metrics: when `crdt_mode = true` the applier mirrors every
-//! successful op into the in-memory [`crate::coordination::Document`]
-//! POC and reports through [`crate::observability::coordination_metrics::global`]
-//! via the `incr_crdt_*` helpers.
-//!
-//! The journal format is intentionally append-only JSONL so that an
-//! external supervisor (multi-agent runtime) can replay,
-//! audit or roll back batches independently of the in-process state.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -303,8 +273,6 @@ pub struct OpsApplier {
     apply_opts: ApplyOptions,
     journal_retention: usize,
 
-    crdt_mode: bool,
-
     symbol_graph_writer: Option<Arc<crate::code_intel::symbol_graph_incremental::SymbolGraphWriter>>,
 
     lsp_notify: Option<Arc<dyn LspNotifier>>,
@@ -348,7 +316,6 @@ impl OpsApplier {
             validator: Arc::new(NoopBatchValidator),
             apply_opts: ApplyOptions::default(),
             journal_retention: 64,
-            crdt_mode: false,
             symbol_graph_writer: None,
             lsp_notify: None,
             edit_history: None,
@@ -383,17 +350,6 @@ impl OpsApplier {
     pub fn with_lock_provider(mut self, provider: Arc<dyn LockProvider>) -> Self {
         self.lock_provider = provider;
         self
-    }
-
-    #[must_use]
-    pub fn with_crdt_mode(mut self, enabled: bool) -> Self {
-        self.crdt_mode = enabled;
-        self
-    }
-
-    #[must_use]
-    pub fn crdt_mode(&self) -> bool {
-        self.crdt_mode
     }
 
     #[must_use]
@@ -472,9 +428,6 @@ impl OpsApplier {
                         success: true,
                         error: None,
                     });
-                    if self.crdt_mode {
-                        self.record_crdt_local_op(op);
-                    }
                     applied_paths.push(touched);
                 }
                 Err(err) => {
@@ -574,7 +527,7 @@ impl OpsApplier {
         }
 
         if let Some(writer) = self.symbol_graph_writer.as_ref() {
-            let changed: Vec<PathBuf> = unique_paths.iter().cloned().collect();
+            let changed: Vec<PathBuf> = unique_paths.to_vec();
             writer.on_files_changed(&changed);
         }
 
@@ -1170,22 +1123,6 @@ impl OpsApplier {
         }
     }
 
-    fn record_crdt_local_op(&self, op: &crate::apply_model::edit_op::EditOp) {
-        #[cfg(feature = "crdt-coordination")]
-        {
-            let path = op.primary_path().to_path_buf();
-            if let Ok(mut doc) = crate::coordination::Document::from_path(&path) {
-                if doc.apply_local(op).is_ok() {
-                    let _ = doc.encode_update();
-                }
-            }
-        }
-        #[cfg(not(feature = "crdt-coordination"))]
-        {
-            crate::observability::coordination_metrics::incr_crdt_local_ops(1);
-            let _ = op;
-        }
-    }
 }
 
 fn build_named_scopes_for(
@@ -1284,13 +1221,13 @@ fn line_range_to_byte_range(
 }
 
 fn unique_touched_paths(batch: &EditBatch) -> Vec<PathBuf> {
-    let mut set = BTreeMap::new();
+    let mut set = std::collections::BTreeSet::new();
     for op in &batch.ops {
         for p in op.touched_paths() {
-            set.insert(p.to_path_buf(), ());
+            set.insert(p.to_path_buf());
         }
     }
-    set.into_keys().collect()
+    set.into_iter().collect()
 }
 
 fn region_requests_for_batch(batch: &EditBatch) -> Vec<RegionLockRequest> {

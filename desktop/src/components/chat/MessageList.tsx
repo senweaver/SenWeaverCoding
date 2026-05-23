@@ -22,9 +22,12 @@ import { CommandPreviewCard } from './CommandPreviewCard'
 import { SubagentChunkBlock } from './SubagentChunkBlock'
 import { AskUserQuestion } from './AskUserQuestion'
 import { StreamingIndicator } from './StreamingIndicator'
+import { ProviderRetryBanner } from './ProviderRetryBanner'
 import { InlineTaskSummary } from './InlineTaskSummary'
 import { AnswersCard } from './AnswersCard'
 import { PlanCard } from './PlanCard'
+import { CuratorCard } from './CuratorCard'
+import { parseCuratorEnvelope } from '../../utils/parseCuratorMd'
 import { ModeSwitchCard } from './ModeSwitchCard'
 import { PairCheckpointCard } from './PairCheckpointCard'
 import { PlanModeBlockedNotice } from './PlanModeBlockedNotice'
@@ -43,6 +46,50 @@ type ToolResult = Extract<UIMessage, { type: 'tool_result' }>
 type RenderItem =
   | { kind: 'explored'; id: string; items: UIMessage[]; summary: ExploredSummary }
   | { kind: 'message'; message: UIMessage }
+
+function displayMessageFromKey(errorText: string | null, errorKey: string | null): string | null {
+  if (!errorText || !errorKey) return null
+  if (errorText === errorKey) return null
+  return errorText
+}
+
+const PROVIDER_FAIL_HINT_REGEX =
+  /All providers\/models failed after (\d+) attempts/i
+const PROVIDER_TOOL_DISPATCH_REGEX = /tool dispatch failed:\s*/i
+const PROVIDER_BACKEND_NOISE_REGEX = /\(responses fallback failed:[^)]*\)/i
+
+function humanizeErrorMessage(raw: string | undefined | null, fallback: string | null): string {
+  const text = (raw ?? '').trim()
+  if (!text) {
+    return fallback ?? 'Unknown error'
+  }
+  let summary = text.replace(PROVIDER_TOOL_DISPATCH_REGEX, '').trim()
+  summary = summary.replace(PROVIDER_BACKEND_NOISE_REGEX, '').trim()
+  const m = summary.match(PROVIDER_FAIL_HINT_REGEX)
+  if (m) {
+    const attempts = m[1]
+    return `所有可用模型/通道都失败了（已尝试 ${attempts} 次）。请检查网络或切换其他 Provider/Model 后再试。`
+  }
+  if (/error decoding response body/i.test(summary)) {
+    return '上游响应体解码失败，连接可能被中断。系统已自动重试若干次仍未恢复，建议稍后重试或更换模型。'
+  }
+  if (/url\.not_found|page not found|\b404\b/i.test(summary)) {
+    return '上游接口路径不存在或已下线。建议切换到当前服务商支持的模型/接口。'
+  }
+  if (/insufficient_quota|insufficient balance|quota exhausted|out of credits/i.test(summary)) {
+    return '当前 Provider 配额已用完或账户余额不足，请补充余额或切换备用通道。'
+  }
+  if (/rate.?limit|429/i.test(summary)) {
+    return '当前 Provider 触发限流（rate limit），请稍候再试或切换备用通道。'
+  }
+  if (/captcha|安全验证|人机验证|please verify/i.test(summary)) {
+    return '上游触发了反爬验证。系统会自动跳过该来源并尝试其他通道。'
+  }
+  if (summary.length > 240) {
+    return summary.slice(0, 200).trim() + '… (完整错误见详情)'
+  }
+  return summary
+}
 
 function signatureMatches(
   a: Map<string, Extract<UIMessage, { type: 'tool_result' }>>,
@@ -283,6 +330,11 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const pendingRewind = useChatStore((s) =>
     resolvedSessionId ? s.sessions[resolvedSessionId]?.pendingRewind ?? null : null,
   )
+  const providerRetry = useChatStore((s) =>
+    resolvedSessionId
+      ? s.sessions[resolvedSessionId]?.providerRetry ?? null
+      : null,
+  )
   const pendingSendAfterRewind = useChatStore((s) =>
     resolvedSessionId
       ? s.sessions[resolvedSessionId]?.pendingSendAfterRewind ?? null
@@ -395,6 +447,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
     scheduleAutoScroll()
   }, [messages.length, resolvedSessionId, streamingText, scheduleAutoScroll])
+
+  useEffect(() => {
+    setRewindTarget(null)
+    setRewindPreview(null)
+    setRewindError(null)
+    setIsLoadingPreview(false)
+    setIsExecutingRewind(false)
+    setExecutingRewindChoice(null)
+    setRestoreConfirmOpen(false)
+    setIsRestoring(false)
+    setIsCommittingSendAfterRewind(false)
+    setEditingMessage(null)
+  }, [resolvedSessionId])
 
   useEffect(() => {
     const container = scrollContainerRef.current
@@ -891,7 +956,27 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           <AssistantMessage content={streamingText} isStreaming={chatState === 'streaming'} />
         )}
 
-        {showPlanningIndicator && <StreamingIndicator />}
+        {resolvedSessionId && providerRetry && (
+          <ProviderRetryBanner sessionId={resolvedSessionId} />
+        )}
+
+        {showPlanningIndicator && !providerRetry && (
+          chatState === 'awaiting_workers' ? (
+            <div className="mx-auto w-full max-w-[860px] px-8 py-2">
+              <div className="inline-flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-[12px] text-[var(--color-text-secondary)]">
+                <span className="material-symbols-outlined text-[14px] text-[var(--color-warning)] animate-pulse">
+                  smart_toy
+                </span>
+                <span>
+                  {t('chat.willResumeWhenWorkersFinish') ||
+                    'Will resume when subagents finish'}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <StreamingIndicator />
+          )
+        )}
 
         <div ref={bottomRef} />
       </div>
@@ -1136,7 +1221,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   )
 }
 
-type ChatStateLite = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending'
+type ChatStateLite = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending' | 'awaiting_workers'
 
 type MessageBlockProps = {
   message: UIMessage
@@ -1281,16 +1366,49 @@ export const MessageBlock = memo(function MessageBlock({
           completedAt={message.completedAt}
         />
       )
-    case 'tool_use':
-
+    case 'tool_use': {
       if (isAskQuestionToolName(message.toolName)) {
         return supersededWrap(
           <AskUserQuestion
             toolUseId={message.toolUseId}
             input={message.input}
             result={toolResult?.content}
+            sessionId={sessionId}
           />
         )
+      }
+      if (
+        message.toolName === 'exit_curator_mode' &&
+        toolResult &&
+        !toolResult.isError
+      ) {
+        const resultText =
+          typeof toolResult.content === 'string'
+            ? toolResult.content
+            : Array.isArray(toolResult.content)
+              ? toolResult.content
+                  .filter((c: any) => c && typeof c.text === 'string')
+                  .map((c: any) => c.text)
+                  .join('\n')
+              : ''
+        if (resultText.includes('===CURATOR_MARKDOWN_BEGIN===')) {
+          const parsed = parseCuratorEnvelope(resultText)
+          if (parsed) {
+            return supersededWrap(
+              <CuratorCard
+                messageId={message.id}
+                slug={parsed.slug}
+                template={parsed.template}
+                finalMdPath={parsed.finalMdPath}
+                implBlueprintPath={parsed.implBlueprintPath}
+                docxPath={parsed.docxPath}
+                title={parsed.title}
+                body={parsed.body}
+                sessionId={sessionId}
+              />
+            )
+          }
+        }
       }
       return supersededWrap(
         <ToolCard
@@ -1301,11 +1419,41 @@ export const MessageBlock = memo(function MessageBlock({
           isStreaming={
             chatState === 'tool_executing' && (toolResult == null)
           }
+          parentSessionId={sessionId}
+          toolTimestamp={message.timestamp}
           childCalls={childCalls}
           childResults={childResults}
         />
       )
-    case 'tool_result':
+    }
+    case 'tool_result': {
+      const resultText =
+        typeof message.content === 'string'
+          ? message.content
+          : Array.isArray(message.content)
+            ? message.content
+                .filter((c: any) => c && typeof c.text === 'string')
+                .map((c: any) => c.text)
+                .join('\n')
+            : ''
+      if (!message.isError && resultText.includes('===CURATOR_MARKDOWN_BEGIN===')) {
+        const parsed = parseCuratorEnvelope(resultText)
+        if (parsed) {
+          return supersededWrap(
+            <CuratorCard
+              messageId={message.id}
+              slug={parsed.slug}
+              template={parsed.template}
+              finalMdPath={parsed.finalMdPath}
+              implBlueprintPath={parsed.implBlueprintPath}
+              docxPath={parsed.docxPath}
+              title={parsed.title}
+              body={parsed.body}
+              sessionId={sessionId}
+            />
+          )
+        }
+      }
       return supersededWrap(
         <ToolResultBlock
           content={message.content}
@@ -1313,6 +1461,7 @@ export const MessageBlock = memo(function MessageBlock({
           standalone
         />
       )
+    }
     case 'permission_request':
       return supersededWrap(
         <PermissionDialog
@@ -1320,23 +1469,29 @@ export const MessageBlock = memo(function MessageBlock({
           toolName={message.toolName}
           input={message.input}
           description={message.description}
+          sessionId={sessionId}
         />
       )
     case 'error': {
       const errorKey = message.code ? `error.${message.code}` as TranslationKey : null
       const errorText = errorKey ? t(errorKey) : null
-      const displayMessage = (errorText && errorText !== errorKey) ? errorText : message.message
+      const friendly = humanizeErrorMessage(message.message, displayMessageFromKey(errorText, errorKey))
       const showRawDetail =
         Boolean(message.message) &&
         message.message.trim() !== '' &&
-        message.message !== displayMessage
+        message.message !== friendly
       return supersededWrap(
         <div className="mb-2 px-4 py-2 rounded-lg border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/28 text-sm text-[var(--color-error)]">
-          <strong>Error:</strong> {displayMessage}
+          <strong>Error:</strong> {friendly}
           {showRawDetail && (
-            <div className="mt-1 whitespace-pre-wrap text-xs text-[var(--color-on-error-container)]/85">
-              {message.message}
-            </div>
+            <details className="mt-1 group">
+              <summary className="cursor-pointer text-xs text-[var(--color-on-error-container)]/75 hover:text-[var(--color-on-error-container)] select-none">
+                {t('chat.errorDetails')}
+              </summary>
+              <pre className="mt-1 whitespace-pre-wrap break-words font-[var(--font-mono)] text-[11px] leading-[1.5] text-[var(--color-on-error-container)]/85 max-h-64 overflow-y-auto">
+                {message.message}
+              </pre>
+            </details>
           )}
         </div>
       )
@@ -1414,6 +1569,22 @@ export const MessageBlock = memo(function MessageBlock({
           targetMode={message.targetMode}
           status={message.status}
           superseded={message.superseded}
+          sessionId={sessionId}
+          handoffKind={message.handoffKind}
+        />
+      )
+    case 'curator_card':
+      return supersededWrap(
+        <CuratorCard
+          messageId={message.id}
+          slug={message.slug}
+          template={message.template}
+          finalMdPath={message.finalMdPath}
+          implBlueprintPath={message.implBlueprintPath}
+          docxPath={message.docxPath}
+          title={message.title}
+          body={message.body}
+          status={message.status}
           sessionId={sessionId}
         />
       )

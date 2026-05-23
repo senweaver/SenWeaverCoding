@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Wizard-driven hardware configuration (`[hardware]`).
-//!
-//! Migrated out of `schema.rs` as part of N6.4.  Covers the
-//! physical-world-interaction surface: serial ports, debug probes,
-//! and the workspace datasheet RAG flag.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

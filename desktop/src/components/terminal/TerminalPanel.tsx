@@ -1,13 +1,4 @@
 // SPDX-License-Identifier: MIT
-//
-// Bottom Terminal Panel — VS Code style multi-tab dock anchored
-// above the StatusBar. Shows the agent-mirror tab on the left and
-// any number of interactive PTY tabs to its right.
-//
-// Tabs are mounted persistently (display:none toggle) so PTY output
-// & xterm scrollback are never lost when switching focus.
-//
-// All persistence (open / heightPx) lives inside terminalPanelStore.
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 
@@ -15,9 +6,11 @@ import { useTranslation } from '../../i18n'
 import { useActiveTabWorkDir } from '../../lib/activeWorkDir'
 import {
   TERMINAL_AGENT_MIRROR_TAB_ID,
+  sessionIdFromMirrorTabId,
   useTerminalPanelStore,
   type TerminalTab,
 } from '../../stores/terminalPanelStore'
+import { useTabStore } from '../../stores/tabStore'
 import { XtermView, type XtermViewHandle } from './XtermView'
 
 const HEIGHT_MIN = 120
@@ -39,14 +32,20 @@ export function TerminalPanel() {
   const setTabTitle = useTerminalPanelStore((s) => s.setTabTitle)
   const ensureAgentMirrorTab = useTerminalPanelStore((s) => s.ensureAgentMirrorTab)
   const clearAgentMirror = useTerminalPanelStore((s) => s.clearAgentMirror)
+  const syncAgentMirrorForChatSession = useTerminalPanelStore((s) => s.syncAgentMirrorForChatSession)
+  const activeChatTabId = useTabStore((s) => s.activeTabId)
 
   const handleRefs = useRef<Record<string, XtermViewHandle | null>>({})
 
   const activeTabWorkDir = useActiveTabWorkDir()
 
   useEffect(() => {
-    ensureAgentMirrorTab()
-  }, [ensureAgentMirrorTab])
+    ensureAgentMirrorTab(activeChatTabId ?? null)
+  }, [ensureAgentMirrorTab, activeChatTabId])
+
+  useEffect(() => {
+    syncAgentMirrorForChatSession(activeChatTabId ?? null)
+  }, [syncAgentMirrorForChatSession, activeChatTabId])
 
   const handleNewTab = useCallback(() => {
     openNewTab({ cwd: activeTabWorkDir ?? undefined })
@@ -148,7 +147,7 @@ export function TerminalPanel() {
             onClick={() => {
               if (!activeTab) return
               if (activeTab.kind === 'agent-mirror') {
-                clearAgentMirror()
+                clearAgentMirror(sessionIdFromMirrorTabId(activeTab.id))
               } else {
                 handleRefs.current[activeTab.id]?.clear()
               }
@@ -210,6 +209,14 @@ function tabLabel(
   t: ReturnType<typeof useTranslation>,
 ): string {
   if (tab.id === TERMINAL_AGENT_MIRROR_TAB_ID) return t('terminal.tab.agentMirror')
+  if (tab.kind === 'agent-mirror') {
+    const sid = sessionIdFromMirrorTabId(tab.id)
+    if (sid) {
+      const label = t('terminal.tab.agentMirror')
+      return `${label} · ${sid.slice(0, 6)}`
+    }
+    return t('terminal.tab.agentMirror')
+  }
   if (tab.title?.trim()) return tab.title
   return t('terminal.tab.untitled')
 }

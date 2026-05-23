@@ -1,8 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! `/workflow` slash command — load a DAG workflow file and run it
-//! through the `TaskSchedulerRuntime` + merge the results.
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use std::path::PathBuf;

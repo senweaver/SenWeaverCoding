@@ -36,11 +36,8 @@ fn validate_webhook_url(url: &str) -> Result<(), String> {
         let bare = host.trim_start_matches('[').trim_end_matches(']');
         if let Ok(ip) = bare.parse::<IpAddr>() {
             reject_private_ip(ip)?;
-        } else {
-
-            if bare == "localhost" && !(cfg!(debug_assertions) && scheme == "http") {
-                return Err("webhook URL must not target localhost".to_string());
-            }
+        } else if bare == "localhost" && !(cfg!(debug_assertions) && scheme == "http") {
+            return Err("webhook URL must not target localhost".to_string());
         }
     }
 
@@ -106,8 +103,7 @@ pub struct WebhookAuditHook {
 }
 
 impl WebhookAuditHook {
-    pub fn new(config: WebhookAuditConfig) -> Self {
-
+    pub fn new(config: WebhookAuditConfig) -> anyhow::Result<Self> {
         if config.enabled && config.url.is_empty() {
             tracing::warn!(
                 hook = "webhook-audit",
@@ -118,19 +114,19 @@ impl WebhookAuditHook {
         if !config.url.is_empty() {
             if let Err(e) = validate_webhook_url(&config.url) {
                 tracing::error!(hook = "webhook-audit", error = %e, "webhook URL validation failed");
-                panic!("webhook-audit: {e}");
+                return Err(anyhow::anyhow!("webhook-audit: {e}"));
             }
         }
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
-            .expect("failed to build webhook HTTP client");
-        Self {
+            .map_err(|e| anyhow::anyhow!("failed to build webhook HTTP client: {e}"))?;
+        Ok(Self {
             config,
             client,
             pending_args: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 }
 

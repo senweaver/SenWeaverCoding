@@ -1,13 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Incremental Server-Sent Events parser.
-//!
-//! Stream-ready state machine that tolerates packet fragmentation,
-//! multi-`data:` events, and the `[DONE]` sentinel.  Designed as a
-//! drop-in primitive for the provider rewrite — existing
-//! callers in `providers/compatible.rs` / `providers/reliable.rs`
-//! are not modified in this phase.
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SseEvent {
@@ -46,7 +39,7 @@ impl SseParser {
         self.parse_buffer();
     }
 
-    pub fn next(&mut self) -> Option<SseEvent> {
+    pub fn next_event(&mut self) -> Option<SseEvent> {
         self.ready.pop_front()
     }
 

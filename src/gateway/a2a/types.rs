@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! A2A Protocol Types - Agent-to-Agent communication protocol.
-//!
-//! Provides standardized types for agent discovery, task submission,
-//! and status tracking.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -158,7 +154,7 @@ impl A2aTask {
             id: format!(
                 "task-{}-{}",
                 now.timestamp_millis(),
-                uuid::Uuid::new_v4().to_string()[..8].to_string()
+                &uuid::Uuid::new_v4().to_string()[..8]
             ),
             name: name.into(),
             description: description.into(),

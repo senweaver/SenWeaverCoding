@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Notification context — mirrors claude-code-typescript-src`context/notifications.tsx`.
-// Manages in-session notifications displayed to the user.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

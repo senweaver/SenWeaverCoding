@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Per-tag resolution handlers.
-//!
-//! Each public function takes a reference to the workspace root
-//! plus the tag payload and returns a [`ContextItem`].  Handlers are
-//! small on purpose so they are easy to unit-test without pulling
-//! heavier subsystems (SymbolGraph / Tantivy / git) into the hot path.
 
 use std::path::{Path, PathBuf};
 

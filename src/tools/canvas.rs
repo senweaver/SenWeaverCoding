@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Live Canvas (A2UI) tool — push rendered content to a web canvas in real time.
-//!
-//! The agent can render HTML/SVG/Markdown to a named canvas, snapshot its
-//! current state, clear it, or evaluate a JavaScript expression in the canvas
-//! context. Content is stored in a shared [`CanvasStore`] and broadcast to
-//! connected WebSocket clients via per-canvas channels.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-// Skill self-improvement: atomically updates existing skill documents
-// after the agent uses them successfully.
-//
-// Gated behind `#[cfg(feature = "skill-creation")]` at the module level
-// in `src/skills/mod.rs`.
 
 use crate::config::SkillImprovementConfig;
 use anyhow::{Context, Result, bail};

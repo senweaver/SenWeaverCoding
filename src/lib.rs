@@ -5,158 +5,67 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(
     clippy::assigning_clones,
-
+    clippy::await_holding_lock,
     clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collapsible_if,
+    clippy::default_trait_access,
+    clippy::derivable_impls,
     clippy::doc_markdown,
-
-    clippy::float_cmp,
+    clippy::enum_glob_use,
+    clippy::explicit_iter_loop,
+    clippy::format_push_string,
+    clippy::if_not_else,
+    clippy::if_same_then_else,
+    clippy::ignored_unit_patterns,
     clippy::implicit_clone,
     clippy::items_after_statements,
-    clippy::map_unwrap_or,
+    clippy::large_futures,
+    clippy::let_and_return,
     clippy::manual_let_else,
+    clippy::manual_strip,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::missing_const_for_fn,
     clippy::missing_errors_doc,
+    clippy::missing_fields_in_debug,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
+    clippy::multiple_crate_versions,
     clippy::must_use_candidate,
-
+    clippy::needless_bool,
+    clippy::needless_continue,
     clippy::needless_pass_by_value,
-
+    clippy::new_without_default,
+    clippy::redundant_closure,
     clippy::redundant_closure_for_method_calls,
+    clippy::ref_option,
     clippy::return_self_not_must_use,
+    clippy::semicolon_if_nothing_returned,
+    clippy::shadow_unrelated,
     clippy::similar_names,
     clippy::single_match_else,
+    clippy::struct_excessive_bools,
     clippy::struct_field_names,
     clippy::too_many_lines,
+    clippy::type_complexity,
     clippy::uninlined_format_args,
-
-    clippy::unnecessary_lazy_evaluations,
+    clippy::unnecessary_cast,
     clippy::unnecessary_literal_bound,
     clippy::unnecessary_map_or,
-    clippy::unused_self,
-    clippy::cast_precision_loss,
     clippy::unnecessary_wraps,
-
-    dead_code,
-    private_interfaces,
-    clippy::new_without_default,
-    clippy::unwrap_or_default,
-    clippy::from_iter_instead_of_collect,
-    clippy::ref_option,
-    clippy::used_underscore_binding,
-    clippy::match_wildcard_for_single_variants,
-    clippy::doc_lazy_continuation,
-    clippy::missing_fields_in_debug,
-    clippy::match_same_arms,
-
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::derive_partial_eq_without_eq,
-    clippy::explicit_into_iter_loop,
-    clippy::explicit_iter_loop,
-    clippy::float_arithmetic,
-    clippy::format_push_string,
-    clippy::get_unwrap,
-    clippy::inline_always,
-    clippy::int_plus_one,
-    clippy::large_futures,
-    clippy::len_zero,
-    clippy::manual_assert,
-    clippy::manual_find_map,
-    clippy::manual_flatten,
-    clippy::map_flatten,
-    clippy::match_like_matches_macro,
-    clippy::maybe_infinite_iter,
-    clippy::mem_forget,
-    clippy::missing_const_for_fn,
-    clippy::modulo_arithmetic,
-    clippy::multiple_crate_versions,
-    clippy::needless_collect,
-    clippy::needless_for_each,
-    clippy::needless_pass_by_ref_mut,
-    clippy::non_ascii_literal,
-    clippy::option_if_let_else,
-    clippy::or_fun_call,
-    clippy::perf,
-    clippy::precedence,
-    clippy::redundant_else,
-    clippy::rest_pat_in_fully_bound_structs,
-    clippy::same_name_method,
-    clippy::shadow_reuse,
-    clippy::shadow_same,
-    clippy::shadow_unrelated,
-    clippy::string_add,
-    clippy::string_lit_as_bytes,
-    clippy::suspicious_else_formatting,
-    clippy::try_err,
-    clippy::unnecessary_sort_by,
     clippy::unnested_or_patterns,
-    clippy::unused_rounding,
-    clippy::useless_let_if_seq,
-    clippy::verbose_bit_mask,
-    clippy::zero_sized_map_values,
-
     clippy::unused_async,
-    clippy::manual_string_new,
-    clippy::derivable_impls,
-    clippy::field_reassign_with_default,
-    clippy::default_trait_access,
-    clippy::unnecessary_cast,
-    clippy::used_underscore_items,
-    unused_must_use,
-    clippy::borrow_as_ptr,
-    clippy::collapsible_match,
-    clippy::needless_range_loop,
-    clippy::manual_div_ceil,
-    clippy::implicit_saturating_sub,
-    clippy::absurd_extreme_comparisons,
-    clippy::cloned_instead_of_copied,
-    clippy::enum_glob_use,
-    clippy::blocks_in_conditions,
-    clippy::manual_range_contains,
-    clippy::doc_overindented_list_items,
-    clippy::doc_comment_double_space_linebreaks,
-    clippy::inherent_to_string,
-    clippy::should_implement_trait,
-    clippy::while_let_loop,
-    clippy::bind_instead_of_map,
-    clippy::useless_format,
-    clippy::single_char_pattern,
-    clippy::if_same_then_else,
-    clippy::let_and_return,
-    clippy::manual_strip,
-    clippy::cast_lossless,
-    clippy::semicolon_if_nothing_returned,
-    clippy::struct_excessive_bools,
-    clippy::ignored_unit_patterns,
-    clippy::manual_is_multiple_of,
-    clippy::manual_midpoint,
-    clippy::bool_to_int_with_if,
-    clippy::needless_continue,
-    clippy::await_holding_lock,
-    clippy::self_only_used_in_recursion,
-    clippy::no_effect_underscore_binding,
-    clippy::print_literal,
-    clippy::needless_borrows_for_generic_args,
-    clippy::collapsible_if,
-    clippy::type_complexity,
-    clippy::ptr_as_ptr,
-    clippy::explicit_auto_deref,
-    clippy::doc_link_with_quotes,
-    clippy::collapsible_else_if,
-    clippy::redundant_closure,
-    clippy::needless_borrow,
-    clippy::if_not_else,
-    clippy::manual_clamp,
-    clippy::unnecessary_min_or_max,
-    clippy::unused_enumerate_index,
-    clippy::ptr_arg,
-
-    clippy::useless_vec,
+    clippy::unused_self,
+    clippy::unwrap_or_default,
+    clippy::used_underscore_binding,
     clippy::wildcard_imports,
-    deprecated,
-    unreachable_code,
+    dead_code,
 )]
 
 use clap::Subcommand;
@@ -167,15 +76,15 @@ pub mod session;
 
 pub use session as agent_session;
 
-pub(crate) mod approval;
-pub(crate) mod auth;
+pub mod approval;
+pub mod auth;
 pub mod bench_diff;
 pub mod channels;
 pub mod cli;
 
 pub mod cli_entry;
 pub use cli::input::Input;
-pub(crate) mod commands;
+pub mod commands;
 
 pub use commands::registry::{
     CommandCategory, CommandContext, CommandRegistry, CommandResult, SlashCommand,
@@ -187,12 +96,12 @@ pub mod code_intel;
 pub mod config;
 
 pub mod context_resolver;
-pub(crate) mod cost;
+pub mod cost;
 pub mod cron;
-pub(crate) mod daemon;
+pub mod daemon;
 
 pub mod diff_session;
-pub(crate) mod doctor;
+pub mod doctor;
 pub mod editor_core;
 pub mod error;
 
@@ -200,29 +109,28 @@ pub mod evals;
 
 pub mod evolution;
 
-pub mod flow_canvas;
 pub mod gateway;
 pub mod guardrails;
 pub mod hands;
-pub(crate) mod hardware;
-pub(crate) mod health;
-pub(crate) mod heartbeat;
+pub mod hardware;
+pub mod health;
+pub mod heartbeat;
 pub mod hooks;
 pub mod i18n;
-pub(crate) mod identity;
+pub mod identity;
 
 pub mod inline_completion;
 pub mod lsp;
 
 pub mod inline_edit;
-pub(crate) mod integrations;
+pub mod integrations;
 pub mod memdir;
 pub mod memory;
-pub(crate) mod migration;
-pub(crate) mod multimodal;
+pub mod migration;
+pub mod multimodal;
 pub mod nodes;
 pub mod observability;
-pub(crate) mod onboard;
+pub mod onboard;
 pub mod peripherals;
 pub mod providers;
 pub mod python_env;
@@ -233,13 +141,13 @@ pub mod runtime;
 pub mod security;
 pub mod services;
 pub mod skillforge;
-pub(crate) mod skills;
+pub mod skills;
 pub mod sop;
 pub mod user_rules;
 pub mod token_saver;
 pub mod tools;
 pub mod trust;
-pub(crate) mod tunnel;
+pub mod tunnel;
 pub mod util;
 pub mod verifiable_intent;
 
@@ -249,10 +157,10 @@ pub mod event_bus;
 pub mod workflows;
 
 pub mod bootstrap;
-pub(crate) mod bridge;
-pub(crate) mod buddy;
-pub(crate) mod constants;
-pub(crate) mod context;
+pub mod bridge;
+pub mod buddy;
+pub mod constants;
+pub mod context;
 pub mod coordinator;
 
 #[cfg(feature = "crdt-coordination")]
@@ -260,15 +168,15 @@ pub mod coordination;
 pub mod entrypoints;
 
 pub mod keybindings;
-pub(crate) mod output_styles;
-pub(crate) mod proxy;
+pub mod output_styles;
+pub mod proxy;
 pub mod query;
-pub(crate) mod remote;
-pub(crate) mod schemas;
+pub mod remote;
+pub mod schemas;
 pub mod tasks;
+pub mod workers;
 
 pub mod vim_mode;
-pub(crate) mod voice;
 
 #[cfg(feature = "tui")]
 pub mod tui;

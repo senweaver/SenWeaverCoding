@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: MIT
-// LSP server registry + live diagnostics cache for the desktop UI.
-//
-// Subscribes to the chat WebSocket via the side-channel installed in
-// `lspBridge.ts` so install progress, server status, and
-// publishDiagnostics events all reach this store without polling.
 
 import { create } from 'zustand'
 import { lspApi, type LspPreferences } from '../api/lsp'
+import { useSessionStore } from './sessionStore'
 import type {
   LspBroadcastEvent,
   LspDiagnostic,
@@ -17,6 +13,62 @@ import type {
 } from '../types/lsp'
 
 type DiagnosticsByUri = Record<string, { serverId: string; version: number | null; diagnostics: LspDiagnostic[] }>
+type DiagnosticsByWorkspace = Record<string, DiagnosticsByUri>
+
+const DIAGNOSTICS_UNKNOWN_WORKSPACE = '__unknown__'
+
+function normaliseFsPathForCompare(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+function uriToFsPath(uri: string): string | null {
+  if (uri.startsWith('file://')) {
+    try {
+      const decoded = decodeURIComponent(uri.slice(7))
+      if (decoded.startsWith('/') && /^\/[A-Za-z]:/.test(decoded)) {
+        return decoded.slice(1)
+      }
+      return decoded
+    } catch {
+      return uri.slice(7)
+    }
+  }
+  return uri
+}
+
+export function resolveWorkspaceRootForUri(
+  uri: string,
+  workspaceRoots: readonly string[],
+): string {
+  const fsPath = uriToFsPath(uri)
+  if (!fsPath) return DIAGNOSTICS_UNKNOWN_WORKSPACE
+  const cmp = normaliseFsPathForCompare(fsPath)
+  let best: string | null = null
+  let bestLen = -1
+  for (const root of workspaceRoots) {
+    if (!root) continue
+    const rootCmp = normaliseFsPathForCompare(root)
+    if (cmp === rootCmp || cmp.startsWith(`${rootCmp}/`)) {
+      if (rootCmp.length > bestLen) {
+        best = root
+        bestLen = rootCmp.length
+      }
+    }
+  }
+  return best ?? DIAGNOSTICS_UNKNOWN_WORKSPACE
+}
+
+function collectWorkspaceRoots(): string[] {
+  const roots = new Set<string>()
+  for (const session of useSessionStore.getState().sessions) {
+    if (session.workDir && session.workDir.trim().length > 0) {
+      roots.add(session.workDir)
+    }
+  }
+  return Array.from(roots)
+}
+
+export { DIAGNOSTICS_UNKNOWN_WORKSPACE }
 
 type InstallProgressMap = Record<
   string,
@@ -39,6 +91,7 @@ type LspStore = {
   error: string | null
 
   diagnosticsByUri: DiagnosticsByUri
+  diagnosticsByWorkspace: DiagnosticsByWorkspace
   installProgress: InstallProgressMap
   serverStatus: ServerStatusMap
 
@@ -268,6 +321,7 @@ export const useLspStore = create<LspStore>((set, get) => ({
   error: null,
 
   diagnosticsByUri: {},
+  diagnosticsByWorkspace: {},
   installProgress: {},
   serverStatus: {},
 
@@ -379,7 +433,7 @@ export const useLspStore = create<LspStore>((set, get) => ({
   },
 
   clearDiagnostics: () => {
-    set({ diagnosticsByUri: {} })
+    set({ diagnosticsByUri: {}, diagnosticsByWorkspace: {} })
   },
 
   handleBroadcastEvent: (event) => {
@@ -395,7 +449,26 @@ export const useLspStore = create<LspStore>((set, get) => ({
             diagnostics: event.diagnostics,
           }
         }
-        set({ diagnosticsByUri: next })
+        const workspaceRoots = collectWorkspaceRoots()
+        const workspaceRoot = resolveWorkspaceRootForUri(event.uri, workspaceRoots)
+        const prevWorkspaceMap = get().diagnosticsByWorkspace
+        const wsCopy: DiagnosticsByWorkspace = { ...prevWorkspaceMap }
+        const bucket: DiagnosticsByUri = { ...(wsCopy[workspaceRoot] ?? {}) }
+        if (!event.diagnostics || event.diagnostics.length === 0) {
+          delete bucket[event.uri]
+        } else {
+          bucket[event.uri] = {
+            serverId: event.serverId,
+            version: event.version ?? null,
+            diagnostics: event.diagnostics,
+          }
+        }
+        if (Object.keys(bucket).length === 0) {
+          delete wsCopy[workspaceRoot]
+        } else {
+          wsCopy[workspaceRoot] = bucket
+        }
+        set({ diagnosticsByUri: next, diagnosticsByWorkspace: wsCopy })
         break
       }
       case 'lsp_install_progress': {

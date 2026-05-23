@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Experience replay memory for scored interaction storage.
-//!
-//! Stores scored interaction experiences that can be recalled for adaptive behavior.
-//! Experiences are ranked by reward and can be sampled for prompt injection
-//! (few-shot learning from past successes/failures).
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -235,7 +230,7 @@ impl ExperienceReplay {
         output.push_str("</experience_replay>");
 
         if let Some(led) = ledger {
-            let approx_tokens = (output.len() as u64 + 3) / 4;
+            let approx_tokens = (output.len() as u64).div_ceil(4);
             if approx_tokens > 0 {
                 let _ = led.reserve(
                     crate::agent::budget_ledger::Segment::Experience,

@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! OpenAI-style embedding back-end for code RAG.
-//!
-//! Reuses [`crate::memory::embeddings::OpenAiEmbedding`] under the
-//! hood so we share its proxy-aware HTTP client and `/embeddings`
-//! URL normalisation logic.
 
 use super::{CodeEmbedderConfig, EmbeddingProvider};
 

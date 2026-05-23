@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Suggestions Engine - contextual next-action suggestions for agent sessions.
-//!
-//! Analyzes conversation history and available tools to suggest
-//! relevant follow-up actions the user might want to take.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

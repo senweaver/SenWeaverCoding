@@ -1,20 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! LLM-backed next-edit predictor.
-//!
-//! [`LlmNep`] sends the recent edit history and a window around the
-//! cursor to a configured [`Provider`] and asks for a unified diff
-//! describing the most likely next edit.  The model is constrained
-//! by a tight system prompt so it cannot reply with prose: the only
-//! valid output is a single-file unified diff (or an explicit empty
-//! string when no useful prediction is possible).
-//!
-//! By default we route through the same provider/model the inline
-//! edit runner uses; surfaces that want a smaller / faster model can
-//! override `model` at construction time (e.g. wire it to the M1.5
-//! `fast_apply_model` so heuristic-fail → small-model NEP → large
-//! model on accept).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

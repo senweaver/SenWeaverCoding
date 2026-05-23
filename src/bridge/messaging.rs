@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Bridge messaging — mirrors claude-code-typescript-src`bridge/bridgeMessaging.ts`.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};

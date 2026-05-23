@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-// Output style constants — mirrors claude-code-typescript-src`constants/outputStyles.ts`.
 
 use serde::{Deserialize, Serialize};
 

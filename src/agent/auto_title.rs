@@ -1,10 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Auto Title - automatic conversation title generation.
-//!
-//! Generates concise titles for agent sessions based on the initial
-//! exchange, improving session management and history browsing.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Prompt templates for the LLM-backed Write Mode planner.
-//!
-//! The planner is expected to return a JSON object that deserialises
-//! straight into [`crate::write_mode::WritePlan`].  Keeping the schema
-//! small and explicit minimises the risk of hallucinated fields.
 
 use super::{MAX_PLAN_STEPS, types::PlanContext};
 

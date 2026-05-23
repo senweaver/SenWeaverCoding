@@ -1,18 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Token-budget ledger shared across every turn-shaping component.
-//!
-//! C.4 — the current codebase spreads token budgeting across
-//! `context_compressor`, `history_pruner`, `token_optimizer`,
-//! `tool_output_compressor`, and `experience`.  `BudgetLedger` provides
-//! a **single source of truth**: callers `reserve` tokens against a
-//! named `Segment`, `release` when they fail to use the full amount,
-//! and read `remaining` / `snapshot` for decisions.
-//!
-//! This module is deliberately **dependency-free** (no Observer /
-//! Prometheus wiring yet) so it can be adopted incrementally without
-//! breaking existing call-sites.
 
 use std::collections::HashMap;
 

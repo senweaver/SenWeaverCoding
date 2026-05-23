@@ -1,12 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Centralized token budget management and allocation.
-//!
-//! Provides real-time token estimation, budget allocation per component
-//! (system prompt, history, tool results, RAG context), and auto-triggers
-//! compression when approaching limits. Inspired by RTK's token tracking
-//! combined with SenWeaverCoding's existing context window management.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

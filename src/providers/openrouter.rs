@@ -111,7 +111,7 @@ struct NativeMessage {
     content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "crate::providers::sanitize::skip_serializing_tool_calls")]
     tool_calls: Option<Vec<NativeToolCall>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -447,7 +447,9 @@ impl OpenRouterProvider {
                                 let tool_calls = parsed_calls
                                     .into_iter()
                                     .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
+                                        id: Some(crate::providers::sanitize::normalize_tool_call_id(
+                                            Some(tc.id),
+                                        )),
                                         kind: Some("function".to_string()),
                                         function: NativeFunctionCall {
                                             name: tc.name,
@@ -463,11 +465,16 @@ impl OpenRouterProvider {
                                     .get("reasoning_content")
                                     .and_then(serde_json::Value::as_str)
                                     .map(ToString::to_string);
+                                let tool_calls = if tool_calls.is_empty() {
+                                    None
+                                } else {
+                                    Some(tool_calls)
+                                };
                                 return NativeMessage {
                                     role: "assistant".to_string(),
                                     content,
                                     tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
+                                    tool_calls,
                                     reasoning_content,
                                 };
                             }
@@ -541,7 +548,7 @@ impl OpenRouterProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| ProviderToolCall {
-                id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                id: crate::providers::sanitize::normalize_tool_call_id(tc.id),
                 name: tc.function.name,
                 arguments: tc.function.arguments,
             })
@@ -588,12 +595,14 @@ impl OpenRouterProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts_and_headers(
-            "provider.openrouter",
-            self.timeout_secs,
-            OPENROUTER_CONNECT_TIMEOUT_SECS,
-            &self.extra_headers,
-        )
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client_with_timeouts_and_headers(
+                "provider.openrouter",
+                self.timeout_secs,
+                OPENROUTER_CONNECT_TIMEOUT_SECS,
+                &self.extra_headers,
+            )
     }
 }
 
@@ -724,7 +733,8 @@ impl Provider for OpenRouterProvider {
         })?;
 
         let sanitized = super::traits::sanitize_messages_for_legacy(messages);
-        let budgeted = super::traits::enforce_context_budget_with_window(
+        let budgeted = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
             sanitized,
             model,
             self.reserved_output_tokens(model),
@@ -822,12 +832,7 @@ impl Provider for OpenRouterProvider {
             let text = self
                 .chat_with_history(&guided, model, temperature)
                 .await?;
-            return Ok(ProviderChatResponse {
-                text: Some(text),
-                tool_calls: vec![],
-                usage: None,
-                reasoning_content: None,
-            });
+            return Ok(ProviderChatResponse::text_only(Some(text), None));
         }
 
         let tools = if allow_native_tools {
@@ -835,7 +840,8 @@ impl Provider for OpenRouterProvider {
         } else {
             None
         };
-        let budgeted_messages = super::traits::enforce_context_budget_native_with_window(
+        let budgeted_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
             request.messages.to_vec(),
             model,
             self.reserved_output_tokens(model),
@@ -894,12 +900,7 @@ impl Provider for OpenRouterProvider {
                 let text = self
                     .chat_with_history(&guided, model, temperature)
                     .await?;
-                return Ok(ProviderChatResponse {
-                    text: Some(text),
-                    tool_calls: vec![],
-                    usage: None,
-                    reasoning_content: None,
-                });
+                return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
             anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
@@ -953,12 +954,7 @@ impl Provider for OpenRouterProvider {
                 "model is on the legacy/no-tools allowlist; chat_with_tools routing through chat_with_history"
             );
             let text = self.chat_with_history(messages, model, temperature).await?;
-            return Ok(ProviderChatResponse {
-                text: Some(text),
-                tool_calls: vec![],
-                usage: None,
-                reasoning_content: None,
-            });
+            return Ok(ProviderChatResponse::text_only(Some(text), None));
         }
 
         let native_tools: Option<Vec<NativeToolSpec>> = if !allow_native_tools {
@@ -988,7 +984,8 @@ impl Provider for OpenRouterProvider {
             if specs.is_empty() { None } else { Some(specs) }
         };
 
-        let budgeted_messages = super::traits::enforce_context_budget_native_with_window(
+        let budgeted_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
             messages.to_vec(),
             model,
             self.reserved_output_tokens(model),
@@ -1043,12 +1040,7 @@ impl Provider for OpenRouterProvider {
                     "OpenRouter rejected native tools ({sanitized}); retrying via chat_with_history"
                 );
                 let text = self.chat_with_history(messages, model, temperature).await?;
-                return Ok(ProviderChatResponse {
-                    text: Some(text),
-                    tool_calls: vec![],
-                    usage: None,
-                    reasoning_content: None,
-                });
+                return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
             anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
@@ -1198,9 +1190,16 @@ impl Provider for OpenRouterProvider {
         };
 
         let tools = Self::convert_tools(request.tools);
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            self.reserved_output_tokens(model),
+            Some(self.context_window_for(model)),
+        );
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages),
+            messages: Self::convert_messages(&sanitized_messages),
             temperature: Self::adjust_temperature_for_model(model, temperature),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -1461,7 +1460,8 @@ impl Provider for OpenRouterProvider {
         };
 
         let sanitized = super::traits::sanitize_messages_for_legacy(messages);
-        let budgeted = super::traits::enforce_context_budget_with_window(
+        let budgeted = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
             sanitized,
             model,
             self.reserved_output_tokens(model),

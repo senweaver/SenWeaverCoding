@@ -62,7 +62,9 @@ impl WebhookChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("channel.webhook")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.webhook")
     }
 
     fn verify_signature(&self, body: &[u8], signature: Option<&str>) -> bool {

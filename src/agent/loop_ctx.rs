@@ -67,7 +67,7 @@ pub struct LoopContext<'a> {
     pub tool_registry: Option<&'a crate::tools::registry::ToolRegistry>,
 }
 
-impl<'a> core::fmt::Debug for LoopContext<'a> {
+impl core::fmt::Debug for LoopContext<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LoopContext")
             .field("provider_name", &self.provider_name)

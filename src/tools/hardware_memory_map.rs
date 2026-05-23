@@ -1,11 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Hardware memory map tool — returns flash/RAM address ranges for connected boards.
-//!
-//! Phase B: When user asks "what are the upper and lower memory addresses?", this tool
-//! returns the memory map. Uses probe-rs for Nucleo/STM32 when available; otherwise
-//! returns static maps from datasheets.
 
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;

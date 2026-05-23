@@ -296,8 +296,7 @@ fn short_ack(
 
     let last = trimmed_out
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .next_back()
+        .rfind(|l| !l.trim().is_empty())
         .unwrap_or("");
     if !last.is_empty() && last.len() < 120 {
         (format!("{base} {last}"), scrub_err)

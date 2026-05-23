@@ -1,28 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//
-//! `LspManager` — reconciler between the persisted `LspConfig` and the
-//! running `services::lsp::LspService` fleet.
-//!
-//! Lifecycle:
-//!
-//! 1. The gateway constructs a manager during `run_gateway`, pointing
-//!    at the workspace dir + the broadcast channel that
-//!    `ws_desktop` will replay to UI clients.
-//! 2. Whenever a desktop route mutates the LspConfig section (CRUD,
-//!    install completion, toggle), it calls `manager.reconcile()` so
-//!    servers are spawned/stopped to match.
-//! 3. Each running server forwards `publishDiagnostics` notifications
-//!    through a [`crate::lsp::events::LspBroadcast`] event so the
-//!    desktop editor sees real-time errors / warnings.
-//!
-//! All reconciliation is intentionally idempotent: calling
-//! `reconcile()` repeatedly with the same config yields the same active
-//! set without restarting healthy processes.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -240,7 +221,7 @@ impl LspManager {
         self.diagnostics_listener.replace_mapping(live_mapping);
     }
 
-    async fn start_entry(&self, entry: &LspServerEntry, workspace_root: &PathBuf) -> Result<()> {
+    async fn start_entry(&self, entry: &LspServerEntry, workspace_root: &Path) -> Result<()> {
         let cmd = entry
             .resolved_command()
             .ok_or_else(|| anyhow!("server `{}` has no command configured", entry.id))?;
@@ -248,7 +229,7 @@ impl LspManager {
             language_id: entry.language_id.clone(),
             server_command: cmd.to_string(),
             server_args: entry.args.clone(),
-            root_path: workspace_root.clone(),
+            root_path: workspace_root.to_path_buf(),
             initialization_options: entry.initialization_options.clone(),
         };
         self.service.register_server(server_config).await;
@@ -258,7 +239,7 @@ impl LspManager {
             .await
     }
 
-    async fn stop_entry(&self, entry: &LspServerEntry, workspace_root: &PathBuf) {
+    async fn stop_entry(&self, entry: &LspServerEntry, workspace_root: &Path) {
         self.service
             .shutdown_server(&entry.language_id, workspace_root)
             .await;
@@ -339,7 +320,7 @@ impl LspManager {
     }
 }
 
-fn canonical_uri_prefix(workspace_root: &PathBuf) -> String {
+fn canonical_uri_prefix(workspace_root: &Path) -> String {
     crate::services::lsp::path_to_uri(workspace_root)
 }
 

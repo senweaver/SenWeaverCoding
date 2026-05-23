@@ -1,25 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! ??pluggable verification pipeline.
-//!
-//! Up to the verifiers were composed ad-hoc by each call
-//! site (CodeEditFlow, inline_edit, write_mode), each running a
-//! single verifier and stopping on the first error.  lifts
-//! that composition into a first-class type so:
-//!
-//! - the same configuration (`stages` + `policy`) can be reused
-//!   across CodeEditFlow / inline_edit / write_mode;
-//! - operators can switch between `fail-fast` (cheap) and
-//!   `collect-all` (full diagnostic dump) without touching the call
-//!   sites;
-//! - per-stage tracing spans emit `stage`, `elapsed_ms`, `passed`,
-//!   `error_count` so dashboards / log aggregators can plot the
-//!   verification cost breakdown without bespoke instrumentation.
-//!
-//! The module is feature-flag-free at the type level ??the heavy
-//! tree-sitter / LSP bits live in their respective modules and are
-//! exposed via the `Verifier` trait.
 
 use std::path::Path;
 use std::sync::Arc;

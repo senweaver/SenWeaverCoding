@@ -6,6 +6,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useTranslation } from '../../i18n'
 import { Popover } from '../shared/Popover'
+import { CODING_MODE_ACCENT } from '../../types/codingMode'
 import {
   DEFAULT_CONTEXT_WINDOW,
   formatTokenCount,
@@ -34,6 +35,8 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
   )
   const settingsModel = useSettingsStore((s) => s.currentModel?.id ?? null)
   const modelId = runtimeSelection?.modelId ?? settingsModel ?? null
+  const codingMode = useSettingsStore((s) => s.codingMode)
+  const accent = CODING_MODE_ACCENT[codingMode]
 
   const providerId = runtimeSelection?.providerId ?? null
   const providers = useProviderStore((s) => s.providers)
@@ -74,9 +77,7 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
   const arcColor =
     pct >= 0.9
       ? 'var(--color-error)'
-      : pct >= 0.7
-        ? 'var(--color-warning)'
-        : 'var(--color-text-secondary)'
+      : accent?.accent ?? 'var(--color-text-secondary)'
 
   const pctLabel = (pct * 100).toFixed(1).replace(/\.0$/, '')
   const tooltipText = t('chat.tokenRing.tooltip', {
@@ -102,7 +103,8 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
         type="button"
         aria-label={tooltipText}
         title=""
-        className="relative flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+        className="relative flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--color-surface-hover)]"
+        style={{ color: accent?.accent ?? 'var(--color-text-secondary)' }}
       >
         <svg
           width={size}

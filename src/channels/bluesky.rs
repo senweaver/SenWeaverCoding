@@ -115,7 +115,9 @@ impl BlueskyChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::config::build_runtime_proxy_client("channel.bluesky")
+        crate::services::get_services()
+            .proxy_runtime()
+            .build_client("channel.bluesky")
     }
 
     async fn create_session(&self) -> Result<()> {
