@@ -146,7 +146,9 @@ async fn rg_search(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn()?;
-    let mut stdout = child.stdout.take().expect("stdout piped");
+    let Some(mut stdout) = child.stdout.take() else {
+        anyhow::bail!("ripgrep spawn succeeded but stdout was not piped");
+    };
     let mut buf = Vec::new();
     let _ = stdout.read_to_end(&mut buf).await;
     let _ = child.wait().await?;
@@ -154,16 +156,28 @@ async fn rg_search(
     parse_rg_output(&text, workspace_root)
 }
 
+fn split_rg_line(line: &str) -> Option<(&str, &str, &str)> {
+    let last_colon = line.rfind(':')?;
+    let before_last = &line[..last_colon];
+    let hit_text = &line[last_colon + 1..];
+    let line_colon = before_last.rfind(':')?;
+    let path_str = &before_last[..line_colon];
+    let lineno_str = &before_last[line_colon + 1..];
+    if path_str.is_empty()
+        || lineno_str.is_empty()
+        || !lineno_str.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((path_str, lineno_str, hit_text))
+}
+
 fn parse_rg_output(text: &str, workspace_root: &Path) -> anyhow::Result<Vec<RawHit>> {
     let mut hits = Vec::new();
     for line in text.lines() {
-        let mut parts = line.splitn(3, ':');
-        let path_str = parts.next().unwrap_or("");
-        let lineno_str = parts.next().unwrap_or("");
-        let text = parts.next().unwrap_or("");
-        if path_str.is_empty() || lineno_str.is_empty() {
+        let Some((path_str, lineno_str, hit_text)) = split_rg_line(line) else {
             continue;
-        }
+        };
         let line_number = match lineno_str.parse::<usize>() {
             Ok(n) => n,
             Err(_) => continue,
@@ -178,7 +192,7 @@ fn parse_rg_output(text: &str, workspace_root: &Path) -> anyhow::Result<Vec<RawH
             path: abs,
             line_number,
             token: String::new(),
-            line_text: text.trim().to_string(),
+            line_text: hit_text.trim().to_string(),
         });
     }
     Ok(hits)
@@ -199,10 +213,17 @@ async fn structural_recall(
     if needles.is_empty() {
         return Ok(Vec::new());
     }
-    let mut matches: Vec<(PathBuf, usize)> = Vec::new();
-    walk_into(scope_path, workspace_root, &needles, &mut matches, include_globs, 0)?;
-    matches.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(matches.into_iter().map(|(p, _)| p).take(30).collect())
+    let scope = scope_path.to_path_buf();
+    let root = workspace_root.to_path_buf();
+    let includes = include_globs.to_vec();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<PathBuf>> {
+        let mut matches: Vec<(PathBuf, usize)> = Vec::new();
+        walk_into(&scope, &root, &needles, &mut matches, &includes, 0)?;
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(matches.into_iter().map(|(p, _)| p).take(30).collect())
+    })
+    .await??;
+    Ok(result)
 }
 
 fn walk_into(
@@ -240,7 +261,7 @@ fn walk_into(
         if !include_globs.is_empty() {
             let included = include_globs.iter().any(|g| {
                 globset::Glob::new(g)
-                    .and_then(|gp| Ok(gp.compile_matcher()))
+                    .map(|gp| gp.compile_matcher())
                     .map(|m| m.is_match(rel))
                     .unwrap_or(false)
             });
@@ -274,53 +295,59 @@ async fn pure_rust_recall(
     scope_path: &Path,
     tokens: &[&str],
 ) -> anyhow::Result<Vec<RawHit>> {
-    let mut hits = Vec::new();
-    let mut stack = vec![scope_path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if matches!(name, ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "__pycache__") {
-                    continue;
-                }
-            }
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
+    let _ = workspace_root;
+    let scope = scope_path.to_path_buf();
+    let tokens_owned: Vec<String> = tokens.iter().map(|s| (*s).to_string()).collect();
+    let hits = tokio::task::spawn_blocking(move || -> Vec<RawHit> {
+        let mut hits = Vec::new();
+        let mut stack = vec![scope];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
                 Err(_) => continue,
             };
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if metadata.len() > 2 * 1024 * 1024 {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            for (idx, line) in text.lines().enumerate() {
-                let lc = line.to_lowercase();
-                for token in tokens {
-                    if lc.contains(&token.to_lowercase()) {
-                        hits.push(RawHit {
-                            path: path.clone(),
-                            line_number: idx + 1,
-                            token: (*token).to_string(),
-                            line_text: line.trim().to_string(),
-                        });
-                        if hits.len() > 3000 {
-                            return Ok(hits);
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if matches!(name, ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "__pycache__") {
+                        continue;
+                    }
+                }
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if metadata.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if metadata.len() > 2 * 1024 * 1024 {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (idx, line) in text.lines().enumerate() {
+                    let lc = line.to_lowercase();
+                    for token in &tokens_owned {
+                        if lc.contains(&token.to_lowercase()) {
+                            hits.push(RawHit {
+                                path: path.clone(),
+                                line_number: idx + 1,
+                                token: token.clone(),
+                                line_text: line.trim().to_string(),
+                            });
+                            if hits.len() > 3000 {
+                                return hits;
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
         }
-        let _ = workspace_root;
-    }
+        hits
+    })
+    .await?;
     Ok(hits)
 }

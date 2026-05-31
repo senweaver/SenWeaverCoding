@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useCallback, useRef } from 'react'
 import { RIGHT_SIDEBAR_BOUNDS, useUIStore } from '../../stores/uiStore'
 import {

@@ -23,13 +23,15 @@ pub async fn handle_voice(_ctx: CommandContext) -> CommandResult {
         );
     }
 
-    let current = crate::util::get_env_var("SEN_VOICE").unwrap_or_else(|| "off".to_string());
+    let current = crate::util::get_runtime_var("SEN_VOICE").unwrap_or_else(|| "off".to_string());
     let new_mode = if current == "on" { "off" } else { "on" };
 
-    crate::util::set_env_var("SEN_VOICE", new_mode);
+    crate::util::set_runtime_var("SEN_VOICE", new_mode);
 
     if new_mode == "on" {
-        CommandResult::ok("Voice mode enabled. Speak your commands and they will be transcribed.")
+        CommandResult::ok(
+            "Voice mode enabled. The prompt now shows a [VOICE] indicator; keyboard input remains active.",
+        )
     } else {
         CommandResult::ok("Voice mode disabled.")
     }

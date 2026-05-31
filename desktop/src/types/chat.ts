@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import type { PermissionMode } from './settings'
 import type { CodingModeId } from './codingMode'
 import type { RuntimeSelection } from './runtime'
@@ -27,6 +31,7 @@ export type ClientMessage =
       type: 'start_plan_execution'
       planPath: string
       resume?: boolean
+      kind?: 'plan' | 'curator'
     }
   | { type: 'debug_bind_tab'; tab_id: number }
   | { type: 'debug_unbind_tab'; tab_id: number }
@@ -53,8 +58,10 @@ export type ServerMessage =
   | { type: 'connected'; sessionId: string }
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }
   | { type: 'content_delta'; text?: string }
+  | { type: 'content_reset' }
   | { type: 'tool_use_complete'; toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string; sessionId?: string }
   | { type: 'tool_result'; toolUseId: string; content: unknown; isError: boolean; parentToolUseId?: string }
+  | { type: 'plan_progress'; planPath: string; title: string; todos: unknown; timestampMs?: number; handoffKind?: 'plan' | 'curator' }
   | {
       type: 'permission_request'
       requestId: string
@@ -71,7 +78,7 @@ export type ServerMessage =
   | { type: 'message_complete'; usage: TokenUsage }
   | { type: 'thinking'; text: string }
   | { type: 'status'; state: ChatState; verb?: string; elapsed?: number; tokens?: number }
-  | { type: 'error'; message: string; code: string; retryable?: boolean }
+  | { type: 'error'; message: string; code: string; detail?: string; retryable?: boolean }
   | {
       type: 'provider_retry'
       attempt: number
@@ -95,6 +102,17 @@ export type ServerMessage =
       section?: string
       message?: string
       data?: unknown
+    }
+  | {
+      type: 'usage_updated'
+      sessionId?: string | null
+      codingMode?: string | null
+      model?: string
+      inputTokens?: number
+      outputTokens?: number
+      totalTokens?: number
+      costUsd?: number
+      timestamp?: string
     }
   | {
       type: 'debug_pii_stats'
@@ -318,7 +336,7 @@ export type UIMessage =
       description?: string
       timestamp: number
     })
-  | (UIMessageCommon & { id: string; type: 'error'; message: string; code: string; timestamp: number })
+  | (UIMessageCommon & { id: string; type: 'error'; message: string; code: string; detail?: string; timestamp: number })
   | (UIMessageCommon & { id: string; type: 'task_summary'; tasks: TaskSummaryItem[]; timestamp: number })
 
   | (UIMessageCommon & {
@@ -383,6 +401,8 @@ export type UIMessage =
       sourceToolUseId?: string
 
       source?: 'update_plan_save' | 'exit_plan_mode'
+
+      wasExecuted?: boolean
     })
 
   | (UIMessageCommon & {
@@ -392,6 +412,21 @@ export type UIMessage =
       planPath: string
       targetMode: CodingModeId
       status: 'pending' | 'switched' | 'dismissed'
+      handoffKind?: 'plan' | 'curator'
+    })
+
+  | (UIMessageCommon & {
+      id: string
+      type: 'plan_progress'
+      timestamp: number
+      planPath: string
+      title: string
+      todos: Array<{
+        id: string
+        content: string
+        status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+        notes?: string | null
+      }>
       handoffKind?: 'plan' | 'curator'
     })
 
@@ -408,6 +443,17 @@ export type UIMessage =
       body: string
       status: 'writing' | 'completed'
       sourceToolUseId?: string
+
+      todos?: Array<{
+        id: string
+        content: string
+        status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+        notes?: string | null
+      }>
+
+      pendingHydration?: boolean
+
+      wasExecuted?: boolean
     })
 
   | (UIMessageCommon & {
@@ -415,6 +461,9 @@ export type UIMessage =
       type: 'plan_mode_blocked'
       timestamp: number
       tools: Array<{ name: string; input?: unknown }>
+      mode?: string
+      reason?: 'plan' | 'read_only' | 'tool_not_allowed'
+      detail?: string
     })
 
 export type PendingEdit = {

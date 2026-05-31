@@ -48,7 +48,7 @@ pub fn ensure_firmware_dir() -> Result<PathBuf> {
     if !uf2_path.exists() {
         if PICO_UF2.len() < 8 || PICO_UF2[..4] != UF2_MAGIC1 {
             bail!(
-                "Bundled UF2 is a placeholder — download the real MicroPython UF2 from \
+                "Bundled UF2 is a placeholder  -  download the real MicroPython UF2 from \
                  https://micropython.org/download/RPI_PICO/ and place it at \
                  src/firmware/pico/sen-pico.uf2, then rebuild SenWeaverCoding."
             );
@@ -97,7 +97,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
 
         match result {
             Ok(Ok(_)) => {
-                tracing::info!("UF2 copy complete (std::fs::copy) — Pico will reboot");
+                tracing::info!("UF2 copy complete (std::fs::copy)  -  Pico will reboot");
                 return Ok(());
             }
             Ok(Err(e)) => tracing::warn!("std::fs::copy failed ({}), trying cp", e),
@@ -123,7 +123,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
                 tracing::warn!("cp timed out after {}s, trying sudo cp", CP_TIMEOUT_SECS);
             }
             Ok(Ok(o)) if o.status.success() => {
-                tracing::info!("UF2 copy complete (cp) — Pico will reboot");
+                tracing::info!("UF2 copy complete (cp)  -  Pico will reboot");
                 return Ok(());
             }
             Ok(Ok(o)) => {
@@ -150,7 +150,7 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
                 tracing::warn!("sudo cp timed out after {}s", SUDO_CP_TIMEOUT_SECS);
             }
             Ok(Ok(o)) if o.status.success() => {
-                tracing::info!("UF2 copy complete (sudo cp) — Pico will reboot");
+                tracing::info!("UF2 copy complete (sudo cp)  -  Pico will reboot");
                 return Ok(());
             }
             Ok(Ok(o)) => {
@@ -204,7 +204,7 @@ pub async fn deploy_main_py(port: &Path, firmware_dir: &Path) -> Result<()> {
 
     if !main_py_src.exists() {
         bail!(
-            "main.py not found at {} — run ensure_firmware_dir() first",
+            "main.py not found at {}  -  run ensure_firmware_dir() first",
             main_py_src.display()
         );
     }

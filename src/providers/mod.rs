@@ -10,20 +10,15 @@ pub mod compatible;
 pub mod copilot;
 pub mod core;
 pub mod gemini;
-pub mod gemini_cli;
 pub mod kilocli;
 pub mod ollama;
 pub mod openai;
-pub mod openai_codex;
-pub mod openai_responses;
 pub mod openrouter;
 pub mod reliable;
 pub mod router;
 pub mod sanitize;
 pub mod telnyx;
 pub mod traits;
-
-#[allow(unused_imports)]
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, Provider, ProviderCapabilityError,
     TokenUsage, ToolCall, ToolResultMessage,
@@ -1199,7 +1194,7 @@ pub fn create_provider_with_options(
 ) -> anyhow::Result<Box<dyn Provider>> {
     match name {
         "openai-codex" | "openai_codex" | "codex" => Ok(Box::new(
-            openai_codex::OpenAiCodexProvider::new(options, api_key)?,
+            openai::codex::OpenAiCodexProvider::new(options, api_key)?,
         )),
         _ => create_provider_with_url_and_options(name, api_key, None, options),
     }
@@ -1220,7 +1215,7 @@ pub fn create_provider_for_model(
     api_url: Option<&str>,
     options: &ProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn Provider>> {
-    if matches!(name, "openai") && openai_responses::model_uses_responses_api(model) {
+    if matches!(name, "openai") && openai::responses::model_uses_responses_api(model) {
         return create_provider_with_url_and_options(
             "openai-responses",
             api_key,
@@ -1304,7 +1299,7 @@ pub fn create_provider_with_url_and_options(
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string)
                 .or_else(|| options.provider_api_url.clone());
-            Ok(Box::new(openai_codex::OpenAiCodexProvider::new(
+            Ok(Box::new(openai::codex::OpenAiCodexProvider::new(
                 &codex_options,
                 key,
             )?))
@@ -1342,7 +1337,7 @@ pub fn create_provider_with_url_and_options(
             Ok(Box::new(p))
         }
         "openai-responses" | "openai_responses" | "openai_responses_api" => {
-            let mut p = openai_responses::OpenAiResponsesProvider::with_base_url(api_url, key);
+            let mut p = openai::responses::OpenAiResponsesProvider::with_base_url(api_url, key);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_output_tokens(Some(mt));
             }
@@ -1615,7 +1610,7 @@ pub fn create_provider_with_url_and_options(
         ))),
         "copilot" | "github-copilot" => Ok(Box::new(copilot::CopilotProvider::new(key))),
         "claude-code" => Ok(Box::new(claude_code::ClaudeCodeProvider::new())),
-        "gemini-cli" => Ok(Box::new(gemini_cli::GeminiCliProvider::new())),
+        "gemini-cli" => Ok(Box::new(gemini::cli::GeminiCliProvider::new())),
         "kilocli" | "kilo" => Ok(Box::new(kilocli::KiloCliProvider::new())),
         "lmstudio" | "lm-studio" => {
             let lm_studio_key = key
@@ -2275,6 +2270,97 @@ pub fn create_routed_provider_with_options(
         routes,
         default_model.to_string(),
     )))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_routed_provider_with_options_async(
+    primary_name: String,
+    api_key: Option<String>,
+    api_url: Option<String>,
+    reliability: crate::config::ReliabilityConfig,
+    model_routes: Vec<crate::config::ModelRouteConfig>,
+    default_model: String,
+    options: ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    tokio::task::spawn_blocking(move || {
+        create_routed_provider_with_options(
+            &primary_name,
+            api_key.as_deref(),
+            api_url.as_deref(),
+            &reliability,
+            &model_routes,
+            &default_model,
+            &options,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
+}
+
+pub async fn create_provider_async(
+    name: String,
+    api_key: Option<String>,
+) -> anyhow::Result<Box<dyn Provider>> {
+    tokio::task::spawn_blocking(move || create_provider(&name, api_key.as_deref()))
+        .await
+        .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
+}
+
+pub async fn create_provider_with_options_async(
+    name: String,
+    api_key: Option<String>,
+    options: ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    tokio::task::spawn_blocking(move || {
+        create_provider_with_options(&name, api_key.as_deref(), &options)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
+}
+
+pub async fn create_provider_with_url_async(
+    name: String,
+    api_key: Option<String>,
+    api_url: Option<String>,
+) -> anyhow::Result<Box<dyn Provider>> {
+    tokio::task::spawn_blocking(move || {
+        create_provider_with_url(&name, api_key.as_deref(), api_url.as_deref())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
+}
+
+pub async fn create_provider_with_url_and_options_async(
+    name: String,
+    api_key: Option<String>,
+    api_url: Option<String>,
+    options: ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    tokio::task::spawn_blocking(move || {
+        create_provider_with_url_and_options(&name, api_key.as_deref(), api_url.as_deref(), &options)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
+}
+
+pub async fn create_resilient_provider_with_options_async(
+    primary_name: String,
+    api_key: Option<String>,
+    api_url: Option<String>,
+    reliability: crate::config::ReliabilityConfig,
+    options: ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    tokio::task::spawn_blocking(move || {
+        create_resilient_provider_with_options(
+            &primary_name,
+            api_key.as_deref(),
+            api_url.as_deref(),
+            &reliability,
+            &options,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
 }
 
 pub struct ProviderInfo {

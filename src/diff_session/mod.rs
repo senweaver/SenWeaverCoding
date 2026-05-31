@@ -165,12 +165,32 @@ impl DiffSession {
             return Err(DiffSessionError::AlreadyApplied);
         }
 
-        for staged in &self.staged {
-            self.backups
-                .entry(staged.path.clone())
-                .or_insert_with(|| FileBackup {
-                    original: std::fs::read_to_string(&staged.path).ok(),
-                });
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let to_backup: Vec<PathBuf> = self
+            .staged
+            .iter()
+            .map(|s| s.path.clone())
+            .filter(|p| !self.backups.contains_key(p) && seen.insert(p.clone()))
+            .collect();
+        if !to_backup.is_empty() {
+            let reads = tokio::task::spawn_blocking(move || {
+                to_backup
+                    .into_iter()
+                    .map(|p| {
+                        let original = std::fs::read_to_string(&p).ok();
+                        (p, original)
+                    })
+                    .collect::<Vec<(PathBuf, Option<String>)>>()
+            })
+            .await
+            .map_err(|e| DiffSessionError::OpsApplier {
+                reason: format!("backup read task failed: {e}"),
+            })?;
+            for (path, original) in reads {
+                self.backups
+                    .entry(path)
+                    .or_insert(FileBackup { original });
+            }
         }
 
         let mut batch = EditBatch::new(EditOrigin::DiffSession).with_atomic(true);
@@ -205,8 +225,12 @@ impl DiffSession {
                 })
             }
             Err(e) => {
-
-                self.recover_with_atomic_fallback();
+                let root = self.root.clone();
+                let backups = self.backups.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    recover_with_atomic_fallback(&root, &backups)
+                })
+                .await;
                 Err(DiffSessionError::OpsApplier {
                     reason: e.to_string(),
                 })
@@ -230,77 +254,64 @@ impl DiffSession {
             }
         }
 
-        self.restore_backups_atomic()?;
+        {
+            let root = self.root.clone();
+            let backups = self.backups.clone();
+            tokio::task::spawn_blocking(move || restore_backups_atomic(&root, &backups))
+                .await
+                .map_err(|e| DiffSessionError::OpsApplier {
+                    reason: format!("restore task failed: {e}"),
+                })??;
+        }
         self.applied = false;
         self.last_batch_id = None;
         session_write_mode_metrics::incr_diff_session_rollback();
         Ok(())
     }
 
-    fn recover_with_atomic_fallback(&self) {
-        match self.restore_backups_atomic() {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!(
-                    target: "diff_session",
-                    error = %e,
-                    "atomic restore failed during apply_all recovery; falling back to best-effort restore",
-                );
-                self.restore_backups_best_effort();
+}
+
+fn recover_with_atomic_fallback(root: &Path, backups: &BTreeMap<PathBuf, FileBackup>) {
+    match restore_backups_atomic(root, backups) {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::error!(
+                target: "diff_session",
+                error = %e,
+                "atomic restore failed during apply_all recovery; falling back to best-effort restore",
+            );
+            restore_backups_best_effort(backups);
+        }
+    }
+}
+
+fn restore_backups_best_effort(backups: &BTreeMap<PathBuf, FileBackup>) {
+    for (path, backup) in backups {
+        match &backup.original {
+            Some(bytes) => {
+                let _ = std::fs::write(path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(path);
             }
         }
     }
+}
 
-    fn restore_backups_best_effort(&self) {
-        for (path, backup) in &self.backups {
-            match &backup.original {
-                Some(bytes) => {
-                    let _ = std::fs::write(path, bytes);
-                }
-                None => {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        }
+fn restore_backups_atomic(
+    root: &Path,
+    backups: &BTreeMap<PathBuf, FileBackup>,
+) -> Result<(), DiffSessionError> {
+    use std::fs;
+
+    if backups.is_empty() {
+        return Ok(());
     }
 
-    fn restore_backups_strict(&self) -> Result<(), DiffSessionError> {
-        let mut written: Vec<PathBuf> = Vec::new();
-        for (path, backup) in &self.backups {
-            let r = match &backup.original {
-                Some(bytes) => std::fs::write(path, bytes),
-                None => match std::fs::remove_file(path) {
-                    Ok(_) => Ok(()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(e) => Err(e),
-                },
-            };
-            match r {
-                Ok(()) => written.push(path.clone()),
-                Err(source) => {
-                    return Err(DiffSessionError::RestorePartial {
-                        path: path.clone(),
-                        written_paths: written,
-                        source,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn restore_backups_atomic(&self) -> Result<(), DiffSessionError> {
-        use std::fs;
-
-        if self.backups.is_empty() {
-            return Ok(());
-        }
-
-        let staging_root = self
-            .root
-            .join(".sen")
-            .join("diff_session")
-            .join(format!("restore-{}", uuid::Uuid::new_v4()));
+    let staging_root = root
+        .join(".sen")
+        .join("diff_session")
+        .join(format!("restore-{}", uuid::Uuid::new_v4()));
 
         fs::create_dir_all(&staging_root).map_err(|source| {
             DiffSessionError::RestoreStageFailed {
@@ -314,12 +325,12 @@ impl DiffSession {
             original: PathBuf,
             delete_original: bool,
         }
-        let mut stage_plan: Vec<Staged> = Vec::with_capacity(self.backups.len());
+        let mut stage_plan: Vec<Staged> = Vec::with_capacity(backups.len());
 
-        for (path, backup) in &self.backups {
+        for (path, backup) in backups {
             match &backup.original {
                 Some(bytes) => {
-                    let rel = path.strip_prefix(&self.root).unwrap_or(path);
+                    let rel = path.strip_prefix(root).unwrap_or(path);
 
                     let rel_clean: PathBuf = rel
                         .components()
@@ -402,9 +413,7 @@ impl DiffSession {
 
         let _ = fs::remove_dir_all(&staging_root);
         Ok(())
-    }
 }
-
 
 fn resolve_inside(root: &Path, path: &Path) -> Result<PathBuf, DiffSessionError> {
     let joined = if path.is_absolute() {

@@ -23,7 +23,7 @@ pub async fn handle_plan(_ctx: CommandContext) -> CommandResult {
         if current == CodingMode::Plan {
             *svc.coding_mode.write() = CodingMode::Vibe;
             CommandResult::ok(
-                "Plan mode disabled. Switched to **vibe** mode — all tools are now available.",
+                "Plan mode disabled. Switched to **vibe** mode  -  all tools are now available.",
             )
         } else {
             *svc.coding_mode.write() = CodingMode::Plan;

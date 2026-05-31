@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Parallel tool-dispatch bench (Phase 4 D1.2).
-//!
-//! Wires into the real
-//! [`senweavercoding::agent::turn_engine::tool_exec::ParallelToolExec`]
-//! trait via the [`JoinAllExec`] reference implementation.  The
-//! previous version spun a hard-coded `join_all(sleep)` loop which
-//! told us nothing about the agent-loop hot path; this version
-//! dispatches through the same trait the production loop uses, so
-//! regressions in the dispatch layer surface in the bench numbers.
-//!
-//! Run: `cargo bench --bench parallel_tools`
 
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};

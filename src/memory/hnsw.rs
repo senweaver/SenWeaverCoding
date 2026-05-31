@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use super::vector_index::VectorIndex;
+use super::vector::index::VectorIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SimScore(f32);

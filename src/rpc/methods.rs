@@ -352,6 +352,16 @@ impl RpcCtx {
                     )
                     .await;
                 }
+                TurnEvent::StreamReset => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "content_reset",
+                        }),
+                    )
+                    .await;
+                }
                 TurnEvent::Thinking { delta } => {
                     self.write_notification(
                         "session/event",
@@ -386,7 +396,7 @@ impl RpcCtx {
                     tool_call_id: _,
                 } => {
                     let is_error = !success
-                        || crate::agent::tool_event_status::output_indicates_error(&output);
+                        || crate::agent::tool_handler::event_status::output_indicates_error(&output);
                     self.write_notification(
                         "session/event",
                         serde_json::json!({
@@ -396,6 +406,24 @@ impl RpcCtx {
                             "output": output,
                             "success": success,
                             "isError": is_error,
+                        }),
+                    )
+                    .await;
+                }
+                TurnEvent::PlanProgressCommitted {
+                    plan_path,
+                    title,
+                    todos_json,
+                } => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "plan_progress",
+                            "planPath": plan_path,
+                            "title": title,
+                            "todos": serde_json::from_str::<serde_json::Value>(&todos_json)
+                                .unwrap_or(serde_json::Value::Null),
                         }),
                     )
                     .await;
@@ -859,13 +887,14 @@ impl RpcCtx {
         };
 
         let mem: Arc<dyn crate::memory::Memory> = Arc::from(
-            crate::memory::create_memory_with_storage_and_routes(
-                &self.config.memory,
-                &self.config.embedding_routes,
-                Some(&self.config.storage.provider.config),
-                &self.config.workspace_dir,
-                self.config.api_key.as_deref(),
+            crate::memory::create_memory_with_storage_and_routes_async(
+                self.config.memory.clone(),
+                self.config.embedding_routes.clone(),
+                Some(self.config.storage.provider.config.clone()),
+                self.config.workspace_dir.clone(),
+                self.config.api_key.clone(),
             )
+            .await
             .map_err(|e| RpcError::memory(format!("Failed to create memory: {e}")))?,
         );
 
@@ -898,13 +927,14 @@ impl RpcCtx {
             .unwrap_or("default");
 
         let mem: Arc<dyn crate::memory::Memory> = Arc::from(
-            crate::memory::create_memory_with_storage_and_routes(
-                &self.config.memory,
-                &self.config.embedding_routes,
-                Some(&self.config.storage.provider.config),
-                &self.config.workspace_dir,
-                self.config.api_key.as_deref(),
+            crate::memory::create_memory_with_storage_and_routes_async(
+                self.config.memory.clone(),
+                self.config.embedding_routes.clone(),
+                Some(self.config.storage.provider.config.clone()),
+                self.config.workspace_dir.clone(),
+                self.config.api_key.clone(),
             )
+            .await
             .map_err(|e| RpcError::memory(format!("Failed to create memory: {e}")))?,
         );
 

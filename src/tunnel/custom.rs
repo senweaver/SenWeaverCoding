@@ -113,7 +113,7 @@ impl Tunnel for CustomTunnel {
     async fn health_check(&self) -> bool {
 
         if let Some(ref url) = self.health_url {
-            return crate::services::get_services()
+            return crate::services::require_services()
                 .proxy_runtime()
                 .build_client("tunnel.custom")
                 .get(url)

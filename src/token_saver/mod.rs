@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -322,7 +322,7 @@ pub fn compact_dir_listing(entries: &[DirEntry], opts: &ListOpts) -> String {
 }
 
 pub fn estimate_tokens(text: &str) -> u64 {
-    crate::agent::token_budget::TokenBudgetManager::estimate_tokens(text) as u64
+    crate::agent::token::budget::TokenBudgetManager::estimate_tokens(text) as u64
 }
 
 fn estimate_tokens_saved(raw_bytes: usize, compacted_bytes: usize) -> u64 {

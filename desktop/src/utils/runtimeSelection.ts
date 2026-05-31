@@ -2,13 +2,13 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
 import type { RuntimeSelection } from '../types/runtime'
 import type { SavedProvider } from '../types/provider'
+import { enabledProviderModelIds } from './providerModels'
 
 function normalizedModels(provider: SavedProvider): string[] {
-  return (provider.models ?? [])
-    .map((m) => (typeof m === 'string' ? m.trim() : ''))
-    .filter((m) => m.length > 0)
+  return enabledProviderModelIds(provider)
 }
 
 export function isValidRuntimeSelection(
@@ -44,4 +44,46 @@ export function pickFirstConfiguredSelection(
     }
   }
   return null
+}
+
+export function resolveEffectiveRuntimeSelection(
+  sessionKey: string | null | undefined,
+  providers: SavedProvider[],
+  preferredProviderId: string | null,
+  settingsModelId: string | undefined,
+): RuntimeSelection | null {
+  const selections = useSessionRuntimeStore.getState().selections
+  const keysToTry: string[] = []
+  if (sessionKey) keysToTry.push(sessionKey)
+  if (sessionKey !== DRAFT_RUNTIME_SELECTION_KEY) {
+    keysToTry.push(DRAFT_RUNTIME_SELECTION_KEY)
+  }
+
+  for (const key of keysToTry) {
+    const stored = selections[key]
+    if (isValidRuntimeSelection(stored, providers)) {
+      return stored
+    }
+  }
+
+  const trimmedSettings = settingsModelId?.trim()
+  if (trimmedSettings) {
+    for (const provider of providers) {
+      if (enabledProviderModelIds(provider).includes(trimmedSettings)) {
+        return { providerId: provider.id, modelId: trimmedSettings }
+      }
+    }
+  }
+
+  return pickFirstConfiguredSelection(providers, preferredProviderId)
+}
+
+export function persistRuntimeSelection(
+  sessionKey: string | null | undefined,
+  selection: RuntimeSelection,
+): void {
+  if (sessionKey) {
+    useSessionRuntimeStore.getState().setSelection(sessionKey, selection)
+  }
+  useSessionRuntimeStore.getState().setSelection(DRAFT_RUNTIME_SELECTION_KEY, selection)
 }

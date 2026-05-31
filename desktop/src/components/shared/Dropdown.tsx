@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useState, useRef, useEffect, type ReactNode } from 'react'
 
 type DropdownItem<T extends string> = {

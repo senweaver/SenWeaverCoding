@@ -52,8 +52,6 @@ pub struct LspManager {
     workspace_root: Arc<RwLock<PathBuf>>,
     broadcast: LspBroadcast,
     inner: Arc<Mutex<ManagerInner>>,
-
-    #[allow(dead_code)]
     diagnostics_listener: Arc<DiagnosticsForwarder>,
 }
 
@@ -140,16 +138,21 @@ impl LspManager {
             }
 
             if unchanged {
-
-                if let (Some(language_id), Some(_)) =
-                    (Some(entry.language_id.clone()), entry.resolved_command())
-                {
-                    live_mapping.insert(
-                        canonical_uri_prefix(&workspace_root),
-                        (id.clone(), language_id),
-                    );
+                let running = self
+                    .service
+                    .is_server_running(&entry.language_id, &workspace_root)
+                    .await;
+                if running {
+                    if let (Some(language_id), Some(_)) =
+                        (Some(entry.language_id.clone()), entry.resolved_command())
+                    {
+                        live_mapping.insert(
+                            canonical_uri_prefix(&workspace_root),
+                            (id.clone(), language_id),
+                        );
+                    }
+                    continue;
                 }
-                continue;
             }
 
             if prev_fp.is_some() {
@@ -325,6 +328,7 @@ fn canonical_uri_prefix(workspace_root: &Path) -> String {
 }
 
 struct DiagnosticsForwarder {
+    #[cfg_attr(not(feature = "lsp-push-diagnostics"), allow(dead_code))]
     broadcast: LspBroadcast,
 
     servers: Arc<RwLock<HashMap<String, (String, String)>>>,
@@ -335,6 +339,7 @@ impl DiagnosticsForwarder {
         *self.servers.write() = mapping;
     }
 
+    #[cfg_attr(not(feature = "lsp-push-diagnostics"), allow(dead_code))]
     fn lookup(&self, uri: &str) -> Option<(String, String)> {
         let map = self.servers.read();
         for (prefix, ids) in map.iter() {

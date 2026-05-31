@@ -77,7 +77,7 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
         }
         SandboxBackend::Wasm => {
             tracing::info!(
-                "WASM sandbox requested — WASM isolation applies to runtime.kind='wasm' modules. \
+                "WASM sandbox requested  -  WASM isolation applies to runtime.kind='wasm' modules. \
                  Shell commands still use application-layer security."
             );
             Arc::new(super::traits::NoopSandbox)

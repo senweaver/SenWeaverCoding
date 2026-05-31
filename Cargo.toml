@@ -5,8 +5,11 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power"] }
+
 [lints.rust]
-unsafe_code = "warn"
+unsafe_code = "allow"
 unused_must_use = "warn"
 dead_code = "warn"
 
@@ -32,13 +35,10 @@ rust-version = "1.87"
 
 include = [
   "/src/**/*",
-  "/docs/**/*",
-  "/build.rs",
   "/Cargo.toml",
   "/Cargo.lock",
   "/LICENSE*",
   "/README.md",
-  "/tool_descriptions/**/*",
 ]
 
 [[bin]]
@@ -132,6 +132,7 @@ once_cell = "1"
 async-trait = "0.1"
 
 ring = "0.17"
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
 
@@ -149,7 +150,7 @@ which = "8.0"
 
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-socks = "0.5"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink", "alloc"] }
 
 crossbeam-deque = "0.8"
 num_cpus = "1.16"
@@ -219,6 +220,7 @@ streaming-iterator = { version = "0.1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"], optional = true }
+windows-sys = { workspace = true }
 
 cpal = { version = "0.15", optional = true }
 
@@ -341,6 +343,19 @@ channels = [
     "channel-twilio",
     "whatsapp-web",
 ]
+channels-lite = [
+    "channel-lark",
+    "channel-nostr",
+    "channel-telegram",
+    "channel-slack",
+    "channel-discord",
+    "channel-dingtalk",
+    "channel-wechat",
+    "channel-email",
+    "channel-line",
+    "channel-twilio",
+    "whatsapp-web",
+]
 code-intel-extra = ["code-intel-go", "code-intel-java", "code-intel-c", "code-intel-cpp"]
 tool-cron = []
 tool-sop = []
@@ -360,11 +375,6 @@ extras = ["tool-cron", "tool-sop", "tool-team", "tool-cloud-ops", "tool-reports"
 
 [profile.dev]
 incremental = true
-# Keep `opt-level = 0` here: MSVC + incremental + `cdylib` linking (desktop's
-# `sen_desktop_lib.dll`) has reproducibly surfaced thousands of `LNK2019`
-# unresolved `anon.*.llvm*` symbols across CGUs when compiling dependencies at
-# `opt-level >= 1` in dev mode. Thin/dev optimization is incompatible with this
-# link graph until toolchain fixes land.
 opt-level = 0
 
 [profile.release]

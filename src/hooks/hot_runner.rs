@@ -174,6 +174,19 @@ pub fn build_runner(config: &Config, workspace_dir: &Path) -> Option<Arc<HookRun
         return None;
     }
 
+    let hook_schema = crate::schemas::hooks::HookSchema::default_schema();
+    if config.hooks.builtin.webhook_audit.enabled {
+        let audit_cfg = serde_json::to_value(&config.hooks.builtin.webhook_audit).unwrap_or_default();
+        if let Err(errors) =
+            crate::schemas::hooks::validate_hook_config(&hook_schema, "post_tool_use", &audit_cfg)
+        {
+            tracing::warn!(
+                ?errors,
+                "webhook-audit hook config failed schema validation; continuing with built-in checks"
+            );
+        }
+    }
+
     let mut runner = HookRunner::new();
 
     if config.hooks.builtin.command_logger {

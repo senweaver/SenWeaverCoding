@@ -23,6 +23,9 @@ pub enum HookEvent {
     #[serde(rename = "beforeMCPExecution")]
     BeforeMcpExecution,
 
+    #[serde(rename = "preToolUse")]
+    PreToolUse,
+
     BeforeReadFile,
 
     BeforeSubmitPrompt,
@@ -38,6 +41,7 @@ impl HookEvent {
         match self {
             HookEvent::BeforeShellExecution => "beforeShellExecution",
             HookEvent::BeforeMcpExecution => "beforeMCPExecution",
+            HookEvent::PreToolUse => "preToolUse",
             HookEvent::BeforeReadFile => "beforeReadFile",
             HookEvent::BeforeSubmitPrompt => "beforeSubmitPrompt",
             HookEvent::AfterFileEdit => "afterFileEdit",
@@ -260,25 +264,33 @@ impl ScriptHookRunner {
     }
 
     fn commands_for(&self, event: HookEvent, payload: &HookPayload) -> Vec<&HookCommand> {
+        let lookup_events: Vec<HookEvent> = match event {
+            HookEvent::BeforeMcpExecution | HookEvent::PreToolUse => {
+                vec![HookEvent::BeforeMcpExecution, HookEvent::PreToolUse]
+            }
+            other => vec![other],
+        };
 
         let mut chosen: Option<&HooksSource> = None;
         for src in &self.sources {
-            if src.config.hooks.contains_key(&event) {
+            if lookup_events
+                .iter()
+                .any(|ev| src.config.hooks.contains_key(ev))
+            {
                 chosen = Some(src);
             }
         }
         let Some(src) = chosen else {
             return Vec::new();
         };
-        src.config
-            .hooks
-            .get(&event)
-            .map(|cmds| {
+        lookup_events
+            .iter()
+            .filter_map(|ev| src.config.hooks.get(ev))
+            .flat_map(|cmds| {
                 cmds.iter()
                     .filter(|c| matcher_matches(c.matchers.as_ref(), payload))
-                    .collect()
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     pub async fn dispatch(&self, event: HookEvent, payload: HookPayload) -> HookDecision {
@@ -536,7 +548,7 @@ fn home_dir() -> Option<PathBuf> {
 pub fn event_for_tool_pre(tool: &str) -> Option<HookEvent> {
     let lower = tool.to_ascii_lowercase();
     if lower.starts_with("mcp.") || lower.starts_with("mcp_") {
-        return Some(HookEvent::BeforeMcpExecution);
+        return Some(HookEvent::PreToolUse);
     }
     match lower.as_str() {
         "shell_exec" | "shell" | "bash" | "terminal_run" | "process_exec" => {

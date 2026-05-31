@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -86,15 +86,9 @@ pub fn render_docx(
                     skip_first_h1 = false;
                     continue;
                 }
-                let style_name = match level {
-                    1 => "Heading1",
-                    2 => "Heading2",
-                    3 => "Heading3",
-                    _ => "Heading3",
-                };
                 doc = doc.add_paragraph(
                     Paragraph::new()
-                        .style(style_name)
+                        .style(heading_style_name(*level))
                         .line_spacing(heading_spacing(*level, &typo))
                         .add_run(heading_run(text, *level, &typo)),
                 );
@@ -132,30 +126,42 @@ pub fn render_docx(
                 blank_run_after_code = false;
             }
             MdBlock::CodeBlock { lines, .. } => {
-                for (idx, line) in lines.iter().enumerate() {
-                    let mut run = Run::new()
-                        .add_text(line.clone())
-                        .fonts(
-                            RunFonts::new()
-                                .ascii(typo.code_font)
-                                .hi_ansi(typo.code_font)
-                                .east_asia(typo.code_font),
-                        )
-                        .size(typo.code_size_hp);
-                    if idx == 0 {
-                        run = run.color("1A1A1A");
-                    }
-                    let para = Paragraph::new()
-                        .line_spacing(
-                            LineSpacing::new()
-                                .line(240)
-                                .line_rule(LineSpacingType::Auto),
-                        )
-                        .indent(Some(420), None, None, None)
-                        .add_run(run);
-                    doc = doc.add_paragraph(para);
-                }
+                doc = doc.add_table(render_code_block(lines, &typo));
+                doc = doc.add_paragraph(
+                    Paragraph::new().line_spacing(LineSpacing::new().before(40).after(40)),
+                );
                 blank_run_after_code = true;
+            }
+            MdBlock::Image { alt, path } => {
+                let base = output_path.parent();
+                if let Some(para) = embed_image_paragraph(alt, path, base, &typo) {
+                    doc = doc.add_paragraph(para);
+                    if !alt.trim().is_empty() {
+                        doc = doc.add_paragraph(
+                            Paragraph::new()
+                                .align(AlignmentType::Center)
+                                .add_run(
+                                    Run::new()
+                                        .add_text(alt.clone())
+                                        .italic()
+                                        .size(typo.body_size_hp - 2)
+                                        .color("666666")
+                                        .fonts(
+                                            RunFonts::new()
+                                                .ascii(typo.body_font_ascii)
+                                                .hi_ansi(typo.body_font_ascii)
+                                                .east_asia(typo.body_font_east),
+                                        ),
+                                ),
+                        );
+                    }
+                } else {
+                    doc = doc.add_paragraph(emit_inline_runs(
+                        &format!("![{alt}]({path})"),
+                        &typo,
+                    ));
+                }
+                blank_run_after_code = false;
             }
             MdBlock::Table { header, rows } => {
                 doc = doc.add_table(render_table(header, rows, &typo));
@@ -220,10 +226,6 @@ pub fn render_docx(
         "DOCX renderer disabled: rebuild with the `tool-curator` feature enabled"
     ))
 }
-
-// ============================================================================
-// Typography profile per standard
-// ============================================================================
 
 #[cfg(feature = "tool-curator")]
 #[derive(Debug, Clone, Copy)]
@@ -508,11 +510,8 @@ fn typography_for(template: CuratorTemplateKind) -> Typography {
     }
 }
 
-// ============================================================================
-// Metadata extraction from markdown frontmatter
-// ============================================================================
-
 #[cfg(feature = "tool-curator")]
+#[allow(dead_code)]
 struct DocMetadata {
     title: String,
     standard_label: String,
@@ -610,22 +609,39 @@ fn template_heading_label(template: CuratorTemplateKind) -> String {
     label.to_string()
 }
 
-// ============================================================================
-// Heading styles registration
-// ============================================================================
+#[cfg(feature = "tool-curator")]
+fn heading_style_name(level: u8) -> &'static str {
+    match level {
+        1 => "Heading1",
+        2 => "Heading2",
+        3 => "Heading3",
+        4 => "Heading4",
+        5 => "Heading5",
+        _ => "Heading6",
+    }
+}
+
+#[cfg(feature = "tool-curator")]
+fn heading_size(level: u8, typo: &Typography) -> usize {
+    match level {
+        1 => typo.h1_size_hp,
+        2 => typo.h2_size_hp,
+        3 => typo.h3_size_hp,
+        4 => typo.body_size_hp + 4,
+        5 => typo.body_size_hp + 2,
+        _ => typo.body_size_hp,
+    }
+}
 
 #[cfg(feature = "tool-curator")]
 fn register_heading_styles(mut doc: docx_rs::Docx, typo: &Typography) -> docx_rs::Docx {
     use docx_rs::*;
-    for (level, name, size_hp) in [
-        (1u8, "Heading1", typo.h1_size_hp),
-        (2, "Heading2", typo.h2_size_hp),
-        (3, "Heading3", typo.h3_size_hp),
-    ] {
+    for level in 1u8..=6 {
+        let name = heading_style_name(level);
+        let size_hp = heading_size(level, typo);
         let spacing = heading_spacing(level, typo);
-        let style = Style::new(name, StyleType::Paragraph)
-            .name(&format!("heading {level}"))
-            .bold()
+        let mut style = Style::new(name, StyleType::Paragraph)
+            .name(format!("heading {level}"))
             .size(size_hp)
             .fonts(
                 RunFonts::new()
@@ -634,15 +650,20 @@ fn register_heading_styles(mut doc: docx_rs::Docx, typo: &Typography) -> docx_rs
                     .east_asia(typo.heading_font_east),
             )
             .line_spacing(spacing)
-            .outline_lvl(level as usize);
+            .outline_lvl(level as usize - 1);
+        if level <= 4 {
+            style = style.bold();
+        }
+        if level >= 5 {
+            style = style.italic();
+        }
+        if level >= 4 {
+            style = style.color("404040");
+        }
         doc = doc.add_style(style);
     }
     doc
 }
-
-// ============================================================================
-// Numbering definitions (bullet + ordered)
-// ============================================================================
 
 #[cfg(feature = "tool-curator")]
 fn register_numbering_definitions(mut doc: docx_rs::Docx) -> docx_rs::Docx {
@@ -676,10 +697,6 @@ fn register_numbering_definitions(mut doc: docx_rs::Docx) -> docx_rs::Docx {
         .add_numbering(docx_rs::Numbering::new(ORDERED_NUM_ID, ORDERED_NUM_ID));
     doc
 }
-
-// ============================================================================
-// Header / Footer with page numbers
-// ============================================================================
 
 #[cfg(feature = "tool-curator")]
 fn build_header(meta: &DocMetadata, typo: &Typography) -> docx_rs::Header {
@@ -749,10 +766,6 @@ fn build_footer(typo: &Typography) -> docx_rs::Footer {
         );
     Footer::new().add_paragraph(para)
 }
-
-// ============================================================================
-// Cover page
-// ============================================================================
 
 #[cfg(feature = "tool-curator")]
 fn cover_page_paragraphs(
@@ -871,10 +884,6 @@ fn cover_page_paragraphs(
     out
 }
 
-// ============================================================================
-// Paragraph / Run helpers
-// ============================================================================
-
 #[cfg(feature = "tool-curator")]
 fn page_break_paragraph() -> docx_rs::Paragraph {
     use docx_rs::*;
@@ -895,22 +904,26 @@ fn heading_spacing(level: u8, _typo: &Typography) -> docx_rs::LineSpacing {
 #[cfg(feature = "tool-curator")]
 fn heading_run(text: &str, level: u8, typo: &Typography) -> docx_rs::Run {
     use docx_rs::*;
-    let size = match level {
-        1 => typo.h1_size_hp,
-        2 => typo.h2_size_hp,
-        3 => typo.h3_size_hp,
-        _ => typo.body_size_hp + 2,
-    };
-    Run::new()
+    let size = heading_size(level, typo);
+    let mut run = Run::new()
         .add_text(text)
-        .bold()
         .size(size)
         .fonts(
             RunFonts::new()
                 .ascii(typo.heading_font_ascii)
                 .hi_ansi(typo.heading_font_ascii)
                 .east_asia(typo.heading_font_east),
-        )
+        );
+    if level <= 4 {
+        run = run.bold();
+    }
+    if level >= 5 {
+        run = run.italic();
+    }
+    if level >= 4 {
+        run = run.color("404040");
+    }
+    run
 }
 
 #[cfg(feature = "tool-curator")]
@@ -927,10 +940,6 @@ fn extract_first_h1(markdown: &str) -> Option<String> {
     None
 }
 
-// ============================================================================
-// Table rendering
-// ============================================================================
-
 #[cfg(feature = "tool-curator")]
 fn render_table(
     header: &[String],
@@ -946,14 +955,15 @@ fn render_table(
     let mut header_cells: Vec<TableCell> = Vec::new();
     for c in 0..col_count {
         let text = header.get(c).cloned().unwrap_or_default();
-        header_cells.push(make_table_cell(&text, typo, true));
+        header_cells.push(make_table_cell(&text, typo, true, false));
     }
     docx_rows.push(TableRow::new(header_cells));
-    for row in rows {
+    for (r, row) in rows.iter().enumerate() {
+        let zebra = r % 2 == 1;
         let mut cells: Vec<TableCell> = Vec::new();
         for c in 0..col_count {
             let text = row.get(c).cloned().unwrap_or_default();
-            cells.push(make_table_cell(&text, typo, false));
+            cells.push(make_table_cell(&text, typo, false, zebra));
         }
         docx_rows.push(TableRow::new(cells));
     }
@@ -995,7 +1005,29 @@ fn render_table(
 }
 
 #[cfg(feature = "tool-curator")]
-fn make_table_cell(text: &str, typo: &Typography, is_header: bool) -> docx_rs::TableCell {
+fn make_table_cell(
+    text: &str,
+    typo: &Typography,
+    is_header: bool,
+    zebra: bool,
+) -> docx_rs::TableCell {
+    use docx_rs::*;
+    let para = table_cell_paragraph(text, typo, is_header);
+    let mut cell = TableCell::new().add_paragraph(para);
+    if is_header {
+        cell = cell.shading(Shading::new().fill("E8E8E8"));
+    } else if zebra {
+        cell = cell.shading(Shading::new().fill("F6F6F8"));
+    }
+    cell
+}
+
+#[cfg(feature = "tool-curator")]
+fn table_cell_paragraph(
+    text: &str,
+    typo: &Typography,
+    is_header: bool,
+) -> docx_rs::Paragraph {
     use docx_rs::*;
     let mut run = Run::new()
         .add_text(text)
@@ -1009,7 +1041,7 @@ fn make_table_cell(text: &str, typo: &Typography, is_header: bool) -> docx_rs::T
     if is_header {
         run = run.bold();
     }
-    let para = Paragraph::new()
+    Paragraph::new()
         .line_spacing(
             LineSpacing::new()
                 .line(240)
@@ -1017,20 +1049,152 @@ fn make_table_cell(text: &str, typo: &Typography, is_header: bool) -> docx_rs::T
                 .before(30)
                 .after(30),
         )
-        .add_run(run);
-    let mut cell = TableCell::new().add_paragraph(para);
-    if is_header {
-        cell = cell.shading(Shading::new().fill("E8E8E8"));
-    }
-    cell
+        .add_run(run)
 }
 
-// ============================================================================
-// Markdown parsing
-// ============================================================================
+#[cfg(feature = "tool-curator")]
+fn render_code_block(lines: &[String], typo: &Typography) -> docx_rs::Table {
+    use docx_rs::*;
+    let mut cell = TableCell::new().shading(Shading::new().fill("F4F4F5"));
+    if lines.is_empty() {
+        cell = cell.add_paragraph(Paragraph::new());
+    }
+    for line in lines {
+        let run = Run::new()
+            .add_text(line.clone())
+            .fonts(
+                RunFonts::new()
+                    .ascii(typo.code_font)
+                    .hi_ansi(typo.code_font)
+                    .east_asia(typo.code_font),
+            )
+            .size(typo.code_size_hp)
+            .color("1A1A1A");
+        let para = Paragraph::new()
+            .line_spacing(
+                LineSpacing::new()
+                    .line(typo.code_size_hp as i32 * 12)
+                    .line_rule(LineSpacingType::Auto)
+                    .before(10)
+                    .after(10),
+            )
+            .add_run(run);
+        cell = cell.add_paragraph(para);
+    }
+    let row = TableRow::new(vec![cell]);
+    Table::new(vec![row])
+        .layout(TableLayoutType::Autofit)
+        .set_borders(
+            TableBorders::new()
+                .set(
+                    TableBorder::new(TableBorderPosition::Top)
+                        .border_type(BorderType::Single)
+                        .color("D0D0D5")
+                        .size(4),
+                )
+                .set(
+                    TableBorder::new(TableBorderPosition::Bottom)
+                        .border_type(BorderType::Single)
+                        .color("D0D0D5")
+                        .size(4),
+                )
+                .set(
+                    TableBorder::new(TableBorderPosition::Left)
+                        .border_type(BorderType::Single)
+                        .color("D0D0D5")
+                        .size(4),
+                )
+                .set(
+                    TableBorder::new(TableBorderPosition::Right)
+                        .border_type(BorderType::Single)
+                        .color("D0D0D5")
+                        .size(4),
+                ),
+        )
+}
+
+#[cfg(feature = "tool-curator")]
+fn content_width_emu(typo: &Typography) -> u32 {
+    let content_twips = (typo.page_width_twips as i32) - typo.margin_left - typo.margin_right;
+    let content_twips = content_twips.max(2000) as u32;
+    content_twips.saturating_mul(635)
+}
+
+#[cfg(feature = "tool-curator")]
+fn embed_image_paragraph(
+    alt: &str,
+    rel_path: &str,
+    base: Option<&Path>,
+    typo: &Typography,
+) -> Option<docx_rs::Paragraph> {
+    use docx_rs::*;
+    let _ = alt;
+    if rel_path.starts_with("http://") || rel_path.starts_with("https://") || rel_path.starts_with("data:") {
+        return None;
+    }
+    let candidate = std::path::Path::new(rel_path);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base?.join(candidate)
+    };
+    let bytes = std::fs::read(&resolved).ok()?;
+    let img = ::image::load_from_memory(&bytes).ok()?;
+    let (w_px, h_px) = ::image::GenericImageView::dimensions(&img);
+    if w_px == 0 || h_px == 0 {
+        return None;
+    }
+    let mut png_buf = std::io::Cursor::new(Vec::<u8>::new());
+    img.write_to(&mut png_buf, ::image::ImageFormat::Png).ok()?;
+    let png_bytes = png_buf.into_inner();
+
+    const EMU_PER_PX: u64 = 9525;
+    let mut w_emu = (w_px as u64) * EMU_PER_PX;
+    let mut h_emu = (h_px as u64) * EMU_PER_PX;
+    let max_w = content_width_emu(typo) as u64;
+    if w_emu > max_w && w_emu > 0 {
+        h_emu = h_emu.saturating_mul(max_w) / w_emu;
+        w_emu = max_w;
+    }
+    let pic = Pic::new_with_dimensions(png_bytes, w_px, h_px)
+        .size(w_emu.min(u32::MAX as u64) as u32, h_emu.min(u32::MAX as u64) as u32);
+    Some(
+        Paragraph::new()
+            .align(AlignmentType::Center)
+            .line_spacing(LineSpacing::new().before(80).after(40))
+            .add_run(Run::new().add_image(pic)),
+    )
+}
+
+#[cfg(feature = "tool-curator")]
+fn parse_image_line(line: &str) -> Option<(String, String)> {
+    let t = line.trim();
+    let rest = t.strip_prefix("![")?;
+    let close_alt = rest.find("](")?;
+    let alt = rest[..close_alt].to_string();
+    let after = &rest[close_alt + 2..];
+    let close_paren = after.rfind(')')?;
+    if close_paren + 1 != after.len() {
+        return None;
+    }
+    let path_part = after[..close_paren].trim();
+    let path = path_part
+        .split_whitespace()
+        .next()
+        .unwrap_or(path_part)
+        .trim_matches('"')
+        .trim_matches('<')
+        .trim_matches('>')
+        .to_string();
+    if path.is_empty() {
+        return None;
+    }
+    Some((alt, path))
+}
 
 #[cfg(feature = "tool-curator")]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum MdBlock {
     Heading { level: u8, text: String },
     Paragraph(String),
@@ -1038,6 +1202,7 @@ enum MdBlock {
     OrderedList(Vec<String>),
     CodeBlock { lang: String, lines: Vec<String> },
     Table { header: Vec<String>, rows: Vec<Vec<String>> },
+    Image { alt: String, path: String },
     Blockquote(String),
     HorizontalRule,
     Blank,
@@ -1093,6 +1258,10 @@ fn parse_blocks(markdown: &str) -> Vec<MdBlock> {
         }
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
             blocks.push(MdBlock::HorizontalRule);
+            i += 1; continue;
+        }
+        if let Some((alt, path)) = parse_image_line(trimmed) {
+            blocks.push(MdBlock::Image { alt, path });
             i += 1; continue;
         }
         if let Some(rest) = trimmed.strip_prefix("> ") {
@@ -1179,9 +1348,73 @@ fn split_table_row(line: &str) -> Vec<String> {
     trimmed.split('|').map(|c| c.trim().to_string()).collect()
 }
 
-// ============================================================================
-// Inline formatting (bold, italic, code, links)
-// ============================================================================
+#[cfg(feature = "tool-curator")]
+fn styled_run(
+    text: &str,
+    bold: bool,
+    italic: bool,
+    code: bool,
+    typo: &Typography,
+) -> docx_rs::Run {
+    use docx_rs::*;
+    let mut run = Run::new().add_text(text);
+    if code {
+        run = run
+            .fonts(
+                RunFonts::new()
+                    .ascii(typo.code_font)
+                    .hi_ansi(typo.code_font)
+                    .east_asia(typo.code_font),
+            )
+            .size(typo.code_size_hp);
+    } else {
+        run = run
+            .fonts(
+                RunFonts::new()
+                    .ascii(typo.body_font_ascii)
+                    .hi_ansi(typo.body_font_ascii)
+                    .east_asia(typo.body_font_east),
+            )
+            .size(typo.body_size_hp);
+    }
+    if bold {
+        run = run.bold();
+    }
+    if italic {
+        run = run.italic();
+    }
+    run
+}
+
+#[cfg(feature = "tool-curator")]
+fn try_parse_inline_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    if chars.get(start) != Some(&'[') {
+        return None;
+    }
+    let mut j = start + 1;
+    let mut text = String::new();
+    while j < chars.len() && chars[j] != ']' {
+        text.push(chars[j]);
+        j += 1;
+    }
+    if j >= chars.len() || chars.get(j + 1) != Some(&'(') {
+        return None;
+    }
+    let mut k = j + 2;
+    let mut url = String::new();
+    while k < chars.len() && chars[k] != ')' {
+        url.push(chars[k]);
+        k += 1;
+    }
+    if k >= chars.len() {
+        return None;
+    }
+    let url = url.trim().to_string();
+    if text.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some((text, url, k + 1))
+}
 
 #[cfg(feature = "tool-curator")]
 fn emit_inline_runs(line: &str, typo: &Typography) -> docx_rs::Paragraph {
@@ -1191,68 +1424,70 @@ fn emit_inline_runs(line: &str, typo: &Typography) -> docx_rs::Paragraph {
             .line(typo.line_spacing_twips)
             .line_rule(LineSpacingType::Auto),
     );
+    let chars: Vec<char> = line.chars().collect();
     let mut buf = String::new();
-    let mut chars = line.chars().peekable();
     let mut bold = false;
     let mut italic = false;
     let mut code = false;
-    let flush = |para: Paragraph,
-                 buf: &mut String,
-                 bold: bool,
-                 italic: bool,
-                 code: bool,
-                 typo: &Typography|
-     -> Paragraph {
-        if buf.is_empty() { return para; }
-        let mut run = Run::new().add_text(buf.clone());
-        if code {
-            run = run
-                .fonts(
-                    RunFonts::new()
-                        .ascii(typo.code_font)
-                        .hi_ansi(typo.code_font)
-                        .east_asia(typo.code_font),
-                )
-                .size(typo.code_size_hp);
-        } else {
-            run = run
-                .fonts(
-                    RunFonts::new()
-                        .ascii(typo.body_font_ascii)
-                        .hi_ansi(typo.body_font_ascii)
-                        .east_asia(typo.body_font_east),
-                )
-                .size(typo.body_size_hp);
-        }
-        if bold { run = run.bold(); }
-        if italic { run = run.italic(); }
-        buf.clear();
-        para.add_run(run)
-    };
-    while let Some(ch) = chars.next() {
+    let mut i = 0usize;
+    macro_rules! flush_buf {
+        () => {{
+            if !buf.is_empty() {
+                para = para.add_run(styled_run(&buf, bold, italic, code, typo));
+                buf.clear();
+            }
+        }};
+    }
+    while i < chars.len() {
+        let ch = chars[i];
         if ch == '`' {
-            para = flush(para, &mut buf, bold, italic, code, typo);
+            flush_buf!();
             code = !code;
+            i += 1;
             continue;
         }
-        if ch == '*' && chars.peek() == Some(&'*') {
-            chars.next();
-            para = flush(para, &mut buf, bold, italic, code, typo);
+        if !code && ch == '[' {
+            if let Some((text, url, next)) = try_parse_inline_link(&chars, i) {
+                flush_buf!();
+                let link_run = Run::new()
+                    .add_text(text)
+                    .color("0563C1")
+                    .underline("single")
+                    .size(typo.body_size_hp)
+                    .fonts(
+                        RunFonts::new()
+                            .ascii(typo.body_font_ascii)
+                            .hi_ansi(typo.body_font_ascii)
+                            .east_asia(typo.body_font_east),
+                    );
+                para = para.add_hyperlink(
+                    Hyperlink::new(url, HyperlinkType::External).add_run(link_run),
+                );
+                i = next;
+                continue;
+            }
+        }
+        if !code && ch == '*' && chars.get(i + 1) == Some(&'*') {
+            flush_buf!();
             bold = !bold;
+            i += 2;
             continue;
         }
-        if ch == '_' && chars.peek() == Some(&'_') {
-            chars.next();
-            para = flush(para, &mut buf, bold, italic, code, typo);
+        if !code && ch == '_' && chars.get(i + 1) == Some(&'_') {
+            flush_buf!();
             bold = !bold;
+            i += 2;
             continue;
         }
-        if (ch == '*' || ch == '_') && !code {
-            para = flush(para, &mut buf, bold, italic, code, typo);
+        if !code && (ch == '*' || ch == '_') {
+            flush_buf!();
             italic = !italic;
+            i += 1;
             continue;
         }
         buf.push(ch);
+        i += 1;
     }
-    flush(para, &mut buf, bold, italic, code, typo)
+    flush_buf!();
+    para
 }

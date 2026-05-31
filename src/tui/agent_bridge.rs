@@ -349,6 +349,6 @@ async fn execute_slash_command(name: &str, args: &[String], _config: &Config) ->
         let result = svc.command_registry.execute(name, ctx).await;
         result.message.unwrap_or_default()
     } else {
-        format!("Services not initialized — cannot run /{name}")
+        format!("Services not initialized  -  cannot run /{name}")
     }
 }

@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use std::path::PathBuf;
 
-use crate::agent::scheduler_runtime::{TaskExecutor, TaskSchedulerRuntime};
+use crate::agent::scheduler::runtime::{TaskExecutor, TaskSchedulerRuntime};
 use crate::agent::workflow_loader::WorkflowSpec;
 use crate::coordinator::delegation::{SubTaskResult, merge_results};
 

@@ -8,17 +8,13 @@ pub mod traits;
 pub mod serial;
 
 #[cfg(feature = "hardware")]
-pub mod arduino_flash;
-#[cfg(feature = "hardware")]
-pub mod arduino_upload;
+pub mod arduino;
 #[cfg(feature = "hardware")]
 pub mod capabilities_tool;
 #[cfg(feature = "hardware")]
 pub mod nucleo_flash;
 #[cfg(feature = "hardware")]
-pub mod uno_q_bridge;
-#[cfg(feature = "hardware")]
-pub mod uno_q_setup;
+pub mod uno_q;
 
 #[cfg(all(feature = "peripheral-rpi", target_os = "linux"))]
 pub mod rpi;
@@ -98,12 +94,16 @@ pub async fn handle_command(cmd: crate::PeripheralCommands, config: &Config) -> 
         }
         #[cfg(feature = "hardware")]
         crate::PeripheralCommands::Flash { port } => {
-            let port_str = arduino_flash::resolve_port(config, port.as_deref())
+            let port_str = arduino::flash::resolve_port(config, port.as_deref())
                 .or_else(|| port.clone())
                 .ok_or_else(|| anyhow::anyhow!(
                     "No port specified. Use --port /dev/cu.usbmodem* or add arduino-uno to config.toml"
                 ))?;
-            arduino_flash::flash_arduino_firmware(&port_str)?;
+            tokio::task::spawn_blocking(move || {
+                arduino::flash::flash_arduino_firmware(&port_str)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("arduino flash task failed: {e}"))??;
         }
         #[cfg(not(feature = "hardware"))]
         crate::PeripheralCommands::Flash { .. } => {
@@ -112,7 +112,11 @@ pub async fn handle_command(cmd: crate::PeripheralCommands, config: &Config) -> 
         }
         #[cfg(feature = "hardware")]
         crate::PeripheralCommands::SetupUnoQ { host } => {
-            uno_q_setup::setup_uno_q_bridge(host.as_deref())?;
+            tokio::task::spawn_blocking(move || {
+                uno_q::setup::setup_uno_q_bridge(host.as_deref())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("uno-q setup task failed: {e}"))??;
         }
         #[cfg(not(feature = "hardware"))]
         crate::PeripheralCommands::SetupUnoQ { .. } => {
@@ -121,7 +125,9 @@ pub async fn handle_command(cmd: crate::PeripheralCommands, config: &Config) -> 
         }
         #[cfg(feature = "hardware")]
         crate::PeripheralCommands::FlashNucleo => {
-            nucleo_flash::flash_nucleo_firmware()?;
+            tokio::task::spawn_blocking(nucleo_flash::flash_nucleo_firmware)
+                .await
+                .map_err(|e| anyhow::anyhow!("nucleo flash task failed: {e}"))??;
         }
         #[cfg(not(feature = "hardware"))]
         crate::PeripheralCommands::FlashNucleo => {
@@ -145,8 +151,8 @@ pub async fn create_peripheral_tools(config: &PeripheralsConfig) -> Result<Vec<B
 
         if board.transport == "bridge" && (board.board == "arduino-uno-q" || board.board == "uno-q")
         {
-            tools.push(Box::new(uno_q_bridge::UnoQGpioReadTool));
-            tools.push(Box::new(uno_q_bridge::UnoQGpioWriteTool));
+            tools.push(Box::new(uno_q::bridge::UnoQGpioReadTool));
+            tools.push(Box::new(uno_q::bridge::UnoQGpioWriteTool));
             tracing::info!(board = %board.board, "Uno Q Bridge GPIO tools added");
             continue;
         }
@@ -185,7 +191,7 @@ pub async fn create_peripheral_tools(config: &PeripheralsConfig) -> Result<Vec<B
                 tools.extend(p.tools());
                 if board.board == "arduino-uno" {
                     if let Some(ref path) = board.path {
-                        tools.push(Box::new(arduino_upload::ArduinoUploadTool::new(
+                        tools.push(Box::new(arduino::upload::ArduinoUploadTool::new(
                             path.clone(),
                         )));
                         tracing::info!("Arduino upload tool added (port: {})", path);

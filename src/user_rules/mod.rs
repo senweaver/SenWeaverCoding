@@ -347,7 +347,7 @@ pub fn user_rules_to_prompt(rules: &[UserRuleMeta]) -> String {
                 if rule.body_truncated {
                     let _ = writeln!(
                         out,
-                        "_[truncated at {EAGER_RULE_BODY_CHAR_LIMIT} chars — call \
+                        "_[truncated at {EAGER_RULE_BODY_CHAR_LIMIT} chars  -  call \
                          `read_user_rule(name=\"{}\")` for the full body]_\n",
                         rule.name
                     );

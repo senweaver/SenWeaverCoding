@@ -95,7 +95,7 @@ fn rule_signature_change(req: &NepRequest) -> Option<NepSuggestion> {
     Some(NepSuggestion {
         file_path: edit.file_path.clone(),
         diff: String::new(),
-        rationale: "function signature changed — review call sites for breakage".into(),
+        rationale: "function signature changed  -  review call sites for breakage".into(),
         confidence: Some(0.4),
         origin: "heuristic_nep",
     })

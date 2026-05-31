@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
 
-use super::traits::{Tool, ToolResult};
+use super::traits::{Tool, ToolResult, json_verbose_flag, render_json_output};
 use crate::config::SecurityOpsConfig;
 use crate::security::playbook::{
     Playbook, StepStatus, evaluate_step, load_playbooks, severity_level,
@@ -73,7 +73,7 @@ impl SecurityOpsTool {
             },
             "recommended_playbooks": playbook_names,
             "recommended_action": if matching_playbooks.is_empty() {
-                "Manual investigation required — no matching playbook found"
+                "Manual investigation required  -  no matching playbook found"
             } else {
                 "Execute recommended playbook(s)"
             },
@@ -82,7 +82,7 @@ impl SecurityOpsTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: render_json_output(&output, json_verbose_flag(args)),
             error: None,
         })
     }
@@ -129,7 +129,7 @@ impl SecurityOpsTool {
 
         Ok(ToolResult {
             success: result.status != StepStatus::Failed,
-            output: serde_json::to_string_pretty(&output)?,
+            output: render_json_output(&output, json_verbose_flag(args)),
             error: if result.status == StepStatus::Failed {
                 Some(result.message)
             } else {
@@ -143,8 +143,8 @@ impl SecurityOpsTool {
             .get("scan_data")
             .ok_or_else(|| anyhow::anyhow!("Missing required 'scan_data' parameter"))?;
 
-        let json_str = if scan_data.is_string() {
-            scan_data.as_str().unwrap().to_string()
+        let json_str = if let Some(text) = scan_data.as_str() {
+            text.to_string()
         } else {
             serde_json::to_string(scan_data)?
         };
@@ -167,7 +167,7 @@ impl SecurityOpsTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: render_json_output(&output, json_verbose_flag(args)),
             error: None,
         })
     }
@@ -188,7 +188,7 @@ impl SecurityOpsTool {
             .unwrap_or("");
 
         let report = format!(
-            "# Security Posture Report — {client_name}\n\
+            "# Security Posture Report  -  {client_name}\n\
              **Period:** {period}\n\
              **Generated:** {}\n\n\
              ## Executive Summary\n\n\
@@ -248,7 +248,7 @@ impl SecurityOpsTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&playbook_list)?,
+            output: render_json_output(&serde_json::Value::Array(playbook_list), false),
             error: None,
         })
     }
@@ -305,7 +305,7 @@ impl SecurityOpsTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: render_json_output(&output, json_verbose_flag(args)),
             error: None,
         })
     }

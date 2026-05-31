@@ -13,6 +13,4 @@ pub use script_runner::{
     HookCommand, HookDecision, HookEvent, HookMatchers, HookPayload, HooksConfig,
     ScriptHookRunner, event_for_tool_post, event_for_tool_pre,
 };
-
-#[allow(unused_imports)]
 pub use traits::{HookHandler, HookResult};

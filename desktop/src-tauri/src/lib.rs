@@ -1,4 +1,6 @@
-
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
 
 mod bootstrap_diag;
 mod browser_dock;
@@ -350,6 +352,35 @@ fn get_server_status(state: State<'_, ServerState>) -> BootstrapStatusPayload {
 }
 
 #[tauri::command]
+async fn restart_adapters_sidecar(state: State<'_, ServerState>) -> Result<(), String> {
+    let url = {
+        let guard = state.0.lock();
+        guard
+            .url
+            .clone()
+            .ok_or_else(|| EMBEDDED_GATEWAY_PENDING_MSG.to_string())?
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client
+        .post(format!("{url}/api/channels/restart"))
+        .header(HEALTH_PROBE_HEADER, HEALTH_PROBE_HEADER_VALUE)
+        .send()
+        .await
+        .map_err(|e| format!("channels restart request failed: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "channels restart returned HTTP {}",
+            resp.status().as_u16()
+        ))
+    }
+}
+
+#[tauri::command]
 fn restart_embedded_gateway(
     handle: AppHandle,
     state: State<'_, ServerState>,
@@ -389,13 +420,19 @@ fn restart_embedded_gateway(
 }
 
 #[tauri::command]
-fn open_log_dir() -> Result<String, String> {
+async fn open_log_dir() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(open_log_dir_blocking)
+        .await
+        .map_err(|err| format!("open log dir task failed: {err}"))?
+}
+
+fn open_log_dir_blocking() -> Result<String, String> {
     let dir = sen_log_dir().ok_or_else(|| "could not resolve sen config directory".to_string())?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("create log dir failed: {err}"))?;
     }
-    reveal_in_explorer(dir.to_string_lossy().into_owned())?;
+    reveal_in_explorer_blocking(dir.to_string_lossy().into_owned())?;
     Ok(dir.to_string_lossy().into_owned())
 }
 
@@ -404,18 +441,18 @@ fn sen_log_dir() -> Option<PathBuf> {
 }
 
 fn sen_config_dir() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("SEN_CONFIG_DIR") {
+    if let Some(custom) = senweavercoding::util::get_runtime_var("SEN_CONFIG_DIR") {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
             return Some(PathBuf::from(trimmed));
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = senweavercoding::util::get_runtime_var("HOME") {
         if !home.is_empty() {
             return Some(PathBuf::from(home).join(".senweavercoding"));
         }
     }
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+    if let Some(userprofile) = senweavercoding::util::get_runtime_var("USERPROFILE") {
         if !userprofile.is_empty() {
             return Some(PathBuf::from(userprofile).join(".senweavercoding"));
         }
@@ -424,8 +461,12 @@ fn sen_config_dir() -> Option<PathBuf> {
 }
 
 #[tauri::command]
-fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
-    process_lifetime::run_full_shutdown(&handle, Duration::from_secs(8));
+async fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        process_lifetime::run_full_shutdown(&handle, Duration::from_secs(8));
+    })
+    .await
+    .map_err(|err| format!("update shutdown task failed: {err}"))?;
     Ok(())
 }
 
@@ -485,7 +526,13 @@ fn schedule_main_window_show_fallback(window: tauri::WebviewWindow) {
 }
 
 #[tauri::command]
-fn reveal_in_explorer(path: String) -> Result<(), String> {
+async fn reveal_in_explorer(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || reveal_in_explorer_blocking(path))
+        .await
+        .map_err(|err| format!("reveal task failed: {err}"))?
+}
+
+fn reveal_in_explorer_blocking(path: String) -> Result<(), String> {
     use std::path::PathBuf;
 
     let target = PathBuf::from(&path);
@@ -582,6 +629,7 @@ pub fn run() {
             get_server_url,
             get_server_status,
             restart_embedded_gateway,
+            restart_adapters_sidecar,
             open_log_dir,
             prepare_for_update_install,
             signal_frontend_ready,
@@ -644,9 +692,11 @@ pub fn run() {
             let handle = app.handle().clone();
 
             let server_state = app.state::<ServerState>().inner().clone();
+            const GATEWAY_SPAWN_MAX_ATTEMPTS: usize = 4;
+            const GATEWAY_SPAWN_RETRY_DELAY_MS: u64 = 100;
             let mut spawn_ok = false;
             let mut last_spawn_err = String::new();
-            for attempt in 0usize..128 {
+            for attempt in 0..GATEWAY_SPAWN_MAX_ATTEMPTS {
                 match spawn_gateway_bootstrap_thread(handle.clone(), server_state.clone()) {
                     Ok(()) => {
                         spawn_ok = true;
@@ -655,23 +705,26 @@ pub fn run() {
                     Err(err) => {
                         last_spawn_err = err.clone();
                         tracing::warn!(
-                            "[sen-desktop] gateway bootstrap thread spawn attempt {} failed: {err}",
+                            "[sen-desktop] gateway bootstrap thread spawn attempt {} of {} failed: {err}",
                             attempt + 1,
+                            GATEWAY_SPAWN_MAX_ATTEMPTS,
                         );
-                        thread::sleep(Duration::from_millis(150));
+                        if attempt + 1 < GATEWAY_SPAWN_MAX_ATTEMPTS {
+                            thread::sleep(Duration::from_millis(GATEWAY_SPAWN_RETRY_DELAY_MS));
+                        }
                     }
                 }
             }
             if !spawn_ok {
-                tracing::error!(
-                    "[sen-desktop] giving up spawning gateway bootstrap after 128 attempts: {last_spawn_err}"
+                let msg = format!(
+                    "could not spawn gateway bootstrap thread after {GATEWAY_SPAWN_MAX_ATTEMPTS} attempts: \
+                     {last_spawn_err}. The desktop UI will surface this and you can click Restart to retry."
                 );
+                tracing::error!("[sen-desktop] {msg}");
                 {
                     let mut g = server_state.0.lock();
                     g.bootstrap_in_progress = false;
-                    g.last_error = Some(format!(
-                        "could not spawn gateway bootstrap thread after 128 attempts: {last_spawn_err}"
-                    ));
+                    g.last_error = Some(msg);
                 }
                 emit_backend_state(&handle, &server_state);
             }
@@ -988,12 +1041,18 @@ fn start_embedded_gateway_once(
                 };
                 runtime.block_on(async move {
                     let load_started = Instant::now();
-                    let mut config = senweavercoding::Config::load_or_init().await.unwrap_or_else(|err| {
-                        tracing::warn!(
-                            "[sen-desktop] config load failed ({err}); falling back to defaults"
-                        );
-                        senweavercoding::Config::default()
-                    });
+                    let mut config = match senweavercoding::Config::load_or_init().await {
+                        Ok(cfg) => cfg,
+                        Err(err) => {
+                            let msg = format!(
+                                "config load failed ({err:#}); embedded gateway will not start to avoid silently dropping API keys / providers. \
+                                 Please fix ~/.senweavercoding/config.toml (or the SEN_CONFIG_DIR override) and click Restart in the desktop UI."
+                            );
+                            tracing::error!("[sen-desktop] {msg}");
+                            record_gateway_exit(&exit_for_thread, msg);
+                            return;
+                        }
+                    };
                     tracing::info!(
                         elapsed_ms = load_started.elapsed().as_millis() as u64,
                         "[sen-desktop] gateway: config loaded"
@@ -1080,6 +1139,49 @@ fn apply_embedded_gateway_overrides(
     host: &str,
     port: u16,
 ) {
+    if config.gateway.require_pairing {
+        tracing::warn!(
+            "[sen-desktop] desktop GUI mode is overriding gateway.require_pairing=true to false; \
+             the embedded gateway listens on loopback ({host}:{port}) only and shares this process \
+             with the webview, so pairing is unnecessary. Run `senweavercoding` headless if you need \
+             pairing for remote clients."
+        );
+    }
+    if config.gateway.allow_public_bind {
+        tracing::warn!(
+            "[sen-desktop] desktop GUI mode is overriding gateway.allow_public_bind=true to false; \
+             desktop always binds to 127.0.0.1. Run `senweavercoding` headless to expose the gateway \
+             on a public interface."
+        );
+    }
+    if !config.gateway.paired_tokens.is_empty() {
+        tracing::warn!(
+            paired_tokens = config.gateway.paired_tokens.len(),
+            "[sen-desktop] desktop GUI mode is clearing {} paired-token entries from the in-memory \
+             config (config.toml on disk is untouched). Headless `senweavercoding` will continue to use them.",
+            config.gateway.paired_tokens.len()
+        );
+    }
+    if config.gateway.trust_forwarded_headers {
+        tracing::warn!(
+            "[sen-desktop] desktop GUI mode is overriding gateway.trust_forwarded_headers=true to false; \
+             desktop never sits behind a reverse proxy."
+        );
+    }
+    if config.gateway.path_prefix.is_some() {
+        tracing::warn!(
+            "[sen-desktop] desktop GUI mode is clearing gateway.path_prefix; webview always talks to \
+             the embedded gateway at the root path."
+        );
+    }
+    if config.tunnel.provider.trim() != "none" && !config.tunnel.provider.trim().is_empty() {
+        tracing::warn!(
+            current = %config.tunnel.provider,
+            "[sen-desktop] desktop GUI mode is overriding tunnel.provider to \"none\"; \
+             tunneling makes no sense for the loopback-bound embedded gateway."
+        );
+    }
+
     config.gateway.host = host.to_string();
     config.gateway.port = port;
     config.gateway.require_pairing = false;

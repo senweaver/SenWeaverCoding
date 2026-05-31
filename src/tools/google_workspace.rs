@@ -9,12 +9,11 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-const DEFAULT_GWS_TIMEOUT_SECS: u64 = 30;
-
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 
 use crate::config::DEFAULT_GWS_SERVICES;
 
+#[allow(dead_code)]
 pub struct GoogleWorkspaceTool {
     security: Arc<SecurityPolicy>,
     allowed_services: Vec<String>,

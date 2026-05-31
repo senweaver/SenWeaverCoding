@@ -17,7 +17,7 @@ pub struct ChannelMessage {
 
     pub interruption_scope_id: Option<String>,
 
-    pub attachments: Vec<super::media_pipeline::MediaAttachment>,
+    pub attachments: Vec<super::pipeline::media::MediaAttachment>,
 }
 
 #[derive(Debug, Clone)]

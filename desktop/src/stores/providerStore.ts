@@ -1,8 +1,13 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 
 
 import { create } from 'zustand'
 import { providersApi } from '../api/providers'
 import { useSettingsStore } from './settingsStore'
+import { enabledProviderModelIds } from '../utils/providerModels'
 import type {
   SavedProvider,
   CreateProviderInput,
@@ -81,7 +86,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
     await get().fetchProviders()
 
     const provider = get().providers.find((p) => p.id === id)
-    const fallbackModel = provider?.models?.find((m) => m.trim().length > 0)
+    const fallbackModel = provider ? enabledProviderModelIds(provider)[0] : undefined
     if (fallbackModel) {
       const settings = useSettingsStore.getState()
       await settings.setModel(fallbackModel)

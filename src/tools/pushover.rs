@@ -169,7 +169,7 @@ impl Tool for PushoverTool {
             form = form.text("sound", sound);
         }
 
-        let client = crate::services::get_services()
+        let client = crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("tool.pushover", PUSHOVER_REQUEST_TIMEOUT_SECS, 10);
         let response = client.post(PUSHOVER_API_URL).multipart(form).send().await?;

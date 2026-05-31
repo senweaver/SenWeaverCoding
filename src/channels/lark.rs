@@ -170,7 +170,6 @@ struct LarkEvent {
 #[derive(Debug, serde::Deserialize)]
 struct LarkEventHeader {
     event_type: String,
-    #[allow(dead_code)]
     event_id: String,
 }
 
@@ -375,7 +374,9 @@ pub struct LarkChannel {
 
     proxy_url: Option<String>,
     transcription: Option<crate::config::TranscriptionConfig>,
-    transcription_manager: Option<Arc<super::transcription::TranscriptionManager>>,
+    transcription_manager: Option<Arc<super::pipeline::transcription::TranscriptionManager>>,
+}
+
 impl LarkChannel {
     pub fn new(
         app_id: String,
@@ -420,6 +421,7 @@ impl LarkChannel {
             proxy_url: None,
             transcription: None,
             transcription_manager: None,
+        }
     }
 
     pub fn from_config(config: &crate::config::schema::LarkConfig) -> Self {
@@ -476,7 +478,7 @@ impl LarkChannel {
         if !config.enabled {
             return self;
         }
-        match super::transcription::TranscriptionManager::new(&config) {
+        match super::pipeline::transcription::TranscriptionManager::new(&config) {
             Ok(m) => {
                 self.transcription_manager = Some(Arc::new(m));
             }
@@ -491,7 +493,7 @@ impl LarkChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_channel_client(self.platform.proxy_service_key(), self.proxy_url.as_deref())
     }
@@ -685,7 +687,7 @@ impl LarkChannel {
             .unwrap_or(0);
         tracing::info!("Lark: connecting to {wss_url}");
 
-        let (ws_stream, _) = crate::services::get_services()
+        let (ws_stream, _) = crate::services::require_services()
             .proxy_runtime()
             .ws_connect(&wss_url, "channel.lark", self.proxy_url.as_deref())
             .await?;
@@ -759,11 +761,11 @@ impl LarkChannel {
                             match ws_msg {
                                 WsMsg::Binary(b) => b,
                                 WsMsg::Ping(d) => { let _ = write.send(WsMsg::Pong(d)).await; continue; }
-                                WsMsg::Close(_) => { tracing::info!("Lark: WS closed — reconnecting"); break; }
+                                WsMsg::Close(_) => { tracing::info!("Lark: WS closed  -  reconnecting"); break; }
                                 _ => continue,
                             }
                         }
-                        None => { tracing::info!("Lark: WS closed — reconnecting"); break; }
+                        None => { tracing::info!("Lark: WS closed  -  reconnecting"); break; }
                         Some(Err(e)) => { tracing::error!("Lark: WS read error: {e}"); break; }
                     };
 
@@ -1357,7 +1359,7 @@ impl LarkChannel {
         &self,
         message_id: &str,
         content: &str,
-        manager: &super::transcription::TranscriptionManager,
+        manager: &super::pipeline::transcription::TranscriptionManager,
     ) -> Option<String> {
         let file_key = serde_json::from_str::<serde_json::Value>(content)
             .ok()

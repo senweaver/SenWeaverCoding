@@ -12,6 +12,7 @@ use crate::gateway::a2a::types::{
 };
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct A2aClient {
     http: Client,
     default_timeout: Duration,
@@ -343,7 +344,7 @@ pub enum A2aClientError {
     #[error("Invalid URL {url}: {message}")]
     InvalidUrl { url: String, message: String },
 
-    #[error("SSRF attack blocked: {url} — {reason}")]
+    #[error("SSRF attack blocked: {url}  -  {reason}")]
     SsrfBlocked { url: String, reason: String },
 
     #[error("Invalid response from {url}: {message}")]
@@ -376,6 +377,9 @@ pub enum A2aClientError {
 
     #[error("Polling timeout for task '{task_id}' after {max_polls} attempts")]
     PollingTimeout { task_id: TaskId, max_polls: u32 },
+
+    #[error(transparent)]
+    RetryExhausted(#[from] crate::util::retry::RetryExhausted),
 }
 
 impl crate::error::ErrorClassification for A2aClientError {
@@ -413,6 +417,7 @@ impl crate::error::ErrorClassification for A2aClientError {
             }
             A2aClientError::InvalidResponse { .. } => ErrorCategory::Provider,
             A2aClientError::PollingTimeout { .. } => ErrorCategory::Timeout,
+            A2aClientError::RetryExhausted(inner) => inner.category(),
         }
     }
 }

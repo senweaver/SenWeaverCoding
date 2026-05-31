@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { create } from 'zustand'
 import { workspaceFilesApi, type WorkspaceWatchEvent } from '../api/workspaceFiles'
 import type { FileTreeNode } from '../types/workspaceFile'
@@ -123,6 +127,12 @@ const AI_PENDING_WINDOW_MS = 5_000
 
 const SELF_PENDING_WINDOW_MS = 3_000
 
+const AI_TREE_REFRESH_DEBOUNCE_MS = 400
+
+const aiRefreshBatch = new Set<string>()
+
+let aiRefreshFlushTimer: ReturnType<typeof setTimeout> | null = null
+
 export const AI_FRESH_WINDOW_MS = 8_000
 
 export type TabViewState = {
@@ -201,6 +211,8 @@ export type WorkspaceFilesState = {
   setActiveTab: (relPath: string | null) => void
 
   registerAiPendingWrite: (relPath: string) => void
+
+  notifyAiFileChanged: (relPath: string) => void
 
   registerSelfWrite: (relPath: string) => void
 
@@ -403,6 +415,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       watcherDispose()
       watcherDispose = null
     }
+    if (aiRefreshFlushTimer) {
+      clearTimeout(aiRefreshFlushTimer)
+      aiRefreshFlushTimer = null
+    }
+    aiRefreshBatch.clear()
     try {
       useLspStore.getState().clearDiagnostics()
     } catch (err) {
@@ -756,6 +773,12 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       }
       return { aiPendingWrites: { ...s.aiPendingWrites, [relPath]: now } }
     })
+  },
+
+  notifyAiFileChanged: (relPath: string) => {
+    if (!relPath) return
+    get().registerAiPendingWrite(relPath)
+    scheduleAiFileRefresh(relPath, get, set)
   },
 
   registerSelfWrite: (relPath: string) => {
@@ -1151,6 +1174,62 @@ function stripKey<V>(map: Record<string, V>, key: string): Record<string, V> {
   const next = { ...map }
   delete next[key]
   return next
+}
+
+function scheduleAiFileRefresh(
+  relPath: string,
+  get: () => WorkspaceFilesState,
+  set: (
+    partial:
+      | Partial<WorkspaceFilesState>
+      | ((s: WorkspaceFilesState) => Partial<WorkspaceFilesState>),
+  ) => void,
+) {
+  aiRefreshBatch.add(relPath)
+  if (aiRefreshFlushTimer) clearTimeout(aiRefreshFlushTimer)
+  aiRefreshFlushTimer = setTimeout(() => {
+    aiRefreshFlushTimer = null
+    void flushAiFileRefresh(get, set)
+  }, AI_TREE_REFRESH_DEBOUNCE_MS)
+}
+
+async function flushAiFileRefresh(
+  get: () => WorkspaceFilesState,
+  set: (
+    partial:
+      | Partial<WorkspaceFilesState>
+      | ((s: WorkspaceFilesState) => Partial<WorkspaceFilesState>),
+  ) => void,
+) {
+  const batch = [...aiRefreshBatch]
+  aiRefreshBatch.clear()
+  const root = get().root
+  if (!root || batch.length === 0) return
+
+  const parents = new Set<string>()
+  for (const rel of batch) {
+    parents.add(parentOf(rel))
+  }
+
+  for (const parent of parents) {
+    const parentKey = k(root, parent)
+    const parentDir = get().dirs[parentKey]
+    if (parent === '' || parentDir?.loaded) {
+      await refreshDir(get, set, parent)
+    }
+  }
+
+  const now = Date.now()
+  for (const relPath of batch) {
+    if (!get().openTabs.includes(relPath)) continue
+    const key = k(root, relPath)
+    const buf = get().files[key]
+    if (!buf || buf.isDirty) continue
+    await reloadBuffer(get, set, relPath)
+    set((s) => ({
+      aiModifiedAt: { ...s.aiModifiedAt, [relPath]: now },
+    }))
+  }
 }
 
 async function reloadBuffer(

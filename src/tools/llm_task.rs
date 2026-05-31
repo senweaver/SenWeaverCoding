@@ -133,12 +133,13 @@ impl Tool for LlmTaskTool {
             prompt.to_string()
         };
 
-        let api_key_ref = self.api_key.as_deref();
-        let provider: Box<dyn Provider> = match providers::create_provider_with_options(
-            &self.default_provider,
-            api_key_ref,
-            &self.provider_runtime_options,
-        ) {
+        let provider: Box<dyn Provider> = match providers::create_provider_with_options_async(
+            self.default_provider.clone(),
+            self.api_key.clone(),
+            self.provider_runtime_options.clone(),
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 return Ok(ToolResult {

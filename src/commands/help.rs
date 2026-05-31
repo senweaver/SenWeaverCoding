@@ -23,7 +23,7 @@ pub async fn handle_help(ctx: CommandContext) -> CommandResult {
             sorted.sort_by(|a, b| a.name.cmp(&b.name));
             let mut lines = vec!["Available commands:".to_string()];
             for cmd in &sorted {
-                lines.push(format!("  /{:<16} — {}", cmd.name, cmd.description));
+                lines.push(format!("  /{:<16}  -  {}", cmd.name, cmd.description));
             }
             lines.push(String::new());
             lines.push("Type /help <command> for details.".to_string());
@@ -49,6 +49,6 @@ pub async fn handle_help(ctx: CommandContext) -> CommandResult {
 
 const STATIC_HELP: &str = "\
 Available commands:\n\
-  /help — Show help\n\
-  /quit — Exit\n\
+  /help  -  Show help\n\
+  /quit  -  Exit\n\
   Type /help <command> for details.";

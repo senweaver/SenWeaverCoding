@@ -11,14 +11,14 @@ use serde::Deserialize;
 
 use super::api::require_auth;
 use super::AppState;
-use crate::services::credential_vault::{
+use crate::services::governance::credential_vault::{
     init_credential_vault, try_get_credential_vault, CredentialKind, CredentialMeta,
 };
 
 fn ensure_vault(
     state: &AppState,
 ) -> Result<
-    std::sync::Arc<crate::services::credential_vault::CredentialVault>,
+    std::sync::Arc<crate::services::governance::credential_vault::CredentialVault>,
     Box<axum::response::Response>,
 > {
     if let Some(v) = try_get_credential_vault() {
@@ -62,7 +62,10 @@ pub async fn handle_list(State(state): State<AppState>, headers: HeaderMap) -> i
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let items: Vec<serde_json::Value> = vault.list().iter().map(meta_to_json).collect();
+    let items: Vec<serde_json::Value> =
+        tokio::task::spawn_blocking(move || vault.list().iter().map(meta_to_json).collect())
+            .await
+            .unwrap_or_default();
     Json(serde_json::json!({ "credentials": items })).into_response()
 }
 
@@ -90,16 +93,27 @@ pub async fn handle_put(
         .as_deref()
         .map(CredentialKind::parse)
         .unwrap_or(CredentialKind::Other);
-    match vault.put(&body.name, kind, &body.value) {
-        Ok(meta) => Json(serde_json::json!({
+    let name = body.name.clone();
+    let value = body.value.clone();
+    let result = tokio::task::spawn_blocking(move || vault.put(&name, kind, &value)).await;
+    match result {
+        Ok(Ok(meta)) => Json(serde_json::json!({
             "status": "ok",
             "credential": meta_to_json(&meta),
         }))
         .into_response(),
-        Err(err) => (
+        Ok(Err(err)) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": "invalid",
+                "detail": err.to_string(),
+            })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "vault_unavailable",
                 "detail": err.to_string(),
             })),
         )
@@ -119,13 +133,25 @@ pub async fn handle_delete(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    match vault.delete(&name) {
-        Ok(true) => Json(serde_json::json!({ "status": "deleted", "name": name })).into_response(),
-        Ok(false) => (
+    let name_for_io = name.clone();
+    let result = tokio::task::spawn_blocking(move || vault.delete(&name_for_io)).await;
+    match result {
+        Ok(Ok(true)) => {
+            Json(serde_json::json!({ "status": "deleted", "name": name })).into_response()
+        }
+        Ok(Ok(false)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": "not_found",
                 "name": name,
+            })),
+        )
+            .into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "delete_failed",
+                "detail": err.to_string(),
             })),
         )
             .into_response(),

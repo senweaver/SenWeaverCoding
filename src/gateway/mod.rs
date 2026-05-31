@@ -1,13 +1,8 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
 pub mod api;
-pub mod api_pairing;
-#[cfg(feature = "plugins-wasm")]
-pub mod api_plugins;
-#[cfg(feature = "webauthn")]
-pub mod api_webauthn;
 pub mod auth_rate_limit;
 pub mod canvas;
 pub mod nodes;
@@ -23,13 +18,13 @@ pub mod git_routes;
 pub mod mcp_live;
 pub mod python_env_routes;
 pub mod workspace_files;
-pub mod ws_desktop;
 
 pub mod a2a;
 pub mod client_ip;
 pub mod cors;
 pub mod hardware_context;
 pub mod lifecycle;
+pub mod channel_supervisor;
 pub mod rate_limit;
 
 pub use crate::gateway::lifecycle::{
@@ -40,7 +35,7 @@ use crate::gateway::lifecycle::{GATEWAY_SHUTDOWN_SIGNAL, GatewayRunningGuard};
 
 use crate::channels::{
     Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
-    WhatsAppChannel, session_backend::SessionBackend, session_sqlite::SqliteSessionBackend,
+    WhatsAppChannel, session::backend::SessionBackend, session::sqlite::SqliteSessionBackend,
 };
 use crate::config::Config;
 use crate::cost::CostTracker;
@@ -294,16 +289,16 @@ pub struct AppState {
 
     pub session_backend: Option<Arc<dyn SessionBackend>>,
 
-    pub device_registry: Option<Arc<api_pairing::DeviceRegistry>>,
+    pub device_registry: Option<Arc<api::pairing::DeviceRegistry>>,
 
-    pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
+    pub pending_pairings: Option<Arc<api::pairing::PairingStore>>,
 
     pub rbac: Option<Arc<crate::security::rbac::RbacEngine>>,
 
     pub canvas_store: CanvasStore,
 
     #[cfg(feature = "webauthn")]
-    pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
+    pub webauthn: Option<Arc<api::webauthn::WebAuthnState>>,
 
     pub hooks: Arc<crate::hooks::HotHookRunner>,
 
@@ -336,65 +331,18 @@ impl AppState {
         self.model.read().clone()
     }
 
-    pub fn rebuild_runtime_from_config(&self) {
+    pub async fn rebuild_runtime_from_config_async(&self) {
         let cfg = self.config.lock().clone();
-        let resolved_default_provider = providers::resolve_runtime_provider_name(
-            cfg.default_provider.as_deref().unwrap_or("openrouter"),
-            &cfg,
-        );
-        let provider_runtime_options = providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            provider_api_url: cfg.api_url.clone(),
-            sen_dir: cfg.config_path.parent().map(std::path::PathBuf::from),
-            secrets_encrypt: cfg.secrets.encrypt,
-            reasoning_enabled: cfg.runtime.reasoning_enabled,
-            reasoning_effort: cfg.runtime.reasoning_effort.clone(),
-            provider_timeout_secs: Some(cfg.provider_timeout_secs),
-            extra_headers: providers::merged_extra_headers_for_config(&cfg),
-            api_path: cfg.api_path.clone(),
-            provider_max_tokens: cfg.provider_max_tokens,
-            model_context_windows: cfg.model_context_windows.clone(),
+        let cfg_for_build = cfg.clone();
+        let built = tokio::task::spawn_blocking(move || {
+            build_runtime_provider_from_cfg(&cfg_for_build)
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((provider_arc, model_string)) = built else {
+            return;
         };
-
-        let provider_arc: Arc<dyn Provider> =
-            match providers::create_resilient_provider_with_options(
-                &resolved_default_provider,
-                cfg.api_key.as_deref(),
-                cfg.api_url.as_deref(),
-                &cfg.reliability,
-                &provider_runtime_options,
-            ) {
-                Ok(p) => Arc::from(p),
-                Err(err) => {
-                    tracing::warn!(
-                        resolved_default_provider = %resolved_default_provider,
-                        error = %err,
-                        "gateway runtime hot-reload: failed to build provider for new config; \
-                         falling back to placeholder openrouter so the desktop shell stays alive. \
-                         The user can re-check their Provider settings."
-                    );
-                    match providers::create_resilient_provider_with_options(
-                        "openrouter",
-                        None,
-                        None,
-                        &Default::default(),
-                        &provider_runtime_options,
-                    ) {
-                        Ok(p) => Arc::from(p),
-                        Err(inner) => {
-                            tracing::error!(
-                                error = %inner,
-                                "gateway runtime hot-reload: placeholder provider build failed; \
-                                 keeping previous provider Arc to avoid breaking in-flight requests"
-                            );
-                            return;
-                        }
-                    }
-                }
-            };
-
-        let model_string = providers::resolve_default_model(&cfg).unwrap_or_default();
-
         {
             let mut guard = self.provider.write();
             *guard = provider_arc;
@@ -405,6 +353,65 @@ impl AppState {
         }
         self.push_live_config(cfg);
     }
+}
+
+fn build_runtime_provider_from_cfg(cfg: &Config) -> Option<(Arc<dyn Provider>, String)> {
+    let resolved_default_provider = providers::resolve_runtime_provider_name(
+        cfg.default_provider.as_deref().unwrap_or("openrouter"),
+        cfg,
+    );
+    let provider_runtime_options = providers::ProviderRuntimeOptions {
+        auth_profile_override: None,
+        provider_api_url: cfg.api_url.clone(),
+        sen_dir: cfg.config_path.parent().map(std::path::PathBuf::from),
+        secrets_encrypt: cfg.secrets.encrypt,
+        reasoning_enabled: cfg.runtime.reasoning_enabled,
+        reasoning_effort: cfg.runtime.reasoning_effort.clone(),
+        provider_timeout_secs: Some(cfg.provider_timeout_secs),
+        extra_headers: providers::merged_extra_headers_for_config(cfg),
+        api_path: cfg.api_path.clone(),
+        provider_max_tokens: cfg.provider_max_tokens,
+        model_context_windows: cfg.model_context_windows.clone(),
+    };
+
+    let provider_arc: Arc<dyn Provider> = match providers::create_resilient_provider_with_options(
+        &resolved_default_provider,
+        cfg.api_key.as_deref(),
+        cfg.api_url.as_deref(),
+        &cfg.reliability,
+        &provider_runtime_options,
+    ) {
+        Ok(p) => Arc::from(p),
+        Err(err) => {
+            tracing::warn!(
+                resolved_default_provider = %resolved_default_provider,
+                error = %err,
+                "gateway runtime hot-reload: failed to build provider for new config; \
+                 falling back to placeholder openrouter so the desktop shell stays alive. \
+                 The user can re-check their Provider settings."
+            );
+            match providers::create_resilient_provider_with_options(
+                "openrouter",
+                None,
+                None,
+                &Default::default(),
+                &provider_runtime_options,
+            ) {
+                Ok(p) => Arc::from(p),
+                Err(inner) => {
+                    tracing::error!(
+                        error = %inner,
+                        "gateway runtime hot-reload: placeholder provider build failed; \
+                         keeping previous provider Arc to avoid breaking in-flight requests"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    let model_string = providers::resolve_default_model(cfg).unwrap_or_default();
+    Some((provider_arc, model_string))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -485,7 +492,7 @@ async fn run_gateway_inner(
     let live_config_state = crate::config::live::LiveConfig::new(config.clone());
 
     if let Some(parent) = config.config_path.parent() {
-        crate::gateway::ws_desktop::desktop_runtime_state()
+        crate::gateway::ws::desktop::desktop_runtime_state()
             .set_settings_path(parent.join("desktop_user.json"));
     }
 
@@ -507,7 +514,7 @@ async fn run_gateway_inner(
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| config.workspace_dir.join(".senweavercoding"));
     let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
-        data_dir: svc_data_dir,
+        data_dir: svc_data_dir.clone(),
         shared_config: Some(Arc::clone(live_config_state.shared())),
         ..Default::default()
     });
@@ -522,12 +529,20 @@ async fn run_gateway_inner(
     .await;
 
     {
-        let project_loc =
-            crate::agent::token_budget::count_source_loc(&config.workspace_dir);
+        let workspace_for_loc = config.workspace_dir.clone();
+        let loc_cache_dir = svc_data_dir.clone();
+        let project_loc = tokio::task::spawn_blocking(move || {
+            crate::agent::token::budget::count_source_loc_cached(
+                &workspace_for_loc,
+                &loc_cache_dir,
+            )
+        })
+        .await
+        .unwrap_or(0);
         crate::observability::session_write_mode_metrics::set_token_budget_project_loc(
             project_loc,
         );
-        crate::agent::token_optimizer::ensure_global_optimizer_with_loc(
+        crate::agent::token::optimizer::ensure_global_optimizer_with_loc(
             config.tool_output_compressor.clone(),
             config.token_budget.clone(),
             project_loc,
@@ -549,7 +564,7 @@ async fn run_gateway_inner(
     let hooks: std::sync::Arc<crate::hooks::HotHookRunner> = std::sync::Arc::clone(&hooks_runner);
 
     if let Err(err) =
-        crate::services::credential_vault::init_credential_vault(&hooks_workspace_anchor)
+        crate::services::governance::credential_vault::init_credential_vault(&hooks_workspace_anchor)
     {
         tracing::warn!(error = %err, "Failed to initialise credential vault");
     }
@@ -613,31 +628,37 @@ async fn run_gateway_inner(
         provider_max_tokens: config.provider_max_tokens,
         model_context_windows: config.model_context_windows.clone(),
     };
-    let provider_inner: Arc<dyn Provider> = match providers::create_resilient_provider_with_options(
-        &resolved_default_provider,
-        config.api_key.as_deref(),
-        config.api_url.as_deref(),
-        &config.reliability,
-        &provider_runtime_options,
-    ) {
-        Ok(p) => Arc::from(p),
-        Err(err) => {
-            tracing::warn!(
-                resolved_default_provider = %resolved_default_provider,
-                error = %err,
-                "gateway startup: failed to instantiate default provider; \
-                 starting in degraded mode with a placeholder provider so the desktop \
-                 shell can render Provider settings page"
-            );
-            Arc::from(providers::create_resilient_provider_with_options(
-                "openrouter",
-                None,
-                None,
-                &Default::default(),
-                &provider_runtime_options,
-            )?)
-        }
-    };
+    let provider_inner: Arc<dyn Provider> =
+        match providers::create_resilient_provider_with_options_async(
+            resolved_default_provider.clone(),
+            config.api_key.clone(),
+            config.api_url.clone(),
+            config.reliability.clone(),
+            provider_runtime_options.clone(),
+        )
+        .await
+        {
+            Ok(p) => Arc::from(p),
+            Err(err) => {
+                tracing::warn!(
+                    resolved_default_provider = %resolved_default_provider,
+                    error = %err,
+                    "gateway startup: failed to instantiate default provider; \
+                     starting in degraded mode with a placeholder provider so the desktop \
+                     shell can render Provider settings page"
+                );
+                Arc::from(
+                    providers::create_resilient_provider_with_options_async(
+                        "openrouter".to_string(),
+                        None,
+                        None,
+                        Default::default(),
+                        provider_runtime_options.clone(),
+                    )
+                    .await?,
+                )
+            }
+        };
     let provider: Arc<parking_lot::RwLock<Arc<dyn Provider>>> =
         Arc::new(parking_lot::RwLock::new(provider_inner));
     let model_string = providers::resolve_default_model(&config).unwrap_or_else(|err| {
@@ -705,8 +726,8 @@ async fn run_gateway_inner(
                 crate::token_saver::set_enabled(cfg.token_saver.enabled);
                 crate::token_saver::set_global(cfg.token_saver.to_runtime_ctx());
                 crate::guardrails::ensure_global_guardrails(cfg.guardrails.clone());
-                crate::services::proxy_runtime::ProxyRuntime::global().replace(cfg.proxy.clone());
-                crate::agent::token_optimizer::ensure_global_optimizer_from_config(&cfg);
+                crate::services::proxy::runtime::ProxyRuntime::global().replace(cfg.proxy.clone());
+                crate::agent::token::optimizer::ensure_global_optimizer_from_config(&cfg);
                 let workspace_anchor = if cfg.workspace_dir.as_os_str().is_empty() {
                     std::env::current_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -891,6 +912,24 @@ async fn run_gateway_inner(
     let cost_tracker = CostTracker::get_or_init_global(config.cost.clone(), &config.workspace_dir);
 
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
+
+    {
+        let usage_event_tx = event_tx.clone();
+        crate::cost::tracker::set_usage_notify_callback(move |record| {
+            let payload = serde_json::json!({
+                "type": "usage_updated",
+                "sessionId": record.chat_session_id,
+                "codingMode": record.coding_mode,
+                "model": record.usage.model,
+                "inputTokens": record.usage.input_tokens,
+                "outputTokens": record.usage.output_tokens,
+                "totalTokens": record.usage.total_tokens,
+                "costUsd": record.usage.cost_usd,
+                "timestamp": record.usage.timestamp.to_rfc3339(),
+            });
+            let _ = usage_event_tx.send(payload);
+        });
+    }
 
     {
         let live_mcp = crate::gateway::mcp_live::LiveMcpReconciler::new();
@@ -1098,7 +1137,7 @@ async fn run_gateway_inner(
                 tunnel_url = Some(url);
             }
             Err(e) => {
-                println!("????  Tunnel failed to start: {e}");
+                println!("\u{274C}  Tunnel failed to start: {e}");
                 println!("   Falling back to local-only mode.");
             }
         }
@@ -1112,7 +1151,7 @@ async fn run_gateway_inner(
     .await;
 
     let pfx = path_prefix.unwrap_or("");
-    println!("???? SenWeaverCoding Gateway listening on http://{display_addr}{pfx}");
+    println!("\u{1F680} SenWeaverCoding Gateway listening on http://{display_addr}{pfx}");
     if let Some(ref url) = tunnel_url {
         println!("   - ? Public URL: {url}");
     }
@@ -1120,16 +1159,16 @@ async fn run_gateway_inner(
     if let Some(code) = pairing.pairing_code() {
         println!();
         println!("   - ? PAIRING REQUIRED  -  use this one-time code:");
-        println!("      -  -  -  -  -  -  -  -  -  -  -  -  -  -  - ???");
+        println!("      \u{2500}  \u{2500}  \u{2500}  \u{2500}  \u{2500}  \u{2500}  \u{2500}  \u{2500} \u{2022}");
         println!("      -   {code}   - ");
-        println!("      -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  - ");
+        println!("      -  -  -  -  -  -  -  - ");
         println!("     Send: POST {pfx}/pair with header X-Pairing-Code: {code}");
     } else if pairing.require_pairing() {
         println!("   - ? Pairing: ACTIVE (bearer token required)");
         println!("     To pair a new device: sen gateway get-paircode --new");
         println!();
     } else {
-        println!("  ????  Pairing: DISABLED (all requests accepted)");
+        println!("  \u{26A0}\u{FE0F}  Pairing: DISABLED (all requests accepted)");
         println!();
     }
     println!("  POST {pfx}/pair       -  pair a new client (X-Pairing-Code header)");
@@ -1174,7 +1213,7 @@ async fn run_gateway_inner(
     let node_registry = Arc::new(nodes::NodeRegistry::new(config.nodes.max_nodes));
 
     let device_registry = if config.gateway.require_pairing {
-        match api_pairing::DeviceRegistry::new(&config.workspace_dir) {
+        match api::pairing::DeviceRegistry::new(&config.workspace_dir) {
             Ok(registry) => Some(Arc::new(registry)),
             Err(e) => {
                 tracing::error!("Failed to initialise device registry: {e}");
@@ -1185,7 +1224,7 @@ async fn run_gateway_inner(
         None
     };
     let pending_pairings = if config.gateway.require_pairing {
-        Some(Arc::new(api_pairing::PairingStore::new(
+        Some(Arc::new(api::pairing::PairingStore::new(
             config.gateway.pairing_dashboard.max_pending_codes,
         )))
     } else {
@@ -1204,7 +1243,18 @@ async fn run_gateway_inner(
                 });
                 let registered_models = collect_registered_models_for_engine(&config);
                 engine.clear_reflection_providers();
-                register_per_provider_reflection_factories(&engine, &config);
+                {
+                    let engine_for_factories = Arc::clone(&engine);
+                    let config_for_factories = config.clone();
+                    tokio::task::spawn_blocking(move || {
+                        register_per_provider_reflection_factories(
+                            &engine_for_factories,
+                            &config_for_factories,
+                        );
+                    })
+                    .await
+                    .ok();
+                }
                 engine.set_registered_models(registered_models);
                 engine.ensure_judge_worker();
                 engine.ensure_reflection_scheduler();
@@ -1282,7 +1332,7 @@ async fn run_gateway_inner(
                 rp_origin: config.security.webauthn.rp_origin.clone(),
                 rp_name: config.security.webauthn.rp_name.clone(),
             };
-            Some(Arc::new(api_webauthn::WebAuthnState {
+            Some(Arc::new(api::webauthn::WebAuthnState {
                 manager: crate::security::webauthn::WebAuthnManager::new(
                     wa_config,
                     secret_store,
@@ -1295,6 +1345,11 @@ async fn run_gateway_inner(
             None
         },
     };
+
+    if with_scheduler {
+        let cfg_snapshot = state.config.lock().clone();
+        channel_supervisor::start_embedded_channels(&cfg_snapshot, &state.live_config);
+    }
 
     let config_put_router = Router::new()
         .route("/api/config", put(api::handle_api_config_put))
@@ -1349,6 +1404,12 @@ async fn run_gateway_inner(
         .route("/api/cost", get(api::handle_api_cost))
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
+        .route("/api/tips/next", get(api::handle_api_tips_next))
+        .route("/api/tips/dismiss", post(api::handle_api_tips_dismiss))
+        .route(
+            "/api/remote/sessions",
+            get(api::handle_api_remote_sessions_list).post(api::handle_api_remote_sessions_register),
+        )
         .route("/api/metrics", get(api::handle_api_metrics))
         .route(
             "/api/sessions",
@@ -1357,6 +1418,10 @@ async fn run_gateway_inner(
         .route(
             "/api/sessions/events",
             get(api::handle_api_sessions_events),
+        )
+        .route(
+            "/api/gateway/events",
+            get(crate::gateway::sse::handle_sse_events),
         )
         .route(
             "/api/sessions/recent-projects",
@@ -1396,13 +1461,13 @@ async fn run_gateway_inner(
                 .put(api::handle_api_session_rename)
                 .patch(api::handle_api_session_rename),
         )
-        .route("/api/pairing/initiate", post(api_pairing::initiate_pairing))
-        .route("/api/pair", post(api_pairing::submit_pairing_enhanced))
-        .route("/api/devices", get(api_pairing::list_devices))
-        .route("/api/devices/{id}", delete(api_pairing::revoke_device))
+        .route("/api/pairing/initiate", post(api::pairing::initiate_pairing))
+        .route("/api/pair", post(api::pairing::submit_pairing_enhanced))
+        .route("/api/devices", get(api::pairing::list_devices))
+        .route("/api/devices/{id}", delete(api::pairing::revoke_device))
         .route(
             "/api/devices/{id}/token/rotate",
-            post(api_pairing::rotate_token),
+            post(api::pairing::rotate_token),
         )
         .route("/api/canvas", get(canvas::handle_canvas_list))
         .route(
@@ -1726,6 +1791,10 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_adapters_get).put(desktop_routes::handle_adapters_put),
         )
         .route(
+            "/api/channels/restart",
+            post(desktop_routes::handle_channels_restart),
+        )
+        .route(
             "/api/computer-use/status",
             get(desktop_routes::handle_computer_use_status),
         )
@@ -1756,6 +1825,10 @@ async fn run_gateway_inner(
         .route("/api/search/sessions", post(desktop_routes::handle_search_sessions))
 
         .route("/api/workspace/tree", get(workspace_files::handle_workspace_tree))
+        .route(
+            "/api/workspace/structure-doc",
+            get(workspace_files::handle_workspace_structure_doc),
+        )
         .route("/api/workspace/file", get(workspace_files::handle_workspace_file_get))
         .route("/api/workspace/dir", post(workspace_files::handle_workspace_dir_post))
         .route("/api/workspace/move", post(workspace_files::handle_workspace_move))
@@ -1884,33 +1957,33 @@ async fn run_gateway_inner(
     let inner = inner
         .route(
             "/api/webauthn/register/start",
-            post(api_webauthn::handle_register_start),
+            post(api::webauthn::handle_register_start),
         )
         .route(
             "/api/webauthn/register/finish",
-            post(api_webauthn::handle_register_finish),
+            post(api::webauthn::handle_register_finish),
         )
         .route(
             "/api/webauthn/auth/start",
-            post(api_webauthn::handle_auth_start),
+            post(api::webauthn::handle_auth_start),
         )
         .route(
             "/api/webauthn/auth/finish",
-            post(api_webauthn::handle_auth_finish),
+            post(api::webauthn::handle_auth_finish),
         )
         .route(
             "/api/webauthn/credentials",
-            get(api_webauthn::handle_list_credentials),
+            get(api::webauthn::handle_list_credentials),
         )
         .route(
             "/api/webauthn/credentials/{id}",
-            delete(api_webauthn::handle_delete_credential),
+            delete(api::webauthn::handle_delete_credential),
         );
 
     #[cfg(feature = "plugins-wasm")]
     let inner = inner.route(
         "/api/plugins",
-        get(api_plugins::plugin_routes::list_plugins),
+        get(api::plugins::plugin_routes::list_plugins),
     );
 
     let inner = inner
@@ -1948,7 +2021,7 @@ async fn run_gateway_inner(
 
         .route("/ws/chat", get(ws::handle_ws_chat))
 
-        .route("/ws/{session_id}", get(ws_desktop::handle_ws_desktop))
+        .route("/ws/{session_id}", get(ws::desktop::handle_ws_desktop))
 
         .route("/approval/{id}/respond", post(ws::handle_approval_respond))
 
@@ -2052,7 +2125,7 @@ async fn run_gateway_inner(
                     );
                 }
                 _ = shutdown_signal.changed() => {
-                    tracing::info!("???? SenWeaverCoding Gateway shutting down...");
+                    tracing::info!("\u{1F6D1} SenWeaverCoding Gateway shutting down...");
                     break;
                 }
             }
@@ -2066,7 +2139,7 @@ async fn run_gateway_inner(
         )
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.changed().await;
-            tracing::info!("???? SenWeaverCoding Gateway shutting down...");
+            tracing::info!("\u{1F6D1} SenWeaverCoding Gateway shutting down...");
         });
 
         let force_after = std::time::Duration::from_secs(6);

@@ -68,7 +68,17 @@ export function normalizeAddressBarUrl(raw: string): string {
   }
 
   if (isLoopbackAuthority(trimmed)) {
-    return `http://${trimmed}`
+    const withScheme = trimmed.includes('://') ? trimmed : `http://${trimmed}`
+    try {
+      const parsed = new URL(withScheme)
+      const host = parsed.hostname.toLowerCase()
+      if (host === 'localhost' || host === '::1') {
+        parsed.hostname = '127.0.0.1'
+      }
+      return parsed.toString()
+    } catch {
+      return `http://${trimmed}`
+    }
   }
 
   return `https://${trimmed}`

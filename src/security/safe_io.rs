@@ -66,7 +66,5 @@ pub fn verify_no_symlink<P: AsRef<Path>>(path: P) -> io::Result<()> {
 
 #[cfg(unix)]
 mod libc_shim {
-
-    #[allow(dead_code)]
     pub(super) const _SENTINEL: i32 = libc::O_NOFOLLOW as i32;
 }

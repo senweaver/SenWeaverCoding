@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -8,10 +8,10 @@ use super::state::{
 };
 use super::templates::{list_summary, template_for};
 use crate::security::SecurityPolicy;
-use crate::tools::enter_plan_mode::PlanModeFlag;
+use crate::tools::plan_mode::enter::PlanModeFlag;
 use crate::tools::traits::{Tool, ToolResult};
-use crate::tools::web_fetch::WebFetchTool;
-use crate::tools::web_search_tool::WebSearchTool;
+use crate::tools::web::fetch::WebFetchTool;
+use crate::tools::web::search::tool::WebSearchTool;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::json;
@@ -69,7 +69,7 @@ impl Tool for EnterCuratorModeTool {
                     ],
                     "description": "Target document template. Aliases: `paper` → paper_imrad, `solution` → solution_functional."
                 },
-                "slug": { "type": "string", "description": "Optional explicit slug for the `.senweavercoding/curators/<slug>/` directory. Multiple parallel curator sessions in the same workspace are supported — each one lives under its own slug; if the chosen slug already exists, a numeric suffix is appended automatically (e.g. `my-doc`, `my-doc-2`, `my-doc-3`)." }
+                "slug": { "type": "string", "description": "Optional explicit slug for the `.senweavercoding/curators/<slug>/` directory. Multiple parallel curator sessions in the same workspace are supported  -  each one lives under its own slug; if the chosen slug already exists, a numeric suffix is appended automatically (e.g. `my-doc`, `my-doc-2`, `my-doc-3`)." }
             },
             "required": ["intent"]
         })
@@ -95,35 +95,26 @@ impl Tool for EnterCuratorModeTool {
         } else {
             workspace
         };
-        let slug = explicit_slug
+        let base_slug = explicit_slug
             .filter(|s| !s.is_empty())
             .map(slugify)
             .unwrap_or_else(|| slugify(&intent));
-        let slug = uniquify_slug(&workspace, slug);
-        let curators_base = curators_base_dir(&workspace);
-        let curator_root = curators_base.join(&slug);
-        std::fs::create_dir_all(&curator_root)?;
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        write_placeholder(&curator_root, "research_notes.md", &research_seed(&intent, &now))?;
-        write_placeholder(&curator_root, "sources.md", &sources_seed(&intent, &now))?;
-        let tpl = template_for(template);
-        let draft_with_banner = compose_draft_with_banner(tpl.draft_markdown);
-        write_placeholder(&curator_root, "draft.md", &draft_with_banner)?;
-        write_placeholder(&curator_root, "final.md", "# (final.md — populated by exit_curator_mode)\n")?;
-        write_placeholder(&curator_root, "impl_blueprint.md", tpl.blueprint_markdown)?;
+        let init = {
+            let workspace = workspace.clone();
+            let intent_seed = intent.clone();
+            let now_seed = now.clone();
+            tokio::task::spawn_blocking(move || {
+                enter_curator_init(workspace, base_slug, template, &intent_seed, &now_seed)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("enter_curator_mode internal task error: {e}"))??
+        };
+        let curator_root = init.curator_root;
+        let slug = init.slug;
 
-        let placeholder_paths = [
-            "research_notes.md",
-            "sources.md",
-            "draft.md",
-            "final.md",
-            "impl_blueprint.md",
-        ];
-        for name in placeholder_paths {
-            let p = curator_root.join(name);
-            if let Ok(bytes) = std::fs::read(&p) {
-                crate::agent::file_edit_emitter::emit_file_create(&p, &bytes, None).await;
-            }
+        for (p, bytes) in &init.created {
+            crate::agent::file_edit_emitter::emit_file_create(p, bytes, None).await;
         }
 
         *self.flag.write() = true;
@@ -147,10 +138,10 @@ impl Tool for EnterCuratorModeTool {
              Workflow: Intent → Web Collect (`web_search` / `web_fetch`) → \
              Local Collect (`workspace_deep_search`) → Organize → Draft → Polish → \
              `exit_curator_mode(slug=\"{slug}\", template=\"{}\")`.",
-            tpl.kind.label(),
+            init.kind_label,
             curator_root.display(),
             rel,
-            tpl.kind.label()
+            init.kind_label
         );
         Ok(ToolResult {
             success: true,
@@ -235,9 +226,14 @@ impl Tool for CuratorCollectTool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("curator_collect kind=source requires non-empty 'url'"))?;
-                let id = next_source_id(&active.root_dir)?;
+                let id = {
+                    let root = active.root_dir.clone();
+                    tokio::task::spawn_blocking(move || next_source_id(&root))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("curator_collect internal task error: {e}"))??
+                };
                 payload.push_str(&format!(
-                    "## {id} — {title}\n- URL: <{url}>\n",
+                    "## {id}  -  {title}\n- URL: <{url}>\n",
                 ));
                 if let Some(author) = args.get("author").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
                     payload.push_str(&format!("- Author: {author}\n"));
@@ -305,9 +301,18 @@ impl Tool for CuratorCollectTool {
                 );
             }
         };
-        let before_bytes = std::fs::read(&target_file).ok();
-        append_file(&target_file, &payload)?;
-        let after_bytes = std::fs::read(&target_file).ok();
+        let (before_bytes, after_bytes) = {
+            let target = target_file.clone();
+            let payload = payload.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+                let before = std::fs::read(&target).ok();
+                append_file(&target, &payload)?;
+                let after = std::fs::read(&target).ok();
+                Ok((before, after))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("curator_collect internal task error: {e}"))??
+        };
         if let Some(after) = after_bytes.as_deref() {
             crate::agent::file_edit_emitter::emit_file_edit(
                 &target_file,
@@ -506,12 +511,23 @@ impl Tool for CuratorDeepCollectTool {
         let notes_path = active.root_dir.join("research_notes.md");
         let sources_path = active.root_dir.join("sources.md");
         let session_header = format!(
-            "\n\n## Deep collect @ {timestamp} — query `{query}`\n- max_sources: {max_sources}\n- search hits: {}\n\n",
+            "\n\n## Deep collect @ {timestamp}  -  query `{query}`\n- max_sources: {max_sources}\n- search hits: {}\n\n",
             hits.len()
         );
-        let notes_before = std::fs::read(&notes_path).ok();
-        append_file(&notes_path, &session_header)?;
-        let notes_after_header = std::fs::read(&notes_path).ok();
+        let (notes_before, notes_after_header) = {
+            let notes_path = notes_path.clone();
+            let session_header = session_header.clone();
+            tokio::task::spawn_blocking(
+                move || -> anyhow::Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+                    let before = std::fs::read(&notes_path).ok();
+                    append_file(&notes_path, &session_header)?;
+                    let after = std::fs::read(&notes_path).ok();
+                    Ok((before, after))
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("curator_deep_collect internal task error: {e}"))??
+        };
         if let Some(after) = notes_after_header.as_deref() {
             crate::agent::file_edit_emitter::emit_file_edit(
                 &notes_path,
@@ -550,7 +566,7 @@ impl Tool for CuratorDeepCollectTool {
                     .unwrap_or_else(|| "unknown error".to_string());
                 failures.push(format!("{} ({}): {reason}", hit.title, hit.url));
                 summary_lines.push(format!(
-                    "  {position}. ✗ [{label}] {} — fetch failed: {reason}",
+                    "  {position}. ✗ [{label}] {}  -  fetch failed: {reason}",
                     hit.title
                 ));
                 continue;
@@ -560,84 +576,115 @@ impl Tool for CuratorDeepCollectTool {
             if body.is_empty() {
                 failures.push(format!("{} ({}): empty body", hit.title, hit.url));
                 summary_lines.push(format!(
-                    "  {position}. ✗ [{label}] {} — empty body",
+                    "  {position}. ✗ [{label}] {}  -  empty body",
                     hit.title
                 ));
                 continue;
             }
 
-            let trimmed: String = body.chars().take(snippet_chars).collect();
-            let truncated = body.chars().count() > snippet_chars;
+            let persist = {
+                let root_dir = active.root_dir.clone();
+                let sources_path = sources_path.clone();
+                let notes_path = notes_path.clone();
+                let title = hit.title.clone();
+                let url = hit.url.clone();
+                let label = label.to_string();
+                let description = hit.description.clone();
+                let tags = tags.clone();
+                let query = query.clone();
+                let timestamp = timestamp.clone();
+                let body_owned = body.to_string();
+                tokio::task::spawn_blocking(move || -> anyhow::Result<DeepHitPersist> {
+                    let trimmed: String = body_owned.chars().take(snippet_chars).collect();
+                    let truncated = body_owned.chars().count() > snippet_chars;
 
-            let source_id = next_source_id(&active.root_dir)?;
-            let mut source_entry = String::new();
-            source_entry.push_str(&format!("## {source_id} — {}\n", hit.title));
-            source_entry.push_str(&format!("- URL: <{}>\n", hit.url));
-            source_entry.push_str(&format!("- Engine: {}\n", label));
-            if !hit.description.trim().is_empty() {
-                source_entry.push_str(&format!("- Search snippet: {}\n", hit.description.trim()));
-            }
-            if let Some(tag_list) = tags.as_ref() {
-                source_entry.push_str(&format!("- Tags: {}\n", tag_list.join(", ")));
-            }
-            source_entry.push_str(&format!("- Captured: {timestamp}\n"));
-            source_entry.push_str(&format!(
-                "- Captured via: curator_deep_collect (query=`{query}`)\n\n"
-            ));
-            let sources_before = std::fs::read(&sources_path).ok();
-            append_file(&sources_path, &source_entry)?;
-            let sources_after = std::fs::read(&sources_path).ok();
-            if let Some(after) = sources_after.as_deref() {
+                    let source_id = next_source_id(&root_dir)?;
+                    let mut source_entry = String::new();
+                    source_entry.push_str(&format!("## {source_id}  -  {title}\n"));
+                    source_entry.push_str(&format!("- URL: <{url}>\n"));
+                    source_entry.push_str(&format!("- Engine: {label}\n"));
+                    if !description.trim().is_empty() {
+                        source_entry.push_str(&format!("- Search snippet: {}\n", description.trim()));
+                    }
+                    if let Some(tag_list) = tags.as_ref() {
+                        source_entry.push_str(&format!("- Tags: {}\n", tag_list.join(", ")));
+                    }
+                    source_entry.push_str(&format!("- Captured: {timestamp}\n"));
+                    source_entry.push_str(&format!(
+                        "- Captured via: curator_deep_collect (query=`{query}`)\n\n"
+                    ));
+                    let sources_before = std::fs::read(&sources_path).ok();
+                    append_file(&sources_path, &source_entry)?;
+                    let sources_after = std::fs::read(&sources_path).ok();
+
+                    let mut note_block = String::new();
+                    note_block.push_str(&format!("### {source_id}  -  {title}\n"));
+                    note_block.push_str(&format!("- URL: <{url}>\n"));
+                    note_block.push_str(&format!("- Engine: {label}\n"));
+                    if truncated {
+                        note_block.push_str(&format!(
+                            "- Excerpt ({} of {} chars):\n",
+                            trimmed.chars().count(),
+                            body_owned.chars().count()
+                        ));
+                    } else {
+                        note_block.push_str(&format!(
+                            "- Excerpt ({} chars):\n",
+                            trimmed.chars().count()
+                        ));
+                    }
+                    note_block.push_str("\n```text\n");
+                    note_block.push_str(&trimmed);
+                    if !trimmed.ends_with('\n') {
+                        note_block.push('\n');
+                    }
+                    if truncated {
+                        note_block.push_str(
+                            "... [truncated; fetch the URL again to read the rest] ...\n",
+                        );
+                    }
+                    note_block.push_str("```\n\n");
+                    let notes_before = std::fs::read(&notes_path).ok();
+                    append_file(&notes_path, &note_block)?;
+                    let notes_after = std::fs::read(&notes_path).ok();
+
+                    let summary_line = format!(
+                        "  {position}. ✓ [{label}] {title}  -  {} chars (id={source_id})",
+                        trimmed.chars().count()
+                    );
+                    Ok(DeepHitPersist {
+                        sources_before,
+                        sources_after,
+                        notes_before,
+                        notes_after,
+                        appended: note_block.len() + source_entry.len(),
+                        summary_line,
+                    })
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("curator_deep_collect internal task error: {e}"))??
+            };
+
+            if let Some(after) = persist.sources_after.as_deref() {
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &sources_path,
-                    sources_before.as_deref(),
+                    persist.sources_before.as_deref(),
                     Some(after),
                     None,
                 )
                 .await;
             }
-
-            let mut note_block = String::new();
-            note_block.push_str(&format!("### {source_id} — {}\n", hit.title));
-            note_block.push_str(&format!("- URL: <{}>\n", hit.url));
-            note_block.push_str(&format!("- Engine: {}\n", label));
-            if truncated {
-                note_block.push_str(&format!(
-                    "- Excerpt ({} of {} chars):\n",
-                    trimmed.chars().count(),
-                    body.chars().count()
-                ));
-            } else {
-                note_block.push_str(&format!("- Excerpt ({} chars):\n", trimmed.chars().count()));
-            }
-            note_block.push_str("\n```text\n");
-            note_block.push_str(&trimmed);
-            if !trimmed.ends_with('\n') {
-                note_block.push('\n');
-            }
-            if truncated {
-                note_block.push_str("... [truncated; fetch the URL again to read the rest] ...\n");
-            }
-            note_block.push_str("```\n\n");
-            let notes_before_chunk = std::fs::read(&notes_path).ok();
-            append_file(&notes_path, &note_block)?;
-            let notes_after_chunk = std::fs::read(&notes_path).ok();
-            if let Some(after) = notes_after_chunk.as_deref() {
+            if let Some(after) = persist.notes_after.as_deref() {
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &notes_path,
-                    notes_before_chunk.as_deref(),
+                    persist.notes_before.as_deref(),
                     Some(after),
                     None,
                 )
                 .await;
             }
-            total_appended += note_block.len() + source_entry.len();
-            summary_lines.push(format!(
-                "  {position}. ✓ [{label}] {} — {} chars (id={})",
-                hit.title,
-                trimmed.chars().count(),
-                source_id
-            ));
+            total_appended += persist.appended;
+            summary_lines.push(persist.summary_line);
         }
 
         let succeeded = summary_lines
@@ -698,7 +745,7 @@ impl Tool for CuratorTemplateListTool {
     }
 
     fn description(&self) -> &str {
-        "List all bundled Curator document templates — 5 academic paper styles (IMRaD / APA 7 / MLA 9 / Chicago 17-18 / GB/T 7714), 8 software solution standards (Functional / GB/T 8567-2006 / 1988 / IEEE 830 / ISO 29148 / ISO 42010 / IEEE 1016 / ISO 12207), and 1 technical report."
+        "List all bundled Curator document templates  -  5 academic paper styles (IMRaD / APA 7 / MLA 9 / Chicago 17-18 / GB/T 7714), 8 software solution standards (Functional / GB/T 8567-2006 / 1988 / IEEE 830 / ISO 29148 / ISO 42010 / IEEE 1016 / ISO 12207), and 1 technical report."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -776,57 +823,99 @@ impl Tool for CuratorTemplateApplyTool {
             .ok_or_else(|| anyhow::anyhow!("curator_template_apply requires an active Curator session."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
         let info = template_for(template);
-        let draft_path = active.root_dir.join("draft.md");
-        let existing = std::fs::read_to_string(&draft_path).unwrap_or_default();
-        let already_edited = existing
-            .lines()
-            .filter(|l| !l.trim_start().is_empty())
-            .count()
-            > 15;
-        if already_edited && !force {
-            anyhow::bail!(
-                "draft.md already contains substantive content. Pass force=true to overwrite, \
-                 or merge manually."
-            );
-        }
-        let draft_before = std::fs::read(&draft_path).ok();
-        let draft_with_banner = compose_draft_with_banner(info.draft_markdown);
-        std::fs::write(&draft_path, &draft_with_banner)?;
-        crate::agent::file_edit_emitter::emit_file_edit(
-            &draft_path,
-            draft_before.as_deref(),
-            Some(draft_with_banner.as_bytes()),
-            None,
-        )
-        .await;
-        let mut applied = vec!["draft.md".to_string()];
-        if include_blueprint {
-            let blueprint_path = active.root_dir.join("impl_blueprint.md");
-            let blueprint_before = std::fs::read(&blueprint_path).ok();
-            std::fs::write(&blueprint_path, info.blueprint_markdown)?;
-            crate::agent::file_edit_emitter::emit_file_edit(
-                &blueprint_path,
-                blueprint_before.as_deref(),
-                Some(info.blueprint_markdown.as_bytes()),
-                None,
-            )
-            .await;
-            applied.push("impl_blueprint.md".to_string());
-        }
+        let kind_label = info.kind.label().to_string();
+        let draft_bytes = compose_draft_with_banner(info.draft_markdown).into_bytes();
+        let blueprint_bytes = info.blueprint_markdown.as_bytes().to_vec();
+        let prep = {
+            let root = active.root_dir.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<TemplateApplyPrep> {
+                let draft_path = root.join("draft.md");
+                let existing = std::fs::read_to_string(&draft_path).unwrap_or_default();
+                let already_edited = existing
+                    .lines()
+                    .filter(|l| !l.trim_start().is_empty())
+                    .count()
+                    > 15;
+                if already_edited && !force {
+                    return Ok(TemplateApplyPrep::AlreadyEdited);
+                }
+                let draft_before = std::fs::read(&draft_path).ok();
+                std::fs::write(&draft_path, &draft_bytes)?;
+                let blueprint = if include_blueprint {
+                    let blueprint_path = root.join("impl_blueprint.md");
+                    let blueprint_before = std::fs::read(&blueprint_path).ok();
+                    std::fs::write(&blueprint_path, &blueprint_bytes)?;
+                    Some((blueprint_path, blueprint_before, blueprint_bytes))
+                } else {
+                    None
+                };
+                Ok(TemplateApplyPrep::Applied {
+                    draft_path,
+                    draft_before,
+                    draft_bytes,
+                    blueprint,
+                })
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("curator_template_apply internal task error: {e}"))??
+        };
+
+        let applied = match prep {
+            TemplateApplyPrep::AlreadyEdited => {
+                anyhow::bail!(
+                    "draft.md already contains substantive content. Pass force=true to overwrite, \
+                     or merge manually."
+                );
+            }
+            TemplateApplyPrep::Applied {
+                draft_path,
+                draft_before,
+                draft_bytes,
+                blueprint,
+            } => {
+                crate::agent::file_edit_emitter::emit_file_edit(
+                    &draft_path,
+                    draft_before.as_deref(),
+                    Some(&draft_bytes),
+                    None,
+                )
+                .await;
+                let mut applied = vec!["draft.md".to_string()];
+                if let Some((blueprint_path, blueprint_before, blueprint_bytes)) = blueprint {
+                    crate::agent::file_edit_emitter::emit_file_edit(
+                        &blueprint_path,
+                        blueprint_before.as_deref(),
+                        Some(&blueprint_bytes),
+                        None,
+                    )
+                    .await;
+                    applied.push("impl_blueprint.md".to_string());
+                }
+                applied
+            }
+        };
+
         let mut state = self.state.write();
         if let Some(active_state) = state.as_mut() {
             active_state.template = template;
         }
+        drop(state);
         Ok(ToolResult {
             success: true,
-            output: format!(
-                "Applied template `{}` to: {}",
-                info.kind.label(),
-                applied.join(", ")
-            ),
+            output: format!("Applied template `{}` to: {}", kind_label, applied.join(", ")),
             error: None,
         })
     }
+}
+
+enum TemplateApplyPrep {
+    AlreadyEdited,
+    Applied {
+        draft_path: std::path::PathBuf,
+        draft_before: Option<Vec<u8>>,
+        draft_bytes: Vec<u8>,
+        blueprint: Option<(std::path::PathBuf, Option<Vec<u8>>, Vec<u8>)>,
+    },
 }
 
 pub struct ExitCuratorModeTool {
@@ -891,7 +980,7 @@ impl Tool for ExitCuratorModeTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        // ---------- Step 1: session + sandbox validation ----------
+
         let active = self
             .state
             .read()
@@ -899,7 +988,6 @@ impl Tool for ExitCuratorModeTool {
             .ok_or_else(|| anyhow::anyhow!("exit_curator_mode requires an active Curator session."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
 
-        // ---------- Step 2: argument validation ----------
         let final_content = args
             .get("final_content")
             .and_then(|v| v.as_str())
@@ -923,7 +1011,6 @@ impl Tool for ExitCuratorModeTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // ---------- Step 3: content quality gate (rejects thin docs) ----------
         if let Err(reason) = quality_check(final_content, impl_blueprint) {
             return Ok(ToolResult {
                 success: false,
@@ -932,7 +1019,6 @@ impl Tool for ExitCuratorModeTool {
             });
         }
 
-        // ---------- Step 3b: content style gate (no source code / vendor dumps for ANY template) ----------
         if let Err(reason) = curator_content_style_check(final_content) {
             return Ok(ToolResult {
                 success: false,
@@ -941,8 +1027,13 @@ impl Tool for ExitCuratorModeTool {
             });
         }
 
-        // ---------- Step 4: evidence gate (requires research_notes + sources) ----------
-        if let Err(reason) = curator_evidence_check(&active.root_dir) {
+        let evidence = {
+            let root = active.root_dir.clone();
+            tokio::task::spawn_blocking(move || curator_evidence_check(&root))
+                .await
+                .map_err(|e| anyhow::anyhow!("exit_curator_mode internal task error: {e}"))?
+        };
+        if let Err(reason) = evidence {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -954,55 +1045,92 @@ impl Tool for ExitCuratorModeTool {
         let blueprint_path = active.root_dir.join("impl_blueprint.md");
         let docx_path = active.root_dir.join("final.docx");
 
-        // ---------- Step 5: persist Markdown deliverables ----------
-        let final_before = std::fs::read(&final_path).ok();
-        let blueprint_before = std::fs::read(&blueprint_path).ok();
-        if let Err(e) = std::fs::write(&final_path, final_content) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "exit_curator_mode REJECTED — failed to persist final.md at `{}`: {e}\n\nFix the IO error (permissions / disk space) and retry.",
-                    final_path.display()
-                )),
-            });
-        }
-        if let Err(e) = std::fs::write(&blueprint_path, impl_blueprint) {
-            let _ = std::fs::remove_file(&final_path);
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "exit_curator_mode REJECTED — failed to persist impl_blueprint.md at `{}`: {e}\n\nFix the IO error and retry.",
-                    blueprint_path.display()
-                )),
-            });
-        }
+        let prep = {
+            let final_path = final_path.clone();
+            let blueprint_path = blueprint_path.clone();
+            let docx_path = docx_path.clone();
+            let final_owned = final_content.to_string();
+            let blueprint_owned = impl_blueprint.to_string();
+            let render_template = active.template;
+            tokio::task::spawn_blocking(move || -> ExitPrep {
+                let final_before = std::fs::read(&final_path).ok();
+                let blueprint_before = std::fs::read(&blueprint_path).ok();
+                if let Err(e) = std::fs::write(&final_path, &final_owned) {
+                    return ExitPrep::WriteFailed(format!(
+                        "exit_curator_mode REJECTED  -  failed to persist final.md at `{}`: {e}\n\nFix the IO error (permissions / disk space) and retry.",
+                        final_path.display()
+                    ));
+                }
+                if let Err(e) = std::fs::write(&blueprint_path, &blueprint_owned) {
+                    let _ = std::fs::remove_file(&final_path);
+                    return ExitPrep::WriteFailed(format!(
+                        "exit_curator_mode REJECTED  -  failed to persist impl_blueprint.md at `{}`: {e}\n\nFix the IO error and retry.",
+                        blueprint_path.display()
+                    ));
+                }
 
-        // ---------- Step 6: render DOCX with mandatory standards-compliant template ----------
-        let docx_before = std::fs::read(&docx_path).ok();
-        let mut docx_ready = false;
-        let mut docx_error: Option<String> = None;
-        match render_docx(final_content, active.template, &docx_path) {
-            Ok(()) => {
-                match verify_docx_artifact(&docx_path) {
-                    Ok(()) => docx_ready = true,
+                let docx_before = std::fs::read(&docx_path).ok();
+                let mut docx_ready = false;
+                let mut docx_error: Option<String> = None;
+                let mut docx_bytes: Option<Vec<u8>> = None;
+                match render_docx(&final_owned, render_template, &docx_path) {
+                    Ok(()) => match verify_docx_artifact(&docx_path) {
+                        Ok(()) => {
+                            docx_ready = true;
+                            docx_bytes = Some(std::fs::read(&docx_path).unwrap_or_default());
+                        }
+                        Err(e) => {
+                            docx_error = Some(format!(
+                                "DOCX file `{}` failed post-write verification: {e}",
+                                docx_path.display()
+                            ));
+                            let _ = std::fs::remove_file(&docx_path);
+                        }
+                    },
                     Err(e) => {
-                        docx_error = Some(format!(
-                            "DOCX file `{}` failed post-write verification: {e}",
-                            docx_path.display()
-                        ));
+                        docx_error = Some(format!("DOCX renderer returned an error: {e}"));
                         let _ = std::fs::remove_file(&docx_path);
                     }
                 }
-            }
-            Err(e) => {
-                docx_error = Some(format!(
-                    "DOCX renderer returned an error: {e}"
-                ));
-                let _ = std::fs::remove_file(&docx_path);
-            }
-        }
+
+                ExitPrep::Done {
+                    final_before,
+                    blueprint_before,
+                    docx_before,
+                    docx_ready,
+                    docx_error,
+                    docx_bytes,
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("exit_curator_mode internal task error: {e}"))?
+        };
+
+        let (final_before, blueprint_before, docx_before, docx_ready, docx_error, docx_bytes) =
+            match prep {
+                ExitPrep::WriteFailed(msg) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(msg),
+                    });
+                }
+                ExitPrep::Done {
+                    final_before,
+                    blueprint_before,
+                    docx_before,
+                    docx_ready,
+                    docx_error,
+                    docx_bytes,
+                } => (
+                    final_before,
+                    blueprint_before,
+                    docx_before,
+                    docx_ready,
+                    docx_error,
+                    docx_bytes,
+                ),
+            };
 
         if !docx_ready && !allow_docx_skip {
             let detail = docx_error
@@ -1011,17 +1139,16 @@ impl Tool for ExitCuratorModeTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "exit_curator_mode REJECTED — final.docx generation failed and is REQUIRED before the Curator card can be shown.\n\
+                    "exit_curator_mode REJECTED  -  final.docx generation failed and is REQUIRED before the Curator card can be shown.\n\
                      Detail: {detail}\n\n\
                      Concrete next steps:\n\
                      1) Inspect `final_content` for malformed Markdown that the docx renderer cannot represent (deeply nested code fences, unterminated tables, raw HTML, NUL bytes).\n\
                      2) Simplify the section that crashed the renderer (try moving figures/long URLs/exotic Unicode out of headings).\n\
-                     3) Call exit_curator_mode again with the corrected `final_content`. DOCX is part of the deliverable contract — do NOT bypass it. Only pass `allow_docx_skip=true` if the user explicitly accepted a Markdown-only deliverable."
+                     3) Call exit_curator_mode again with the corrected `final_content`. DOCX is part of the deliverable contract  -  do NOT bypass it. Only pass `allow_docx_skip=true` if the user explicitly accepted a Markdown-only deliverable."
                 )),
             });
         }
 
-        // ---------- Step 7: emit Review Panel events AFTER every artifact is on disk ----------
         crate::agent::file_edit_emitter::emit_file_edit(
             &final_path,
             final_before.as_deref(),
@@ -1037,7 +1164,7 @@ impl Tool for ExitCuratorModeTool {
         )
         .await;
         let final_docx_path_opt: Option<std::path::PathBuf> = if docx_ready {
-            let docx_bytes_after = std::fs::read(&docx_path).unwrap_or_default();
+            let docx_bytes_after = docx_bytes.unwrap_or_default();
             crate::agent::file_edit_emitter::emit_file_edit(
                 &docx_path,
                 docx_before.as_deref(),
@@ -1050,7 +1177,6 @@ impl Tool for ExitCuratorModeTool {
             None
         };
 
-        // ---------- Step 8: flip mode flags & publish payload (point of no return) ----------
         *self.flag.write() = false;
         *self.plan_flag.write() = false;
 
@@ -1069,11 +1195,10 @@ impl Tool for ExitCuratorModeTool {
         *self.pending.write() = Some(payload);
         *self.state.write() = None;
 
-        // ---------- Step 9: surface the curator envelope (creates the CuratorCard) ----------
         let docx_line = if let Some(ref p) = final_docx_path_opt {
             format!("\nfinal.docx: `{}`", p.display())
         } else {
-            "\nfinal.docx: (skipped by allow_docx_skip — degraded deliverable)".to_string()
+            "\nfinal.docx: (skipped by allow_docx_skip  -  degraded deliverable)".to_string()
         };
         let summary_line = summary
             .as_ref()
@@ -1084,7 +1209,7 @@ impl Tool for ExitCuratorModeTool {
              final.md: `{}`\n\
              impl_blueprint.md: `{}`{docx_line}\n\
              Slug: `{}`  |  Template: `{}`{summary_line}\n\n\
-             Awaiting user's Build click — DO NOT call any other tool now; the user will click \
+             Awaiting user's Build click  -  DO NOT call any other tool now; the user will click \
              Build → Switch to start the engineering implementation in Agent mode, and that \
              implementation MUST mirror impl_blueprint.md verbatim.",
             final_path.display(),
@@ -1112,8 +1237,27 @@ impl Tool for ExitCuratorModeTool {
     }
 }
 
-/// Post-write verification: a valid `.docx` must exist, be non-empty,
-/// and start with the ZIP local-file-header signature `PK\x03\x04`.
+struct DeepHitPersist {
+    sources_before: Option<Vec<u8>>,
+    sources_after: Option<Vec<u8>>,
+    notes_before: Option<Vec<u8>>,
+    notes_after: Option<Vec<u8>>,
+    appended: usize,
+    summary_line: String,
+}
+
+enum ExitPrep {
+    WriteFailed(String),
+    Done {
+        final_before: Option<Vec<u8>>,
+        blueprint_before: Option<Vec<u8>>,
+        docx_before: Option<Vec<u8>>,
+        docx_ready: bool,
+        docx_error: Option<String>,
+        docx_bytes: Option<Vec<u8>>,
+    },
+}
+
 fn verify_docx_artifact(path: &Path) -> Result<(), String> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("metadata read failed: {e}"))?;
@@ -1139,6 +1283,59 @@ fn verify_docx_artifact(path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+struct EnterInit {
+    slug: String,
+    curator_root: std::path::PathBuf,
+    created: Vec<(std::path::PathBuf, Vec<u8>)>,
+    kind_label: String,
+}
+
+fn enter_curator_init(
+    workspace: std::path::PathBuf,
+    base_slug: String,
+    template: CuratorTemplateKind,
+    intent: &str,
+    now: &str,
+) -> anyhow::Result<EnterInit> {
+    let slug = uniquify_slug(&workspace, base_slug);
+    let curators_base = curators_base_dir(&workspace);
+    let curator_root = curators_base.join(&slug);
+    std::fs::create_dir_all(&curator_root)?;
+    write_placeholder(&curator_root, "research_notes.md", &research_seed(intent, now))?;
+    write_placeholder(&curator_root, "sources.md", &sources_seed(intent, now))?;
+    let tpl = template_for(template);
+    let draft_with_banner = compose_draft_with_banner(tpl.draft_markdown);
+    write_placeholder(&curator_root, "draft.md", &draft_with_banner)?;
+    write_placeholder(
+        &curator_root,
+        "final.md",
+        "# (final.md  -  populated by exit_curator_mode)\n",
+    )?;
+    write_placeholder(&curator_root, "impl_blueprint.md", tpl.blueprint_markdown)?;
+
+    let placeholder_paths = [
+        "research_notes.md",
+        "sources.md",
+        "draft.md",
+        "final.md",
+        "impl_blueprint.md",
+    ];
+    let mut created: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
+    for name in placeholder_paths {
+        let p = curator_root.join(name);
+        if let Ok(bytes) = std::fs::read(&p) {
+            created.push((p, bytes));
+        }
+    }
+
+    Ok(EnterInit {
+        slug,
+        curator_root,
+        created,
+        kind_label: tpl.kind.label().to_string(),
+    })
 }
 
 fn write_placeholder(root: &Path, name: &str, body: &str) -> anyhow::Result<()> {
@@ -1199,9 +1396,6 @@ fn slugify(raw: &str) -> String {
     }
 }
 
-/// Canonical filesystem home for all Curator session directories of a workspace.
-/// Layout: `<workspace>/.senweavercoding/curators/<slug>/`
-/// This is the only place that constructs this base path.
 pub fn curators_base_dir(workspace: &Path) -> std::path::PathBuf {
     workspace.join(".senweavercoding").join("curators")
 }
@@ -1231,7 +1425,7 @@ fn pathdiff_or_self(target: &Path, base: &Path) -> String {
         .unwrap_or_else(|_| target.to_string_lossy().into_owned())
 }
 
-fn ensure_inside_curator(root_dir: &Path, security: &SecurityPolicy) -> anyhow::Result<()> {
+pub(super) fn ensure_inside_curator(root_dir: &Path, security: &SecurityPolicy) -> anyhow::Result<()> {
     let workspace = security.workspace_dir();
     let abs = std::fs::canonicalize(root_dir).unwrap_or_else(|_| root_dir.to_path_buf());
     let workspace_abs = std::fs::canonicalize(&workspace).unwrap_or(workspace);
@@ -1251,7 +1445,6 @@ fn ensure_inside_curator(root_dir: &Path, security: &SecurityPolicy) -> anyhow::
     Ok(())
 }
 
-/// True if `path` contains the adjacent components `.senweavercoding/curators` (case-insensitive).
 pub fn path_is_under_curators_dir(path: &Path) -> bool {
     let comps: Vec<_> = path.components().collect();
     let target_root = std::ffi::OsStr::new(".senweavercoding");
@@ -1316,29 +1509,54 @@ fn curator_evidence_check(root: &Path) -> Result<(), String> {
     let sources_text = std::fs::read_to_string(&sources_path).unwrap_or_default();
     let notes_text = std::fs::read_to_string(&notes_path).unwrap_or_default();
 
-    let mut source_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let re = regex::Regex::new(r"\[S(\d+)\]").expect("source id regex");
-    for cap in re.captures_iter(&sources_text) {
-        if let Some(id) = cap.get(0).map(|m| m.as_str().to_string()) {
-            source_ids.insert(id);
+    let mut web_source_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut git_ref_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut local_ref_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let re_all = regex::Regex::new(r"\[([SGL])(\d+)\]").expect("ref id regex");
+    for cap in re_all.captures_iter(&sources_text) {
+        let prefix = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        if let Some(full) = cap.get(0).map(|m| m.as_str().to_string()) {
+            match prefix {
+                "S" => {
+                    web_source_ids.insert(full);
+                }
+                "G" => {
+                    git_ref_ids.insert(full);
+                }
+                "L" => {
+                    local_ref_ids.insert(full);
+                }
+                _ => {}
+            }
         }
     }
-    let source_count = source_ids.len();
+    let web_source_count = web_source_ids.len();
+    let git_ref_count = git_ref_ids.len();
+    let local_ref_count = local_ref_ids.len();
+    let total_ref_count = web_source_count + git_ref_count + local_ref_count;
     let notes_chars = notes_text.chars().count();
 
-    let min_sources = 5usize;
+    let min_total_refs = 5usize;
     let min_notes_chars = 4000usize;
     let mut missing: Vec<String> = Vec::new();
-    if source_count < min_sources {
+    if total_ref_count < min_total_refs {
         missing.push(format!(
-            "sources.md only registers {source_count} `[Sn]` entries (≥ {min_sources} required). \
-             Run `curator_deep_collect` or `curator_collect(kind=\"source\")` more times before exiting."
+            "sources.md only registers {total_ref_count} references (≥ {min_total_refs} required). \
+             Breakdown: {web_source_count} web `[Sn]`, {git_ref_count} git `[Gn]`, {local_ref_count} local `[Ln]`. \
+             Grow it by running `curator_deep_collect`, `curator_collect(kind=\"source\")`, \
+             `curator_git_reference` (remote repos), or `curator_local_reference` (in-workspace projects). \
+             For local paragraph-level evidence run `workspace_deep_search(query=…)` and persist \
+             useful chunks via `curator_collect(kind=\"note\", path=…, lines=…, excerpt=…, commentary=…)`."
         ));
     }
     if notes_chars < min_notes_chars {
         missing.push(format!(
             "research_notes.md is too thin ({notes_chars} chars; ≥ {min_notes_chars} required). \
-             Capture more long excerpts via `curator_deep_collect` / `curator_collect(kind=\"note\")`."
+             Capture more long excerpts via `curator_deep_collect`, `curator_git_reference`, \
+             `curator_local_reference`, or `workspace_deep_search` + `curator_collect(kind=\"note\")`."
         ));
     }
     if missing.is_empty() {
@@ -1350,15 +1568,21 @@ fn curator_evidence_check(root: &Path) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     Err(format!(
-        "exit_curator_mode REJECTED — research evidence is insufficient:\n{bullets}\n\n\
+        "exit_curator_mode REJECTED  -  research evidence is insufficient:\n{bullets}\n\n\
          Concrete next steps:\n\
-         1. Run `curator_deep_collect` with 2–3 different query angles to grow `sources.md` \
-            and `research_notes.md` at once.\n\
-         2. Follow up with targeted `web_fetch` + `curator_collect(kind=\"source\")` on any \
+         1. Web evidence: run `curator_deep_collect` with 2–3 different query angles, then \
+            follow up with targeted `web_fetch` + `curator_collect(kind=\"source\")` on any \
             high-value URLs the deep collect missed.\n\
-         3. Use `workspace_deep_search` and `curator_collect(kind=\"note\")` for local \
-            references.\n\
-         4. Re-call `exit_curator_mode` once the gates are green."
+         2. Git references: call `curator_git_reference(repos=[…])` to shallow-clone any \
+            open-source projects the user supplied (or that you discovered) into the curator \
+            workspace; each clone yields a `[Gn]` entry and a README/skeleton excerpt.\n\
+         3. Local references: call `curator_local_reference(projects=[…])` for any reference \
+            projects already sitting inside the current workspace; each entry yields a `[Ln]` \
+            with metadata + key-source skeleton.\n\
+         4. Local deep search: call `workspace_deep_search(query=…)` to mine paragraph-level \
+            evidence from anywhere in the workspace, then persist the useful chunks via \
+            `curator_collect(kind=\"note\", path=…, lines=…, excerpt=…, commentary=…)`.\n\
+         5. Re-call `exit_curator_mode` once the gates are green."
     ))
 }
 
@@ -1471,13 +1695,13 @@ fn curator_content_style_check(final_md: &str) -> Result<(), String> {
     if path_line_hits > 0 {
         violations.push(format!(
             "final.md cites real source files {path_line_hits} time(s) in `path/file.ext:Lstart-Lend` form. \
-             Curator documents must not point at external repositories at the file / line level — remove these citations and describe the behavior in prose instead."
+             Curator documents must not point at external repositories at the file / line level  -  remove these citations and describe the behavior in prose instead."
         ));
     }
     if func_hits_outside_blocks > 1 {
         violations.push(format!(
             "final.md contains {func_hits_outside_blocks} function / class signature lines outside fenced blocks (e.g. `func Foo(`, `def bar(`, `fn baz(`, `class Quux:`). \
-             These are leaked source — describe behavior in prose, not in language signatures."
+             These are leaked source  -  describe behavior in prose, not in language signatures."
         ));
     }
     if oss_brand_hits > 3 {
@@ -1496,7 +1720,7 @@ fn curator_content_style_check(final_md: &str) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     Err(format!(
-        "exit_curator_mode REJECTED — Curator deliverables (paper / solution / tech_report) must \
+        "exit_curator_mode REJECTED  -  Curator deliverables (paper / solution / tech_report) must \
          focus on functional design, mechanism, and decisions in prose, not implementation source:\n{bullets}\n\n\
          How to fix in one rewrite pass:\n\
          1. Delete every ```language``` source block; replace with ≥2 paragraphs of prose explaining the \
@@ -1513,23 +1737,26 @@ fn quality_check(final_md: &str, blueprint_md: &str) -> Result<(), String> {
     let final_chars = final_md.chars().count();
     let blueprint_chars = blueprint_md.chars().count();
     let mut missing: Vec<String> = Vec::new();
-    if final_chars < 1500 {
+    if final_chars < 2400 {
         missing.push(format!(
-            "final.md too short ({final_chars} chars; expect ≥ 1500). The final document is the user-facing deliverable — flesh it out."
+            "final.md too short ({final_chars} chars; expect ≥ 2400). The final document is the user-facing deliverable  -  a serious paper / solution / report needs depth, not a stub. Flesh out each section with substantive prose."
         ));
     }
     if blueprint_chars < 600 {
         missing.push(format!(
-            "impl_blueprint.md too short ({blueprint_chars} chars; expect ≥ 600). The blueprint is the contract Agent mode will follow — include modules, build/run commands, and acceptance criteria."
+            "impl_blueprint.md too short ({blueprint_chars} chars; expect ≥ 600). The blueprint is the contract Agent mode will follow  -  include modules, build/run commands, and acceptance criteria."
         ));
     }
-    let final_sections = final_md
+    let final_top_sections = final_md
         .lines()
-        .filter(|l| l.trim_start().starts_with("## ") || l.trim_start().starts_with("### "))
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("## ") && !t.starts_with("### ")
+        })
         .count();
-    if final_sections < 3 {
+    if final_top_sections < 4 {
         missing.push(format!(
-            "final.md lacks structural sections ({final_sections} `## ` headings; ≥3 required)"
+            "final.md lacks top-level structure ({final_top_sections} `## ` sections; ≥4 required). A professional deliverable is organised into at least four top-level sections (e.g. Background / Approach / Design / Evaluation / References)."
         ));
     }
     let blueprint_sections = blueprint_md
@@ -1544,7 +1771,7 @@ fn quality_check(final_md: &str, blueprint_md: &str) -> Result<(), String> {
     let has_blueprint_command = blueprint_md.contains("```bash") || blueprint_md.contains("```sh") || blueprint_md.contains("```cargo");
     if !has_blueprint_command {
         missing.push(
-            "impl_blueprint.md is missing a fenced ```bash``` (or ```sh```) command block — Agent mode needs the verification commands written down."
+            "impl_blueprint.md is missing a fenced ```bash``` (or ```sh```) command block  -  Agent mode needs the verification commands written down."
                 .to_string(),
         );
     }
@@ -1557,7 +1784,7 @@ fn quality_check(final_md: &str, blueprint_md: &str) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     Err(format!(
-        "exit_curator_mode REJECTED — the submitted document is too thin to count as a finished Curator deliverable:\n{bullets}\n\n\
+        "exit_curator_mode REJECTED  -  the submitted document is too thin to count as a finished Curator deliverable:\n{bullets}\n\n\
          Concrete next steps:\n\
          1. Continue collecting evidence with `web_search` / `workspace_deep_search` / \
             `curator_collect` until the gaps are filled.\n\

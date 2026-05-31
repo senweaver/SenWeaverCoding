@@ -90,21 +90,21 @@ static ANSI_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub fn apply(rule: &Rule, raw: &str, level: CompactLevel) -> String {
-    let stage1 = strip_ansi(raw);
-    let stage2 = replace_all(rule, &stage1);
-    let stage3 = strip_lines(rule, &stage2);
-    let stage4 = if rule.dedup {
-        dedup_consecutive(&stage3)
+    let ansi_stripped = strip_ansi(raw);
+    let replaced = replace_all(rule, &ansi_stripped);
+    let line_stripped = strip_lines(rule, &replaced);
+    let deduped = if rule.dedup {
+        dedup_consecutive(&line_stripped)
     } else {
-        stage3
+        line_stripped
     };
-    let stage5 = head_tail_cap(&stage4, rule, level);
-    if stage5.trim().is_empty() {
+    let capped = head_tail_cap(&deduped, rule, level);
+    if capped.trim().is_empty() {
         if let Some(empty) = &rule.on_empty {
             return empty.clone();
         }
     }
-    stage5
+    capped
 }
 
 pub fn strip_ansi_only(raw: &str) -> String {

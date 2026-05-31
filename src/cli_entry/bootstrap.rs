@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 pub fn load_env() {
     let candidates = [
-        crate::util::get_env_var_os("SEN_WORKSPACE")
+        crate::util::get_runtime_var_os("SEN_WORKSPACE")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .map(|p| p.join(".env")),
@@ -35,7 +35,7 @@ pub fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
 }
 
 pub fn print_no_command_help() -> anyhow::Result<()> {
-    println!("SenWeaverCoding — AI Code Editor\n");
+    println!("SenWeaverCoding  -  AI Code Editor\n");
     println!("Usage:");
     println!("  sen                          Start interactive session");
     println!("  sen \"explain this code\"      Start with initial prompt");
@@ -62,5 +62,4 @@ fn pause_after_no_command_help() {
 }
 
 #[cfg(not(windows))]
-#[allow(dead_code)]
 fn _keep_write_trait_imported(_w: &mut dyn Write) {}

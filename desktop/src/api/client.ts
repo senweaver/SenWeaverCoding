@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 const ENV_BASE_URL =
   typeof import.meta !== 'undefined' &&
   typeof import.meta.env?.VITE_DESKTOP_SERVER_URL === 'string' &&

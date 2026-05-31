@@ -11,6 +11,9 @@ pub struct PacingConfig {
     #[serde(default)]
     pub step_timeout_secs: Option<u64>,
 
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: Option<u64>,
+
     #[serde(default)]
     pub loop_detection_min_elapsed_secs: Option<u64>,
 
@@ -33,6 +36,10 @@ pub struct PacingConfig {
     pub loop_detection_identical_output_threshold: u32,
 }
 
+pub(crate) fn default_stream_idle_timeout_secs() -> Option<u64> {
+    Some(180)
+}
+
 pub(crate) fn default_loop_detection_enabled() -> bool {
     true
 }
@@ -53,7 +60,8 @@ impl Default for PacingConfig {
     fn default() -> Self {
         Self {
             step_timeout_secs: None,
-            loop_detection_min_elapsed_secs: None,
+            stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
+            loop_detection_min_elapsed_secs: Some(0),
             loop_ignore_tools: Vec::new(),
             message_timeout_scale_max: None,
             loop_detection_enabled: default_loop_detection_enabled(),
@@ -91,6 +99,11 @@ impl PacingConfig {
         if let Some(t) = self.step_timeout_secs {
             if t == 0 {
                 errors.push("pacing.step_timeout_secs must be > 0 when set".into());
+            }
+        }
+        if let Some(t) = self.stream_idle_timeout_secs {
+            if t == 0 {
+                errors.push("pacing.stream_idle_timeout_secs must be > 0 when set".into());
             }
         }
         errors

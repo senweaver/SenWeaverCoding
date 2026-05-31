@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use parking_lot::RwLock;
 
-use crate::memory::vector_index::{VectorBackend, VectorIndex, build_backend};
+use crate::memory::vector::index::{VectorBackend, VectorIndex, build_backend};
 
 inventory::submit!(StaticSlashCommand {
     name: "vector",
@@ -51,7 +51,7 @@ fn backend(ctx: &CommandContext) -> CommandResult {
         let active = *GLOBAL_BACKEND.read();
         let idx = GLOBAL_INDEX.read();
         let mut out = format!(
-            "Active vector backend: {} — {}\nEntries: {}\n\nAvailable backends:\n",
+            "Active vector backend: {}  -  {}\nEntries: {}\n\nAvailable backends:\n",
             active.display_name(),
             active.description(),
             idx.len(),
@@ -109,7 +109,7 @@ fn backend(ctx: &CommandContext) -> CommandResult {
 }
 
 fn bench_parallel_vs_sequential(ctx: &CommandContext) -> CommandResult {
-    use crate::memory::vector_index::LinearIndex;
+    use crate::memory::vector::index::LinearIndex;
     let n_vecs: usize = ctx
         .args
         .get(1)
@@ -135,7 +135,7 @@ fn bench_parallel_vs_sequential(ctx: &CommandContext) -> CommandResult {
     };
 
     let mut linear = LinearIndex::new();
-    let mut sharded = crate::memory::sharded_index::ShardedVectorIndex::with_cpu_count();
+    let mut sharded = crate::memory::sharded::index::ShardedVectorIndex::with_cpu_count();
 
     for i in 0..n_vecs {
         let v = gen_vec(dim);

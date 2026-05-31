@@ -22,6 +22,7 @@ const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'user_message',
   'stop_generation',
   'approval_decision',
+  'set_runtime_config',
 ])
 
 function isCriticalMessage(message: ClientMessage): boolean {
@@ -72,6 +73,53 @@ type Connection = {
 class WebSocketManager {
   private connections = new Map<string, Connection>()
   private connectListeners = new Set<ConnectListener>()
+  private runtimeConfigResolvers = new Map<string, Array<() => void>>()
+
+  notifyRuntimeConfigUpdated(sessionId: string) {
+    const resolvers = this.runtimeConfigResolvers.get(sessionId)
+    if (!resolvers) return
+    this.runtimeConfigResolvers.delete(sessionId)
+    for (const resolve of resolvers) {
+      resolve()
+    }
+  }
+
+  waitForRuntimeConfigUpdated(sessionId: string, timeoutMs = 5000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const pending = this.runtimeConfigResolvers.get(sessionId)
+        if (!pending) return
+        this.runtimeConfigResolvers.set(
+          sessionId,
+          pending.filter((entry) => entry !== resolver),
+        )
+        reject(new Error('runtime config sync timeout'))
+      }, timeoutMs)
+      const resolver = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const existing = this.runtimeConfigResolvers.get(sessionId) ?? []
+      existing.push(resolver)
+      this.runtimeConfigResolvers.set(sessionId, existing)
+    })
+  }
+
+  sendRuntimeConfig(
+    sessionId: string,
+    selection: { providerId: string; modelId: string },
+    options?: { persist?: boolean },
+  ): Promise<void> {
+    const persist = options?.persist ?? true
+    const wait = this.waitForRuntimeConfigUpdated(sessionId)
+    this.send(sessionId, {
+      type: 'set_runtime_config',
+      persist,
+      providerId: selection.providerId,
+      modelId: selection.modelId,
+    })
+    return wait.catch(() => undefined)
+  }
 
   isConnected(sessionId: string): boolean {
     const conn = this.connections.get(sessionId)

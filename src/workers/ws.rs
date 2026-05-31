@@ -194,6 +194,9 @@ impl WorkerWireTracker {
                 "type": "content_delta",
                 "delta": { "type": "text_delta", "text": delta },
             })],
+            TurnEvent::StreamReset => vec![json!({
+                "type": "content_reset",
+            })],
             TurnEvent::Thinking { delta } => vec![json!({
                 "type": "thinking",
                 "text": delta,
@@ -205,7 +208,7 @@ impl WorkerWireTracker {
             } => {
                 let id = self.resolve_tool_call_id(name, tool_call_id);
                 let safe_args =
-                    crate::services::credential_vault::redact_args_optional(args);
+                    crate::services::governance::credential_vault::redact_args_optional(args);
                 vec![
                     json!({
                         "type": "content_start",
@@ -230,9 +233,9 @@ impl WorkerWireTracker {
             } => {
                 let id = self.resolve_tool_result_id(name, tool_call_id);
                 let is_error = !success
-                    || crate::agent::tool_event_status::output_indicates_error(output);
+                    || crate::agent::tool_handler::event_status::output_indicates_error(output);
                 let safe_output =
-                    crate::services::credential_vault::redact_for_audit_optional(output);
+                    crate::services::governance::credential_vault::redact_for_audit_optional(output);
                 vec![json!({
                     "type": "tool_result",
                     "toolUseId": id,
@@ -383,6 +386,7 @@ impl WorkerWireTracker {
             | TurnEvent::WorkerStopped { .. }
             | TurnEvent::ParentResumed { .. }
             | TurnEvent::ContextCompressed { .. }
+            | TurnEvent::PlanProgressCommitted { .. }
             | TurnEvent::PiiSanitized { .. } => Vec::new(),
         }
     }

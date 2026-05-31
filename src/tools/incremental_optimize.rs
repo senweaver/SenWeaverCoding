@@ -407,7 +407,7 @@ impl Tool for IncrementalOptimizeTool {
                 let checkpoint_id = format!("cp{}", self.next_id());
                 let now = self.unix_now();
 
-                let files: Vec<String> = self.list_code_files().unwrap_or_default();
+                let files: Vec<String> = self.list_code_files().await.unwrap_or_default();
                 let files_count = files.len();
 
                 let checkpoint = OptimizationCheckpoint {
@@ -524,16 +524,25 @@ impl Tool for IncrementalOptimizeTool {
                     changes = state.changes.clone();
                 }
 
+                let ws = self.project_workspace();
+                let file_paths: Vec<PathBuf> =
+                    changes.iter().map(|c| ws.join(&c.file)).collect();
+                let contents: Vec<Option<String>> = tokio::task::spawn_blocking(move || {
+                    file_paths
+                        .into_iter()
+                        .map(|p| std::fs::read_to_string(&p).ok())
+                        .collect()
+                })
+                .await?;
+
                 let mut new_suggestions = Vec::new();
                 {
                     let mut state = self.state.write();
 
-                    for change in &changes {
-
-                        let file_path = self.project_workspace().join(&change.file);
-                        if let Ok(content) = std::fs::read_to_string(&file_path) {
+                    for (change, content) in changes.iter().zip(contents.iter()) {
+                        if let Some(content) = content {
                             let file_suggestions =
-                                self.generate_suggestions_for_change(change, &content);
+                                self.generate_suggestions_for_change(change, content);
                             for sug in file_suggestions {
 
                                 if !state
@@ -923,7 +932,12 @@ impl Tool for IncrementalOptimizeTool {
 }
 
 impl IncrementalOptimizeTool {
-    fn list_code_files(&self) -> anyhow::Result<Vec<String>> {
+    async fn list_code_files(&self) -> anyhow::Result<Vec<String>> {
+        let ws = self.project_workspace();
+        tokio::task::spawn_blocking(move || Self::list_code_files_blocking(&ws)).await?
+    }
+
+    fn list_code_files_blocking(ws: &std::path::Path) -> anyhow::Result<Vec<String>> {
         let extensions = [
             "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "toml", "yaml", "yml",
         ];
@@ -961,8 +975,7 @@ impl IncrementalOptimizeTool {
             Ok(())
         }
 
-        let ws = self.project_workspace();
-        walk(&ws, &extensions, &ws, &mut files)?;
+        walk(ws, &extensions, ws, &mut files)?;
         Ok(files)
     }
 }

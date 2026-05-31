@@ -65,7 +65,7 @@ pub fn critique_config(rules: &[AutoModeRule]) -> Vec<String> {
         if rule.action == AutoModeAction::Allow && rule.tool == "shell" && rule.condition.is_none()
         {
             warnings
-                .push("Unconditional shell allow is dangerous — consider adding conditions".into());
+                .push("Unconditional shell allow is dangerous  -  consider adding conditions".into());
         }
         if rule.action == AutoModeAction::Allow && rule.tool == "*" {
             warnings.push("Wildcard allow bypasses all permission checks".into());

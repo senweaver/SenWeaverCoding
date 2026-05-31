@@ -1177,18 +1177,18 @@ impl SecurityPolicy {
 
     pub fn can_act(&self) -> bool {
 
-        if crate::util::get_env_var("SEN_READ_ONLY").as_deref() == Some("1") {
+        if crate::util::get_runtime_var("SEN_READ_ONLY").as_deref() == Some("1") {
             return false;
         }
 
-        if crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1") {
+        if crate::util::get_runtime_var("SEN_DRY_RUN").as_deref() == Some("1") {
             return true;
         }
         self.autonomy != AutonomyLevel::ReadOnly
     }
 
     pub fn is_dry_run(&self) -> bool {
-        crate::util::get_env_var("SEN_DRY_RUN").as_deref() == Some("1")
+        crate::util::get_runtime_var("SEN_DRY_RUN").as_deref() == Some("1")
     }
 
     pub fn enforce_tool_operation(

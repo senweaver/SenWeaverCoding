@@ -83,6 +83,68 @@ type InstallProgressMap = Record<
 
 type ServerStatusMap = Record<string, { status: LspServerLifecycleStatus; reason?: string | null }>
 
+export type LspDisplayStatus =
+  | 'disabled'
+  | 'stopped'
+  | 'install'
+  | 'installing'
+  | 'ready'
+  | 'starting'
+  | 'failed'
+
+export function resolveLspServerDisplayStatus(
+  globalEnabled: boolean,
+  server: LspServerRecord,
+  lifecycle?: LspServerLifecycleStatus | null,
+  installProgress?: { phase: string } | null,
+): LspDisplayStatus {
+  if (!globalEnabled) {
+    return 'disabled'
+  }
+  if (!server.enabled) {
+    return 'stopped'
+  }
+
+  const phase = installProgress?.phase
+  const installing =
+    phase === 'resolving' ||
+    phase === 'downloading' ||
+    phase === 'extracting' ||
+    phase === 'verifying' ||
+    server.installState.status === 'installing'
+  if (installing) {
+    return 'installing'
+  }
+  if (server.installState.status === 'failed' || phase === 'failed') {
+    return 'failed'
+  }
+
+  const hasCommand = Boolean(server.command?.trim())
+  if (server.managed && server.installState.status === 'not_installed') {
+    return 'install'
+  }
+  if (server.managed && !hasCommand) {
+    return 'install'
+  }
+  if (!server.managed && !hasCommand) {
+    return 'stopped'
+  }
+
+  if (lifecycle === 'ready') {
+    return 'ready'
+  }
+  if (lifecycle === 'starting') {
+    return 'starting'
+  }
+  if (lifecycle === 'failed') {
+    return 'failed'
+  }
+  if (server.installState.status === 'installed' || hasCommand) {
+    return 'starting'
+  }
+  return 'install'
+}
+
 type LspStore = {
   enabled: boolean
   servers: LspServerRecord[]
@@ -338,12 +400,12 @@ export const useLspStore = create<LspStore>((set, get) => ({
           snapshot[entry.id] = { status: entry.lifecycleStatus, reason: null }
         }
       }
-      set((state) => ({
+      set({
         enabled: response.enabled,
         servers: response.servers,
         isLoading: false,
-        serverStatus: { ...state.serverStatus, ...snapshot },
-      }))
+        serverStatus: snapshot,
+      })
     } catch (error) {
       set({
         isLoading: false,
@@ -354,7 +416,26 @@ export const useLspStore = create<LspStore>((set, get) => ({
 
   setGlobalEnabled: async (enabled) => {
     const result = await lspApi.setGlobalEnabled(enabled)
-    set({ enabled: result.enabled })
+    if (enabled) {
+      set((state) => {
+        const nextStatus: ServerStatusMap = { ...state.serverStatus }
+        for (const server of state.servers) {
+          if (!server.enabled) continue
+          const hasCommand = Boolean(server.command?.trim())
+          const needsInstall =
+            (server.managed && server.installState.status === 'not_installed') ||
+            (server.managed && !hasCommand) ||
+            (!server.managed && !hasCommand)
+          if (!needsInstall) {
+            nextStatus[server.id] = { status: 'starting', reason: null }
+          }
+        }
+        return { enabled: result.enabled, serverStatus: nextStatus }
+      })
+    } else {
+      set({ enabled: result.enabled })
+    }
+    await get().fetch()
   },
 
   createServer: async (payload) => {
@@ -380,6 +461,7 @@ export const useLspStore = create<LspStore>((set, get) => ({
   toggleServer: async (id) => {
     const { server } = await lspApi.toggle(id)
     set((state) => ({ servers: applyServerPatch(state.servers, server) }))
+    await get().fetch()
     return server
   },
 
@@ -404,6 +486,7 @@ export const useLspStore = create<LspStore>((set, get) => ({
 
   restartServer: async (id) => {
     await lspApi.restart(id)
+    await get().fetch()
   },
 
   selectServer: (id) => set({ selectedId: id }),

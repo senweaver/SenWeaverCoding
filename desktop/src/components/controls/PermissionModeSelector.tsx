@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useMemo, useState, useRef, useEffect } from 'react'
 import DOMPurify from 'dompurify'
 import { createPortal } from 'react-dom'

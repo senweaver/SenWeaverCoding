@@ -82,7 +82,7 @@ fn render_cli_pretty(kind: &SessionEventKind) -> (String, bool) {
             steps,
         } => (
             format!(
-                "◉ write plan ({steps} steps) — {} [{summary}]",
+                "◉ write plan ({steps} steps)  -  {} [{summary}]",
                 truncate(goal, 60)
             ),
             true,

@@ -12,6 +12,25 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+pub fn render_json_output(value: &Value, verbose: bool) -> String {
+    if verbose {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    } else {
+        value.to_string()
+    }
+}
+
+pub fn json_verbose_flag(args: &Value) -> bool {
+    args.get("verbose")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            args.get("format")
+                .and_then(|v| v.as_str())
+                .map(|f| f.eq_ignore_ascii_case("pretty"))
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
@@ -36,6 +55,19 @@ pub trait Tool: Send + Sync {
             description: self.description().to_string(),
             parameters: self.parameters_schema(),
         }
+    }
+
+    fn spec_with_descriptions(
+        &self,
+        descriptions: Option<&crate::i18n::ToolDescriptions>,
+    ) -> ToolSpec {
+        let mut spec = self.spec();
+        if let Some(descs) = descriptions {
+            if let Some(d) = descs.get(self.name()) {
+                spec.description = d.to_string();
+            }
+        }
+        spec
     }
 
     fn validate_args(&self, _args: &Value) -> Result<(), String> {

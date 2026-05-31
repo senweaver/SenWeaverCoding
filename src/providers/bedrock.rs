@@ -373,11 +373,11 @@ struct InputSchema {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct ConverseResponse {
     #[serde(default)]
     output: Option<ConverseOutput>,
     #[serde(default)]
-    #[allow(dead_code)]
     stop_reason: Option<String>,
     #[serde(default)]
     usage: Option<BedrockUsage>,
@@ -399,14 +399,15 @@ struct ConverseOutput {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ConverseOutputMessage {
-    #[allow(dead_code)]
     role: String,
     content: Vec<ResponseContentBlock>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code)]
 enum ResponseContentBlock {
     ToolUse(ResponseToolUseWrapper),
     Text(TextBlock),
@@ -467,7 +468,7 @@ impl BedrockProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("provider.bedrock", 120, 10)
     }
@@ -489,16 +490,6 @@ impl BedrockProvider {
     fn canonical_uri(model_id: &str) -> String {
         let encoded = Self::encode_model_path(model_id);
         format!("/model/{encoded}/converse")
-    }
-
-    fn require_auth(&self) -> anyhow::Result<&BedrockAuth> {
-        self.auth.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "AWS Bedrock credentials not set. Set BEDROCK_API_KEY for Bearer \
-                 token auth, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for \
-                 SigV4 auth, or run on an EC2 instance with an IAM role attached."
-            )
-        })
     }
 
     async fn resolve_auth(&self) -> anyhow::Result<BedrockAuth> {

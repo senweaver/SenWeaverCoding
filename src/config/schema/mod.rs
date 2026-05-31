@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
+pub mod export;
+
 use crate::config::traits::ChannelConfig;
 use crate::providers::{is_glm_alias, is_zai_alias};
 use crate::security::{AutonomyLevel, DomainMatcher};
@@ -113,7 +119,7 @@ impl ProxyConfig {
     }
 
     pub fn registered_service_keys() -> Vec<String> {
-        crate::services::proxy_registry::snapshot_services()
+        crate::services::proxy::registry::snapshot_services()
     }
     pub fn has_any_proxy_url(&self) -> bool {
         normalize_proxy_url_option(self.http_proxy.as_deref()).is_some()
@@ -294,7 +300,7 @@ fn normalize_comma_values(values: Vec<String>) -> Vec<String> {
     o
 }
 fn is_supported_proxy_service_selector(selector: &str) -> bool {
-    if crate::services::proxy_registry::is_valid_selector(selector) {
+    if crate::services::proxy::registry::is_valid_selector(selector) {
         return true;
     }
 
@@ -388,7 +394,7 @@ fn apply_proxy_env_batch(
         ("NO_PROXY", no_proxy),
         ("no_proxy", no_proxy),
     ];
-    crate::util::set_env_vars_batch(&pairs);
+    crate::util::set_runtime_vars_batch(&pairs);
 }
 
 pub fn parse_proxy_scope(raw: &str) -> Option<ProxyScope> {
@@ -551,7 +557,7 @@ pub struct Config {
     pub browser: BrowserConfig,
 
     #[serde(default)]
-    pub browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig,
+    pub browser_delegate: crate::tools::browser::delegate::BrowserDelegateConfig,
 
     #[serde(default)]
     pub http_request: HttpRequestConfig,
@@ -686,43 +692,43 @@ pub struct Config {
     pub suggestions: crate::agent::suggestions::SuggestionsConfig,
 
     #[serde(default)]
-    pub tool_groups: crate::tools::tool_groups::ToolGroupsConfig,
+    pub tool_groups: crate::tools::handler::groups::ToolGroupsConfig,
 
     #[serde(default)]
-    pub user_profile: crate::agent::user_profile::UserProfileConfig,
+    pub user_profile: crate::agent::user::profile::UserProfileConfig,
 
     #[serde(default)]
-    pub self_eval: crate::agent::self_eval::SelfEvalConfig,
+    pub self_eval: crate::agent::self_assess::eval::SelfEvalConfig,
 
     #[serde(default)]
-    pub feedback: crate::agent::feedback::FeedbackConfig,
+    pub feedback: crate::agent::reward::feedback::FeedbackConfig,
 
     #[serde(default)]
-    pub experience: crate::agent::experience::ExperienceConfig,
+    pub experience: crate::agent::reward::experience::ExperienceConfig,
 
     #[serde(default)]
-    pub self_reflection: crate::agent::self_reflection::SelfReflectionConfig,
+    pub self_reflection: crate::agent::self_assess::reflection::SelfReflectionConfig,
 
     #[serde(default)]
-    pub prompt_optimizer: crate::agent::prompt_optimizer::PromptOptimizerConfig,
+    pub prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig,
 
     #[serde(default)]
     pub skill_evolution: crate::agent::skill_evolution::SkillEvolutionConfig,
 
     #[serde(default)]
-    pub reinforcement: crate::agent::reinforcement::ReinforcementConfig,
+    pub reinforcement: crate::agent::reward::reinforcement::ReinforcementConfig,
 
     #[serde(default)]
     pub rbac: crate::security::rbac::RbacConfig,
 
     #[serde(default)]
-    pub tool_output_compressor: crate::agent::tool_output_compressor::ToolOutputCompressorConfig,
+    pub tool_output_compressor: crate::agent::tool_handler::output_compressor::ToolOutputCompressorConfig,
 
     #[serde(default)]
     pub code_rag: CodeRagConfig,
 
     #[serde(default)]
-    pub token_budget: crate::agent::token_budget::TokenBudgetConfig,
+    pub token_budget: crate::agent::token::budget::TokenBudgetConfig,
 
     #[serde(default)]
     pub token_saver: TokenSaverConfig,
@@ -827,9 +833,9 @@ impl CustomToolDef {
 #[serde(rename_all = "snake_case")]
 pub enum TokenSaverLevel {
 
-    #[default]
     Conservative,
 
+    #[default]
     Balanced,
 
     Aggressive,
@@ -874,7 +880,7 @@ impl Default for TokenSaverConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            level: TokenSaverLevel::Conservative,
+            level: TokenSaverLevel::Balanced,
             tee_enabled: true,
             data_dir: None,
             exclude_commands: Vec::new(),
@@ -1764,7 +1770,7 @@ pub struct AgentConfig {
     pub thinking: crate::agent::thinking::ThinkingConfig,
 
     #[serde(default)]
-    pub history_pruning: crate::agent::history_pruner::HistoryPrunerConfig,
+    pub history_pruning: crate::agent::history::pruner::HistoryPrunerConfig,
 
     #[serde(default)]
     pub context_aware_tools: bool,
@@ -1776,7 +1782,7 @@ pub struct AgentConfig {
     pub auto_classify: Option<crate::agent::eval::AutoClassifyConfig>,
 
     #[serde(default)]
-    pub context_compression: crate::agent::context_compressor::ContextCompressionConfig,
+    pub context_compression: crate::agent::context::compressor::ContextCompressionConfig,
 
     #[serde(default)]
     pub global_directives: Vec<GlobalDirective>,
@@ -1967,7 +1973,7 @@ fn default_agent_tool_dispatcher() -> String {
 }
 
 fn default_max_system_prompt_chars() -> usize {
-    0
+    16_000
 }
 
 impl Default for AgentConfig {
@@ -1983,12 +1989,12 @@ impl Default for AgentConfig {
             tool_filter_groups: Vec::new(),
             max_system_prompt_chars: default_max_system_prompt_chars(),
             thinking: crate::agent::thinking::ThinkingConfig::default(),
-            history_pruning: crate::agent::history_pruner::HistoryPrunerConfig::default(),
+            history_pruning: crate::agent::history::pruner::HistoryPrunerConfig::default(),
             context_aware_tools: false,
             eval: crate::agent::eval::EvalConfig::default(),
             auto_classify: None,
             context_compression:
-                crate::agent::context_compressor::ContextCompressionConfig::default(),
+                crate::agent::context::compressor::ContextCompressionConfig::default(),
             global_directives: Vec::new(),
             project_config_dir: None,
             auto_index: AutoIndexConfig::default(),
@@ -3787,7 +3793,6 @@ impl Default for AutonomyConfig {
 
 pub use crate::config::domain::runtime::{DockerRuntimeConfig, RuntimeConfig, WasmRuntimeConfig};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelRouteConfig {
 
@@ -3985,13 +3990,13 @@ pub struct ChannelsConfig {
     #[cfg(feature = "channel-nostr")]
     pub nostr: Option<NostrConfig>,
 
-    pub clawdtalk: Option<crate::channels::ClawdTalkConfig>,
+    pub telnyx: Option<crate::channels::TelnyxConfig>,
 
     pub reddit: Option<RedditConfig>,
 
     pub bluesky: Option<BlueskyConfig>,
 
-    pub voice_call: Option<crate::channels::voice_call::VoiceCallConfig>,
+    pub voice_call: Option<crate::channels::voice::call::VoiceCallConfig>,
 
     #[cfg(feature = "voice-wake")]
     pub voice_wake: Option<VoiceWakeConfig>,
@@ -4105,8 +4110,8 @@ impl ChannelsConfig {
                 self.nostr.is_some(),
             ),
             (
-                Box::new(ConfigWrapper::new(self.clawdtalk.as_ref())),
-                self.clawdtalk.is_some(),
+                Box::new(ConfigWrapper::new(self.telnyx.as_ref())),
+                self.telnyx.is_some(),
             ),
             (
                 Box::new(ConfigWrapper::new(self.reddit.as_ref())),
@@ -4171,7 +4176,7 @@ impl Default for ChannelsConfig {
             mochat: None,
             #[cfg(feature = "channel-nostr")]
             nostr: None,
-            clawdtalk: None,
+            telnyx: None,
             reddit: None,
             bluesky: None,
             voice_call: None,
@@ -4201,10 +4206,6 @@ pub enum StreamMode {
     MultiMessage,
 }
 
-fn default_draft_update_interval_ms() -> u64 {
-    1000
-}
-
 fn default_multi_message_delay_ms() -> u64 {
     800
 }
@@ -4213,7 +4214,7 @@ fn default_matrix_draft_update_interval_ms() -> u64 {
     1500
 }
 
-pub use crate::config::domain::channels_core::{
+pub use crate::config::domain::channels::integration::{
     DiscordConfig, DiscordHistoryConfig, MattermostConfig, SlackConfig, TelegramConfig,
 };
 
@@ -4651,8 +4652,6 @@ impl ChannelConfig for FeishuConfig {
         "Feishu Bot"
     }
 }
-
-#[allow(unused_imports)]
 pub use crate::config::domain::security::{SecurityConfig, WebAuthnConfig};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, JsonSchema, PartialEq, Eq)]
@@ -4862,7 +4861,7 @@ fn default_nevis_realm() -> String {
 }
 
 fn default_nevis_token_validation() -> String {
-    "local".into()
+    "remote".into()
 }
 
 fn default_nevis_session_timeout_secs() -> u64 {
@@ -5480,7 +5479,7 @@ impl Default for Config {
             microsoft365: Microsoft365Config::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
-            browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig::default(),
+            browser_delegate: crate::tools::browser::delegate::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
@@ -5526,20 +5525,20 @@ impl Default for Config {
             plan_mode: crate::agent::plan_mode::PlanModeConfig::default(),
             auto_title: crate::agent::auto_title::AutoTitleConfig::default(),
             suggestions: crate::agent::suggestions::SuggestionsConfig::default(),
-            tool_groups: crate::tools::tool_groups::ToolGroupsConfig::default(),
-            user_profile: crate::agent::user_profile::UserProfileConfig::default(),
-            self_eval: crate::agent::self_eval::SelfEvalConfig::default(),
-            feedback: crate::agent::feedback::FeedbackConfig::default(),
-            experience: crate::agent::experience::ExperienceConfig::default(),
-            self_reflection: crate::agent::self_reflection::SelfReflectionConfig::default(),
-            prompt_optimizer: crate::agent::prompt_optimizer::PromptOptimizerConfig::default(),
+            tool_groups: crate::tools::handler::groups::ToolGroupsConfig::default(),
+            user_profile: crate::agent::user::profile::UserProfileConfig::default(),
+            self_eval: crate::agent::self_assess::eval::SelfEvalConfig::default(),
+            feedback: crate::agent::reward::feedback::FeedbackConfig::default(),
+            experience: crate::agent::reward::experience::ExperienceConfig::default(),
+            self_reflection: crate::agent::self_assess::reflection::SelfReflectionConfig::default(),
+            prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig::default(),
             skill_evolution: crate::agent::skill_evolution::SkillEvolutionConfig::default(),
-            reinforcement: crate::agent::reinforcement::ReinforcementConfig::default(),
+            reinforcement: crate::agent::reward::reinforcement::ReinforcementConfig::default(),
             rbac: crate::security::rbac::RbacConfig::default(),
             tool_output_compressor:
-                crate::agent::tool_output_compressor::ToolOutputCompressorConfig::default(),
+                crate::agent::tool_handler::output_compressor::ToolOutputCompressorConfig::default(),
             code_rag: CodeRagConfig::default(),
-            token_budget: crate::agent::token_budget::TokenBudgetConfig::default(),
+            token_budget: crate::agent::token::budget::TokenBudgetConfig::default(),
             token_saver: TokenSaverConfig::default(),
             custom_tools: CustomToolsConfig::default(),
             lsp: LspConfig::default(),
@@ -5773,7 +5772,7 @@ impl ConfigResolutionSource {
     }
 }
 
-fn expand_tilde_path(path: &str) -> PathBuf {
+pub fn expand_tilde_path(path: &str) -> PathBuf {
     let expanded = shellexpand::tilde(path);
     let expanded_str = expanded.as_ref();
 
@@ -5800,7 +5799,7 @@ async fn resolve_runtime_config_dirs(
     default_sen_dir: &Path,
     default_workspace_dir: &Path,
 ) -> Result<(PathBuf, PathBuf, ConfigResolutionSource)> {
-    if let Some(custom_config_dir) = crate::util::get_env_var("SEN_CONFIG_DIR") {
+    if let Some(custom_config_dir) = crate::util::get_runtime_var("SEN_CONFIG_DIR") {
         let custom_config_dir = custom_config_dir.trim();
         if !custom_config_dir.is_empty() {
             let sen_dir = expand_tilde_path(custom_config_dir);
@@ -5812,7 +5811,7 @@ async fn resolve_runtime_config_dirs(
         }
     }
 
-    if let Some(custom_workspace) = crate::util::get_env_var("SEN_WORKSPACE") {
+    if let Some(custom_workspace) = crate::util::get_runtime_var("SEN_WORKSPACE") {
         if !custom_workspace.is_empty() {
             let expanded = expand_tilde_path(&custom_workspace);
             let (sen_dir, workspace_dir) = resolve_config_dir_for_workspace(&expanded);
@@ -5839,7 +5838,7 @@ fn resolve_runtime_config_dirs_sync(
     default_sen_dir: &Path,
     default_workspace_dir: &Path,
 ) -> (PathBuf, PathBuf) {
-    if let Some(custom_config_dir) = crate::util::get_env_var("SEN_CONFIG_DIR") {
+    if let Some(custom_config_dir) = crate::util::get_runtime_var("SEN_CONFIG_DIR") {
         let custom_config_dir = custom_config_dir.trim();
         if !custom_config_dir.is_empty() {
             let sen_dir = expand_tilde_path(custom_config_dir);
@@ -5847,7 +5846,7 @@ fn resolve_runtime_config_dirs_sync(
         }
     }
 
-    if let Some(custom_workspace) = crate::util::get_env_var("SEN_WORKSPACE") {
+    if let Some(custom_workspace) = crate::util::get_runtime_var("SEN_WORKSPACE") {
         if !custom_workspace.is_empty() {
             let expanded = expand_tilde_path(&custom_workspace);
             let (sen_dir, workspace_dir) = resolve_config_dir_for_workspace(&expanded);
@@ -6276,11 +6275,26 @@ impl Config {
 
                 static KNOWN_KEYS: OnceLock<Vec<String>> = OnceLock::new();
                 let known = KNOWN_KEYS.get_or_init(|| {
-                    toml::to_string(&Config::default())
+                    let mut keys = toml::to_string(&Config::default())
                         .ok()
                         .and_then(|s| s.parse::<toml::Table>().ok())
-                        .map(|t| t.keys().cloned().collect())
-                        .unwrap_or_default()
+                        .map(|t| t.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    for legacy in [
+                        "api_key",
+                        "api_url",
+                        "api_path",
+                        "default_provider",
+                        "default_model",
+                        "model",
+                        "model_provider",
+                    ] {
+                        let name = legacy.to_string();
+                        if !keys.contains(&name) {
+                            keys.push(name);
+                        }
+                    }
+                    keys
                 });
                 for key in raw.keys() {
                     if !known.contains(key) {
@@ -6606,16 +6620,16 @@ impl Config {
                     "config.channels_config.webhook.secret",
                 )?;
             }
-            if let Some(ref mut ct) = config.channels_config.clawdtalk {
+            if let Some(ref mut ct) = config.channels_config.telnyx {
                 decrypt_secret(
                     &store,
                     &mut ct.api_key,
-                    "config.channels_config.clawdtalk.api_key",
+                    "config.channels_config.telnyx.api_key",
                 )?;
                 decrypt_optional_secret(
                     &store,
                     &mut ct.webhook_secret,
-                    "config.channels_config.clawdtalk.webhook_secret",
+                    "config.channels_config.telnyx.webhook_secret",
                 )?;
             }
 
@@ -7610,11 +7624,34 @@ impl Config {
 
         self.apply_named_model_provider_profile();
 
-        if let Some(workspace) = crate::util::get_env_var("SEN_WORKSPACE") {
+        if let Some(workspace) = crate::util::get_runtime_var("SEN_WORKSPACE") {
             if !workspace.is_empty() {
                 let expanded = expand_tilde_path(&workspace);
                 let (_, workspace_dir) = resolve_config_dir_for_workspace(&expanded);
                 self.workspace_dir = workspace_dir;
+            }
+        }
+
+        if let Some(raw) = crate::util::get_runtime_var("SEN_MAX_ITERATIONS") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                match trimmed.parse::<usize>() {
+                    Ok(n) if n > 0 => {
+                        self.agent.max_tool_iterations = n;
+                        self.agent_runtime.max_tool_iterations =
+                            n.min(u32::MAX as usize) as u32;
+                    }
+                    _ => tracing::warn!(
+                        "Ignoring invalid SEN_MAX_ITERATIONS (must be a positive integer)"
+                    ),
+                }
+            }
+        }
+
+        if let Some(raw) = crate::util::get_runtime_var("SEN_LOCALE") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                self.locale = Some(crate::i18n::normalize_locale_public(trimmed));
             }
         }
 
@@ -7864,7 +7901,7 @@ impl Config {
             self.proxy.apply_to_process_env();
         }
 
-        crate::services::proxy_runtime::ProxyRuntime::global().replace(self.proxy.clone());
+        crate::services::proxy::runtime::ProxyRuntime::global().replace(self.proxy.clone());
 
         if self.conversational_ai.enabled {
             tracing::warn!(
@@ -8222,16 +8259,16 @@ impl Config {
                 "config.channels_config.webhook.secret",
             )?;
         }
-        if let Some(ref mut ct) = config_to_save.channels_config.clawdtalk {
+        if let Some(ref mut ct) = config_to_save.channels_config.telnyx {
             encrypt_secret(
                 &store,
                 &mut ct.api_key,
-                "config.channels_config.clawdtalk.api_key",
+                "config.channels_config.telnyx.api_key",
             )?;
             encrypt_optional_secret(
                 &store,
                 &mut ct.webhook_secret,
-                "config.channels_config.clawdtalk.webhook_secret",
+                "config.channels_config.telnyx.webhook_secret",
             )?;
         }
 

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useShallow } from 'zustand/react/shallow'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
 import { useTranslation, useCodingModeText } from '../../i18n'

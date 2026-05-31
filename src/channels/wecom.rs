@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 pub struct WeComChannel {
     webhook_key: String,
+    #[allow(dead_code)]
     allowed_users: Vec<String>,
 }
 
@@ -18,7 +19,7 @@ impl WeComChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client("channel.wecom")
     }
@@ -28,10 +29,6 @@ impl WeComChannel {
             "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={}",
             self.webhook_key
         )
-    }
-
-    fn is_user_allowed(&self, user_id: &str) -> bool {
-        self.allowed_users.iter().any(|u| u == "*" || u == user_id)
     }
 }
 

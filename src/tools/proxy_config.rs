@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-use super::traits::{Tool, ToolResult};
+use super::traits::{Tool, ToolResult, json_verbose_flag, render_json_output};
 use crate::config::{Config, ProxyConfig, ProxyScope};
 use crate::security::SecurityPolicy;
 use crate::util::MaybeSet;
@@ -141,14 +141,17 @@ impl ProxyConfigTool {
 
     fn handle_get(&self) -> anyhow::Result<ToolResult> {
         let file_proxy = self.load_config_without_env()?.proxy;
-        let runtime_proxy = crate::services::get_services().proxy_runtime().snapshot();
+        let runtime_proxy = crate::services::require_services().proxy_runtime().snapshot();
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "proxy": Self::proxy_json(&file_proxy),
-                "runtime_proxy": Self::proxy_json(&runtime_proxy),
-                "environment": Self::env_snapshot(),
-            }))?,
+            output: render_json_output(
+                &json!({
+                    "proxy": Self::proxy_json(&file_proxy),
+                    "runtime_proxy": Self::proxy_json(&runtime_proxy),
+                    "environment": Self::env_snapshot(),
+                }),
+                false,
+            ),
             error: None,
         })
     }
@@ -156,15 +159,18 @@ impl ProxyConfigTool {
     fn handle_list_services(&self) -> anyhow::Result<ToolResult> {
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "supported_service_keys": ProxyConfig::supported_service_keys(),
-                "supported_selectors": ProxyConfig::supported_service_selectors(),
-                "usage_example": {
-                    "action": "set",
-                    "scope": "services",
-                    "services": ["provider.openai", "tool.http_request", "channel.telegram"]
-                }
-            }))?,
+            output: render_json_output(
+                &json!({
+                    "supported_service_keys": ProxyConfig::supported_service_keys(),
+                    "supported_selectors": ProxyConfig::supported_service_selectors(),
+                    "usage_example": {
+                        "action": "set",
+                        "scope": "services",
+                        "services": ["provider.openai", "tool.http_request", "channel.telegram"]
+                    }
+                }),
+                false,
+            ),
             error: None,
         })
     }
@@ -246,7 +252,7 @@ impl ProxyConfigTool {
 
         cfg.proxy = proxy.clone();
         cfg.save().await?;
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .replace(proxy.clone());
 
@@ -258,11 +264,14 @@ impl ProxyConfigTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "message": "Proxy configuration updated",
-                "proxy": Self::proxy_json(&proxy),
-                "environment": Self::env_snapshot(),
-            }))?,
+            output: render_json_output(
+                &json!({
+                    "message": "Proxy configuration updated",
+                    "proxy": Self::proxy_json(&proxy),
+                    "environment": Self::env_snapshot(),
+                }),
+                json_verbose_flag(args),
+            ),
             error: None,
         })
     }
@@ -273,7 +282,7 @@ impl ProxyConfigTool {
         cfg.proxy.enabled = false;
         cfg.save().await?;
 
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .replace(cfg.proxy.clone());
 
@@ -287,11 +296,14 @@ impl ProxyConfigTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "message": "Proxy disabled",
-                "proxy": Self::proxy_json(&cfg.proxy),
-                "environment": Self::env_snapshot(),
-            }))?,
+            output: render_json_output(
+                &json!({
+                    "message": "Proxy disabled",
+                    "proxy": Self::proxy_json(&cfg.proxy),
+                    "environment": Self::env_snapshot(),
+                }),
+                json_verbose_flag(args),
+            ),
             error: None,
         })
     }
@@ -313,17 +325,20 @@ impl ProxyConfigTool {
         }
 
         proxy.apply_to_process_env();
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .replace(proxy.clone());
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "message": "Proxy environment variables applied",
-                "proxy": Self::proxy_json(&proxy),
-                "environment": Self::env_snapshot(),
-            }))?,
+            output: render_json_output(
+                &json!({
+                    "message": "Proxy environment variables applied",
+                    "proxy": Self::proxy_json(&proxy),
+                    "environment": Self::env_snapshot(),
+                }),
+                false,
+            ),
             error: None,
         })
     }
@@ -332,10 +347,13 @@ impl ProxyConfigTool {
         ProxyConfig::clear_process_env();
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "message": "Proxy environment variables cleared",
-                "environment": Self::env_snapshot(),
-            }))?,
+            output: render_json_output(
+                &json!({
+                    "message": "Proxy environment variables cleared",
+                    "environment": Self::env_snapshot(),
+                }),
+                false,
+            ),
             error: None,
         })
     }

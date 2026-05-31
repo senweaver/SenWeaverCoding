@@ -31,7 +31,7 @@ impl Tool for OpenCodeCliTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a coding task to OpenCode CLI (opencode run). Supports file editing and bash execution. Use for complex coding work that benefits from OpenCode's full agent loop."
+        "Delegate a coding task to the configured external agentic coding CLI for multi-step file edits and shell execution. Use for complex implementations that benefit from a full external agent loop."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -40,7 +40,7 @@ impl Tool for OpenCodeCliTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "The coding task to delegate to OpenCode"
+                    "description": "The coding task to delegate to the external CLI"
                 },
                 "working_directory": {
                     "type": "string",
@@ -186,9 +186,9 @@ impl Tool for OpenCodeCliTool {
                     || err_msg.contains("not found")
                     || err_msg.contains("cannot find")
                 {
-                    "OpenCode CLI ('opencode') not found in PATH. Install with: go install github.com/opencode-ai/opencode@latest".into()
+                    "External agentic coding CLI binary not found in PATH. Ensure the configured executable is installed and reachable.".into()
                 } else {
-                    format!("Failed to execute opencode: {e}")
+                    format!("Failed to execute external agentic coding CLI: {e}")
                 };
                 Ok(ToolResult {
                     success: false,
@@ -202,7 +202,7 @@ impl Tool for OpenCodeCliTool {
                     success: false,
                     output: String::new(),
                     error: Some(format!(
-                        "OpenCode CLI timed out after {}s and was killed",
+                        "External agentic coding CLI timed out after {}s and was killed",
                         self.config.timeout_secs
                     )),
                 })

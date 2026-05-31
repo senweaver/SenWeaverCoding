@@ -18,7 +18,6 @@ pub struct PluginHost {
 struct LoadedPlugin {
     manifest: PluginManifest,
     wasm_path: PathBuf,
-    #[allow(dead_code)]
     verification: VerificationResult,
 }
 

@@ -137,10 +137,6 @@ pub fn list_summary() -> String {
     out
 }
 
-// ============================================================================
-// PAPER TEMPLATES
-// ============================================================================
-
 const PAPER_IMRAD_DRAFT: &str = "# <Title>\n\n\
 > Curator template: **Academic Paper — IMRaD (generic)**\n\n\
 **Authors**: <name1>, <name2>  \n\
@@ -312,10 +308,6 @@ The Agent mode build that follows this blueprint MUST reproduce every quantitati
 ```bash\n<smoke command>\n```\n\n\
 ## 6. Risks & Mitigations\n\n\
 - Risk: <…> → Mitigation: <…>\n";
-
-// ============================================================================
-// SOLUTION TEMPLATES
-// ============================================================================
 
 const SOLUTION_FUNCTIONAL_DRAFT: &str = "# <解决方案标题>\n\n\
 > Curator 模板：**工程解决方案 — 功能设计为核心**  \n\
@@ -678,10 +670,6 @@ const SOLUTION_ISO12207_DRAFT: &str = "# Software Lifecycle Process Plan\n\n\
 ### 4.12 Operation\n<…>\n\n\
 ### 4.13 Maintenance\n<…>\n\n\
 ### 4.14 Disposal\n<…>\n";
-
-// ============================================================================
-// TECH REPORT TEMPLATES
-// ============================================================================
 
 const TECH_REPORT_DRAFT: &str = "# <Technical Report Title>\n\n\
 > Curator template: **Technical Report**\n\n\

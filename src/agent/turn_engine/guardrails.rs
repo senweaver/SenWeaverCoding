@@ -38,7 +38,7 @@ pub fn check_tool_guardrails(tool_name: &str) -> Option<String> {
         .map(|svc| svc.coding_mode.read().label().to_string());
     let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
     let perm_mode_lc =
-        crate::gateway::ws_desktop::desktop_runtime_state().permission_mode();
+        crate::gateway::ws::desktop::desktop_runtime_state().permission_mode();
     let tool_lc = tool_name.to_ascii_lowercase();
     let ctx = crate::guardrails::GuardrailContext {
         coding_mode: coding_label_lc.as_deref(),

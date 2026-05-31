@@ -59,7 +59,7 @@ impl LockProvider for LockManagerProvider {
                 exclusive: true,
             })
             .collect();
-        self.acquire_specs(&specs, holder)
+        self.acquire_specs(specs, holder).await
     }
 
     async fn acquire_for_regions(
@@ -75,14 +75,14 @@ impl LockProvider for LockManagerProvider {
                 exclusive: r.exclusive,
             })
             .collect();
-        self.acquire_specs(&specs, holder)
+        self.acquire_specs(specs, holder).await
     }
 }
 
 impl LockManagerProvider {
-    fn acquire_specs(
+    async fn acquire_specs(
         &self,
-        specs: &[RegionRequest],
+        specs: Vec<RegionRequest>,
         holder: &str,
     ) -> Result<Box<dyn LockGuard>, LockProviderError> {
         let opts = AcquireOpts {
@@ -99,7 +99,13 @@ impl LockManagerProvider {
             format!("{}/{}", self.holder_id, holder)
         };
 
-        match lock_manager.acquire_multi(specs, &holder_string, opts) {
+        let result = tokio::task::spawn_blocking(move || {
+            lock_manager.acquire_multi(&specs, &holder_string, opts)
+        })
+        .await
+        .map_err(|e| LockProviderError::Acquire(format!("lock acquire task failed: {e}")))?;
+
+        match result {
             Ok(tokens) => Ok(Box::new(RegionLockGuard { _tokens: tokens })),
             Err(err) => Err(LockProviderError::Acquire(format_lock_error(&err))),
         }

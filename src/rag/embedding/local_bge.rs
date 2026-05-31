@@ -35,7 +35,7 @@ impl EmbeddingProvider for LocalBgeEmbedding {
             return Ok(Vec::new());
         }
         anyhow::bail!(
-            "local_bge embedding model '{model}' is not available — \
+            "local_bge embedding model '{model}' is not available  -  \
              enable the `rag-bge` feature or configure a remote embedder",
             model = self.model
         )

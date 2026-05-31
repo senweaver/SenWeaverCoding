@@ -30,6 +30,7 @@ pub struct SettingsSyncService {
     inner: Arc<RwLock<SyncInner>>,
 }
 
+#[allow(dead_code)]
 struct SyncInner {
     local_version: u64,
     remote_version: u64,

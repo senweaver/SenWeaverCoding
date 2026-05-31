@@ -11,7 +11,6 @@ pub mod types;
 pub use audit::SopAuditLogger;
 pub use engine::SopEngine;
 pub use metrics::SopMetricsCollector;
-#[allow(unused_imports)]
 pub use types::{
     DeterministicRunState, DeterministicSavings, Sop, SopEvent, SopExecutionMode, SopPriority,
     SopRun, SopRunAction, SopRunStatus, SopStep, SopStepKind, SopStepResult, SopStepStatus,
@@ -302,7 +301,7 @@ fn extract_bold_title(text: &str) -> Option<(String, String)> {
     let rest_start = after_start + end + 2;
     let rest = text[rest_start..].trim();
     let rest = rest
-        .strip_prefix("—")
+        .strip_prefix(" - ")
         .or_else(|| rest.strip_prefix("–"))
         .or_else(|| rest.strip_prefix("-"))
         .unwrap_or(rest)
@@ -370,7 +369,7 @@ pub fn handle_command(command: crate::SopCommands, config: &crate::config::Confi
                     let triggers: Vec<String> =
                         sop.triggers.iter().map(ToString::to_string).collect();
                     println!(
-                        "  {} {} [{}] — {}",
+                        "  {} {} [{}]  -  {}",
                         console::style(&sop.name).white().bold(),
                         console::style(format!("v{}", sop.version)).dim(),
                         console::style(&sop.priority).cyan(),
@@ -416,14 +415,14 @@ pub fn handle_command(command: crate::SopCommands, config: &crate::config::Confi
                 let warnings = validate_sop(sop);
                 if warnings.is_empty() {
                     println!(
-                        "  {} {} — valid",
+                        "  {} {}  -  valid",
                         console::style("✓").green().bold(),
                         sop.name
                     );
                 } else {
                     any_warnings = true;
                     println!(
-                        "  {} {} — {} warning(s):",
+                        "  {} {}  -  {} warning(s):",
                         console::style("!").yellow().bold(),
                         sop.name,
                         warnings.len()

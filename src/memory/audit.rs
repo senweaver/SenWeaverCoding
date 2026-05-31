@@ -71,7 +71,7 @@ impl<M: Memory> AuditedMemory<M> {
         })
     }
 
-    fn log_audit(
+    async fn log_audit(
         &self,
         op: AuditOp,
         key: Option<&str>,
@@ -79,14 +79,22 @@ impl<M: Memory> AuditedMemory<M> {
         session_id: Option<&str>,
         metadata: Option<&str>,
     ) {
-        let conn = self.audit_conn.lock();
-        let now = Local::now().to_rfc3339();
+        let conn = Arc::clone(&self.audit_conn);
         let op_str = op.to_string();
-        let _ = conn.execute(
-            "INSERT INTO memory_audit (operation, key, namespace, session_id, timestamp, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![op_str, key, namespace, session_id, now, metadata],
-        );
+        let key = key.map(str::to_string);
+        let namespace = namespace.map(str::to_string);
+        let session_id = session_id.map(str::to_string);
+        let metadata = metadata.map(str::to_string);
+        let _ = tokio::task::spawn_blocking(move || {
+            let conn = conn.lock();
+            let now = Local::now().to_rfc3339();
+            let _ = conn.execute(
+                "INSERT INTO memory_audit (operation, key, namespace, session_id, timestamp, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![op_str, key, namespace, session_id, now, metadata],
+            );
+        })
+        .await;
     }
 
     pub fn prune_older_than(&self, retention_days: u32) -> anyhow::Result<u64> {
@@ -122,7 +130,8 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         category: MemoryCategory,
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.log_audit(AuditOp::Store, Some(key), None, session_id, None);
+        self.log_audit(AuditOp::Store, Some(key), None, session_id, None)
+            .await;
         self.inner.store(key, content, category, session_id).await
     }
 
@@ -140,14 +149,16 @@ impl<M: Memory> Memory for AuditedMemory<M> {
             None,
             session_id,
             Some(&format!("query={query}")),
-        );
+        )
+        .await;
         self.inner
             .recall(query, limit, session_id, since, until)
             .await
     }
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
-        self.log_audit(AuditOp::Get, Some(key), None, None, None);
+        self.log_audit(AuditOp::Get, Some(key), None, None, None)
+            .await;
         self.inner.get(key).await
     }
 
@@ -156,12 +167,14 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         category: Option<&MemoryCategory>,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        self.log_audit(AuditOp::List, None, None, session_id, None);
+        self.log_audit(AuditOp::List, None, None, session_id, None)
+            .await;
         self.inner.list(category, session_id).await
     }
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        self.log_audit(AuditOp::Forget, Some(key), None, None, None);
+        self.log_audit(AuditOp::Forget, Some(key), None, None, None)
+            .await;
         self.inner.forget(key).await
     }
 
@@ -184,7 +197,8 @@ impl<M: Memory> Memory for AuditedMemory<M> {
             None,
             session_id,
             Some(&format!("messages={}", messages.len())),
-        );
+        )
+        .await;
         self.inner.store_procedural(messages, session_id).await
     }
 
@@ -203,7 +217,8 @@ impl<M: Memory> Memory for AuditedMemory<M> {
             Some(namespace),
             session_id,
             Some(&format!("query={query}")),
-        );
+        )
+        .await;
         self.inner
             .recall_namespaced(namespace, query, limit, session_id, since, until)
             .await
@@ -218,7 +233,8 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         namespace: Option<&str>,
         importance: Option<f64>,
     ) -> anyhow::Result<()> {
-        self.log_audit(AuditOp::Store, Some(key), namespace, session_id, None);
+        self.log_audit(AuditOp::Store, Some(key), namespace, session_id, None)
+            .await;
         self.inner
             .store_with_metadata(key, content, category, session_id, namespace, importance)
             .await

@@ -1,10 +1,3 @@
-// Benchmark: tool-spec serialization caching.
-//
-// Validates that the `ToolSpecCache` eliminates redundant serialization work
-// compared to the naive "serialize every iteration" approach.
-//
-// Run: `cargo bench --bench tool_dispatch`
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use senweavercoding::tools::spec_cache::ToolSpecCache;
 use senweavercoding::tools::traits::ToolSpec;

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { create } from 'zustand'
 import { webApi } from '../api/web'
 import type { WebFetchConfig, WebSearchConfig } from '../api/web'

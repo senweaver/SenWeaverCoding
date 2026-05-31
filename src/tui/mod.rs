@@ -5,8 +5,7 @@
 pub mod agent_bridge;
 pub mod agents_panel;
 
-pub mod chat_render_cache;
-pub mod chat_view;
+pub mod chat;
 
 pub mod edit_batch_registry;
 
@@ -17,8 +16,6 @@ pub mod file_viewer;
 pub mod inline_edit_modal;
 
 pub mod ghost_overlay;
-
-pub mod chat_message_reconciler;
 
 pub mod event_loop;
 
@@ -157,6 +154,61 @@ impl Tab {
     }
 }
 
+struct RefreshWorker<T> {
+    req_tx: std::sync::mpsc::Sender<u64>,
+    res_rx: std::sync::mpsc::Receiver<(u64, Option<T>)>,
+    inflight: Option<u64>,
+    next_gen: u64,
+}
+
+impl<T: Send + 'static> RefreshWorker<T> {
+    fn spawn<F>(compute: F) -> Self
+    where
+        F: Fn() -> Option<T> + Send + 'static,
+    {
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<u64>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<(u64, Option<T>)>();
+        std::thread::spawn(move || {
+            while let Ok(generation) = req_rx.recv() {
+                let result = compute();
+                if res_tx.send((generation, result)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            req_tx,
+            res_rx,
+            inflight: None,
+            next_gen: 0,
+        }
+    }
+
+    fn request(&mut self) {
+        if self.inflight.is_some() {
+            return;
+        }
+        let generation = self.next_gen;
+        self.next_gen = self.next_gen.wrapping_add(1);
+        if self.req_tx.send(generation).is_ok() {
+            self.inflight = Some(generation);
+        }
+    }
+
+    fn poll(&mut self) -> Option<T> {
+        let mut latest = None;
+        while let Ok((generation, value)) = self.res_rx.try_recv() {
+            if Some(generation) == self.inflight {
+                self.inflight = None;
+                if let Some(v) = value {
+                    latest = Some(v);
+                }
+            }
+        }
+        latest
+    }
+}
+
 pub struct App {
     pub active_tab: Tab,
     pub should_quit: bool,
@@ -172,6 +224,8 @@ pub struct App {
     pub tick_count: u64,
     pub task_entries: Vec<TaskEntry>,
     pub task_list_state: ListState,
+    task_worker: Option<RefreshWorker<Vec<TaskEntry>>>,
+    memory_worker: Option<RefreshWorker<Vec<MemoryEntry>>>,
     pub tool_entries: Vec<ToolEntry>,
     pub tool_list_state: ListState,
     pub command_entries: Vec<CommandEntry>,
@@ -212,7 +266,7 @@ pub struct App {
 
     pub partial_redraw_pending: bool,
 
-    pub chat_render_cache: chat_render_cache::ChatRenderCache,
+    pub chat_render_cache: chat::render_cache::ChatRenderCache,
 
     pub edit_batch_registry: edit_batch_registry::EditBatchRegistry,
 
@@ -226,16 +280,31 @@ pub struct App {
 
     pub pending_inline_path: Option<std::path::PathBuf>,
 
-    pub chat_reconciler: chat_message_reconciler::ChatMessageReconciler,
+    pub chat_reconciler: chat::message_reconciler::ChatMessageReconciler,
 
     pub inline_edit_outcome_tx: tokio::sync::mpsc::UnboundedSender<RunnerOutcomeMessage>,
     pub inline_edit_outcome_rx: tokio::sync::mpsc::UnboundedReceiver<RunnerOutcomeMessage>,
+
+    pub revert_hunk_outcome_tx: tokio::sync::mpsc::UnboundedSender<RevertHunkOutcome>,
+    pub revert_hunk_outcome_rx: tokio::sync::mpsc::UnboundedReceiver<RevertHunkOutcome>,
 }
 
 #[derive(Debug)]
 pub enum RunnerOutcomeMessage {
     Success(inline_edit_modal::RunnerSubmitOutcome),
     Failure { path: std::path::PathBuf, error: String },
+}
+
+#[derive(Debug)]
+pub enum RevertHunkOutcome {
+    Done {
+        entry_id: u64,
+        hunk_index: usize,
+        new_batch_id: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 pub struct KeyShortcut {
@@ -322,7 +391,7 @@ impl ChatMessage {
     }
 
     pub fn from_parts(role: &str, content: String, timestamp: String) -> Self {
-        let content_hash = chat_render_cache::fingerprint(&content);
+        let content_hash = chat::render_cache::fingerprint(&content);
         Self {
             role: role.to_string(),
             content,
@@ -334,8 +403,8 @@ impl ChatMessage {
     }
 
     pub fn mark_content_dirty(&mut self) {
-        self.content_hash = chat_render_cache::fingerprint(&self.content);
-        chat_render_cache::invalidate_message_cache(&mut self.highlighted_cache);
+        self.content_hash = chat::render_cache::fingerprint(&self.content);
+        chat::render_cache::invalidate_message_cache(&mut self.highlighted_cache);
     }
 }
 
@@ -477,6 +546,8 @@ impl App {
             .unwrap_or_else(|| "none".into());
         let (inline_edit_outcome_tx, inline_edit_outcome_rx) =
             tokio::sync::mpsc::unbounded_channel::<RunnerOutcomeMessage>();
+        let (revert_hunk_outcome_tx, revert_hunk_outcome_rx) =
+            tokio::sync::mpsc::unbounded_channel::<RevertHunkOutcome>();
 
         Self {
             active_tab: Tab::Dashboard,
@@ -507,6 +578,8 @@ impl App {
             tick_count: 0,
             task_entries: Vec::new(),
             task_list_state: ListState::default(),
+            task_worker: None,
+            memory_worker: None,
             tool_entries: Vec::new(),
             tool_list_state: ListState::default(),
             command_entries: Vec::new(),
@@ -535,7 +608,7 @@ impl App {
             dirty: true,
             pending_delta_started_at: None,
             partial_redraw_pending: false,
-            chat_render_cache: chat_render_cache::ChatRenderCache::new(),
+            chat_render_cache: chat::render_cache::ChatRenderCache::new(),
             edit_batch_registry: edit_batch_registry::EditBatchRegistry::default(),
             diff_review_state: diff_review::DiffReviewState::new(),
             file_viewer_state: file_viewer::FileViewerState::new(),
@@ -543,9 +616,11 @@ impl App {
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
             inline_edit_modal: inline_edit_modal::InlineEditModal::default(),
             pending_inline_path: None,
-            chat_reconciler: chat_message_reconciler::ChatMessageReconciler::default(),
+            chat_reconciler: chat::message_reconciler::ChatMessageReconciler::default(),
             inline_edit_outcome_tx,
             inline_edit_outcome_rx,
+            revert_hunk_outcome_tx,
+            revert_hunk_outcome_rx,
         }
     }
 
@@ -779,37 +854,27 @@ impl App {
 
                     let entry_clone = entry.clone();
                     let ws_clone = workspace.clone();
-                    let join = std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(|e| anyhow::anyhow!("runtime build: {e}"))?;
-                        rt.block_on(diff_review::revert_single_hunk(
+                    let tx = self.revert_hunk_outcome_tx.clone();
+                    tokio::spawn(async move {
+                        let msg = match diff_review::revert_single_hunk(
                             &entry_clone,
                             hunk_index,
                             &ws_clone,
-                        ))
-                    });
-                    match join.join() {
-                        Ok(Ok(new_batch_id)) => {
-                            diff_review::mark_reverted(
-                                &mut self.edit_batch_registry,
+                        )
+                        .await
+                        {
+                            Ok(new_batch_id) => RevertHunkOutcome::Done {
                                 entry_id,
-                                Some(hunk_index),
-                            );
-                            self.diff_review_state.toast = Some(format!(
-                                "hunk reverted via new batch {new_batch_id}"
-                            ));
-                        }
-                        Ok(Err(e)) => {
-                            self.diff_review_state.toast =
-                                Some(format!("hunk revert failed: {e}"));
-                        }
-                        Err(_) => {
-                            self.diff_review_state.toast =
-                                Some("hunk revert worker panicked".into());
-                        }
-                    }
+                                hunk_index,
+                                new_batch_id,
+                            },
+                            Err(e) => RevertHunkOutcome::Failed {
+                                message: format!("hunk revert failed: {e}"),
+                            },
+                        };
+                        let _ = tx.send(msg);
+                    });
+                    self.diff_review_state.toast = Some("reverting hunk...".into());
                 }
             }
         }
@@ -884,7 +949,7 @@ impl App {
                             crate::observability::tui_metrics::incr_tui_inline_edit_success();
                         } else {
                             self.inline_edit_modal.status =
-                                Some("agent busy — retry after it finishes".into());
+                                Some("agent busy  -  retry after it finishes".into());
                             crate::observability::tui_metrics::incr_tui_inline_edit_failed();
                         }
                         self.inline_edit_modal.close();
@@ -1321,6 +1386,7 @@ impl App {
         self.status_info.uptime_secs += 1;
         self.drain_agent_events();
         self.drain_inline_edit_outcomes();
+        self.drain_revert_hunk_outcomes();
         self.sync_from_services();
     }
 
@@ -1330,6 +1396,32 @@ impl App {
             self.handle_agent_event(ev);
         }
         self.reconcile_chat_messages();
+    }
+
+    fn drain_revert_hunk_outcomes(&mut self) {
+        loop {
+            match self.revert_hunk_outcome_rx.try_recv() {
+                Ok(RevertHunkOutcome::Done {
+                    entry_id,
+                    hunk_index,
+                    new_batch_id,
+                }) => {
+                    diff_review::mark_reverted(
+                        &mut self.edit_batch_registry,
+                        entry_id,
+                        Some(hunk_index),
+                    );
+                    self.diff_review_state.toast =
+                        Some(format!("hunk reverted via new batch {new_batch_id}"));
+                    self.mark_dirty();
+                }
+                Ok(RevertHunkOutcome::Failed { message }) => {
+                    self.diff_review_state.toast = Some(message);
+                    self.mark_dirty();
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     fn drain_inline_edit_outcomes(&mut self) {
@@ -1400,7 +1492,7 @@ impl App {
             .reconcile(&mut self.chat_messages, &self.bridge.session_actor_slot);
         if matches!(
             outcome,
-            chat_message_reconciler::ReconcileOutcome::Backfilled
+            chat::message_reconciler::ReconcileOutcome::Backfilled
         ) {
             self.mark_dirty();
         }
@@ -1607,7 +1699,7 @@ impl App {
                 } => {
                     self.chat_messages.push(ChatMessage::from_parts(
                         "system",
-                        format!("\u{26A0} Approval needed: {tool_name} — {args_summary}"),
+                        format!("\u{26A0} Approval needed: {tool_name}  -  {args_summary}"),
                         ts.clone(),
                     ));
                 }
@@ -1727,6 +1819,19 @@ impl App {
             });
         }
 
+        if self.tick_count == 1 {
+            if let Some(svc) = try_get_services() {
+                let mut tips = svc.tips.lock();
+                if let Some(tip) = tips.next_tip().cloned() {
+                    self.log_entries.push(format!(
+                        "[tip] {}  -  {}",
+                        tip.title, tip.body
+                    ));
+                    tips.mark_shown(&tip.id);
+                }
+            }
+        }
+
         if let Some(svc) = try_get_services() {
             if self.command_entries.is_empty() {
                 self.command_entries = svc
@@ -1743,68 +1848,94 @@ impl App {
             }
 
             if self.tool_entries.is_empty() || self.tick_count % 10 == 0 {
-                if let Ok(guard) = svc.tool_use_summary.lock() {
-                    self.tool_entries = guard
-                        .aggregate()
-                        .into_iter()
-                        .map(|s| ToolEntry {
-                            name: s.tool_name,
-                            category: String::new(),
-                            call_count: s.call_count,
-                            enabled: true,
-                        })
-                        .collect();
-                }
-            }
-        }
-
-        if self.tick_count % 5 == 0 {
-            if let Ok(sessions) = crate::cli::bg::list_sessions_sync(&self.config.workspace_dir) {
-                self.task_entries = sessions
+                let guard = svc.tool_use_summary.lock();
+                self.tool_entries = guard
+                    .aggregate()
                     .into_iter()
-                    .map(|s| TaskEntry {
-                        id: s.id,
-                        task_type: "background".into(),
-                        status: s.status.to_string(),
-                        description: s.cwd.display().to_string(),
-                        duration_ms: 0,
+                    .map(|s| ToolEntry {
+                        name: s.tool_name,
+                        category: String::new(),
+                        call_count: s.call_count,
+                        enabled: true,
                     })
                     .collect();
             }
         }
 
-        if self.memory_entries.is_empty() || self.tick_count % 30 == 0 {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let candidates = [
-                "CLAUDE.md",
-                "AGENTS.md",
-                "MEMORY.md",
-                ".senweavercoding/MEMORY.md",
-                ".claude/CLAUDE.md",
-            ];
-            let mut entries = Vec::new();
-            for name in &candidates {
-                let path = cwd.join(name);
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let summary: String = content.lines().take(3).collect::<Vec<_>>().join(" | ");
-                    let preview = if summary.len() > 120 {
-                        let mut end = 120;
-                        while end > 0 && !summary.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        format!("{}...", &summary[..end])
-                    } else {
-                        summary
-                    };
-                    entries.push(MemoryEntry {
-                        key: name.to_string(),
-                        category: "file".to_string(),
-                        preview,
-                    });
+        if self.task_worker.is_none() {
+            let workspace = self.config.workspace_dir.clone();
+            self.task_worker = Some(RefreshWorker::spawn(move || {
+                match crate::cli::bg::list_sessions_sync(&workspace) {
+                    Ok(sessions) => Some(
+                        sessions
+                            .into_iter()
+                            .map(|s| TaskEntry {
+                                id: s.id,
+                                task_type: "background".into(),
+                                status: s.status.to_string(),
+                                description: s.cwd.display().to_string(),
+                                duration_ms: 0,
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    Err(_) => None,
                 }
+            }));
+        }
+        if let Some(worker) = self.task_worker.as_mut() {
+            if let Some(entries) = worker.poll() {
+                self.task_entries = entries;
             }
-            if !entries.is_empty() {
+            if self.tick_count % 5 == 0 {
+                worker.request();
+            }
+        }
+
+        if self.memory_worker.is_none() {
+            self.memory_worker = Some(RefreshWorker::spawn(|| {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let candidates = [
+                    "CLAUDE.md",
+                    "AGENTS.md",
+                    "MEMORY.md",
+                    ".senweavercoding/MEMORY.md",
+                    ".claude/CLAUDE.md",
+                ];
+                let mut entries = Vec::new();
+                for name in &candidates {
+                    let path = cwd.join(name);
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let summary: String =
+                            content.lines().take(3).collect::<Vec<_>>().join(" | ");
+                        let preview = if summary.len() > 120 {
+                            let mut end = 120;
+                            while end > 0 && !summary.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("{}...", &summary[..end])
+                        } else {
+                            summary
+                        };
+                        entries.push(MemoryEntry {
+                            key: name.to_string(),
+                            category: "file".to_string(),
+                            preview,
+                        });
+                    }
+                }
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(entries)
+                }
+            }));
+        }
+        if let Some(worker) = self.memory_worker.as_mut() {
+            if let Some(entries) = worker.poll() {
                 self.memory_entries = entries;
+            }
+            if self.memory_entries.is_empty() || self.tick_count % 30 == 0 {
+                worker.request();
             }
         }
     }
@@ -2171,7 +2302,7 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         if m.content.contains("```") {
             messages.push(Line::from(header));
             let highlighted =
-                chat_render_cache::render_message_cached(&m.highlighted_cache, &m.content);
+                chat::render_cache::render_message_cached(&m.highlighted_cache, &m.content);
 
             messages.extend(highlighted.iter().cloned());
         } else {

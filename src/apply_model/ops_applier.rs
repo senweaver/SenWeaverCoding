@@ -273,7 +273,7 @@ pub struct OpsApplier {
     apply_opts: ApplyOptions,
     journal_retention: usize,
 
-    symbol_graph_writer: Option<Arc<crate::code_intel::symbol_graph_incremental::SymbolGraphWriter>>,
+    symbol_graph_writer: Option<Arc<crate::code_intel::symbol_graph::incremental::SymbolGraphWriter>>,
 
     lsp_notify: Option<Arc<dyn LspNotifier>>,
 
@@ -334,7 +334,7 @@ impl OpsApplier {
     #[must_use]
     pub fn with_symbol_graph_writer(
         mut self,
-        writer: Arc<crate::code_intel::symbol_graph_incremental::SymbolGraphWriter>,
+        writer: Arc<crate::code_intel::symbol_graph::incremental::SymbolGraphWriter>,
     ) -> Self {
         self.symbol_graph_writer = Some(writer);
         self
@@ -391,10 +391,10 @@ impl OpsApplier {
             .acquire_for_regions(&region_requests, batch.origin.tag())
             .await?;
 
-        let pre_images = {
+        let pre_images: Arc<BTreeMap<PathBuf, PreImage>> = {
             let batch_clone = batch.clone();
             match tokio::task::spawn_blocking(move || capture_pre_images(&batch_clone)).await {
-                Ok(res) => res?,
+                Ok(res) => Arc::new(res?),
                 Err(e) => {
                     return Err(ApplyBatchError::Io {
                         op_index: 0,
@@ -407,8 +407,9 @@ impl OpsApplier {
             }
         };
 
-        let (journal_path, journal_persisted) =
-            self.write_journal_pending(&batch, &pre_images)?;
+        let (journal_path, journal_persisted) = self
+            .write_journal_pending(&batch, Arc::clone(&pre_images))
+            .await?;
 
         let preview = self.build_preview(&batch).await?;
 
@@ -490,7 +491,11 @@ impl OpsApplier {
 
         if self.apply_opts.validate {
             for path in &applied_paths {
-                if let Ok(text) = std::fs::read_to_string(path) {
+                let path_for_read = path.clone();
+                let read =
+                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_for_read))
+                        .await;
+                if let Ok(Ok(text)) = read {
                     let report = validate_bytes(&text);
                     if !report.is_ok() {
                         if batch.atomic {
@@ -535,7 +540,10 @@ impl OpsApplier {
             let applied_dedup: std::collections::HashSet<PathBuf> =
                 applied_paths.iter().cloned().collect();
             for p in applied_dedup {
-                if let Ok(contents) = std::fs::read_to_string(&p) {
+                let p_for_read = p.clone();
+                let read = tokio::task::spawn_blocking(move || std::fs::read_to_string(&p_for_read))
+                    .await;
+                if let Ok(Ok(contents)) = read {
                     if notifier.notify_changed(&p, &contents).await.is_ok() {
                         crate::observability::code_intel_metrics::incr_lsp_did_change_sent();
                     }
@@ -562,11 +570,21 @@ impl OpsApplier {
         hint: Option<&str>,
         origin: super::edit_op::EditOrigin,
     ) -> Result<(BatchOutcome, super::fast_apply::FastPathTier), ApplyBatchError> {
-        let source = std::fs::read_to_string(&path).map_err(|source| ApplyBatchError::Io {
-            op_index: 0,
-            path: path.clone(),
-            source,
-        })?;
+        let source = {
+            let path_for_read = path.clone();
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_for_read))
+                .await
+                .map_err(|e| ApplyBatchError::Io {
+                    op_index: 0,
+                    path: path.clone(),
+                    source: std::io::Error::other(format!("read join error: {e}")),
+                })?
+                .map_err(|source| ApplyBatchError::Io {
+                    op_index: 0,
+                    path: path.clone(),
+                    source,
+                })?
+        };
         let (outcome, _final_diff, tier) =
             super::fast_apply::apply_unified_diff_with_fast_path(
                 &source, raw_diff, options, refiner, hint,
@@ -605,41 +623,52 @@ impl OpsApplier {
     }
 
     pub async fn rollback(&self, batch_id: &str) -> Result<(), RollbackError> {
-        let path = self.journal_dir_snapshot().join(format!("{batch_id}.jsonl"));
-        if !path.exists() {
-            return Err(RollbackError::JournalMissing(batch_id.to_string()));
-        }
-        let raw = std::fs::read_to_string(&path).map_err(|source| RollbackError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let mut records: Vec<JournalRecord> = Vec::new();
-        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
-            let parsed: JournalLine = serde_json::from_str(line)
-                .map_err(|e| RollbackError::Parse(e.to_string()))?;
-            if let JournalLineKind::Record = parsed.kind {
-                if let Some(rec) = parsed.record {
-                    records.push(rec);
+        let journal_dir = self.journal_dir_snapshot();
+        let batch_id = batch_id.to_string();
+        let join = tokio::task::spawn_blocking(move || {
+            let path = journal_dir.join(format!("{batch_id}.jsonl"));
+            if !path.exists() {
+                return Err(RollbackError::JournalMissing(batch_id));
+            }
+            let raw = std::fs::read_to_string(&path).map_err(|source| RollbackError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let mut records: Vec<JournalRecord> = Vec::new();
+            for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+                let parsed: JournalLine = serde_json::from_str(line)
+                    .map_err(|e| RollbackError::Parse(e.to_string()))?;
+                if let JournalLineKind::Record = parsed.kind {
+                    if let Some(rec) = parsed.record {
+                        records.push(rec);
+                    }
                 }
             }
-        }
 
-        for record in records.into_iter().rev() {
-            if let Some(pre) = &record.pre_image {
-                restore_one(pre).map_err(|source| RollbackError::Io {
-                    path: pre.path.clone(),
-                    source,
-                })?;
+            for record in records.into_iter().rev() {
+                if let Some(pre) = &record.pre_image {
+                    restore_one(pre).map_err(|source| RollbackError::Io {
+                        path: pre.path.clone(),
+                        source,
+                    })?;
+                }
+                if let EditOp::RenameFile { from, .. } = &record.op {
+                    let _ = std::fs::remove_file(record.op.primary_path());
+                    let _ = from;
+                }
             }
-            if let EditOp::RenameFile { from, .. } = &record.op {
 
-                let _ = std::fs::remove_file(record.op.primary_path());
-                let _ = from;
-            }
+            append_footer_to_path(&path, JournalStatus::RolledBack, false);
+            Ok(())
+        })
+        .await;
+        match join {
+            Ok(res) => res,
+            Err(e) => Err(RollbackError::Io {
+                path: PathBuf::new(),
+                source: std::io::Error::other(format!("rollback join error: {e}")),
+            }),
         }
-
-        self.append_footer(Some(&path), JournalStatus::RolledBack, false);
-        Ok(())
     }
 
     async fn apply_one(
@@ -647,7 +676,12 @@ impl OpsApplier {
         op_index: usize,
         op: &EditOp,
     ) -> Result<(Option<usize>, Option<usize>), ApplyBatchError> {
-        match op {
+        let op = op.clone();
+        let apply_opts = self.apply_opts.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            let op = &op;
+            let apply_opts = &apply_opts;
+            match op {
             EditOp::Replace {
                 path,
                 byte_range,
@@ -660,8 +694,9 @@ impl OpsApplier {
                     source,
                 })?;
                 let before = bytes.len();
+                validate_byte_range_for_apply(op_index, path, byte_range, before)?;
                 let mut out = Vec::with_capacity(
-                    bytes.len() - (byte_range.end - byte_range.start) + new_text.len(),
+                    before - (byte_range.end - byte_range.start) + new_text.len(),
                 );
                 out.extend_from_slice(&bytes[..byte_range.start]);
                 out.extend_from_slice(new_text.as_bytes());
@@ -680,6 +715,7 @@ impl OpsApplier {
                     source,
                 })?;
                 let before = bytes.len();
+                validate_at_byte_for_apply(op_index, path, *at_byte, before)?;
                 let mut out = Vec::with_capacity(bytes.len() + text.len());
                 out.extend_from_slice(&bytes[..*at_byte]);
                 out.extend_from_slice(text.as_bytes());
@@ -700,8 +736,9 @@ impl OpsApplier {
                     source,
                 })?;
                 let before = bytes.len();
+                validate_byte_range_for_apply(op_index, path, byte_range, before)?;
                 let mut out =
-                    Vec::with_capacity(bytes.len() - (byte_range.end - byte_range.start));
+                    Vec::with_capacity(before - (byte_range.end - byte_range.start));
                 out.extend_from_slice(&bytes[..byte_range.start]);
                 out.extend_from_slice(&bytes[byte_range.end..]);
                 std::fs::write(path, &out).map_err(|source| ApplyBatchError::Io {
@@ -787,7 +824,7 @@ impl OpsApplier {
                     }
                 })?;
                 let before = source.len();
-                let mut opts = self.apply_opts.clone();
+                let mut opts = apply_opts.clone();
                 opts.max_fuzz = *fuzz as usize;
                 opts.dry_run = false;
 
@@ -855,6 +892,16 @@ impl OpsApplier {
                 let _ = cell_op_label(cell_op);
                 Ok((Some(raw.len()), Some(out.len())))
             }
+            }
+        })
+        .await;
+        match join {
+            Ok(res) => res,
+            Err(e) => Err(ApplyBatchError::Io {
+                op_index,
+                path: PathBuf::new(),
+                source: std::io::Error::other(format!("apply_one join error: {e}")),
+            }),
         }
     }
 
@@ -862,6 +909,11 @@ impl OpsApplier {
         &self,
         batch: &EditBatch,
     ) -> Result<BatchPreview, ApplyBatchError> {
+        let batch = batch.clone();
+        let apply_opts = self.apply_opts.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            let batch = &batch;
+            let apply_opts = &apply_opts;
         let mut diffs: Vec<UnifiedDiffPreview> = Vec::with_capacity(batch.ops.len());
         let mut created: Vec<PathBuf> = Vec::new();
         let mut deleted: Vec<PathBuf> = Vec::new();
@@ -875,11 +927,12 @@ impl OpsApplier {
                     ..
                 } => {
                     let bytes = std::fs::read(path).unwrap_or_default();
+                    let range = clamp_byte_range(byte_range, bytes.len());
                     let before_text = String::from_utf8_lossy(&bytes).to_string();
                     let mut after_bytes = Vec::with_capacity(bytes.len());
-                    after_bytes.extend_from_slice(&bytes[..byte_range.start]);
+                    after_bytes.extend_from_slice(&bytes[..range.start]);
                     after_bytes.extend_from_slice(new_text.as_bytes());
-                    after_bytes.extend_from_slice(&bytes[byte_range.end..]);
+                    after_bytes.extend_from_slice(&bytes[range.end..]);
                     let after_text = String::from_utf8_lossy(&after_bytes).to_string();
                     diffs.push(UnifiedDiffPreview {
                         op_index: idx,
@@ -893,10 +946,11 @@ impl OpsApplier {
                 }
                 EditOp::Insert { path, at_byte, text, .. } => {
                     let bytes = std::fs::read(path).unwrap_or_default();
+                    let at = (*at_byte).min(bytes.len());
                     let mut after = Vec::with_capacity(bytes.len() + text.len());
-                    after.extend_from_slice(&bytes[..*at_byte]);
+                    after.extend_from_slice(&bytes[..at]);
                     after.extend_from_slice(text.as_bytes());
-                    after.extend_from_slice(&bytes[*at_byte..]);
+                    after.extend_from_slice(&bytes[at..]);
                     let before_text = String::from_utf8_lossy(&bytes).to_string();
                     let after_text = String::from_utf8_lossy(&after).to_string();
                     diffs.push(UnifiedDiffPreview {
@@ -911,9 +965,10 @@ impl OpsApplier {
                 }
                 EditOp::Delete { path, byte_range, .. } => {
                     let bytes = std::fs::read(path).unwrap_or_default();
+                    let range = clamp_byte_range(byte_range, bytes.len());
                     let mut after = Vec::with_capacity(bytes.len());
-                    after.extend_from_slice(&bytes[..byte_range.start]);
-                    after.extend_from_slice(&bytes[byte_range.end..]);
+                    after.extend_from_slice(&bytes[..range.start]);
+                    after.extend_from_slice(&bytes[range.end..]);
                     let before_text = String::from_utf8_lossy(&bytes).to_string();
                     let after_text = String::from_utf8_lossy(&after).to_string();
                     diffs.push(UnifiedDiffPreview {
@@ -969,7 +1024,7 @@ impl OpsApplier {
                     scope_anchor,
                 } => {
                     let source = std::fs::read_to_string(path).unwrap_or_default();
-                    let mut opts = self.apply_opts.clone();
+                    let mut opts = apply_opts.clone();
                     opts.max_fuzz = *fuzz as usize;
                     opts.dry_run = true;
                     let outcome = if let Some(anchor) = scope_anchor.as_ref() {
@@ -1017,84 +1072,87 @@ impl OpsApplier {
             deleted,
             renamed,
         })
+        })
+        .await;
+        match join {
+            Ok(res) => res,
+            Err(e) => Err(ApplyBatchError::Io {
+                op_index: 0,
+                path: PathBuf::new(),
+                source: std::io::Error::other(format!("build_preview join error: {e}")),
+            }),
+        }
     }
 
-    fn write_journal_pending(
+    async fn write_journal_pending(
         &self,
         batch: &EditBatch,
-        pre_images: &BTreeMap<PathBuf, PreImage>,
+        pre_images: Arc<BTreeMap<PathBuf, PreImage>>,
     ) -> Result<(Option<PathBuf>, bool), ApplyBatchError> {
         let journaled = self.journal_dir_snapshot();
-        if std::fs::create_dir_all(&journaled).is_err() {
-
-            return Ok((None, false));
-        }
-        let path = journaled.join(format!("{}.jsonl", batch.batch_id));
         let ws_snap = self.workspace_snapshot();
-        let header = JournalHeader {
-            batch_id: batch.batch_id.clone(),
-            correlation_id: batch.correlation_id.clone(),
-            origin: batch.origin.tag().to_string(),
-            atomic: batch.atomic,
-            started_at: Utc::now(),
-            workspace_root: ws_snap,
-            status: JournalStatus::Pending,
-        };
-        let mut buf = String::new();
-        buf.push_str(
-            &serde_json::to_string(&JournalLine {
-                kind: JournalLineKind::Header,
-                header: Some(header),
-                record: None,
-                footer: None,
-            })
-            .map_err(|e| ApplyBatchError::Journal(std::io::Error::other(e.to_string())))?,
-        );
-        buf.push('\n');
-        for (idx, op) in batch.ops.iter().enumerate() {
-            let touched = op.primary_path().to_path_buf();
-            let pre_image = pre_images.get(&touched).cloned();
-            let record = JournalRecord {
-                op_index: idx,
-                op: op.clone(),
-                pre_image,
-                post_image_sha256: None,
-                ts: Utc::now(),
+        let batch = batch.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            if std::fs::create_dir_all(&journaled).is_err() {
+                return Ok((None, false));
+            }
+            let path = journaled.join(format!("{}.jsonl", batch.batch_id));
+            let header = JournalHeader {
+                batch_id: batch.batch_id.clone(),
+                correlation_id: batch.correlation_id.clone(),
+                origin: batch.origin.tag().to_string(),
+                atomic: batch.atomic,
+                started_at: Utc::now(),
+                workspace_root: ws_snap,
+                status: JournalStatus::Pending,
             };
+            let mut buf = String::new();
             buf.push_str(
                 &serde_json::to_string(&JournalLine {
-                    kind: JournalLineKind::Record,
-                    header: None,
-                    record: Some(record),
+                    kind: JournalLineKind::Header,
+                    header: Some(header),
+                    record: None,
                     footer: None,
                 })
                 .map_err(|e| ApplyBatchError::Journal(std::io::Error::other(e.to_string())))?,
             );
             buf.push('\n');
+            for (idx, op) in batch.ops.iter().enumerate() {
+                let touched = op.primary_path().to_path_buf();
+                let pre_image = pre_images.get(&touched).cloned();
+                let record = JournalRecord {
+                    op_index: idx,
+                    op: op.clone(),
+                    pre_image,
+                    post_image_sha256: None,
+                    ts: Utc::now(),
+                };
+                buf.push_str(
+                    &serde_json::to_string(&JournalLine {
+                        kind: JournalLineKind::Record,
+                        header: None,
+                        record: Some(record),
+                        footer: None,
+                    })
+                    .map_err(|e| ApplyBatchError::Journal(std::io::Error::other(e.to_string())))?,
+                );
+                buf.push('\n');
+            }
+            std::fs::write(&path, buf.as_bytes()).map_err(ApplyBatchError::Journal)?;
+            Ok((Some(path), true))
+        })
+        .await;
+        match join {
+            Ok(res) => res,
+            Err(e) => Err(ApplyBatchError::Journal(std::io::Error::other(format!(
+                "write_journal_pending join error: {e}"
+            )))),
         }
-        std::fs::write(&path, buf.as_bytes()).map_err(ApplyBatchError::Journal)?;
-        Ok((Some(path), true))
     }
 
     fn append_footer(&self, path: Option<&Path>, status: JournalStatus, degraded: bool) {
         let Some(path) = path else { return };
-        let footer = JournalLine {
-            kind: JournalLineKind::Footer,
-            header: None,
-            record: None,
-            footer: Some(JournalFooter {
-                status,
-                finished_at: Utc::now(),
-                degraded,
-            }),
-        };
-        if let Ok(line) = serde_json::to_string(&footer) {
-            if let Ok(mut existing) = std::fs::read_to_string(path) {
-                existing.push_str(&line);
-                existing.push('\n');
-                let _ = std::fs::write(path, existing.as_bytes());
-            }
-        }
+        append_footer_to_path(path, status, degraded);
     }
 
     fn rotate_journals(&self) {
@@ -1193,6 +1251,55 @@ fn scope_kind_from_str(kind: &str) -> crate::apply_model::edit_op::ScopeKind {
         "block" => ScopeKind::Block,
         _ => ScopeKind::Other,
     }
+}
+
+fn validate_byte_range_for_apply(
+    op_index: usize,
+    path: &std::path::Path,
+    byte_range: &std::ops::Range<usize>,
+    len: usize,
+) -> Result<(), ApplyBatchError> {
+    if byte_range.start > byte_range.end || byte_range.end > len {
+        return Err(ApplyBatchError::Apply {
+            op_index,
+            path: path.to_path_buf(),
+            source: anyhow::anyhow!(
+                "stale byte range {}..{} for file of {} byte(s); the file changed since this \
+                 edit was computed. Re-read the file and recompute the edit before retrying.",
+                byte_range.start,
+                byte_range.end,
+                len
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_at_byte_for_apply(
+    op_index: usize,
+    path: &std::path::Path,
+    at_byte: usize,
+    len: usize,
+) -> Result<(), ApplyBatchError> {
+    if at_byte > len {
+        return Err(ApplyBatchError::Apply {
+            op_index,
+            path: path.to_path_buf(),
+            source: anyhow::anyhow!(
+                "stale insert offset {} for file of {} byte(s); the file changed since this \
+                 edit was computed. Re-read the file and recompute the edit before retrying.",
+                at_byte,
+                len
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn clamp_byte_range(byte_range: &std::ops::Range<usize>, len: usize) -> std::ops::Range<usize> {
+    let start = byte_range.start.min(len);
+    let end = byte_range.end.clamp(start, len);
+    start..end
 }
 
 fn line_range_to_byte_range(
@@ -1320,6 +1427,26 @@ fn capture_pre_images(
         }
     }
     Ok(map)
+}
+
+fn append_footer_to_path(path: &Path, status: JournalStatus, degraded: bool) {
+    let footer = JournalLine {
+        kind: JournalLineKind::Footer,
+        header: None,
+        record: None,
+        footer: Some(JournalFooter {
+            status,
+            finished_at: Utc::now(),
+            degraded,
+        }),
+    };
+    if let Ok(line) = serde_json::to_string(&footer) {
+        if let Ok(mut existing) = std::fs::read_to_string(path) {
+            existing.push_str(&line);
+            existing.push('\n');
+            let _ = std::fs::write(path, existing.as_bytes());
+        }
+    }
 }
 
 fn restore_pre_images(map: &BTreeMap<PathBuf, PreImage>) -> Result<(), std::io::Error> {

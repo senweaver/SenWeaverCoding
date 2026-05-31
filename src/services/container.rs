@@ -6,29 +6,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use super::agent_summary::AgentSummaryService;
-use super::analytics::AnalyticsService;
+use super::assist::analytics::AnalyticsService;
 use super::auto_dream::AutoDreamService;
 use super::compact::CompactService;
-use super::extract_memories::ExtractionConfig;
+use super::memory::extract::ExtractionConfig;
 use super::lsp::LspService;
 use super::mcp_manager::McpManager;
-use super::notifier::Notifier;
+use super::assist::notifier::Notifier;
 use super::oauth::OAuthService;
 use super::plugin_service::PluginService;
-use super::policy_limits::{PolicyLimitsService, PolicyRule};
+use super::governance::policy_limits::{PolicyLimitsService, PolicyRule};
 use super::prompt_suggestion::PromptSuggestionService;
-use super::rate_limit::RateLimiter;
-use super::session_memory::SessionMemoryService;
+use super::governance::rate_limit::RateLimiter;
+use super::memory::session::SessionMemoryService;
 use super::settings_sync::{ConflictStrategy, SettingsSyncService};
-use super::team_memory_sync::TeamMemorySyncService;
+use super::memory::team_sync::TeamMemorySyncService;
+use super::assist::tips::TipManager;
 use super::token_estimation::TokenEstimator;
-use super::tool_activation_store::ToolActivationStore;
-use super::tool_use_summary::ToolUseSummaryService;
+use super::tool_telemetry::activation_store::ToolActivationStore;
+use super::tool_telemetry::use_summary::ToolUseSummaryService;
 
 use crate::agent::coding_mode::{CodingMode, CodingModeHandle};
 use crate::commands::registry::CommandRegistry;
 use crate::tasks::runner::TaskRunner;
-use crate::tools::exit_plan_mode::PendingPlan;
+use crate::tools::plan_mode::exit::PendingPlan;
 use crate::tools::todo_write::TodoStore;
 
 pub struct RuntimeFlags {
@@ -106,7 +107,7 @@ pub struct ServiceContainer {
 
     pub team_memory_sync: TeamMemorySyncService,
 
-    pub tool_use_summary: Arc<std::sync::Mutex<ToolUseSummaryService>>,
+    pub tool_use_summary: Arc<parking_lot::Mutex<ToolUseSummaryService>>,
 
     pub command_registry: CommandRegistry,
     pub task_runner: TaskRunner,
@@ -151,7 +152,11 @@ pub struct ServiceContainer {
     pub tool_search_total_latency_ms: Arc<std::sync::atomic::AtomicU64>,
     pub tool_search_latency_samples: Arc<std::sync::atomic::AtomicU64>,
 
-    pub proxy_runtime: Arc<crate::services::proxy_runtime::ProxyRuntime>,
+    pub proxy_runtime: Arc<crate::services::proxy::runtime::ProxyRuntime>,
+
+    pub remote_sessions: crate::remote::manager::RemoteSessionManager,
+
+    pub tips: parking_lot::Mutex<TipManager>,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -217,7 +222,7 @@ impl ServiceContainer {
             prompt_suggestion: PromptSuggestionService,
             settings_sync: SettingsSyncService::new(sync_file, cfg.conflict_strategy),
             team_memory_sync: TeamMemorySyncService::new(cfg.team_sync_enabled),
-            tool_use_summary: Arc::new(std::sync::Mutex::new(ToolUseSummaryService::new())),
+            tool_use_summary: Arc::new(parking_lot::Mutex::new(ToolUseSummaryService::new())),
 
             command_registry,
             task_runner: TaskRunner::new(),
@@ -225,7 +230,7 @@ impl ServiceContainer {
             session_coding_modes: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
-            pending_plan: crate::tools::exit_plan_mode::new_pending_plan(),
+            pending_plan: crate::tools::plan_mode::exit::new_pending_plan(),
             #[cfg(feature = "tool-curator")]
             curator_state: crate::tools::curator::state::new_curator_state(),
             #[cfg(feature = "tool-curator")]
@@ -251,11 +256,13 @@ impl ServiceContainer {
             tool_search_total_latency_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_search_latency_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
 
-            proxy_runtime: crate::services::proxy_runtime::ProxyRuntime::global(),
+            proxy_runtime: crate::services::proxy::runtime::ProxyRuntime::global(),
+            remote_sessions: crate::remote::manager::RemoteSessionManager::new(),
+            tips: parking_lot::Mutex::new(TipManager::new(2)),
         }
     }
 
-    pub fn proxy_runtime(&self) -> &crate::services::proxy_runtime::ProxyRuntime {
+    pub fn proxy_runtime(&self) -> &crate::services::proxy::runtime::ProxyRuntime {
         &self.proxy_runtime
     }
 
@@ -380,66 +387,20 @@ pub fn init_services(cfg: ServiceContainerConfig) -> &'static ServiceContainer {
     GLOBAL_SERVICES.get_or_init(|| ServiceContainer::new(cfg))
 }
 
-pub fn get_services() -> &'static ServiceContainer {
-    GLOBAL_SERVICES
-        .get()
-        .expect("ServiceContainer not initialized — call init_services() first")
-}
-
-pub fn try_get_services() -> Option<&'static ServiceContainer> {
+pub fn get_services() -> Option<&'static ServiceContainer> {
     GLOBAL_SERVICES.get()
 }
 
+pub fn require_services() -> &'static ServiceContainer {
+    GLOBAL_SERVICES
+        .get()
+        .expect("ServiceContainer not initialized - call init_services() first")
+}
+
+pub fn try_get_services() -> Option<&'static ServiceContainer> {
+    get_services()
+}
+
 pub fn register_all_commands() -> CommandRegistry {
-    use crate::commands::registry::{CommandCategory, SlashCommand};
-    use std::sync::Arc;
-
-    let registry = CommandRegistry::from_inventory();
-
-    #[allow(unused_macros)]
-    macro_rules! register_cmd {
-        ($name:expr, [$($alias:expr),*], $desc:expr, $usage:expr, $cat:expr, $handler:path) => {
-            registry.register(SlashCommand {
-                name: $name.to_string(),
-                aliases: vec![$($alias.to_string()),*],
-                description: $desc.to_string(),
-                usage: $usage.to_string(),
-                category: $cat,
-                hidden: false,
-                requires_interactive: false,
-                remote_safe: true,
-                handler: Arc::new(|ctx| Box::pin($handler(ctx))),
-            });
-        };
-        ($name:expr, $desc:expr, $usage:expr, $cat:expr, $handler:path) => {
-            registry.register(SlashCommand {
-                name: $name.to_string(),
-                aliases: Vec::new(),
-                description: $desc.to_string(),
-                usage: $usage.to_string(),
-                category: $cat,
-                hidden: false,
-                requires_interactive: false,
-                remote_safe: true,
-                handler: Arc::new(|ctx| Box::pin($handler(ctx))),
-            });
-        };
-        ($name:expr, $desc:expr, $usage:expr, $cat:expr, $handler:path, interactive) => {
-            registry.register(SlashCommand {
-                name: $name.to_string(),
-                aliases: Vec::new(),
-                description: $desc.to_string(),
-                usage: $usage.to_string(),
-                category: $cat,
-                hidden: false,
-                requires_interactive: true,
-                remote_safe: false,
-                handler: Arc::new(|ctx| Box::pin($handler(ctx))),
-            });
-        };
-    }
-
-    use CommandCategory::*;
-
-    registry
+    CommandRegistry::from_inventory()
 }

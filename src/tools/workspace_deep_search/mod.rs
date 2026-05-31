@@ -133,7 +133,12 @@ impl Tool for WorkspaceDeepSearchTool {
         )
         .await?;
         let mut chunks = chunker::build_chunks(&workspace_root, &recall, context_lines).await;
-        ranker::rerank(&mut chunks, &plan);
+        let plan_for_rank = plan.clone();
+        let mut chunks = tokio::task::spawn_blocking(move || {
+            ranker::rerank(&mut chunks, &plan_for_rank);
+            chunks
+        })
+        .await?;
 
         let coverage = reflect::coverage(&chunks, &plan);
         let reflection_report = if enable_reflection && coverage.missing.iter().any(|m| !m.is_empty()) {
@@ -149,7 +154,12 @@ impl Tool for WorkspaceDeepSearchTool {
             .unwrap_or_default();
             let mut extra =
                 chunker::build_chunks(&workspace_root, &relaxed, context_lines).await;
-            ranker::rerank(&mut extra, &plan);
+            let plan_for_rank = plan.clone();
+            let extra = tokio::task::spawn_blocking(move || {
+                ranker::rerank(&mut extra, &plan_for_rank);
+                extra
+            })
+            .await?;
             let merged_added = ranker::merge_into(&mut chunks, extra);
             Some(reflect::format_report(&coverage, merged_added))
         } else {

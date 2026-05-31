@@ -1,13 +1,18 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
-import { useChatStore } from '../../stores/chatStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import type { SavedProvider } from '../../types/provider'
 import type { RuntimeSelection } from '../../types/runtime'
 import type { EffortLevel, ModelInfo } from '../../types/settings'
-import { isValidRuntimeSelection } from '../../utils/runtimeSelection'
+import { isValidRuntimeSelection, persistRuntimeSelection, resolveEffectiveRuntimeSelection } from '../../utils/runtimeSelection'
+import { syncRuntimeSelectionToBackend } from '../../utils/runtimeSync'
+import { enabledProviderModelIds } from '../../utils/providerModels'
 
 type ProviderChoice = {
   providerId: string
@@ -24,15 +29,12 @@ type Props = {
 }
 
 function buildProviderModels(provider: SavedProvider): ModelInfo[] {
-  const seen = new Set<string>()
-  const out: ModelInfo[] = []
-  for (const raw of provider.models ?? []) {
-    const id = raw.trim()
-    if (!id || seen.has(id)) continue
-    seen.add(id)
-    out.push({ id, name: id, description: '', context: '' })
-  }
-  return out
+  return enabledProviderModelIds(provider).map((id) => ({
+    id,
+    name: id,
+    description: '',
+    context: '',
+  }))
 }
 
 function buildProviderChoices(
@@ -56,34 +58,16 @@ function resolveDefaultRuntimeSelection(
   providers: SavedProvider[],
   currentModelId: string | undefined,
 ): RuntimeSelection | null {
-  const inferredProviderId = activeId ?? (
-    activeProviderName
-      ? providers.find((provider) => provider.name === activeProviderName)?.id ?? null
-      : null
+  return resolveEffectiveRuntimeSelection(
+    null,
+    providers,
+    activeId ?? (
+      activeProviderName
+        ? providers.find((provider) => provider.name === activeProviderName)?.id ?? null
+        : null
+    ),
+    currentModelId,
   )
-
-  if (!inferredProviderId) {
-    return null
-  }
-
-  const activeProvider = providers.find((provider) => provider.id === inferredProviderId)
-  const activeModels = (activeProvider?.models ?? [])
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0)
-
-  const trimmedCurrent = currentModelId?.trim()
-  const modelId = trimmedCurrent && activeModels.includes(trimmedCurrent)
-    ? trimmedCurrent
-    : activeModels[0]
-
-  if (!modelId) {
-    return null
-  }
-
-  return {
-    providerId: inferredProviderId,
-    modelId,
-  }
 }
 
 export function ModelSelector({
@@ -109,6 +93,7 @@ export function ModelSelector({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const requestedProvidersRef = useRef(false)
+  const lastAutoSyncedRef = useRef<string | null>(null)
 
   const EFFORT_OPTIONS: { value: EffortLevel; label: string }[] = [
     { value: 'low', label: t('settings.general.effort.low') },
@@ -175,6 +160,31 @@ export function ModelSelector({
     )
     : null
 
+  useEffect(() => {
+    if (!isRuntimeScoped || !runtimeKey || providersLoading || providers.length === 0) return
+    if (!activeRuntimeSelection?.providerId || !activeRuntimeSelection.modelId.trim()) return
+    if (validRuntimeSelection) {
+      lastAutoSyncedRef.current = null
+      return
+    }
+    const syncKey = `${runtimeKey}:${activeRuntimeSelection.providerId}:${activeRuntimeSelection.modelId}`
+    if (lastAutoSyncedRef.current === syncKey) return
+    lastAutoSyncedRef.current = syncKey
+    persistRuntimeSelection(runtimeKey, activeRuntimeSelection)
+    void syncRuntimeSelectionToBackend(
+      activeRuntimeSelection,
+      runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY ? runtimeKey : null,
+      false,
+    )
+  }, [
+    isRuntimeScoped,
+    runtimeKey,
+    providersLoading,
+    providers,
+    activeRuntimeSelection,
+    validRuntimeSelection,
+  ])
+
   const selectedProviderChoice = activeRuntimeSelection
     ? providerChoices.find((choice) => choice.providerId === activeRuntimeSelection.providerId) ?? null
     : null
@@ -206,12 +216,11 @@ export function ModelSelector({
 
   const handleRuntimeSelect = (selection: RuntimeSelection) => {
     if (!runtimeKey) return
-    useSessionRuntimeStore.getState().setSelection(runtimeKey, selection)
-
-    if (runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY) {
-      useSessionRuntimeStore.getState().setSelection(DRAFT_RUNTIME_SELECTION_KEY, selection)
-      useChatStore.getState().setSessionRuntime(runtimeKey, selection)
-    }
+    persistRuntimeSelection(runtimeKey, selection)
+    void syncRuntimeSelectionToBackend(
+      selection,
+      runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY ? runtimeKey : null,
+    )
     setOpen(false)
   }
 

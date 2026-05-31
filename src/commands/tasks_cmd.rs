@@ -88,7 +88,7 @@ async fn kill_session_sync(workspace: &std::path::Path, session_id: &str) -> Res
             tracing::warn!(
                 pid,
                 session_id,
-                "PID does not match recorded sen process (possible PID reuse) — skipping signal"
+                "PID does not match recorded sen process (possible PID reuse)  -  skipping signal"
             );
         } else {
             crate::cli::bg::safe_terminate_pid(pid).await;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -25,9 +25,9 @@ struct DescriptionFile {
 impl ToolDescriptions {
 
     pub fn load(locale: &str, search_dirs: &[PathBuf]) -> Self {
-        let locale_descriptions = load_locale_file(locale, search_dirs);
+        let mut locale_descriptions = load_locale_file(locale, search_dirs);
 
-        let english_fallback = if locale == "en" {
+        let mut english_fallback = if locale == "en" {
             HashMap::new()
         } else {
             load_locale_file("en", search_dirs)
@@ -39,6 +39,11 @@ impl ToolDescriptions {
             english_keys = english_fallback.len(),
             "tool descriptions loaded"
         );
+
+        merge_tier_fallbacks(&mut locale_descriptions);
+        if locale != "en" {
+            merge_tier_fallbacks(&mut english_fallback);
+        }
 
         Self {
             locale_descriptions,
@@ -68,7 +73,7 @@ impl ToolDescriptions {
 }
 
 pub fn detect_locale() -> String {
-    if let Ok(val) = std::env::var("SEN_LOCALE") {
+    if let Some(val) = crate::util::get_runtime_var("SEN_LOCALE") {
         let val = val.trim().to_string();
         if !val.is_empty() {
             return normalize_locale(&val);
@@ -92,6 +97,10 @@ fn normalize_locale(raw: &str) -> String {
     base.replace('_', "-")
 }
 
+pub fn normalize_locale_public(raw: &str) -> String {
+    normalize_locale(raw)
+}
+
 pub fn default_search_dirs(workspace_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![workspace_dir.to_path_buf()];
 
@@ -109,19 +118,31 @@ pub fn default_search_dirs(workspace_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn load_locale_file(locale: &str, search_dirs: &[PathBuf]) -> HashMap<String, String> {
-    let filename = format!("tool_descriptions/{locale}.toml");
+fn locale_file_candidates(locale: &str) -> Vec<String> {
+    let mut candidates = vec![
+        format!("src/tool_descriptions/{locale}.toml"),
+        format!("tool_descriptions/{locale}.toml"),
+    ];
+    if locale == "zh" || locale.starts_with("zh-") && locale != "zh-CN" {
+        candidates.insert(0, "src/tool_descriptions/zh-CN.toml".to_string());
+        candidates.push("tool_descriptions/zh-CN.toml".to_string());
+    }
+    candidates
+}
 
+fn load_locale_file(locale: &str, search_dirs: &[PathBuf]) -> HashMap<String, String> {
     for dir in search_dirs {
-        let path = dir.join(&filename);
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            match toml::from_str::<DescriptionFile>(&contents) {
-                Ok(parsed) => {
-                    debug!(path = %path.display(), keys = parsed.tools.len(), "loaded locale file");
-                    return parsed.tools;
-                }
-                Err(e) => {
-                    debug!(path = %path.display(), error = %e, "failed to parse locale file");
+        for filename in locale_file_candidates(locale) {
+            let path = dir.join(&filename);
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                match toml::from_str::<DescriptionFile>(&contents) {
+                    Ok(parsed) => {
+                        debug!(path = %path.display(), keys = parsed.tools.len(), "loaded locale file");
+                        return parsed.tools;
+                    }
+                    Err(e) => {
+                        debug!(path = %path.display(), error = %e, "failed to parse locale file");
+                    }
                 }
             }
         }
@@ -129,7 +150,33 @@ fn load_locale_file(locale: &str, search_dirs: &[PathBuf]) -> HashMap<String, St
 
     debug!(
         locale = locale,
-        "no locale file found in any search directory"
+        "no locale file found on filesystem; using embedded fallback"
     );
-    HashMap::new()
+    embedded_locale_fallback(locale)
+}
+
+fn embedded_locale_fallback(locale: &str) -> HashMap<String, String> {
+    const EN: &str = include_str!("tool_descriptions/en.toml");
+    const ZH_CN: &str = include_str!("tool_descriptions/zh-CN.toml");
+    let raw = if locale == "en" {
+        EN
+    } else if locale == "zh" || locale == "zh-CN" || locale.starts_with("zh-") {
+        ZH_CN
+    } else {
+        EN
+    };
+    match toml::from_str::<DescriptionFile>(raw) {
+        Ok(parsed) => parsed.tools,
+        Err(e) => {
+            debug!(error = %e, "failed to parse embedded locale fallback");
+            HashMap::new()
+        }
+    }
+}
+
+fn merge_tier_fallbacks(map: &mut HashMap<String, String>) {
+    for (name, entry) in crate::tools::handler::tier::TOOL_TIERS.iter() {
+        map.entry((*name).to_string())
+            .or_insert_with(|| entry.description.to_string());
+    }
 }

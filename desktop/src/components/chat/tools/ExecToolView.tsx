@@ -1,7 +1,16 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import type { ToolViewProps } from './ToolViewProps'
 import { TerminalChrome } from '../TerminalChrome'
 import { CodeViewer } from '../CodeViewer'
 import { extractCommand, extractTextContent, firstWord, truncate } from '../../../utils/toolFormatters'
+import { useTerminalPanelStore } from '../../../stores/terminalPanelStore'
+import { useTabStore } from '../../../stores/tabStore'
+import { useTranslation } from '../../../i18n'
+
+const EXEC_MAX_LINES = 32
 
 export function ExecHeader({ input }: ToolViewProps) {
   const command = extractCommand(input)
@@ -30,9 +39,26 @@ export function ExecHeader({ input }: ToolViewProps) {
   )
 }
 
-export function ExecDetail({ input, result }: ToolViewProps) {
+export function ExecDetail({ input, result, parentSessionId }: ToolViewProps) {
   const command = extractCommand(input)
   const text = result ? extractTextContent(result.content) : ''
+  const t = useTranslation()
+  const setOpen = useTerminalPanelStore((s) => s.setOpen)
+  const ensureAgentMirrorTab = useTerminalPanelStore((s) => s.ensureAgentMirrorTab)
+  const syncAgentMirrorForChatSession = useTerminalPanelStore(
+    (s) => s.syncAgentMirrorForChatSession,
+  )
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const sessionForMirror = parentSessionId || activeTabId || null
+
+  const openInTerminalPanel = () => {
+    setOpen(true)
+    ensureAgentMirrorTab(sessionForMirror)
+    syncAgentMirrorForChatSession(sessionForMirror)
+  }
+
+  const fullLogLabel =
+    (t('execTool.openFullLog' as never) as string) || 'Open in terminal panel'
 
   return (
     <div className="space-y-2">
@@ -51,8 +77,19 @@ export function ExecDetail({ input, result }: ToolViewProps) {
               : 'border-[var(--color-border)] bg-[var(--color-surface)]'
           }`}
         >
-          <CodeViewer code={text} language="plaintext" maxLines={18} />
+          <CodeViewer code={text} language="plaintext" maxLines={EXEC_MAX_LINES} />
         </div>
+      )}
+      {sessionForMirror && (
+        <button
+          type="button"
+          onClick={openInTerminalPanel}
+          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container)] px-2 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+          title={fullLogLabel}
+        >
+          <span className="material-symbols-outlined text-[14px]">terminal</span>
+          <span>{fullLogLabel}</span>
+        </button>
       )}
     </div>
   )

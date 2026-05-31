@@ -31,10 +31,7 @@ pub mod traits;
 pub mod verbose;
 
 pub mod views;
-
-#[allow(unused_imports)]
 pub use self::log::LogObserver;
-#[allow(unused_imports)]
 pub use self::multi::MultiObserver;
 pub use noop::NoopObserver;
 #[cfg(feature = "observability-otel")]
@@ -60,7 +57,6 @@ pub fn set_global_observer(observer: Arc<dyn Observer>) -> Arc<dyn Observer> {
 pub fn global_observer() -> Option<Arc<dyn Observer>> {
     GLOBAL_OBSERVER.get().cloned()
 }
-#[allow(unused_imports)]
 pub use verbose::VerboseObserver;
 
 use crate::config::ObservabilityConfig;

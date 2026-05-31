@@ -102,7 +102,7 @@ pub async fn handle_config(ctx: CommandContext) -> CommandResult {
                 .cloned();
 
             match format {
-                "schema" => match crate::config::schema_export::export_config_schema() {
+                "schema" => match crate::config::schema::export::export_config_schema() {
                     Ok(s) => {
                         if let Some(path) = path_arg {
                             match std::fs::write(&path, &s) {
@@ -116,7 +116,7 @@ pub async fn handle_config(ctx: CommandContext) -> CommandResult {
 
                             let preview = if s.len() > 500 {
                                 format!(
-                                    "{}\n\n[... {} more chars — pass a path argument to save ...]",
+                                    "{}\n\n[... {} more chars  -  pass a path argument to save ...]",
                                     &s[..500],
                                     s.len() - 500
                                 )

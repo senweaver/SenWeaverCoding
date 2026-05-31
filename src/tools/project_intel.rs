@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 #[cfg(feature = "tool-reports")]
-use super::report_templates;
+use super::report::templates as report_templates;
 use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;

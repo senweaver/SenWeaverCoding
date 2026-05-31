@@ -7,6 +7,7 @@ use tokio::sync::{RwLock, broadcast};
 use super::types::{BridgeStatus, PollConfig};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TransportState {
     status: BridgeStatus,
     retry_count: u32,

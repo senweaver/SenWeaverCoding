@@ -6,12 +6,9 @@ pub mod hot_reload;
 pub mod live;
 pub mod redact;
 pub mod schema;
-pub mod schema_export;
 pub mod traits;
 pub mod validator;
 pub mod workspace;
-
-#[allow(unused_imports)]
 pub use schema::{
     AgentConfig, AssemblyAiSttConfig, AuditConfig, AutonomyConfig, BackupConfig,
     BrowserComputerUseConfig, BrowserConfig, BuiltinHooksConfig, ChannelsConfig,
@@ -45,11 +42,13 @@ pub use schema::{
     build_custom_headers_map, default_agent_max_tool_iterations,
     is_disallowed_custom_header, is_valid_http_header_name, is_valid_http_header_value,
 };
-
-#[allow(unused_imports)]
 pub use hot_reload::validators;
-#[allow(unused_imports)]
 pub use hot_reload::{ConfigChangedEvent, LiveConfig, SharedConfig};
+
+pub type CodingSessionCliConfig = ClaudeCodeConfig;
+pub type CodingSessionRunnerConfig = ClaudeCodeRunnerConfig;
+pub type ShellCodingCliConfig = GeminiCliConfig;
+pub type InlineCodingCliConfig = CodexCliConfig;
 
 pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'static str, bool) {
     (T::name(), channel.is_some())

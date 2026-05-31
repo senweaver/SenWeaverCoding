@@ -131,7 +131,7 @@ pub async fn run(target_version: Option<&str>) -> Result<()> {
             rollback_binary(&backup_path, &current_exe)
                 .await
                 .context("rollback after smoke test failure")?;
-            bail!("Update rolled back — smoke test failed: {e}");
+            bail!("Update rolled back  -  smoke test failed: {e}");
         }
     }
 }
@@ -289,7 +289,7 @@ async fn check_binary_arch(path: &Path) -> Result<()> {
     if let (Some(bin), Some(host)) = (binary_arch, host_arch) {
         if bin != host {
             bail!(
-                "architecture mismatch: downloaded binary is {bin} but this host is {host} — \
+                "architecture mismatch: downloaded binary is {bin} but this host is {host}  -  \
                  the release asset may be mispackaged"
             );
         }

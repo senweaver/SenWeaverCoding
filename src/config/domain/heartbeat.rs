@@ -14,8 +14,8 @@ pub struct HeartbeatConfig {
     #[serde(default = "default_heartbeat_interval")]
     pub interval_minutes: u32,
 
-    #[serde(default = "default_two_phase")]
-    pub two_phase: bool,
+    #[serde(default = "default_decision_before_execute", alias = "two_phase")]
+    pub decision_before_execute: bool,
 
     #[serde(default)]
     pub message: Option<String>,
@@ -54,7 +54,7 @@ pub struct HeartbeatConfig {
 pub(crate) fn default_heartbeat_interval() -> u32 {
     5
 }
-pub(crate) fn default_two_phase() -> bool {
+pub(crate) fn default_decision_before_execute() -> bool {
     true
 }
 pub(crate) fn default_heartbeat_min_interval() -> u32 {
@@ -72,7 +72,7 @@ impl Default for HeartbeatConfig {
         Self {
             enabled: false,
             interval_minutes: default_heartbeat_interval(),
-            two_phase: true,
+            decision_before_execute: true,
             message: None,
             target: None,
             to: None,

@@ -123,7 +123,7 @@ impl CliEntrypoint {
         let cwd = resolve_cwd(&options);
 
         if options.bare {
-            crate::util::set_env_var("SEN_CLI_BARE", "1");
+            crate::util::set_runtime_var("SEN_CLI_BARE", "1");
         }
 
         crate::bootstrap::init_state(cwd.clone());
@@ -309,7 +309,7 @@ impl CliEntrypoint {
     }
 
     async fn run_remote(options: CliOptions) -> anyhow::Result<()> {
-        tracing::info!("Remote mode requested — connecting to bridge");
+        tracing::info!("Remote mode requested  -  connecting to bridge");
 
         Self::run_headless(options).await
     }
@@ -364,11 +364,12 @@ impl CliEntrypoint {
             _ => crate::providers::resolve_default_model(&config)?,
         };
 
-        let provider = crate::providers::create_provider_with_url(
-            &resolved_provider_name,
-            config.api_key.as_deref(),
-            config.api_url.as_deref(),
-        )?;
+        let provider = crate::providers::create_provider_with_url_async(
+            resolved_provider_name,
+            config.api_key.clone(),
+            config.api_url.clone(),
+        )
+        .await?;
 
         let cwd = resolve_cwd(&options);
         let security_policy = std::sync::Arc::new(crate::security::SecurityPolicy::from_config(

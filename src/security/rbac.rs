@@ -272,7 +272,7 @@ impl RbacEngine {
         let mappings = Self::roles_to_mappings(&roles);
         let iam_policy = IamPolicy::from_mappings(&mappings).unwrap_or_else(|e| {
             tracing::warn!("RBAC: failed to compile IAM policy: {e}, using empty policy");
-            IamPolicy::from_mappings(&[]).unwrap()
+            IamPolicy::empty()
         });
 
         let mut engine = Self {
@@ -589,20 +589,32 @@ impl RbacEngine {
 
     fn save_users(&self) {
         let path = self.users_path();
-        let guard = self.users.read();
-        let users: Vec<&UserRecord> = guard.values().collect();
-        if let Ok(json) = serde_json::to_string_pretty(&users) {
+        let json = {
+            let guard = self.users.read();
+            let users: Vec<&UserRecord> = guard.values().collect();
+            match serde_json::to_string_pretty(&users) {
+                Ok(json) => json,
+                Err(_) => return,
+            }
+        };
+
+        let write = move || {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Err(e) = std::fs::write(&path, json) {
-
                 tracing::error!(
                     error = %e,
                     path = %path.display(),
                     "RBAC: CRITICAL failed to save users. User permission changes may be lost on restart."
                 );
             }
+        };
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(write);
+        } else {
+            write();
         }
     }
 

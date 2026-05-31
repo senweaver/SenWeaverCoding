@@ -1,12 +1,33 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useState } from 'react'
 import { useChatStore } from '../../stores/chatStore'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../shared/Modal'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
+import { isTauriRuntime } from '../../lib/desktopRuntime'
 import {
   selectCuratorCardExecutionState,
   type CuratorExecutionState,
 } from '../../utils/activeCuratorSelector'
+
+async function openLocalPath(path: string): Promise<void> {
+  if (!path) return
+  if (!isTauriRuntime()) {
+    window.open(path, '_blank')
+    return
+  }
+  try {
+    const mod = (await import(/* @vite-ignore */ '@tauri-apps/plugin-shell')) as {
+      open: (target: string) => Promise<void>
+    }
+    await mod.open(path)
+  } catch (err) {
+    console.warn('[CuratorCard] open docx failed', err)
+  }
+}
 
 type Props = {
   messageId: string
@@ -37,6 +58,7 @@ export function CuratorCard({
   const [viewOpen, setViewOpen] = useState(false)
   const [pathCopied, setPathCopied] = useState(false)
   const requestModeSwitch = useChatStore((s) => s.requestCuratorModeSwitch)
+  const resumeCuratorExecution = useChatStore((s) => s.resumeCuratorExecution)
 
   const execState = useChatStore((s): CuratorExecutionState => {
     if (!sessionId) return 'idle'
@@ -48,8 +70,10 @@ export function CuratorCard({
   const isWriting = status === 'writing'
   const isExecuting = execState === 'executing'
   const isPendingSwitch = execState === 'pending_switch'
+  const isIncomplete = execState === 'incomplete_run'
   const isBuilt = execState === 'completed_run'
-  const buildDisabled = !sessionId || isWriting || isExecuting || isBuilt || isPendingSwitch
+  const buildDisabled =
+    !sessionId || isWriting || isExecuting || isBuilt || isPendingSwitch || isIncomplete
 
   function handleBuild() {
     if (buildDisabled) return
@@ -58,6 +82,11 @@ export function CuratorCard({
       template,
       finalMdPath,
     })
+  }
+
+  function handleResume() {
+    if (!sessionId) return
+    resumeCuratorExecution(sessionId, implBlueprintPath || finalMdPath)
   }
 
   async function handleCopyPath() {
@@ -145,7 +174,26 @@ export function CuratorCard({
           >
             {pathCopied ? t('plan.copyPathDone') : t('curator.copyPath')}
           </button>
-          {isExecuting ? (
+          {docxPath && (
+            <button
+              onClick={() => void openLocalPath(docxPath)}
+              title={docxPath}
+              className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md text-[var(--color-curator-accent)] hover:bg-[var(--color-surface-hover)]"
+            >
+              <span className="material-symbols-outlined text-[14px]">description</span>
+              {t('curator.openDocx')}
+            </button>
+          )}
+          {isIncomplete ? (
+            <button
+              onClick={handleResume}
+              disabled={!sessionId}
+              className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="material-symbols-outlined text-[14px]">play_arrow</span>
+              {t('plan.resume')}
+            </button>
+          ) : isExecuting ? (
             <span
               className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)] cursor-not-allowed select-none"
               aria-label={t('plan.executing') || 'Executing'}

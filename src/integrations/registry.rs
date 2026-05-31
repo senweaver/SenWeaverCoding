@@ -13,7 +13,7 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
 
         IntegrationEntry {
             name: "Telegram",
-            description: "Bot API — long-polling",
+            description: "Bot API  -  long-polling",
             category: IntegrationCategory::Chat,
             status_fn: |c| {
                 if c.channels_config.telegram.is_some() {

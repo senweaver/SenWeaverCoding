@@ -123,7 +123,7 @@ pub async fn handle_skills(ctx: CommandContext) -> CommandResult {
                 )];
                 for r in matching.iter().take(10) {
                     lines.push(format!(
-                        "  {} — {}",
+                        "  {}  -  {}",
                         r.candidate.name, r.candidate.description
                     ));
                     lines.push(format!("    {}", r.candidate.url));

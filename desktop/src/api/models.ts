@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { api } from './client'
 import type { ModelInfo, EffortLevel } from '../types/settings'
 import type { AvailableModelsResponse } from '../types/evolution'

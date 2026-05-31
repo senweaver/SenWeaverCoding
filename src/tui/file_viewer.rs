@@ -109,6 +109,31 @@ impl Entry {
     }
 }
 
+enum ScanRequest {
+    Scan {
+        generation: u64,
+        dir: PathBuf,
+        gitignore: Vec<GitignorePattern>,
+    },
+    Preview {
+        generation: u64,
+        path: PathBuf,
+    },
+}
+
+enum ScanResult {
+    Scan {
+        generation: u64,
+        dir: PathBuf,
+        entries: Vec<Entry>,
+        mtime: Option<std::time::SystemTime>,
+    },
+    Preview {
+        generation: u64,
+        text: String,
+    },
+}
+
 #[derive(Debug, Default)]
 pub struct FileViewerState {
 
@@ -132,6 +157,15 @@ pub struct FileViewerState {
     pub search_query: String,
 
     filtered_entries: Vec<Entry>,
+
+    req_tx: Option<std::sync::mpsc::Sender<ScanRequest>>,
+    res_rx: Option<std::sync::mpsc::Receiver<ScanResult>>,
+    scan_generation: u64,
+    preview_generation: u64,
+    requested_dir: Option<PathBuf>,
+    loading: bool,
+    current_dir_mtime: Option<std::time::SystemTime>,
+    last_mtime_check: Option<std::time::Instant>,
 }
 
 impl FileViewerState {
@@ -139,6 +173,155 @@ impl FileViewerState {
         let mut s = Self::default();
         s.list_state.select(Some(0));
         s
+    }
+
+    fn ensure_worker(&mut self) {
+        if self.req_tx.is_some() {
+            return;
+        }
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<ScanRequest>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<ScanResult>();
+        let _ = std::thread::Builder::new()
+            .name("tui-file-viewer".into())
+            .spawn(move || {
+                while let Ok(req) = req_rx.recv() {
+                    match req {
+                        ScanRequest::Scan {
+                            generation,
+                            dir,
+                            gitignore,
+                        } => {
+                            let entries = scan_dir(&dir, &gitignore);
+                            let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+                            if res_tx
+                                .send(ScanResult::Scan {
+                                    generation,
+                                    dir,
+                                    entries,
+                                    mtime,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        ScanRequest::Preview { generation, path } => {
+                            let text = read_preview(&path);
+                            if res_tx
+                                .send(ScanResult::Preview { generation, text })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        self.req_tx = Some(req_tx);
+        self.res_rx = Some(res_rx);
+    }
+
+    fn send_scan(&mut self, dir: PathBuf) {
+        self.ensure_worker();
+        self.scan_generation += 1;
+        self.requested_dir = Some(dir.clone());
+        self.loading = true;
+        if let Some(tx) = &self.req_tx {
+            let _ = tx.send(ScanRequest::Scan {
+                generation: self.scan_generation,
+                dir,
+                gitignore: self.gitignore_patterns.clone(),
+            });
+        }
+    }
+
+    fn send_preview(&mut self) {
+        let entry = self.display_entries().get(self.selected).cloned();
+        let Some(entry) = entry else {
+            self.preview = None;
+            return;
+        };
+        if entry.is_dir {
+            self.preview = None;
+            return;
+        }
+        self.ensure_worker();
+        self.preview_generation += 1;
+        if let Some(tx) = &self.req_tx {
+            let _ = tx.send(ScanRequest::Preview {
+                generation: self.preview_generation,
+                path: entry.path,
+            });
+        }
+    }
+
+    pub fn poll(&mut self) {
+        let mut latest_scan: Option<(PathBuf, Vec<Entry>, Option<std::time::SystemTime>)> = None;
+        let mut latest_preview: Option<String> = None;
+        if let Some(rx) = &self.res_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ScanResult::Scan {
+                        generation,
+                        dir,
+                        entries,
+                        mtime,
+                    } => {
+                        if generation == self.scan_generation {
+                            latest_scan = Some((dir, entries, mtime));
+                        }
+                    }
+                    ScanResult::Preview { generation, text } => {
+                        if generation == self.preview_generation {
+                            latest_preview = Some(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((dir, entries, mtime)) = latest_scan {
+            self.current_dir = Some(dir);
+            self.entries = entries;
+            self.current_dir_mtime = mtime;
+            self.loading = false;
+            if self.selected >= self.entries.len() {
+                self.selected = self.entries.len().saturating_sub(1);
+            }
+            self.list_state.select(Some(self.selected));
+            if self.search_mode && !self.search_query.is_empty() {
+                self.rebuild_filter();
+            }
+            self.send_preview();
+        }
+
+        if let Some(text) = latest_preview {
+            self.preview = Some(text);
+        }
+    }
+
+    fn ensure_loaded(&mut self, root: &Path) {
+        if !self.gitignore_loaded {
+            self.gitignore_patterns = load_gitignore(root);
+            self.gitignore_loaded = true;
+        }
+        let target = self.current_dir.clone().unwrap_or_else(|| root.to_path_buf());
+        if self.requested_dir.as_deref() != Some(target.as_path()) {
+            self.send_scan(target);
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let due = self
+            .last_mtime_check
+            .map_or(true, |t| now.duration_since(t) >= std::time::Duration::from_secs(1));
+        if due && !self.loading {
+            self.last_mtime_check = Some(now);
+            let current_mtime = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
+            if current_mtime != self.current_dir_mtime {
+                self.send_scan(target);
+            }
+        }
     }
 
     pub fn display_entries(&self) -> &[Entry] {
@@ -170,41 +353,9 @@ impl FileViewerState {
         self.list_state.select(Some(self.selected));
     }
 
-    pub fn refresh(&mut self, root: &Path) {
-
-        if !self.gitignore_loaded {
-            self.gitignore_patterns = load_gitignore(root);
-            self.gitignore_loaded = true;
-        }
-
-        let target = self.current_dir.clone().unwrap_or_else(|| root.to_path_buf());
-        if self
-            .current_dir
-            .as_deref()
-            .map_or(false, |c| c == target.as_path())
-            && !self.entries.is_empty()
-        {
-            return;
-        }
-        self.current_dir = Some(target.clone());
-        self.entries = scan_dir(&target, &self.gitignore_patterns);
-        if self.selected >= self.entries.len() {
-            self.selected = self.entries.len().saturating_sub(1);
-        }
-        self.list_state.select(Some(self.selected));
-
-        if self.search_mode && !self.search_query.is_empty() {
-            self.rebuild_filter();
-        }
-        self.update_preview();
-    }
-
-    fn update_preview(&mut self) {
-        self.preview = self
-            .display_entries()
-            .get(self.selected)
-            .filter(|e| !e.is_dir)
-            .map(|e| read_preview(&e.path));
+    pub fn tick(&mut self, root: &Path) {
+        self.poll();
+        self.ensure_loaded(root);
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -215,7 +366,7 @@ impl FileViewerState {
         let next = (self.selected as isize + delta).clamp(0, len as isize - 1);
         self.selected = next as usize;
         self.list_state.select(Some(self.selected));
-        self.update_preview();
+        self.send_preview();
     }
 }
 
@@ -290,7 +441,7 @@ pub fn draw(
     open_files: &[(PathBuf, Option<chrono::DateTime<chrono::Utc>>)],
     area: Rect,
 ) {
-    state.refresh(workspace);
+    state.tick(workspace);
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -465,7 +616,7 @@ pub fn handle_key(
     workspace: &Path,
     key: event::KeyEvent,
 ) -> FileViewerAction {
-    state.refresh(workspace);
+    state.tick(workspace);
 
     if state.search_mode {
         match key.code {
@@ -477,22 +628,22 @@ pub fn handle_key(
                 let max = state.entries.len().saturating_sub(1);
                 state.selected = state.selected.min(max);
                 state.list_state.select(Some(state.selected));
-                state.update_preview();
+                state.send_preview();
             }
             KeyCode::Enter => {
 
                 state.search_mode = false;
-                state.update_preview();
+                state.send_preview();
             }
             KeyCode::Backspace => {
                 state.search_query.pop();
                 state.rebuild_filter();
-                state.update_preview();
+                state.send_preview();
             }
             KeyCode::Char(c) => {
                 state.search_query.push(c);
                 state.rebuild_filter();
-                state.update_preview();
+                state.send_preview();
             }
 
             KeyCode::Down => {
@@ -527,11 +678,12 @@ pub fn handle_key(
                 return FileViewerAction::Noop;
             };
             if entry.is_dir {
-                state.current_dir = Some(entry.path);
+                state.current_dir = Some(entry.path.clone());
                 state.entries.clear();
                 state.filtered_entries.clear();
+                state.preview = None;
                 state.selected = 0;
-                state.refresh(workspace);
+                state.send_scan(entry.path);
                 FileViewerAction::Noop
             } else {
                 FileViewerAction::Open { path: entry.path }
@@ -545,11 +697,12 @@ pub fn handle_key(
                 .map(|p| p.to_path_buf())
             {
                 if parent.starts_with(workspace) || parent == *workspace {
-                    state.current_dir = Some(parent);
+                    state.current_dir = Some(parent.clone());
                     state.entries.clear();
                     state.filtered_entries.clear();
+                    state.preview = None;
                     state.selected = 0;
-                    state.refresh(workspace);
+                    state.send_scan(parent);
                 }
             }
             FileViewerAction::Noop

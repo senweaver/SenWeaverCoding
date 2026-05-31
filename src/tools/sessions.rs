@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 use super::traits::{Tool, ToolResult};
-use crate::channels::session_backend::SessionBackend;
+use crate::channels::session::backend::SessionBackend;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
 use async_trait::async_trait;

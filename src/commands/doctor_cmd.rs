@@ -99,7 +99,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
                 checks.push("  ✓ API key: configured".to_string());
             } else {
                 checks.push(
-                    "  ✗ API key: NOT FOUND — set via config or environment variable".to_string(),
+                    "  ✗ API key: NOT FOUND  -  set via config or environment variable".to_string(),
                 );
             }
         }
@@ -115,7 +115,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
         if has_git {
             "yes"
         } else {
-            "no — consider running git init"
+            "no  -  consider running git init"
         }
     ));
 
@@ -150,7 +150,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
     let warn_count = lines.iter().filter(|l| l.contains('⚠')).count();
     if error_count > 0 {
         lines.push(format!(
-            "{error_count} error(s), {warn_count} warning(s) — fix errors above."
+            "{error_count} error(s), {warn_count} warning(s)  -  fix errors above."
         ));
     } else if warn_count > 0 {
         lines.push(format!("All checks passed with {warn_count} warning(s)."));
@@ -177,13 +177,13 @@ async fn handle_network() -> CommandResult {
         .await
     {
         Ok(r) if r.status().is_success() => {
-            lines.push("  [OK]   DuckDuckGo — reachable".to_string());
+            lines.push("  [OK]   DuckDuckGo  -  reachable".to_string());
         }
         Ok(r) => {
-            lines.push(format!("  [FAIL] DuckDuckGo — HTTP {}", r.status()));
+            lines.push(format!("  [FAIL] DuckDuckGo  -  HTTP {}", r.status()));
         }
         Err(e) => {
-            lines.push(format!("  [FAIL] DuckDuckGo — {e}"));
+            lines.push(format!("  [FAIL] DuckDuckGo  -  {e}"));
         }
     }
 
@@ -199,21 +199,21 @@ async fn handle_network() -> CommandResult {
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    lines.push("  [OK]   Brave Search — API key valid".to_string());
+                    lines.push("  [OK]   Brave Search  -  API key valid".to_string());
                 }
                 Ok(r) => {
                     lines.push(format!(
-                        "  [FAIL] Brave Search — HTTP {} (check API key)",
+                        "  [FAIL] Brave Search  -  HTTP {} (check API key)",
                         r.status()
                     ));
                 }
                 Err(e) => {
-                    lines.push(format!("  [FAIL] Brave Search — {e}"));
+                    lines.push(format!("  [FAIL] Brave Search  -  {e}"));
                 }
             }
         }
         _ => {
-            lines.push("  [SKIP] Brave Search — no API key configured".to_string());
+            lines.push("  [SKIP] Brave Search  -  no API key configured".to_string());
         }
     }
 
@@ -228,18 +228,18 @@ async fn handle_network() -> CommandResult {
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    lines.push("  [OK]   SearXNG — instance reachable".to_string());
+                    lines.push("  [OK]   SearXNG  -  instance reachable".to_string());
                 }
                 Ok(r) => {
-                    lines.push(format!("  [FAIL] SearXNG — HTTP {}", r.status()));
+                    lines.push(format!("  [FAIL] SearXNG  -  HTTP {}", r.status()));
                 }
                 Err(e) => {
-                    lines.push(format!("  [FAIL] SearXNG — {e}"));
+                    lines.push(format!("  [FAIL] SearXNG  -  {e}"));
                 }
             }
         }
         _ => {
-            lines.push("  [SKIP] SearXNG — no instance URL configured".to_string());
+            lines.push("  [SKIP] SearXNG  -  no instance URL configured".to_string());
         }
     }
 
@@ -261,21 +261,21 @@ async fn handle_network() -> CommandResult {
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    lines.push("  [OK]   Tavily — API key valid".to_string());
+                    lines.push("  [OK]   Tavily  -  API key valid".to_string());
                 }
                 Ok(r) => {
                     lines.push(format!(
-                        "  [FAIL] Tavily — HTTP {} (check API key)",
+                        "  [FAIL] Tavily  -  HTTP {} (check API key)",
                         r.status()
                     ));
                 }
                 Err(e) => {
-                    lines.push(format!("  [FAIL] Tavily — {e}"));
+                    lines.push(format!("  [FAIL] Tavily  -  {e}"));
                 }
             }
         }
         None => {
-            lines.push("  [SKIP] Tavily — no API key (set TAVILY_API_KEY)".to_string());
+            lines.push("  [SKIP] Tavily  -  no API key (set TAVILY_API_KEY)".to_string());
         }
     }
 
@@ -294,21 +294,21 @@ async fn handle_network() -> CommandResult {
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    lines.push("  [OK]   Exa — API key valid".to_string());
+                    lines.push("  [OK]   Exa  -  API key valid".to_string());
                 }
                 Ok(r) => {
                     lines.push(format!(
-                        "  [FAIL] Exa — HTTP {} (check API key)",
+                        "  [FAIL] Exa  -  HTTP {} (check API key)",
                         r.status()
                     ));
                 }
                 Err(e) => {
-                    lines.push(format!("  [FAIL] Exa — {e}"));
+                    lines.push(format!("  [FAIL] Exa  -  {e}"));
                 }
             }
         }
         None => {
-            lines.push("  [SKIP] Exa — no API key (set EXA_API_KEY)".to_string());
+            lines.push("  [SKIP] Exa  -  no API key (set EXA_API_KEY)".to_string());
         }
     }
 

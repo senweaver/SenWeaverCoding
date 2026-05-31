@@ -16,17 +16,14 @@ pub mod firejail;
 pub mod iam_policy;
 #[cfg(feature = "sandbox-landlock")]
 pub mod landlock;
-pub mod leak_detector;
-pub mod leak_io;
+pub mod leak;
 pub mod nevis;
 pub mod otp;
 pub mod pairing;
-pub mod permission_rules;
 pub mod permissions;
 pub mod playbook;
 pub mod policy;
 pub mod prompt_guard;
-pub mod prompt_guard_yaml;
 pub mod safe_io;
 #[cfg(target_os = "macos")]
 pub mod seatbelt;
@@ -45,48 +42,31 @@ pub mod rbac;
 pub mod sandbox;
 pub mod taint;
 
-#[allow(unused_imports)]
 pub use audit::{AuditEvent, AuditEventType, AuditLogger};
-#[allow(unused_imports)]
 pub use detect::create_sandbox;
 pub use domain_matcher::DomainMatcher;
-#[allow(unused_imports)]
 pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};
-#[allow(unused_imports)]
 pub use otp::OtpValidator;
-#[allow(unused_imports)]
 pub use pairing::PairingGuard;
 pub use policy::{AutonomyLevel, SecurityPolicy};
-#[allow(unused_imports)]
 pub use secrets::SecretStore;
-#[allow(unused_imports)]
 pub use traits::{NoopSandbox, Sandbox};
 
-#[allow(unused_imports)]
 pub use iam_policy::{IamPolicy, PolicyDecision};
-#[allow(unused_imports)]
 pub use nevis::{NevisAuthProvider, NevisIdentity};
 
-#[allow(unused_imports)]
 pub use capabilities::{Capability, CapabilityCheck, CapabilityError, CapabilityManager};
-#[allow(unused_imports)]
-pub use leak_detector::{LeakDetector, LeakResult};
-#[allow(unused_imports)]
+pub use leak::detector::{LeakDetector, LeakResult};
 pub use manifest_signing::{ManifestSignError, ManifestSigner, SignedManifest};
-#[allow(unused_imports)]
 pub use prompt_guard::{GuardAction, GuardResult, PromptGuard};
-#[allow(unused_imports)]
 pub use rbac::{
     AccessContext, AuthSource, AuthorizationResult, CallerIdentity, RbacConfig, RbacEngine,
 };
-#[allow(unused_imports)]
 pub use taint::{TaintLabel, TaintSink, TaintViolation, TaintedValue};
-#[allow(unused_imports)]
 pub use workspace_boundary::{BoundaryVerdict, WorkspaceBoundary};
 
 pub use sandbox::{is_sandbox_active, sandbox_allows_path};
 
-#[allow(unused_imports)]
 pub use job_object::{spawn_in_job, JobLimits, JobObjectGuard, JobObjectSandbox};
 
 pub fn redact(value: &str) -> String {

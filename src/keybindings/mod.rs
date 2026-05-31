@@ -11,7 +11,6 @@ pub mod schema;
 pub mod toml_loader;
 
 #[doc(inline)]
-#[allow(unused_imports)]
 pub use toml_loader::{LoadReport, load_user_keybindings, user_config_path};
 
 use std::sync::{Arc, OnceLock};

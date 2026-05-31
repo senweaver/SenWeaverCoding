@@ -42,9 +42,8 @@ struct RedditListingData {
 struct RedditChild {
     data: RedditItemData,
 }
-
-#[allow(dead_code)]
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct RedditItemData {
     name: Option<String>,
     author: Option<String>,
@@ -88,7 +87,7 @@ impl RedditChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client("channel.reddit")
     }

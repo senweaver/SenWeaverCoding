@@ -30,7 +30,7 @@ pub async fn handle_sse_events(
         if !state.pairing.is_authenticated(token) {
             return (
                 StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide Authorization: Bearer <token>",
+                "Unauthorized  -  provide Authorization: Bearer <token>",
             )
                 .into_response();
         }

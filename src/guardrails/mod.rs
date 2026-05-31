@@ -11,7 +11,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub mod types;
-#[allow(unused_imports)]
 pub use types::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

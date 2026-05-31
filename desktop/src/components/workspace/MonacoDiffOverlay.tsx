@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useRef } from 'react'
 import type * as MonacoNs from 'monaco-editor'
 import { useTranslation } from '../../i18n'

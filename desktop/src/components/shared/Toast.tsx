@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useUIStore, type Toast as ToastType } from '../../stores/uiStore'
 import { useDockEdgeOffset } from '../../hooks/useDockEdgeOffset'
 import { useTabStore } from '../../stores/tabStore'

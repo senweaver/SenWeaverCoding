@@ -49,38 +49,45 @@ pub struct InstallBody {
     pub file: Option<String>,
 }
 
-fn resolve_workspace(state: &AppState, requested: &str) -> Option<PathBuf> {
+async fn resolve_workspace(state: &AppState, requested: &str) -> Option<PathBuf> {
     let trimmed = requested.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let p = PathBuf::from(trimmed);
-    let canonical = p.canonicalize().unwrap_or(p);
-    let workspace_root = state.config.lock().workspace_dir.clone();
-    if let Ok(ws) = workspace_root.canonicalize() {
-        if ws == canonical {
+    let state = state.clone();
+    let requested = trimmed.to_string();
+    tokio::task::spawn_blocking(move || {
+        let p = PathBuf::from(&requested);
+        let canonical = p.canonicalize().unwrap_or(p);
+        let workspace_root = state.config.lock().workspace_dir.clone();
+        if let Ok(ws) = workspace_root.canonicalize() {
+            if ws == canonical {
+                return Some(canonical);
+            }
+        } else if workspace_root == canonical {
             return Some(canonical);
         }
-    } else if workspace_root == canonical {
-        return Some(canonical);
-    }
-    if let Some(backend) = state.session_backend.as_ref() {
-        for meta in backend.list_sessions_with_metadata() {
-            let Some(wd) = meta.work_dir.as_deref() else {
-                continue;
-            };
-            let trimmed_wd = wd.trim();
-            if trimmed_wd.is_empty() {
-                continue;
-            }
-            if let Ok(rp) = PathBuf::from(trimmed_wd).canonicalize() {
-                if rp == canonical {
-                    return Some(canonical);
+        if let Some(backend) = state.session_backend.as_ref() {
+            for meta in backend.list_sessions_with_metadata() {
+                let Some(wd) = meta.work_dir.as_deref() else {
+                    continue;
+                };
+                let trimmed_wd = wd.trim();
+                if trimmed_wd.is_empty() {
+                    continue;
+                }
+                if let Ok(rp) = PathBuf::from(trimmed_wd).canonicalize() {
+                    if rp == canonical {
+                        return Some(canonical);
+                    }
                 }
             }
         }
-    }
-    None
+        None
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn forbid_workspace() -> axum::response::Response {
@@ -118,7 +125,7 @@ pub async fn handle_status(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &q.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &q.workspace).await else {
         return forbid_workspace();
     };
     let env_state = python_env::manager::refresh_status(&workspace).await;
@@ -146,7 +153,7 @@ pub async fn handle_discover(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &q.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &q.workspace).await else {
         return forbid_workspace();
     };
     let items = python_env::discover_interpreters(&workspace).await;
@@ -190,7 +197,7 @@ pub async fn handle_create(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &body.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
         return forbid_workspace();
     };
     let tool = body.tool.as_deref().map(str::to_ascii_lowercase);
@@ -227,7 +234,7 @@ pub async fn handle_select(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &body.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
         return forbid_workspace();
     };
     let interpreter = PathBuf::from(body.interpreter_path.trim());
@@ -249,7 +256,7 @@ pub async fn handle_install_requirements(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &body.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
         return forbid_workspace();
     };
     let file = body.file.clone();
@@ -277,7 +284,7 @@ pub async fn handle_install_smart(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &body.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
         return forbid_workspace();
     };
     let workspace_for_task = workspace.clone();
@@ -295,7 +302,7 @@ pub async fn handle_purge(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &body.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
         return forbid_workspace();
     };
     match python_env::manager::purge_venv(&workspace) {
@@ -316,7 +323,7 @@ pub async fn handle_activation(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &q.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &q.workspace).await else {
         return forbid_workspace();
     };
     let kv = python_env::activation_env(&workspace);
@@ -339,7 +346,7 @@ pub async fn handle_events(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Some(workspace) = resolve_workspace(&state, &q.workspace) else {
+    let Some(workspace) = resolve_workspace(&state, &q.workspace).await else {
         return forbid_workspace();
     };
     let mut bus = python_env::subscribe_events();

@@ -25,18 +25,12 @@ pub mod policy;
 pub mod qdrant;
 pub mod response_cache;
 pub mod retrieval;
-pub mod sharded_index;
-pub mod sharded_map;
+pub mod sharded;
 pub mod snapshot;
 pub mod sqlite;
-pub mod sqlite_vec_ext;
 pub mod traits;
 pub mod vector;
-pub mod vector_index;
-
-#[allow(unused_imports)]
 pub use audit::AuditedMemory;
-#[allow(unused_imports)]
 pub use backend::{
     MemoryBackendKind, MemoryBackendProfile, classify_memory_backend, default_memory_backend_key,
     memory_backend_profile, selectable_memory_backends,
@@ -44,15 +38,12 @@ pub use backend::{
 pub use lucid::LucidMemory;
 pub use markdown::MarkdownMemory;
 pub use none::NoneMemory;
-#[allow(unused_imports)]
 pub use policy::PolicyEnforcer;
 pub use qdrant::QdrantMemory;
 pub use response_cache::ResponseCache;
-#[allow(unused_imports)]
 pub use retrieval::{RetrievalConfig, RetrievalPipeline};
 pub use sqlite::SqliteMemory;
 pub use traits::Memory;
-#[allow(unused_imports)]
 pub use traits::{ExportFilter, MemoryCategory, MemoryEntry, ProceduralMessage};
 
 use crate::config::{EmbeddingRouteConfig, MemoryConfig, StorageProviderConfig};
@@ -303,6 +294,27 @@ pub fn create_memory_with_storage(
     create_memory_with_storage_and_routes(config, &[], storage_provider, workspace_dir, api_key)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn create_memory_with_storage_and_routes_async(
+    config: MemoryConfig,
+    embedding_routes: Vec<EmbeddingRouteConfig>,
+    storage_provider: Option<StorageProviderConfig>,
+    workspace_dir: std::path::PathBuf,
+    api_key: Option<String>,
+) -> anyhow::Result<Box<dyn Memory>> {
+    tokio::task::spawn_blocking(move || {
+        create_memory_with_storage_and_routes(
+            &config,
+            &embedding_routes,
+            storage_provider.as_ref(),
+            &workspace_dir,
+            api_key.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("memory initialization task failed: {e}"))?
+}
+
 pub fn create_memory_with_storage_and_routes(
     config: &MemoryConfig,
     embedding_routes: &[EmbeddingRouteConfig],
@@ -337,7 +349,7 @@ pub fn create_memory_with_storage_and_routes(
         )
         && snapshot::should_hydrate(workspace_dir)
     {
-        tracing::info!("🧬 Cold boot detected — hydrating from MEMORY_SNAPSHOT.md");
+        tracing::info!("🧬 Cold boot detected  -  hydrating from MEMORY_SNAPSHOT.md");
         match snapshot::hydrate_from_snapshot(workspace_dir) {
             Ok(count) => {
                 if count > 0 {

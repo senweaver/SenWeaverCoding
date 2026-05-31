@@ -152,7 +152,7 @@ impl OllamaProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("provider.ollama", 300, 10)
     }
@@ -255,22 +255,6 @@ impl OllamaProvider {
         );
         "I couldn't get a complete response from Ollama. Please try again or switch to a different model."
             .to_string()
-    }
-
-    fn build_chat_request(
-        &self,
-        messages: Vec<Message>,
-        model: &str,
-        temperature: f64,
-        tools: Option<&[serde_json::Value]>,
-    ) -> ChatRequest {
-        self.build_chat_request_with_think(
-            messages,
-            model,
-            temperature,
-            tools,
-            self.reasoning_enabled,
-        )
     }
 
     fn build_chat_request_with_think(

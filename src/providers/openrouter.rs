@@ -595,7 +595,7 @@ impl OpenRouterProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts_and_headers(
                 "provider.openrouter",
@@ -732,7 +732,7 @@ impl Provider for OpenRouterProvider {
             )
         })?;
 
-        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let sanitized = super::traits::flatten_messages_for_text_only_wire(messages);
         let budgeted = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             sanitized,
@@ -1459,7 +1459,7 @@ impl Provider for OpenRouterProvider {
             }
         };
 
-        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let sanitized = super::traits::flatten_messages_for_text_only_wire(messages);
         let budgeted = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             sanitized,

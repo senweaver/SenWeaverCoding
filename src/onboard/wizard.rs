@@ -35,12 +35,7 @@ use tokio::fs;
 
 #[inline]
 fn set_env_var(key: &str, value: impl AsRef<std::ffi::OsStr>) {
-    crate::util::set_env_var(key, value.as_ref());
-}
-
-#[inline]
-fn remove_env_var(key: &str) {
-    crate::util::remove_env_var(key);
+    crate::util::set_runtime_var(key, value.as_ref());
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,16 +51,10 @@ const BANNER: &str = r"
     ║                                                                ║
     ║                           S E N C O D E R                      ║
     ║                                                                ║
-    ║              SenWeaverCoding — AI Code Editor                  ║
+    ║              SenWeaverCoding  -  AI Code Editor                  ║
     ║           Rust-native, extensible, sovereign.                  ║
     ║                                                                ║
     ╚════════════════════════════════════════════════════════════════╝
-";
-
-const BANNER_COMPACT: &str = r"
-    +------------------------------------------------------------+
-    |  SenWeaverCoding -- AI Code Editor (Rust-native)           |
-    +------------------------------------------------------------+
 ";
 
 const LIVE_MODEL_MAX_OPTIONS: usize = 120;
@@ -76,6 +65,14 @@ const CUSTOM_MODEL_SENTINEL: &str = "__custom_model__";
 
 fn has_launchable_channels(channels: &ChannelsConfig) -> bool {
     channels.channels_except_webhook().iter().any(|(_, ok)| *ok)
+}
+
+fn blocking_probe_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +86,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
 
     println!(
         "  {}",
-        style("Welcome to SenWeaverCoding — the fastest, smallest AI assistant.")
+        style("Welcome to SenWeaverCoding  -  the fastest, smallest AI assistant.")
             .white()
             .bold()
     );
@@ -112,7 +109,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
     let (provider, api_key, model, provider_api_url) = setup_provider(&workspace_dir).await?;
 
     print_step(3, 9, "Channels (How You Talk to SenWeaverCoding)");
-    let channels_config = setup_channels()?;
+    let channels_config = tokio::task::spawn_blocking(setup_channels).await??;
 
     print_step(4, 9, "Tunnel (Expose to Internet)");
     let tunnel_config = setup_tunnel()?;
@@ -182,7 +179,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         microsoft365: crate::config::Microsoft365Config::default(),
         secrets: secrets_config,
         browser: BrowserConfig::default(),
-        browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig::default(),
+        browser_delegate: crate::tools::browser::delegate::BrowserDelegateConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
         media_pipeline: crate::config::MediaPipelineConfig::default(),
@@ -228,20 +225,20 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         plan_mode: crate::agent::plan_mode::PlanModeConfig::default(),
         auto_title: crate::agent::auto_title::AutoTitleConfig::default(),
         suggestions: crate::agent::suggestions::SuggestionsConfig::default(),
-        tool_groups: crate::tools::tool_groups::ToolGroupsConfig::default(),
-        user_profile: crate::agent::user_profile::UserProfileConfig::default(),
-        self_eval: crate::agent::self_eval::SelfEvalConfig::default(),
-        feedback: crate::agent::feedback::FeedbackConfig::default(),
-        experience: crate::agent::experience::ExperienceConfig::default(),
-        self_reflection: crate::agent::self_reflection::SelfReflectionConfig::default(),
-        prompt_optimizer: crate::agent::prompt_optimizer::PromptOptimizerConfig::default(),
+        tool_groups: crate::tools::handler::groups::ToolGroupsConfig::default(),
+        user_profile: crate::agent::user::profile::UserProfileConfig::default(),
+        self_eval: crate::agent::self_assess::eval::SelfEvalConfig::default(),
+        feedback: crate::agent::reward::feedback::FeedbackConfig::default(),
+        experience: crate::agent::reward::experience::ExperienceConfig::default(),
+        self_reflection: crate::agent::self_assess::reflection::SelfReflectionConfig::default(),
+        prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig::default(),
         skill_evolution: crate::agent::skill_evolution::SkillEvolutionConfig::default(),
-        reinforcement: crate::agent::reinforcement::ReinforcementConfig::default(),
+        reinforcement: crate::agent::reward::reinforcement::ReinforcementConfig::default(),
         rbac: crate::security::rbac::RbacConfig::default(),
         tool_output_compressor:
-            crate::agent::tool_output_compressor::ToolOutputCompressorConfig::default(),
+            crate::agent::tool_handler::output_compressor::ToolOutputCompressorConfig::default(),
         code_rag: crate::config::domain::CodeRagConfig::default(),
-        token_budget: crate::agent::token_budget::TokenBudgetConfig::default(),
+        token_budget: crate::agent::token::budget::TokenBudgetConfig::default(),
         token_saver: crate::config::schema::TokenSaverConfig::default(),
         custom_tools: crate::config::schema::CustomToolsConfig::default(),
         lsp: crate::config::schema::LspConfig::default(),
@@ -296,7 +293,7 @@ pub async fn run_channels_repair_wizard() -> Result<Config> {
     println!("{}", style(BANNER).cyan().bold());
     println!(
         "  {}",
-        style("Channels Repair — update channel tokens and allowlists only")
+        style("Channels Repair  -  update channel tokens and allowlists only")
             .white()
             .bold()
     );
@@ -305,7 +302,7 @@ pub async fn run_channels_repair_wizard() -> Result<Config> {
     let mut config = Box::pin(Config::load_or_init()).await?;
 
     print_step(1, 1, "Channels (How You Talk to SenWeaverCoding)");
-    config.channels_config = setup_channels()?;
+    config.channels_config = tokio::task::spawn_blocking(setup_channels).await??;
     config.save().await?;
     persist_workspace_selection(&config.config_path).await?;
 
@@ -496,7 +493,7 @@ pub async fn run_quick_setup(
 }
 
 fn resolve_quick_setup_dirs_with_home(home: &Path) -> (PathBuf, PathBuf) {
-    if let Some(custom_config_dir) = crate::util::get_env_var("SEN_CONFIG_DIR") {
+    if let Some(custom_config_dir) = crate::util::get_runtime_var("SEN_CONFIG_DIR") {
         let trimmed = custom_config_dir.trim();
         if !trimmed.is_empty() {
             let config_dir = PathBuf::from(shellexpand::tilde(trimmed).as_ref());
@@ -504,7 +501,7 @@ fn resolve_quick_setup_dirs_with_home(home: &Path) -> (PathBuf, PathBuf) {
         }
     }
 
-    if let Some(custom_workspace) = crate::util::get_env_var("SEN_WORKSPACE") {
+    if let Some(custom_workspace) = crate::util::get_runtime_var("SEN_WORKSPACE") {
         let trimmed = custom_workspace.trim();
         if !trimmed.is_empty() {
             let expanded = shellexpand::tilde(trimmed);
@@ -571,7 +568,7 @@ async fn run_quick_setup_with_home(
     println!("{}", style(BANNER).cyan().bold());
     println!(
         "  {}",
-        style("Quick Setup — generating config with sensible defaults...")
+        style("Quick Setup  -  generating config with sensible defaults...")
             .white()
             .bold()
     );
@@ -645,7 +642,7 @@ async fn run_quick_setup_with_home(
         microsoft365: crate::config::Microsoft365Config::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
-        browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig::default(),
+        browser_delegate: crate::tools::browser::delegate::BrowserDelegateConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
         media_pipeline: crate::config::MediaPipelineConfig::default(),
@@ -691,20 +688,20 @@ async fn run_quick_setup_with_home(
         plan_mode: crate::agent::plan_mode::PlanModeConfig::default(),
         auto_title: crate::agent::auto_title::AutoTitleConfig::default(),
         suggestions: crate::agent::suggestions::SuggestionsConfig::default(),
-        tool_groups: crate::tools::tool_groups::ToolGroupsConfig::default(),
-        user_profile: crate::agent::user_profile::UserProfileConfig::default(),
-        self_eval: crate::agent::self_eval::SelfEvalConfig::default(),
-        feedback: crate::agent::feedback::FeedbackConfig::default(),
-        experience: crate::agent::experience::ExperienceConfig::default(),
-        self_reflection: crate::agent::self_reflection::SelfReflectionConfig::default(),
-        prompt_optimizer: crate::agent::prompt_optimizer::PromptOptimizerConfig::default(),
+        tool_groups: crate::tools::handler::groups::ToolGroupsConfig::default(),
+        user_profile: crate::agent::user::profile::UserProfileConfig::default(),
+        self_eval: crate::agent::self_assess::eval::SelfEvalConfig::default(),
+        feedback: crate::agent::reward::feedback::FeedbackConfig::default(),
+        experience: crate::agent::reward::experience::ExperienceConfig::default(),
+        self_reflection: crate::agent::self_assess::reflection::SelfReflectionConfig::default(),
+        prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig::default(),
         skill_evolution: crate::agent::skill_evolution::SkillEvolutionConfig::default(),
-        reinforcement: crate::agent::reinforcement::ReinforcementConfig::default(),
+        reinforcement: crate::agent::reward::reinforcement::ReinforcementConfig::default(),
         rbac: crate::security::rbac::RbacConfig::default(),
         tool_output_compressor:
-            crate::agent::tool_output_compressor::ToolOutputCompressorConfig::default(),
+            crate::agent::tool_handler::output_compressor::ToolOutputCompressorConfig::default(),
         code_rag: crate::config::domain::CodeRagConfig::default(),
-        token_budget: crate::agent::token_budget::TokenBudgetConfig::default(),
+        token_budget: crate::agent::token::budget::TokenBudgetConfig::default(),
         token_saver: crate::config::schema::TokenSaverConfig::default(),
         custom_tools: crate::config::schema::CustomToolsConfig::default(),
         lsp: crate::config::schema::LspConfig::default(),
@@ -875,19 +872,6 @@ fn allows_unauthenticated_model_fetch(provider_name: &str) -> bool {
             | "nvidia"
     )
 }
-
-const MINIMAX_ONBOARD_MODELS: [(&str, &str); 7] = [
-    (
-        "MiniMax-M2.7",
-        "MiniMax M2.7 (latest flagship, recommended)",
-    ),
-    ("MiniMax-M2.7-highspeed", "MiniMax M2.7 High-Speed (faster)"),
-    ("MiniMax-M2.5", "MiniMax M2.5 (stable)"),
-    ("MiniMax-M2.5-highspeed", "MiniMax M2.5 High-Speed (faster)"),
-    ("MiniMax-M2.1", "MiniMax M2.1 (previous gen)"),
-    ("MiniMax-M2.1-highspeed", "MiniMax M2.1 High-Speed (faster)"),
-    ("MiniMax-M2", "MiniMax M2 (legacy)"),
-];
 
 fn default_model_for_provider(provider: &str) -> String {
     match canonical_provider_name(provider) {
@@ -2354,8 +2338,8 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
         "⚡ Fast inference (Groq, Fireworks, Together AI, NVIDIA NIM)",
         "🌐 Gateway / proxy (Vercel AI, Cloudflare AI, Amazon Bedrock)",
         "🔬 Specialized (Moonshot/Kimi, GLM/Zhipu, MiniMax, Qwen/DashScope, Qianfan, Z.AI, Synthetic, OpenCode Zen, Cohere)",
-        "🏠 Local / private (Ollama, llama.cpp server, vLLM — no API key needed)",
-        "🔧 Custom — bring your own OpenAI-compatible API",
+        "🏠 Local / private (Ollama, llama.cpp server, vLLM  -  no API key needed)",
+        "🔧 Custom  -  bring your own OpenAI-compatible API",
     ];
 
     let tier_idx = Select::new()
@@ -2368,75 +2352,75 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
         0 => vec![
             (
                 "openrouter",
-                "OpenRouter — 200+ models, 1 API key (recommended)",
+                "OpenRouter  -  200+ models, 1 API key (recommended)",
             ),
-            ("venice", "Venice AI — privacy-first (Llama, Opus)"),
-            ("anthropic", "Anthropic — Claude Sonnet & Opus (direct)"),
-            ("openai", "OpenAI — GPT-4o, o1, GPT-5 (direct)"),
+            ("venice", "Venice AI  -  privacy-first (Llama, Opus)"),
+            ("anthropic", "Anthropic  -  Claude Sonnet & Opus (direct)"),
+            ("openai", "OpenAI  -  GPT-4o, o1, GPT-5 (direct)"),
             (
                 "openai-codex",
                 "OpenAI Codex (ChatGPT subscription OAuth, no API key)",
             ),
-            ("deepseek", "DeepSeek — V3 & R1 (affordable)"),
-            ("mistral", "Mistral — Large & Codestral"),
-            ("xai", "xAI — Grok 3 & 4"),
-            ("perplexity", "Perplexity — search-augmented AI"),
+            ("deepseek", "DeepSeek  -  V3 & R1 (affordable)"),
+            ("mistral", "Mistral  -  Large & Codestral"),
+            ("xai", "xAI  -  Grok 3 & 4"),
+            ("perplexity", "Perplexity  -  search-augmented AI"),
             (
                 "gemini",
-                "Google Gemini — Gemini 2.0 Flash & Pro (supports CLI auth)",
+                "Google Gemini  -  Gemini 2.0 Flash & Pro (supports CLI auth)",
             ),
         ],
         1 => vec![
-            ("groq", "Groq — ultra-fast LPU inference"),
-            ("fireworks", "Fireworks AI — fast open-source inference"),
-            ("novita", "Novita AI — affordable open-source inference"),
-            ("together-ai", "Together AI — open-source model hosting"),
-            ("nvidia", "NVIDIA NIM — DeepSeek, Llama, & more"),
+            ("groq", "Groq  -  ultra-fast LPU inference"),
+            ("fireworks", "Fireworks AI  -  fast open-source inference"),
+            ("novita", "Novita AI  -  affordable open-source inference"),
+            ("together-ai", "Together AI  -  open-source model hosting"),
+            ("nvidia", "NVIDIA NIM  -  DeepSeek, Llama, & more"),
         ],
         2 => vec![
             ("vercel", "Vercel AI Gateway"),
             ("cloudflare", "Cloudflare AI Gateway"),
             (
                 "astrai",
-                "Astrai — compliant AI routing (PII stripping, cost optimization)",
+                "Astrai  -  compliant AI routing (PII stripping, cost optimization)",
             ),
             (
                 "avian",
-                "Avian — OpenAI-compatible inference (DeepSeek, Kimi, GLM, MiniMax)",
+                "Avian  -  OpenAI-compatible inference (DeepSeek, Kimi, GLM, MiniMax)",
             ),
-            ("bedrock", "Amazon Bedrock — AWS managed models"),
+            ("bedrock", "Amazon Bedrock  -  AWS managed models"),
         ],
         3 => vec![
             (
                 "kimi-code",
-                "Kimi Code — coding-optimized Kimi API (KimiCLI)",
+                "Kimi Code  -  coding-optimized Kimi API (KimiCLI)",
             ),
             (
                 "qwen-code",
-                "Qwen Code — OAuth tokens reused from ~/.qwen/oauth_creds.json",
+                "Qwen Code  -  OAuth tokens reused from ~/.qwen/oauth_creds.json",
             ),
-            ("moonshot", "Moonshot — Kimi API (China endpoint)"),
+            ("moonshot", "Moonshot  -  Kimi API (China endpoint)"),
             (
                 "moonshot-intl",
-                "Moonshot — Kimi API (international endpoint)",
+                "Moonshot  -  Kimi API (international endpoint)",
             ),
-            ("glm", "GLM — ChatGLM / Zhipu (international endpoint)"),
-            ("glm-cn", "GLM — ChatGLM / Zhipu (China endpoint)"),
+            ("glm", "GLM  -  ChatGLM / Zhipu (international endpoint)"),
+            ("glm-cn", "GLM  -  ChatGLM / Zhipu (China endpoint)"),
             (
                 "minimax",
-                "MiniMax — international endpoint (api.minimax.io)",
+                "MiniMax  -  international endpoint (api.minimax.io)",
             ),
-            ("minimax-cn", "MiniMax — China endpoint (api.minimaxi.com)"),
-            ("qwen", "Qwen — DashScope China endpoint"),
-            ("qwen-intl", "Qwen — DashScope international endpoint"),
-            ("qwen-us", "Qwen — DashScope US endpoint"),
-            ("qianfan", "Qianfan — Baidu AI models (China endpoint)"),
-            ("zai", "Z.AI — global coding endpoint"),
-            ("zai-cn", "Z.AI — China coding endpoint (open.bigmodel.cn)"),
-            ("synthetic", "Synthetic — Synthetic AI models"),
-            ("opencode", "OpenCode Zen — code-focused AI"),
-            ("opencode-go", "OpenCode Go — Subsidized code-focused AI"),
-            ("cohere", "Cohere — Command R+ & embeddings"),
+            ("minimax-cn", "MiniMax  -  China endpoint (api.minimaxi.com)"),
+            ("qwen", "Qwen  -  DashScope China endpoint"),
+            ("qwen-intl", "Qwen  -  DashScope international endpoint"),
+            ("qwen-us", "Qwen  -  DashScope US endpoint"),
+            ("qianfan", "Qianfan  -  Baidu AI models (China endpoint)"),
+            ("zai", "Z.AI  -  global coding endpoint"),
+            ("zai-cn", "Z.AI  -  China coding endpoint (open.bigmodel.cn)"),
+            ("synthetic", "Synthetic  -  Synthetic AI models"),
+            ("opencode", "OpenCode Zen  -  code-focused AI"),
+            ("opencode-go", "OpenCode Go  -  Subsidized code-focused AI"),
+            ("cohere", "Cohere  -  Command R+ & embeddings"),
         ],
         4 => local_provider_choices(),
         _ => vec![],
@@ -2447,7 +2431,7 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
         println!(
             "  {} {}",
             style("Custom Provider Setup").white().bold(),
-            style("— any OpenAI-compatible API").dim()
+            style(" -  any OpenAI-compatible API").dim()
         );
         print_bullet(
             "SenWeaverCoding works with ANY API that speaks the OpenAI chat completions format.",
@@ -3040,7 +3024,7 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
 
     let model_labels: Vec<String> = model_options
         .iter()
-        .map(|(model_id, label)| format!("{label} — {}", style(model_id).dim()))
+        .map(|(model_id, label)| format!("{label}  -  {}", style(model_id).dim()))
         .collect();
 
     let model_idx = Select::new()
@@ -3071,19 +3055,19 @@ async fn setup_provider(workspace_dir: &Path) -> Result<(String, String, String,
 
 fn local_provider_choices() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("ollama", "Ollama — local models (Llama, Mistral, Phi)"),
+        ("ollama", "Ollama  -  local models (Llama, Mistral, Phi)"),
         (
             "llamacpp",
-            "llama.cpp server — local OpenAI-compatible endpoint",
+            "llama.cpp server  -  local OpenAI-compatible endpoint",
         ),
         (
             "sglang",
-            "SGLang — high-performance local serving framework",
+            "SGLang  -  high-performance local serving framework",
         ),
-        ("vllm", "vLLM — high-performance local inference engine"),
+        ("vllm", "vLLM  -  high-performance local inference engine"),
         (
             "osaurus",
-            "Osaurus — unified AI edge runtime (local MLX + cloud proxy + MCP)",
+            "Osaurus  -  unified AI edge runtime (local MLX + cloud proxy + MCP)",
         ),
     ]
 }
@@ -3153,8 +3137,8 @@ fn setup_tool_mode() -> Result<(ComposioConfig, SecretsConfig)> {
     println!();
 
     let options = vec![
-        "Sovereign (local only) — you manage API keys, full privacy (default)",
-        "Composio (managed OAuth) — 1000+ apps via OAuth, no raw keys shared",
+        "Sovereign (local only)  -  you manage API keys, full privacy (default)",
+        "Composio (managed OAuth)  -  1000+ apps via OAuth, no raw keys shared",
     ];
 
     let choice = Select::new()
@@ -3168,10 +3152,10 @@ fn setup_tool_mode() -> Result<(ComposioConfig, SecretsConfig)> {
         println!(
             "  {} {}",
             style("Composio Setup").white().bold(),
-            style("— 1000+ OAuth integrations (Gmail, Notion, GitHub, Slack, ...)").dim()
+            style(" -  1000+ OAuth integrations (Gmail, Notion, GitHub, Slack, ...)").dim()
         );
         print_bullet("Get your API key at: https://app.composio.dev/settings");
-        print_bullet("SenWeaverCoding uses Composio as a tool — your core agent stays local.");
+        print_bullet("SenWeaverCoding uses Composio as a tool  -  your core agent stays local.");
         println!();
 
         let api_key: String = Input::new()
@@ -3181,7 +3165,7 @@ fn setup_tool_mode() -> Result<(ComposioConfig, SecretsConfig)> {
 
         if api_key.trim().is_empty() {
             println!(
-                "  {} Skipped — set composio.api_key in config.toml later",
+                "  {} Skipped  -  set composio.api_key in config.toml later",
                 style("→").dim()
             );
             ComposioConfig::default()
@@ -3199,7 +3183,7 @@ fn setup_tool_mode() -> Result<(ComposioConfig, SecretsConfig)> {
         }
     } else {
         println!(
-            "  {} Tool mode: {} — full privacy, you own every key",
+            "  {} Tool mode: {}  -  full privacy, you own every key",
             style("✓").green().bold(),
             style("Sovereign (local only)").green()
         );
@@ -3219,13 +3203,13 @@ fn setup_tool_mode() -> Result<(ComposioConfig, SecretsConfig)> {
 
     if encrypt {
         println!(
-            "  {} Secrets: {} — keys encrypted with local key file",
+            "  {} Secrets: {}  -  keys encrypted with local key file",
             style("✓").green().bold(),
             style("encrypted").green()
         );
     } else {
         println!(
-            "  {} Secrets: {} — keys stored as plaintext (not recommended)",
+            "  {} Secrets: {}  -  keys stored as plaintext (not recommended)",
             style("✓").green().bold(),
             style("plaintext").yellow()
         );
@@ -3282,10 +3266,10 @@ fn setup_hardware() -> Result<HardwareConfig> {
     println!();
 
     let options = vec![
-        "🚀 Native — direct GPIO on this Linux board (Raspberry Pi, Orange Pi, etc.)",
-        "🔌 Tethered — control an Arduino/ESP32/Nucleo plugged into USB",
-        "🔬 Debug Probe — flash/read MCUs via SWD/JTAG (probe-rs)",
-        "☁️  Software Only — no hardware access (default)",
+        "🚀 Native  -  direct GPIO on this Linux board (Raspberry Pi, Orange Pi, etc.)",
+        "🔌 Tethered  -  control an Arduino/ESP32/Nucleo plugged into USB",
+        "🔬 Debug Probe  -  flash/read MCUs via SWD/JTAG (probe-rs)",
+        "☁️  Software Only  -  no hardware access (default)",
     ];
 
     let recommended = hardware::recommended_wizard_default(&devices);
@@ -3317,7 +3301,7 @@ fn setup_hardware() -> Result<HardwareConfig> {
                 .collect();
 
             let port_idx = Select::new()
-                .with_prompt("  Multiple serial devices found — select one")
+                .with_prompt("  Multiple serial devices found  -  select one")
                 .items(&port_labels)
                 .default(0)
                 .interact()?;
@@ -3463,13 +3447,13 @@ fn setup_project_context() -> Result<ProjectContext> {
         .interact_text()?;
 
     let style_options = vec![
-        "Direct & concise — skip pleasantries, get to the point",
-        "Friendly & casual — warm, human, and helpful",
-        "Professional & polished — calm, confident, and clear",
-        "Expressive & playful — more personality + natural emojis",
-        "Technical & detailed — thorough explanations, code-first",
-        "Balanced — adapt to the situation",
-        "Custom — write your own style guide",
+        "Direct & concise  -  skip pleasantries, get to the point",
+        "Friendly & casual  -  warm, human, and helpful",
+        "Professional & polished  -  calm, confident, and clear",
+        "Expressive & playful  -  more personality + natural emojis",
+        "Technical & detailed  -  thorough explanations, code-first",
+        "Balanced  -  adapt to the situation",
+        "Custom  -  write your own style guide",
     ];
 
     let style_idx = Select::new()
@@ -3612,7 +3596,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.telegram.is_some() {
                         "✅ connected"
                     } else {
-                        "— connect your bot"
+                        " -  connect your bot"
                     }
                 ),
                 ChannelMenuChoice::Discord => format!(
@@ -3620,7 +3604,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.discord.is_some() {
                         "✅ connected"
                     } else {
-                        "— connect your bot"
+                        " -  connect your bot"
                     }
                 ),
                 ChannelMenuChoice::Slack => format!(
@@ -3628,7 +3612,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.slack.is_some() {
                         "✅ connected"
                     } else {
-                        "— connect your bot"
+                        " -  connect your bot"
                     }
                 ),
                 ChannelMenuChoice::IMessage => format!(
@@ -3636,7 +3620,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.imessage.is_some() {
                         "✅ configured"
                     } else {
-                        "— macOS only"
+                        " -  macOS only"
                     }
                 ),
                 ChannelMenuChoice::Matrix => format!(
@@ -3644,7 +3628,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.matrix.is_some() {
                         "✅ connected"
                     } else {
-                        "— self-hosted chat"
+                        " -  self-hosted chat"
                     }
                 ),
                 ChannelMenuChoice::Signal => format!(
@@ -3652,7 +3636,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.signal.is_some() {
                         "✅ connected"
                     } else {
-                        "— signal-cli daemon bridge"
+                        " -  signal-cli daemon bridge"
                     }
                 ),
                 ChannelMenuChoice::WhatsApp => format!(
@@ -3660,7 +3644,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.whatsapp.is_some() {
                         "✅ connected"
                     } else {
-                        "— Business Cloud API"
+                        " -  Business Cloud API"
                     }
                 ),
                 ChannelMenuChoice::Linq => format!(
@@ -3668,7 +3652,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.linq.is_some() {
                         "✅ connected"
                     } else {
-                        "— iMessage/RCS/SMS via Linq API"
+                        " -  iMessage/RCS/SMS via Linq API"
                     }
                 ),
                 ChannelMenuChoice::Irc => format!(
@@ -3676,7 +3660,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.irc.is_some() {
                         "✅ configured"
                     } else {
-                        "— IRC over TLS"
+                        " -  IRC over TLS"
                     }
                 ),
                 ChannelMenuChoice::Webhook => format!(
@@ -3684,7 +3668,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.webhook.is_some() {
                         "✅ configured"
                     } else {
-                        "— HTTP endpoint"
+                        " -  HTTP endpoint"
                     }
                 ),
                 ChannelMenuChoice::NextcloudTalk => format!(
@@ -3692,7 +3676,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.nextcloud_talk.is_some() {
                         "✅ connected"
                     } else {
-                        "— Talk webhook + OCS API"
+                        " -  Talk webhook + OCS API"
                     }
                 ),
                 ChannelMenuChoice::DingTalk => format!(
@@ -3700,7 +3684,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.dingtalk.is_some() {
                         "✅ connected"
                     } else {
-                        "— DingTalk Stream Mode"
+                        " -  DingTalk Stream Mode"
                     }
                 ),
                 ChannelMenuChoice::QqOfficial => format!(
@@ -3708,7 +3692,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.qq.is_some() {
                         "✅ connected"
                     } else {
-                        "— Tencent QQ Bot"
+                        " -  Tencent QQ Bot"
                     }
                 ),
                 ChannelMenuChoice::Lark => format!(
@@ -3716,7 +3700,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.lark.as_ref().is_some_and(|cfg| !cfg.use_feishu) {
                         "✅ connected"
                     } else {
-                        "— Lark Bot"
+                        " -  Lark Bot"
                     }
                 ),
                 ChannelMenuChoice::Feishu => format!(
@@ -3726,7 +3710,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     {
                         "✅ connected"
                     } else {
-                        "— Feishu Bot"
+                        " -  Feishu Bot"
                     }
                 ),
                 #[cfg(feature = "channel-nostr")]
@@ -3735,10 +3719,10 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.nostr.is_some() {
                         "✅ connected"
                     } else {
-                        "     — Nostr DMs"
+                        "      -  Nostr DMs"
                     }
                 ),
-                ChannelMenuChoice::Done => "Done — finish setup".to_string(),
+                ChannelMenuChoice::Done => "Done  -  finish setup".to_string(),
             })
             .collect();
 
@@ -3760,7 +3744,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Telegram Setup").white().bold(),
-                    style("— talk to SenWeaverCoding from Telegram").dim()
+                    style(" -  talk to SenWeaverCoding from Telegram").dim()
                 );
                 print_bullet("1. Open Telegram and message @BotFather");
                 print_bullet("2. Send /newbot and follow the prompts");
@@ -3779,7 +3763,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 print!("  {} Testing connection... ", style("⏳").dim());
                 let token_clone = token.clone();
                 let thread_result = std::thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
+                    let client = blocking_probe_client();
                     let url = format!("https://api.telegram.org/bot{token_clone}/getMe");
                     let resp = client.get(&url).send()?;
                     let ok = resp.status().is_success();
@@ -3802,7 +3786,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check your token and try again",
+                            "\r  {} Connection failed  -  check your token and try again",
                             style("❌").red().bold()
                         );
                         continue;
@@ -3836,7 +3820,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_users.is_empty() {
                     println!(
-                        "  {} No users allowlisted — Telegram inbound messages will be denied until you add your username/user ID or '*'.",
+                        "  {} No users allowlisted  -  Telegram inbound messages will be denied until you add your username/user ID or '*'.",
                         style("⚠").yellow().bold()
                     );
                 }
@@ -3858,7 +3842,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Discord Setup").white().bold(),
-                    style("— talk to SenWeaverCoding from Discord").dim()
+                    style(" -  talk to SenWeaverCoding from Discord").dim()
                 );
                 print_bullet("1. Go to https://discord.com/developers/applications");
                 print_bullet("2. Create a New Application → Bot → Copy token");
@@ -3876,7 +3860,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 print!("  {} Testing connection... ", style("⏳").dim());
                 let token_clone = token.clone();
                 let thread_result = std::thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
+                    let client = blocking_probe_client();
                     let resp = client
                         .get("https://discord.com/api/v10/users/@me")
                         .header("Authorization", format!("Bot {token_clone}"))
@@ -3900,7 +3884,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check your token and try again",
+                            "\r  {} Connection failed  -  check your token and try again",
                             style("❌").red().bold()
                         );
                         continue;
@@ -3937,7 +3921,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_users.is_empty() {
                     println!(
-                        "  {} No users allowlisted — Discord inbound messages will be denied until you add IDs or '*'.",
+                        "  {} No users allowlisted  -  Discord inbound messages will be denied until you add IDs or '*'.",
                         style("⚠").yellow().bold()
                     );
                 }
@@ -3961,7 +3945,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Slack Setup").white().bold(),
-                    style("— talk to SenWeaverCoding from Slack").dim()
+                    style(" -  talk to SenWeaverCoding from Slack").dim()
                 );
                 print_bullet("1. Go to https://api.slack.com/apps → Create New App");
                 print_bullet("2. Add Bot Token Scopes: chat:write, channels:history");
@@ -3980,7 +3964,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 print!("  {} Testing connection... ", style("⏳").dim());
                 let token_clone = token.clone();
                 let thread_result = std::thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
+                    let client = blocking_probe_client();
                     let resp = client
                         .get("https://slack.com/api/auth.test")
                         .bearer_auth(&token_clone)
@@ -4017,7 +4001,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check your token",
+                            "\r  {} Connection failed  -  check your token",
                             style("❌").red().bold()
                         );
                         continue;
@@ -4061,7 +4045,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_users.is_empty() {
                     println!(
-                        "  {} No users allowlisted — Slack inbound messages will be denied until you add IDs or '*'.",
+                        "  {} No users allowlisted  -  Slack inbound messages will be denied until you add IDs or '*'.",
                         style("⚠").yellow().bold()
                     );
                 }
@@ -4095,7 +4079,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("iMessage Setup").white().bold(),
-                    style("— macOS only, reads from Messages.app").dim()
+                    style(" -  macOS only, reads from Messages.app").dim()
                 );
 
                 if !cfg!(target_os = "macos") {
@@ -4141,7 +4125,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Matrix Setup").white().bold(),
-                    style("— self-hosted, federated chat").dim()
+                    style(" -  self-hosted, federated chat").dim()
                 );
                 print_bullet("You need a Matrix account and an access token.");
                 print_bullet("Get a token via Element → Settings → Help & About → Access Token.");
@@ -4166,7 +4150,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 let hs_owned = hs.to_string();
                 let access_token_clone = access_token.clone();
                 let thread_result = std::thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
+                    let client = blocking_probe_client();
                     let resp = client
                         .get(format!("{hs_owned}/_matrix/client/v3/account/whoami"))
                         .header("Authorization", format!("Bearer {access_token_clone}"))
@@ -4212,7 +4196,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check homeserver URL and token",
+                            "\r  {} Connection failed  -  check homeserver URL and token",
                             style("❌").red().bold()
                         );
                         continue;
@@ -4235,7 +4219,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 };
 
                 let recovery_input: String = dialoguer::Password::new()
-                    .with_prompt("  E2EE recovery key (or Enter to skip — see docs/security/matrix-e2ee-guide.md section 4G)")
+                    .with_prompt("  E2EE recovery key (or Enter to skip  -  see docs/security/matrix-e2ee-guide.md section 4G)")
                     .allow_empty_password(true)
                     .interact()?;
                 let recovery_key = if recovery_input.trim().is_empty() {
@@ -4265,7 +4249,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Signal Setup").white().bold(),
-                    style("— signal-cli daemon bridge").dim()
+                    style(" -  signal-cli daemon bridge").dim()
                 );
                 print_bullet("1. Run signal-cli daemon with HTTP enabled (default port 8686).");
                 print_bullet("2. Ensure your Signal account is registered in signal-cli.");
@@ -4278,7 +4262,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 if http_url.trim().is_empty() {
-                    println!("  {} Skipped — HTTP URL required", style("→").dim());
+                    println!("  {} Skipped  -  HTTP URL required", style("→").dim());
                     continue;
                 }
 
@@ -4287,7 +4271,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 if account.trim().is_empty() {
-                    println!("  {} Skipped — account number required", style("→").dim());
+                    println!("  {} Skipped  -  account number required", style("→").dim());
                     continue;
                 }
 
@@ -4309,7 +4293,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                             Input::new().with_prompt("  Group ID").interact_text()?;
                         let group_input = group_input.trim().to_string();
                         if group_input.is_empty() {
-                            println!("  {} Skipped — group ID required", style("→").dim());
+                            println!("  {} Skipped  -  group ID required", style("→").dim());
                             continue;
                         }
                         Some(group_input)
@@ -4403,7 +4387,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                         .interact_text()?;
 
                     if session_path.trim().is_empty() {
-                        println!("  {} Skipped — session path required", style("→").dim());
+                        println!("  {} Skipped  -  session path required", style("→").dim());
                         continue;
                     }
 
@@ -4490,7 +4474,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 if phone_number_id.trim().is_empty() {
-                    println!("  {} Skipped — phone number ID required", style("→").dim());
+                    println!("  {} Skipped  -  phone number ID required", style("→").dim());
                     continue;
                 }
 
@@ -4503,7 +4487,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 let phone_number_id_clone = phone_number_id.clone();
                 let access_token_clone = access_token.clone();
                 let thread_result = std::thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
+                    let client = blocking_probe_client();
                     let url = format!(
                         "https://graph.facebook.com/v18.0/{}",
                         phone_number_id_clone.trim()
@@ -4527,7 +4511,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check access token and phone number ID",
+                            "\r  {} Connection failed  -  check access token and phone number ID",
                             style("❌").red().bold()
                         );
                         continue;
@@ -4571,7 +4555,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Linq Setup").white().bold(),
-                    style("— iMessage/RCS/SMS via Linq API").dim()
+                    style(" -  iMessage/RCS/SMS via Linq API").dim()
                 );
                 print_bullet("1. Sign up at linqapp.com and get your Partner API token");
                 print_bullet("2. Note your Linq phone number (E.164 format)");
@@ -4592,14 +4576,14 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 if from_phone.trim().is_empty() {
-                    println!("  {} Skipped — phone number required", style("→").dim());
+                    println!("  {} Skipped  -  phone number required", style("→").dim());
                     continue;
                 }
 
                 print!("  {} Testing connection... ", style("⏳").dim());
                 let api_token_clone = api_token.clone();
                 let thread_result = std::thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
+                    let client = blocking_probe_client();
                     let url = "https://api.linqapp.com/api/partner/v3/phonenumbers";
                     let resp = client
                         .get(url)
@@ -4620,7 +4604,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check API token",
+                            "\r  {} Connection failed  -  check API token",
                             style("❌").red().bold()
                         );
                         continue;
@@ -4662,7 +4646,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("IRC Setup").white().bold(),
-                    style("— IRC over TLS").dim()
+                    style(" -  IRC over TLS").dim()
                 );
                 print_bullet("IRC connects over TLS to any IRC server");
                 print_bullet("Supports SASL PLAIN and NickServ authentication");
@@ -4694,7 +4678,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     Input::new().with_prompt("  Bot nickname").interact_text()?;
 
                 if nickname.trim().is_empty() {
-                    println!("  {} Skipped — nickname required", style("→").dim());
+                    println!("  {} Skipped  -  nickname required", style("→").dim());
                     continue;
                 }
 
@@ -4735,7 +4719,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_users.is_empty() {
                     print_bullet(
-                        "⚠️  Empty allowlist — only you can interact. Add nicknames above.",
+                        "⚠️  Empty allowlist  -  only you can interact. Add nicknames above.",
                     );
                 }
 
@@ -4801,7 +4785,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Webhook Setup").white().bold(),
-                    style("— HTTP endpoint for custom integrations").dim()
+                    style(" -  HTTP endpoint for custom integrations").dim()
                 );
 
                 let port: String = Input::new()
@@ -4838,7 +4822,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Nextcloud Talk Setup").white().bold(),
-                    style("— Talk webhook receive + OCS API send").dim()
+                    style(" -  Talk webhook receive + OCS API send").dim()
                 );
                 print_bullet("1. Configure your Nextcloud Talk bot app and app token.");
                 print_bullet("2. Set webhook URL to: https://<your-public-url>/nextcloud-talk");
@@ -4853,7 +4837,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 let base_url = base_url.trim().trim_end_matches('/').to_string();
                 if base_url.is_empty() {
-                    println!("  {} Skipped — base URL required", style("→").dim());
+                    println!("  {} Skipped  -  base URL required", style("→").dim());
                     continue;
                 }
 
@@ -4862,7 +4846,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 if app_token.trim().is_empty() {
-                    println!("  {} Skipped — app token required", style("→").dim());
+                    println!("  {} Skipped  -  app token required", style("→").dim());
                     continue;
                 }
 
@@ -4907,7 +4891,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("DingTalk Setup").white().bold(),
-                    style("— DingTalk Stream Mode").dim()
+                    style(" -  DingTalk Stream Mode").dim()
                 );
                 print_bullet("1. Go to DingTalk developer console (open.dingtalk.com)");
                 print_bullet("2. Create an app and enable the Stream Mode bot");
@@ -4928,7 +4912,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     .interact_text()?;
 
                 print!("  {} Testing connection... ", style("⏳").dim());
-                let client = reqwest::blocking::Client::new();
+                let client = blocking_probe_client();
                 let body = serde_json::json!({
                     "clientId": client_id,
                     "clientSecret": client_secret,
@@ -4946,7 +4930,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check your credentials",
+                            "\r  {} Connection failed  -  check your credentials",
                             style("❌").red().bold()
                         );
                         continue;
@@ -4977,7 +4961,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("QQ Official Setup").white().bold(),
-                    style("— Tencent QQ Bot SDK").dim()
+                    style(" -  Tencent QQ Bot SDK").dim()
                 );
                 print_bullet("1. Go to QQ Bot developer console (q.qq.com)");
                 print_bullet("2. Create a bot application");
@@ -4995,7 +4979,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     Input::new().with_prompt("  App Secret").interact_text()?;
 
                 print!("  {} Testing connection... ", style("⏳").dim());
-                let client = reqwest::blocking::Client::new();
+                let client = blocking_probe_client();
                 let body = serde_json::json!({
                     "appId": app_id,
                     "clientSecret": app_secret,
@@ -5014,7 +4998,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                             );
                         } else {
                             println!(
-                                "\r  {} Auth error — check your credentials",
+                                "\r  {} Auth error  -  check your credentials",
                                 style("❌").red().bold()
                             );
                             continue;
@@ -5022,7 +5006,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     _ => {
                         println!(
-                            "\r  {} Connection failed — check your credentials",
+                            "\r  {} Connection failed  -  check your credentials",
                             style("❌").red().bold()
                         );
                         continue;
@@ -5065,7 +5049,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style(format!("{provider_label} Setup")).white().bold(),
-                    style(format!("— talk to SenWeaverCoding from {provider_label}")).dim()
+                    style(format!(" -  talk to SenWeaverCoding from {provider_label}")).dim()
                 );
                 print_bullet(&format!(
                     "1. Go to {provider_label} Open Platform ({provider_host})"
@@ -5143,7 +5127,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     Ok(Err(reason)) => {
                         println!(
-                            "\r  {} Connection failed — check your credentials",
+                            "\r  {} Connection failed  -  check your credentials",
                             style("❌").red().bold()
                         );
                         println!("    {}", style(reason).dim());
@@ -5151,7 +5135,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     }
                     Err(_) => {
                         println!(
-                            "\r  {} Connection failed — check your credentials",
+                            "\r  {} Connection failed  -  check your credentials",
                             style("❌").red().bold()
                         );
                         continue;
@@ -5185,7 +5169,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if receive_mode == LarkReceiveMode::Webhook && verification_token.is_none() {
                     println!(
-                        "  {} Verification Token is empty — webhook authenticity checks are reduced.",
+                        "  {} Verification Token is empty  -  webhook authenticity checks are reduced.",
                         style("⚠").yellow().bold()
                     );
                 }
@@ -5213,7 +5197,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_users.is_empty() {
                     println!(
-                        "  {} No users allowlisted — {provider_label} inbound messages will be denied until you add Open IDs or '*'.",
+                        "  {} No users allowlisted  -  {provider_label} inbound messages will be denied until you add Open IDs or '*'.",
                         style("⚠").yellow().bold()
                     );
                 }
@@ -5238,7 +5222,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 println!(
                     "  {} {}",
                     style("Nostr Setup").white().bold(),
-                    style("— private messages via NIP-04 & NIP-17").dim()
+                    style(" -  private messages via NIP-04 & NIP-17").dim()
                 );
                 print_bullet("SenWeaverCoding will listen for encrypted DMs on Nostr relays.");
                 print_bullet("You need a Nostr private key (hex or nsec) and at least one relay.");
@@ -5256,14 +5240,14 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 match nostr_sdk::Keys::parse(private_key.trim()) {
                     Ok(keys) => {
                         println!(
-                            "  {} Key valid — public key: {}",
+                            "  {} Key valid  -  public key: {}",
                             style("✅").green().bold(),
                             style(keys.public_key().to_hex()).cyan()
                         );
                     }
                     Err(_) => {
                         println!(
-                            "  {} Invalid private key — check format and try again",
+                            "  {} Invalid private key  -  check format and try again",
                             style("❌").red().bold()
                         );
                         continue;
@@ -5302,7 +5286,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 if allowed_pubkeys.is_empty() {
                     println!(
-                        "  {} No pubkeys allowlisted — inbound messages will be denied until you add pubkeys or '*'.",
+                        "  {} No pubkeys allowlisted  -  inbound messages will be denied until you add pubkeys or '*'.",
                         style("⚠").yellow().bold()
                     );
                 }
@@ -5352,11 +5336,11 @@ fn setup_tunnel() -> Result<crate::config::TunnelConfig> {
     println!();
 
     let options = vec![
-        "Skip — local only (default)",
-        "Cloudflare Tunnel — Zero Trust, free tier",
-        "Tailscale — private tailnet or public Funnel",
-        "ngrok — instant public URLs",
-        "Custom — bring your own (bore, frp, ssh, etc.)",
+        "Skip  -  local only (default)",
+        "Cloudflare Tunnel  -  Zero Trust, free tier",
+        "Tailscale  -  private tailnet or public Funnel",
+        "ngrok  -  instant public URLs",
+        "Custom  -  bring your own (bore, frp, ssh, etc.)",
     ];
 
     let choice = Select::new()
@@ -5402,9 +5386,9 @@ fn setup_tunnel() -> Result<crate::config::TunnelConfig> {
                 style("✓").green().bold(),
                 style("Tailscale").green(),
                 if funnel {
-                    "Funnel — public"
+                    "Funnel  -  public"
                 } else {
-                    "Serve — tailnet only"
+                    "Serve  -  tailnet only"
                 }
             );
             TunnelConfig {
@@ -5521,9 +5505,9 @@ async fn scaffold_workspace(
     };
 
     let identity = format!(
-        "# IDENTITY.md — Who Am I?\n\n\
+        "# IDENTITY.md  -  Who Am I?\n\n\
          - **Name:** {agent}\n\
-         - **Creature:** A Rust-forged AI — fast, lean, and relentless\n\
+         - **Creature:** A Rust-forged AI  -  fast, lean, and relentless\n\
          - **Vibe:** Sharp, direct, resourceful. Not corporate. Not a chatbot.\n\
          - **Emoji:** \u{1f980}\n\n\
          ---\n\n\
@@ -5532,39 +5516,39 @@ async fn scaffold_workspace(
 
     let memory_guidance = if memory_backend == "none" {
         "## Memory System\n\n\
-         memory.backend = \"none\" — persistent memory is disabled.\n\
+         memory.backend = \"none\"  -  persistent memory is disabled.\n\
          No daily notes or MEMORY.md will be created or injected.\n\
          All context exists only within the current session.\n\n"
             .to_string()
     } else {
         "## Memory System\n\n\
          You wake up fresh each session. These files ARE your continuity:\n\n\
-         - **Daily notes:** `memory/YYYY-MM-DD.md` — raw logs (accessed via memory tools)\n\
-         - **Long-term:** `MEMORY.md` — curated memories (auto-injected in main session)\n\n\
+         - **Daily notes:** `memory/YYYY-MM-DD.md`  -  raw logs (accessed via memory tools)\n\
+         - **Long-term:** `MEMORY.md`  -  curated memories (auto-injected in main session)\n\n\
          Capture what matters. Decisions, context, things to remember.\n\
          Skip secrets unless asked to keep them.\n\n"
             .to_string()
     };
 
     let session_steps = if memory_backend == "none" {
-        "1. Read `SOUL.md` — this is who you are\n\
-         2. Read `USER.md` — this is who you're helping\n\n"
+        "1. Read `SOUL.md`  -  this is who you are\n\
+         2. Read `USER.md`  -  this is who you're helping\n\n"
     } else {
-        "1. Read `SOUL.md` — this is who you are\n\
-         2. Read `USER.md` — this is who you're helping\n\
+        "1. Read `SOUL.md`  -  this is who you are\n\
+         2. Read `USER.md`  -  this is who you're helping\n\
          3. Use `memory_recall` for recent context (daily notes are on-demand)\n\
          4. If in MAIN SESSION (direct chat): `MEMORY.md` is already injected\n\n"
     };
 
     let agents = format!(
-        "# AGENTS.md — {agent} Personal Assistant\n\n\
+        "# AGENTS.md  -  {agent} Personal Assistant\n\n\
          ## Every Session (required)\n\n\
          Before doing anything else:\n\n\
          {session_steps}\
          Don't ask permission. Just do it.\n\n\
          {memory_guidance}\
-         ### Write It Down — No Mental Notes!\n\
-         - Memory is limited — if you want to remember something, WRITE IT TO A FILE\n\
+         ### Write It Down  -  No Mental Notes!\n\
+         - Memory is limited  -  if you want to remember something, WRITE IT TO A FILE\n\
          - \"Mental notes\" don't survive session restarts. Files do.\n\
          - When someone says \"remember this\" -> update daily file or MEMORY.md\n\
          - When you learn a lesson -> update AGENTS.md, TOOLS.md, or the relevant skill\n\n\
@@ -5606,11 +5590,11 @@ async fn scaffold_workspace(
     );
 
     let soul = format!(
-        "# SOUL.md — Who You Are\n\n\
+        "# SOUL.md  -  Who You Are\n\n\
          *You're not a chatbot. You're becoming someone.*\n\n\
          ## Core Truths\n\n\
          **Be genuinely helpful, not performatively helpful.**\n\
-         Skip the \"Great question!\" and \"I'd be happy to help!\" — just help.\n\n\
+         Skip the \"Great question!\" and \"I'd be happy to help!\"  -  just help.\n\n\
          **Have opinions.** You're allowed to disagree, prefer things,\n\
          find stuff amusing or boring.\n\n\
          **Be resourceful before asking.** Try to figure it out.\n\
@@ -5635,7 +5619,7 @@ async fn scaffold_workspace(
          ## Boundaries\n\n\
          - Private things stay private. Period.\n\
          - When in doubt, ask before acting externally.\n\
-         - You're not the user's voice — be careful in group chats.\n\n\
+         - You're not the user's voice  -  be careful in group chats.\n\n\
          ## Continuity\n\n\
          Each session, you wake up fresh. These files ARE your memory.\n\
          Read them. Update them. They're how you persist.\n\n\
@@ -5644,7 +5628,7 @@ async fn scaffold_workspace(
     );
 
     let user_md = format!(
-        "# USER.md — Who You're Helping\n\n\
+        "# USER.md  -  Who You're Helping\n\n\
          *{agent} reads this file every session to understand you.*\n\n\
          ## About You\n\
          - **Name:** {user}\n\
@@ -5653,16 +5637,16 @@ async fn scaffold_workspace(
          ## Communication Style\n\
          - {comm_style}\n\n\
          ## Preferences\n\
-         - (Add your preferences here — e.g. I work with Rust and TypeScript)\n\n\
+         - (Add your preferences here  -  e.g. I work with Rust and TypeScript)\n\n\
          ## Work Context\n\
-         - (Add your work context here — e.g. building a SaaS product)\n\n\
+         - (Add your work context here  -  e.g. building a SaaS product)\n\n\
          ---\n\
          *Update this anytime. The more {agent} knows, the better it helps.*\n"
     );
 
     let tools = "\
-         # TOOLS.md — Local Notes\n\n\
-         Skills define HOW tools work. This file is for YOUR specifics —\n\
+         # TOOLS.md  -  Local Notes\n\n\
+         Skills define HOW tools work. This file is for YOUR specifics  - \n\
          the stuff that's unique to your setup.\n\n\
          ## What Goes Here\n\n\
          Things like:\n\
@@ -5671,29 +5655,29 @@ async fn scaffold_workspace(
          - Preferred voices for TTS\n\
          - Anything environment-specific\n\n\
          ## Built-in Tools\n\n\
-         - **shell** — Execute terminal commands\n\
+         - **shell**  -  Execute terminal commands\n\
            - Use when: running local checks, build/test commands, or diagnostics.\n\
            - Don't use when: a safer dedicated tool exists, or command is destructive without approval.\n\
-         - **file_read** — Read file contents\n\
+         - **file_read**  -  Read file contents\n\
            - Use when: inspecting project files, configs, or logs.\n\
            - Don't use when: you only need a quick string search (prefer targeted search first).\n\
-         - **file_write** — Write file contents\n\
+         - **file_write**  -  Write file contents\n\
            - Use when: applying focused edits, scaffolding files, or updating docs/code.\n\
            - Don't use when: unsure about side effects or when the file should remain user-owned.\n\
-         - **memory_store** — Save to memory\n\
+         - **memory_store**  -  Save to memory\n\
            - Use when: preserving durable preferences, decisions, or key context.\n\
            - Don't use when: info is transient, noisy, or sensitive without explicit need.\n\
-         - **memory_recall** — Search memory\n\
+         - **memory_recall**  -  Search memory\n\
            - Use when: you need prior decisions, user preferences, or historical context.\n\
            - Don't use when: the answer is already in current files/conversation.\n\
-         - **memory_forget** — Delete a memory entry\n\
+         - **memory_forget**  -  Delete a memory entry\n\
            - Use when: memory is incorrect, stale, or explicitly requested to be removed.\n\
            - Don't use when: uncertain about impact; verify before deleting.\n\n\
          ---\n\
          *Add whatever helps you do your job. This is your cheat sheet.*\n";
 
     let bootstrap = format!(
-        "# BOOTSTRAP.md — Hello, World\n\n\
+        "# BOOTSTRAP.md  -  Hello, World\n\n\
          *You just woke up. Time to figure out who you are.*\n\n\
          Your human's name is **{user}** (timezone: {tz}).\n\
          They prefer: {comm_style}\n\n\
@@ -5702,22 +5686,22 @@ async fn scaffold_workspace(
          Introduce yourself as {agent} and get to know each other.\n\n\
          ## After You Know Each Other\n\n\
          Update these files with what you learned:\n\
-         - `IDENTITY.md` — your name, vibe, emoji\n\
-         - `USER.md` — their preferences, work context\n\
-         - `SOUL.md` — boundaries and behavior\n\n\
+         - `IDENTITY.md`  -  your name, vibe, emoji\n\
+         - `USER.md`  -  their preferences, work context\n\
+         - `SOUL.md`  -  boundaries and behavior\n\n\
          ## When You're Done\n\n\
-         Delete this file. You don't need a bootstrap script anymore —\n\
+         Delete this file. You don't need a bootstrap script anymore  - \n\
          you're you now.\n"
     );
 
     let memory = "\
-         # MEMORY.md — Long-Term Memory\n\n\
+         # MEMORY.md  -  Long-Term Memory\n\n\
          *Your curated memories. The distilled essence, not raw logs.*\n\n\
          ## How This Works\n\
          - Daily files (`memory/YYYY-MM-DD.md`) capture raw events (on-demand via tools)\n\
          - This file captures what's WORTH KEEPING long-term\n\
          - This file is auto-injected into your system prompt each session\n\
-         - Keep it concise — every character here costs tokens\n\n\
+         - Keep it concise  -  every character here costs tokens\n\n\
          ## Security\n\
          - ONLY loaded in main session (direct chat with your human)\n\
          - NEVER loaded in group chats or shared contexts\n\n\

@@ -12,7 +12,9 @@
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
+    clippy::needless_return,
     clippy::collapsible_if,
+    clippy::collapsible_else_if,
     clippy::default_trait_access,
     clippy::derivable_impls,
     clippy::doc_markdown,
@@ -65,7 +67,6 @@
     clippy::unwrap_or_default,
     clippy::used_underscore_binding,
     clippy::wildcard_imports,
-    dead_code,
 )]
 
 use clap::Subcommand;
@@ -73,8 +74,6 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod session;
-
-pub use session as agent_session;
 
 pub mod approval;
 pub mod auth;
@@ -164,7 +163,7 @@ pub mod context;
 pub mod coordinator;
 
 #[cfg(feature = "crdt-coordination")]
-pub mod coordination;
+pub mod crdt;
 pub mod entrypoints;
 
 pub mod keybindings;
@@ -186,12 +185,12 @@ pub mod plugins;
 
 pub use config::Config;
 
-pub mod sdk;
+pub mod embed;
 
 pub use agent::coordination::{Coordinator, CoordinatorHandle};
 pub use agent::registry::{AgentRegistry, AgentRegistryHandle};
 pub use agent::supervisor::{Supervisor, SupervisorHandle};
-pub use agent::task_queue::{TaskQueue, TaskQueueHandle};
+pub use agent::task_orchestrator::queue::{TaskQueue, TaskQueueHandle};
 pub use entrypoints::{
     HookEvent, PermissionMode, SdkConfig, SdkEntrypoint, SdkHookCallback, SdkMcpServer, SdkMessage,
     SdkModelUsage, SdkSession, SdkStatus, SdkToolCall, SdkToolCallBuilder, SdkTurnEvent,

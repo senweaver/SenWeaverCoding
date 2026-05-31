@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_API_VERSION: &str = "2024-08-01-preview";
 
+#[allow(dead_code)]
 pub struct AzureOpenAiProvider {
     credential: Option<String>,
     resource_name: String,
@@ -305,7 +306,7 @@ impl AzureOpenAiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("provider.azure_openai", 120, 10)
     }

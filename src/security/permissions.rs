@@ -386,8 +386,13 @@ pub const CURATOR_MODE_ALLOWED_TOOLS: &[&str] = &[
     "exit_curator_mode",
     "curator_collect",
     "curator_deep_collect",
+    "curator_git_reference",
+    "curator_local_reference",
     "curator_template_list",
     "curator_template_apply",
+    "multi_persona_review",
+    "scenario_matrix",
+    "security_audit",
 ];
 
 pub fn is_curator_mode_allowed_tool(name: &str) -> bool {
@@ -468,8 +473,6 @@ pub struct PermissionsConfig {
     #[serde(default)]
     pub tool_allowlist: Vec<String>,
 }
-
-#[allow(dead_code)]
 pub struct AutoAllowGate;
 
 #[async_trait]

@@ -47,6 +47,7 @@ pub struct EditHistory {
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 struct EditHistoryState {
     index: HistoryIndex,
     timeline: Vec<EditEvent>,

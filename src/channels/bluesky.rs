@@ -46,8 +46,6 @@ struct NotificationListResponse {
     notifications: Vec<Notification>,
     cursor: Option<String>,
 }
-
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Notification {
     uri: String,
@@ -60,9 +58,8 @@ struct Notification {
     #[serde(rename = "indexedAt")]
     indexed_at: String,
 }
-
-#[allow(dead_code)]
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct NotificationAuthor {
     did: String,
     handle: String,
@@ -115,7 +112,7 @@ impl BlueskyChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client("channel.bluesky")
     }

@@ -142,7 +142,7 @@ fn build_prompt(req: &NepRequest, max_history: usize, window_lines: usize) -> St
     let mut out = String::new();
     out.push_str("# Active file\n");
     out.push_str(&format!("Path: {}\n", req.active_file.display()));
-    out.push_str(&format!("Cursor line: {}\n\n", req.cursor_line));
+    out.push_str(&format!("Caret line: {}\n\n", req.cursor_line));
     out.push_str("## Source window\n```\n");
     out.push_str(&windowed_source(&req.source, req.cursor_line, window_lines));
     out.push_str("\n```\n\n");
@@ -157,7 +157,7 @@ fn build_prompt(req: &NepRequest, max_history: usize, window_lines: usize) -> St
     } else {
         for (idx, edit) in history.iter().enumerate() {
             out.push_str(&format!(
-                "### Edit {idx} — {file}\n",
+                "### Edit {idx}  -  {file}\n",
                 idx = idx + 1,
                 file = edit.file_path.display(),
             ));

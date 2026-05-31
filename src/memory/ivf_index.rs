@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use super::vector_index::VectorIndex;
+use super::vector::index::VectorIndex;
 
 pub const IVF_FILE_MAGIC: &[u8; 8] = b"SENIVF01";
 

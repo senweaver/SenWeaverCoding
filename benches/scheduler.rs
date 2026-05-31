@@ -1,8 +1,3 @@
-// Benchmark: TaskScheduler throughput.
-//
-// Measures how fast the scheduler can process a task graph of N independent
-// tasks (claim + complete cycle).
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use senweavercoding::agent::scheduler::{SchedulableTask, TaskScheduler};
 use std::hint::black_box;

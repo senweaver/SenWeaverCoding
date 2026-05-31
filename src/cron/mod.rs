@@ -10,12 +10,9 @@ mod store;
 mod types;
 
 pub mod scheduler;
-
-#[allow(unused_imports)]
 pub use schedule::{
     next_run_for_schedule, normalize_expression, schedule_cron_expression, validate_schedule,
 };
-#[allow(unused_imports)]
 pub use store::{
     add_agent_job, all_overdue_jobs, due_jobs, finalize_run, get_job, list_jobs, list_runs,
     record_last_run, record_run, remove_job, reschedule_after_run, start_run, sync_declarative_jobs,
@@ -128,14 +125,6 @@ pub(crate) fn add_shell_job(
     command: &str,
 ) -> Result<CronJob> {
     add_shell_job_with_approval(config, name, schedule, command, None, false)
-}
-
-pub(crate) fn add_job(config: &Config, expression: &str, command: &str) -> Result<CronJob> {
-    let schedule = Schedule::Cron {
-        expr: expression.to_string(),
-        tz: None,
-    };
-    add_shell_job(config, None, schedule, command)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -424,14 +413,6 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
 
 pub(crate) fn add_once(config: &Config, delay: &str, command: &str) -> Result<CronJob> {
     add_once_validated(config, delay, command, false)
-}
-
-pub(crate) fn add_once_at(
-    config: &Config,
-    at: chrono::DateTime<chrono::Utc>,
-    command: &str,
-) -> Result<CronJob> {
-    add_once_at_validated(config, at, command, false)
 }
 
 pub fn pause_job(config: &Config, id: &str) -> Result<CronJob> {

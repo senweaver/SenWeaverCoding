@@ -496,11 +496,11 @@ impl Tool for NotebookEditTool {
             cell: cell_op,
         });
         let batch_id = batch.batch_id.clone();
-        let before_bytes = std::fs::read(&resolved_target).ok();
+        let before_bytes = tokio::fs::read(&resolved_target).await.ok();
 
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
-                let after_bytes = std::fs::read(&resolved_target).ok();
+                let after_bytes = tokio::fs::read(&resolved_target).await.ok();
                 let out_len = after_bytes
                     .as_ref()
                     .map(|b| b.len() as u64)

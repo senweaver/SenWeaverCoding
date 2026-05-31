@@ -23,7 +23,7 @@ pub struct MattermostChannel {
 
     proxy_url: Option<String>,
     transcription: Option<crate::config::TranscriptionConfig>,
-    transcription_manager: Option<Arc<super::transcription::TranscriptionManager>>,
+    transcription_manager: Option<Arc<super::pipeline::transcription::TranscriptionManager>>,
 }
 
 impl MattermostChannel {
@@ -60,7 +60,7 @@ impl MattermostChannel {
         if !config.enabled {
             return self;
         }
-        match super::transcription::TranscriptionManager::new(&config) {
+        match super::pipeline::transcription::TranscriptionManager::new(&config) {
             Ok(m) => {
                 self.transcription_manager = Some(Arc::new(m));
                 self.transcription = Some(config);
@@ -75,7 +75,7 @@ impl MattermostChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_channel_client("channel.mattermost", self.proxy_url.as_deref())
     }
@@ -490,32 +490,6 @@ fn is_audio_file(file: &serde_json::Value) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "ogg" | "mp3" | "m4a" | "wav" | "opus" | "flac"
     )
-}
-
-fn contains_bot_mention_mm(
-    text: &str,
-    bot_user_id: &str,
-    bot_username: &str,
-    post: &serde_json::Value,
-) -> bool {
-
-    if !find_bot_mention_spans(text, bot_username).is_empty() {
-        return true;
-    }
-
-    if !bot_user_id.is_empty() {
-        if let Some(mentions) = post
-            .get("metadata")
-            .and_then(|m| m.get("mentions"))
-            .and_then(|m| m.as_array())
-        {
-            if mentions.iter().any(|m| m.as_str() == Some(bot_user_id)) {
-                return true;
-            }
-        }
-    }
-
-    false
 }
 
 fn is_mattermost_username_char(c: char) -> bool {

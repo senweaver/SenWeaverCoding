@@ -249,7 +249,7 @@ pub fn init_state(cwd: PathBuf) -> &'static BootstrapState {
 pub fn get_state() -> &'static BootstrapState {
     GLOBAL_STATE
         .get()
-        .expect("bootstrap state not initialised — call init_state() first")
+        .expect("bootstrap state not initialised  -  call init_state() first")
 }
 
 pub fn try_get_state() -> Option<&'static BootstrapState> {

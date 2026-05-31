@@ -226,18 +226,74 @@ impl NevisAuthProvider {
         })
     }
 
-    #[allow(clippy::unused_async)]
     async fn validate_token_local(&self, token: &str) -> Result<NevisIdentity> {
+        let jwks_url = self
+            .jwks_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .context("Nevis token_validation is 'local' but jwks_url is not configured")?;
 
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
-            bail!("Invalid JWT structure: expected 3 dot-separated parts");
-        }
+        let jwks: jsonwebtoken::jwk::JwkSet = self
+            .http_client
+            .get(jwks_url)
+            .send()
+            .await
+            .context("Failed to fetch Nevis JWKS")?
+            .json()
+            .await
+            .context("Failed to parse Nevis JWKS")?;
 
-        bail!(
-            "Local JWKS token validation is not yet implemented. \
-             Set token_validation = \"remote\" to use the Nevis introspection endpoint."
+        let header = jsonwebtoken::decode_header(token).context("Invalid JWT header")?;
+        let kid = header
+            .kid
+            .as_deref()
+            .context("JWT header missing kid for JWKS lookup")?;
+        let jwk = jwks
+            .find(kid)
+            .with_context(|| format!("JWT kid '{kid}' not found in JWKS"))?;
+        let decoding_key =
+            jsonwebtoken::DecodingKey::from_jwk(jwk).context("Unsupported JWKS key material")?;
+
+        let issuer = format!(
+            "{}/auth/realms/{}",
+            self.instance_url.trim_end_matches('/'),
+            self.realm,
         );
+        let mut validation = jsonwebtoken::Validation::new(header.alg);
+        validation.set_audience(&[&self.client_id]);
+        validation.set_issuer(&[issuer.as_str()]);
+        validation.validate_exp = true;
+
+        let token_data = jsonwebtoken::decode::<LocalJwtClaims>(token, &decoding_key, &validation)
+            .context("JWT signature or claim validation failed")?;
+        let body = token_data.claims;
+
+        let user_id = body
+            .sub
+            .filter(|s| !s.trim().is_empty())
+            .context("Token has missing or empty `sub` claim")?;
+
+        let mut roles = body.realm_access.map(|ra| ra.roles).unwrap_or_default();
+        roles.sort();
+        roles.dedup();
+
+        Ok(NevisIdentity {
+            user_id,
+            roles,
+            scopes: body
+                .scope
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
+            mfa_verified: body.acr.as_deref() == Some("mfa")
+                || body
+                    .amr
+                    .iter()
+                    .flatten()
+                    .any(|m| m == "fido2" || m == "passkey" || m == "otp" || m == "webauthn"),
+            session_expiry: body.exp.unwrap_or(0),
+        })
     }
 
     pub async fn validate_session(&self, session_token: &str) -> Result<NevisIdentity> {
@@ -340,6 +396,17 @@ impl NevisAuthProvider {
     pub fn realm(&self) -> &str {
         &self.realm
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalJwtClaims {
+    sub: Option<String>,
+    scope: Option<String>,
+    exp: Option<u64>,
+    #[serde(rename = "realm_access")]
+    realm_access: Option<RealmAccess>,
+    acr: Option<String>,
+    amr: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

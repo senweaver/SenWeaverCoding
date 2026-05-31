@@ -24,7 +24,7 @@ pub const PLAN_SYSTEM_PROMPT: &str = concat!(
     "  * The last step MUST be of kind 'verify'.\n",
     "  * Use relative paths from the workspace root.\n",
     "  * Never reach outside the workspace.\n",
-    "  * Do NOT include prose, markdown fences, or explanations — only ",
+    "  * Do NOT include prose, markdown fences, or explanations  -  only ",
     "the JSON object.\n",
 );
 

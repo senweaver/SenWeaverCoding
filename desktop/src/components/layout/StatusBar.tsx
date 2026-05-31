@@ -1,9 +1,14 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useMemo, useState } from 'react'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../../stores/sessionRuntimeStore'
+import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useTabStore } from '../../stores/tabStore'
-import { useLspStore } from '../../stores/lspStore'
+import { resolveEffectiveRuntimeSelection } from '../../utils/runtimeSelection'
+import { resolveLspServerDisplayStatus, useLspStore } from '../../stores/lspStore'
 import { useActiveWorkspaceRoot } from '../../lib/activeWorkDir'
 import { useUIStore } from '../../stores/uiStore'
 import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
@@ -82,16 +87,25 @@ export function StatusBar() {
   const tCodingMode = useCodingModeText()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const providers = useProviderStore((s) => s.providers)
+  const sessionRuntimeSelection = useSessionRuntimeStore((s) =>
+    activeTabId ? s.selections[activeTabId] : undefined,
+  )
+  const draftRuntimeSelection = useSessionRuntimeStore((s) => s.selections[DRAFT_RUNTIME_SELECTION_KEY])
+  const settingsModel = useSettingsStore((s) => s.currentModel)
+  const activeProviderId = useProviderStore((s) => s.activeId)
 
-  const runtimeSelection = useSessionRuntimeStore((s) =>
-    activeTabId
-      ? s.selections[activeTabId] ?? s.selections[DRAFT_RUNTIME_SELECTION_KEY]
-      : s.selections[DRAFT_RUNTIME_SELECTION_KEY],
+  const runtimeSelection = useMemo(
+    () => resolveEffectiveRuntimeSelection(
+      activeTabId,
+      providers,
+      activeProviderId,
+      settingsModel?.id,
+    ),
+    [activeTabId, providers, activeProviderId, settingsModel, sessionRuntimeSelection, draftRuntimeSelection],
   )
 
   const codingMode = useSettingsStore((s) => s.codingMode)
   const codingModes = useSettingsStore((s) => s.codingModes)
-  const settingsModel = useSettingsStore((s) => s.currentModel)
   const settingsProviderName = useSettingsStore((s) => s.activeProviderName)
 
   const codingModeBackendLabel = codingModes.find((m) => m.id === codingMode)?.label
@@ -195,34 +209,40 @@ export function StatusBar() {
 
   const lspServers = useLspStore((s) => s.servers)
   const lspServerStatus = useLspStore((s) => s.serverStatus)
+  const lspInstallProgress = useLspStore((s) => s.installProgress)
   const lspEnabled = useLspStore((s) => s.enabled)
   const lspIndicator = useMemo(() => {
-    if (!lspEnabled) return { label: 'LSP off', tone: 'off' as const }
-    if (!languageId) return { label: 'LSP', tone: 'idle' as const }
+    if (!lspEnabled) return { label: t('files.statusBar.lspOff'), tone: 'off' as const }
+    if (!languageId) return { label: t('files.statusBar.lspIdle'), tone: 'idle' as const }
     const matching = lspServers.filter(
       (s) => s.enabled && s.languageId === languageId,
     )
     if (matching.length === 0) {
-      return { label: `LSP: no server (${languageId})`, tone: 'idle' as const }
+      return { label: t('files.statusBar.lspIdle'), tone: 'idle' as const }
     }
     let bestTone: 'ready' | 'starting' | 'failed' | 'idle' = 'idle'
     for (const srv of matching) {
-      const st = lspServerStatus[srv.id]?.status ?? srv.lifecycleStatus
-      if (st === 'ready') {
+      const display = resolveLspServerDisplayStatus(
+        lspEnabled,
+        srv,
+        lspServerStatus[srv.id]?.status ?? srv.lifecycleStatus ?? null,
+        lspInstallProgress[srv.id] ?? null,
+      )
+      if (display === 'ready') {
         bestTone = 'ready'
         break
       }
-      if (st === 'starting' && bestTone !== 'failed') bestTone = 'starting'
-      if (st === 'failed') bestTone = 'failed'
+      if (display === 'starting' && bestTone !== 'failed') bestTone = 'starting'
+      if (display === 'failed') bestTone = 'failed'
     }
     const labelMap: Record<typeof bestTone, string> = {
-      ready: `LSP: ready (${languageId})`,
-      starting: `LSP: starting (${languageId})`,
-      failed: `LSP: failed (${languageId})`,
-      idle: `LSP: idle (${languageId})`,
+      ready: t('files.statusBar.lspReady'),
+      starting: t('files.statusBar.lspStarting'),
+      failed: t('files.statusBar.lspFailed'),
+      idle: t('files.statusBar.lspIdle'),
     }
     return { label: labelMap[bestTone], tone: bestTone }
-  }, [languageId, lspEnabled, lspServerStatus, lspServers])
+  }, [languageId, lspEnabled, lspInstallProgress, lspServerStatus, lspServers, t])
 
   const lspDotClass = useMemo(() => {
     switch (lspIndicator.tone) {

@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use super::manager::PythonEnvState;
 
 fn config_root() -> PathBuf {
-    if let Some(custom) = crate::util::get_env_var("SEN_CONFIG_DIR") {
+    if let Some(custom) = crate::util::get_runtime_var("SEN_CONFIG_DIR") {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);

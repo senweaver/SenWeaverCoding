@@ -1,26 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Benchmarks for N1-v2 `turn_streamed` deep optimisations.
-//!
-//! What we measure:
-//!   * `event_canonicalize` — JSON hashing cost of a typical scenario
-//!     (used by `tests/turn_event_stability.rs` for the golden hash
-//!     protocol).  Should stay well under 10µs per 20-event sequence.
-//!   * `event_fanout` — simulated cost of one turn worth of N1-v2
-//!     TurnEvent fanout through in-memory translators.  Establishes
-//!     a floor so future regressions in the event pipeline show up.
-//!
-//! We deliberately **don't** spin up a real Agent here.  A real
-//! end-to-end bench needs network mocks, config bootstrap, and a
-//! ~1 second warmup that swamps the actual streaming cost.  Those
-//! concerns belong in a separate `benches/agent_turn.rs` (TODO).
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use senweavercoding::agent::TurnEvent;
 
-/// Build a scenario with `n` streamed text chunks + 1 tool call +
-/// 1 file edit + 1 tool result, for scale testing.
 fn build_scenario(n_chunks: usize) -> Vec<TurnEvent> {
     let mut out = Vec::with_capacity(n_chunks + 6);
     out.push(TurnEvent::ProgressTick {
@@ -36,10 +20,13 @@ fn build_scenario(n_chunks: usize) -> Vec<TurnEvent> {
     out.push(TurnEvent::ToolCall {
         name: "file_write".into(),
         args: serde_json::json!({"path": "src/lib.rs", "content": "..."}),
+        tool_call_id: Some("bench-tool-call-1".into()),
     });
     out.push(TurnEvent::ToolResult {
         name: "file_write".into(),
         output: r#"{"path": "src/lib.rs", "bytes": 512}"#.into(),
+        success: true,
+        tool_call_id: Some("bench-tool-call-1".into()),
     });
     out.push(TurnEvent::FileEdit {
         path: "src/lib.rs".into(),
@@ -71,11 +58,20 @@ fn event_to_json(event: &TurnEvent) -> serde_json::Value {
     match event {
         TurnEvent::Chunk { delta } => json!({ "kind": "Chunk", "delta": delta }),
         TurnEvent::Thinking { delta } => json!({ "kind": "Thinking", "delta": delta }),
-        TurnEvent::ToolCall { name, args } => {
-            json!({ "kind": "ToolCall", "name": name, "args": args })
+        TurnEvent::ToolCall {
+            name,
+            args,
+            tool_call_id,
+        } => {
+            json!({ "kind": "ToolCall", "name": name, "args": args, "tool_call_id": tool_call_id })
         }
-        TurnEvent::ToolResult { name, output } => {
-            json!({ "kind": "ToolResult", "name": name, "output": output })
+        TurnEvent::ToolResult {
+            name,
+            output,
+            success,
+            tool_call_id,
+        } => {
+            json!({ "kind": "ToolResult", "name": name, "output": output, "success": success, "tool_call_id": tool_call_id })
         }
         TurnEvent::Error { message } => json!({ "kind": "Error", "message": message }),
         TurnEvent::FileEdit {
@@ -132,6 +128,23 @@ fn event_to_json(event: &TurnEvent) -> serde_json::Value {
             "subkind": format!("{kind:?}"),
             "delta": delta,
         }),
+        TurnEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            description,
+        } => json!({
+            "kind": "PermissionRequest",
+            "request_id": request_id,
+            "tool_name": tool_name,
+            "input": input,
+            "description": description,
+        }),
+        TurnEvent::PiiSanitized { report } => json!({
+            "kind": "PiiSanitized",
+            "report": format!("{report:?}"),
+        }),
+        _ => json!({ "kind": "Other" }),
     }
 }
 
@@ -164,8 +177,6 @@ fn bench_event_hash(c: &mut Criterion) {
 }
 
 fn bench_event_clone(c: &mut Criterion) {
-    // Proxy for the cost of sending a TurnEvent across an
-    // `mpsc::Sender`; clone dominates that cost.
     let events = build_scenario(50);
     c.bench_function("turn_event_clone_50", |b| {
         b.iter(|| {
@@ -175,9 +186,6 @@ fn bench_event_clone(c: &mut Criterion) {
     });
 }
 
-// ── tool_specs clone cost comparison ───────────────────────────────────────
-
-/// Generate a realistic ToolSpec payload with non-trivial JSON args.
 fn make_tool_specs(n: usize) -> Vec<senweavercoding::tools::ToolSpec> {
     (0..n)
         .map(|i| senweavercoding::tools::ToolSpec {
@@ -201,7 +209,6 @@ fn make_tool_specs(n: usize) -> Vec<senweavercoding::tools::ToolSpec> {
         .collect()
 }
 
-/// Arc-clone: O(1) — only the pointer is cloned.
 fn bench_tool_specs_arc_clone(c: &mut Criterion) {
     let specs = make_tool_specs(50);
     let arc = std::sync::Arc::new(specs);
@@ -213,7 +220,6 @@ fn bench_tool_specs_arc_clone(c: &mut Criterion) {
     });
 }
 
-/// Vec-clone: O(n) — the entire vec and all elements are copied.
 fn bench_tool_specs_vec_clone(c: &mut Criterion) {
     let specs = make_tool_specs(50);
     c.bench_function("tool_specs_vec_clone_50", |b| {
@@ -224,13 +230,11 @@ fn bench_tool_specs_vec_clone(c: &mut Criterion) {
     });
 }
 
-/// Arc-clone with owned-conversion (the pattern used in loop_.rs when activated_tools exist).
 fn bench_tool_specs_arc_to_owned(c: &mut Criterion) {
     let specs = make_tool_specs(50);
     let arc = std::sync::Arc::new(specs);
     c.bench_function("tool_specs_arc_to_owned_50", |b| {
         b.iter(|| {
-            // This matches the code in loop_.rs: Arc clone + deref + owned clone
             let owned: Vec<_> = (*arc).clone();
             std::hint::black_box(owned);
         });

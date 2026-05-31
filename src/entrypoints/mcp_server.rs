@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::security::SecurityPolicy;
 use crate::services::mcp_server::McpServer;
-use crate::tools::file_read::FileReadTool;
-use crate::tools::glob_search::GlobSearchTool;
+use crate::tools::file::read::FileReadTool;
+use crate::tools::glob::search::GlobSearchTool;
 use crate::tools::traits::Tool;
-use crate::tools::web_fetch::WebFetchTool;
+use crate::tools::web::fetch::WebFetchTool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {

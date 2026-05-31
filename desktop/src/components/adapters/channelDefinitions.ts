@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import type { AdapterFileConfig, ChannelId, FeatureFlags } from '../../types/adapter'
 
 export type ChannelCategory = 'im' | 'whatsapp' | 'email' | 'webhook_social' | 'voice'
@@ -571,9 +575,9 @@ export const CHANNEL_DEFINITIONS: readonly ChannelDefinition[] = [
     ],
   },
   {
-    id: 'clawdtalk',
-    i18nName: 'settings.adapters.channels.clawdtalk.name',
-    i18nTagline: 'settings.adapters.channels.clawdtalk.tagline',
+    id: 'telnyx',
+    i18nName: 'settings.adapters.channels.telnyx.name',
+    i18nTagline: 'settings.adapters.channels.telnyx.tagline',
     category: 'voice',
     icon: 'voice_chat',
     isConfigured: (v) => hasAny(v, ['apiKey', 'connectionId']),

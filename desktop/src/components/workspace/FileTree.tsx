@@ -1,6 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
+import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import {
   joinPath,
   nameOf,
@@ -186,6 +191,7 @@ export function FileTree({ workDir, onSelect }: Props) {
   const handleContextMenu = useCallback(
     (event: React.MouseEvent, node: FileTreeNode) => {
       event.preventDefault()
+      event.stopPropagation()
       setContextMenu({ x: event.clientX, y: event.clientY, target: { kind: 'node', node } })
     },
     [],
@@ -402,7 +408,27 @@ export function FileTree({ workDir, onSelect }: Props) {
     [addToast, t, workDir],
   )
 
+  const handleOpenInTerminal = useCallback(
+    (node: FileTreeNode) => {
+      try {
+        const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+        const store = useTerminalPanelStore.getState()
+        store.setOpen(true)
+        store.openNewTab({ cwd: abs })
+      } catch (err) {
+        addToast({
+          type: 'error',
+          message: t('files.tree.openTerminalFailed', {
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        })
+      }
+    },
+    [addToast, t, workDir],
+  )
+
   const canReveal = useMemo(() => isTauriRuntime(), [])
+  const canOpenTerminal = useMemo(() => isTauriRuntime(), [])
 
   const dirsForFlat = useWorkspaceFilesStore((s) => s.dirs)
   const visibleNodes = useMemo(() => {
@@ -745,6 +771,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           y={contextMenu.y}
           target={contextMenu.target}
           canReveal={canReveal}
+          canOpenTerminal={canOpenTerminal}
           onClose={() => setContextMenu(null)}
           onNewFile={handleNewFile}
           onNewFolder={handleNewFolder}
@@ -756,6 +783,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           onCopyRelativePath={handleCopyRelativePath}
           onCopyAsMarkdown={handleCopyAsMarkdown}
           onReveal={handleReveal}
+          onOpenInTerminal={handleOpenInTerminal}
         />
       )}
     </div>

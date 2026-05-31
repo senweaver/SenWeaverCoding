@@ -143,8 +143,12 @@ impl CostTracker {
             storage.add_record(record.clone())?;
         }
 
-        let mut session_costs = self.lock_session_costs();
-        session_costs.push(record);
+        {
+            let mut session_costs = self.lock_session_costs();
+            session_costs.push(record.clone());
+        }
+
+        fire_usage_notify(&record);
 
         Ok(())
     }
@@ -204,6 +208,23 @@ impl CostTracker {
 }
 
 static GLOBAL_COST_TRACKER: OnceLock<Option<Arc<CostTracker>>> = OnceLock::new();
+
+pub type UsageNotifyCallback = Arc<dyn Fn(&CostRecord) + Send + Sync + 'static>;
+
+static USAGE_NOTIFY_CALLBACK: OnceLock<UsageNotifyCallback> = OnceLock::new();
+
+pub fn set_usage_notify_callback<F>(cb: F)
+where
+    F: Fn(&CostRecord) + Send + Sync + 'static,
+{
+    let _ = USAGE_NOTIFY_CALLBACK.set(Arc::new(cb));
+}
+
+pub(crate) fn fire_usage_notify(record: &CostRecord) {
+    if let Some(cb) = USAGE_NOTIFY_CALLBACK.get() {
+        cb(record);
+    }
+}
 
 impl CostTracker {
 
@@ -403,8 +424,6 @@ impl CostStorage {
 
         writeln!(file, "{}", serde_json::to_string(&record)?)
             .with_context(|| format!("Failed to write cost record to {}", self.path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to sync cost storage at {}", self.path.display()))?;
 
         let day_before = self.cached_day;
         let year_before = self.cached_year;

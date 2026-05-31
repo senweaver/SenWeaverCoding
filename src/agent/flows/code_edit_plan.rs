@@ -495,7 +495,7 @@ pub const PLANNER_JSON_SCHEMA: &str = r#"{
   }
 }"#;
 
-pub const CODE_EDIT_PLANNER_PROMPT_V2: &str = r#"You are a precise code-editing planner. Respond with STRICTLY VALID JSON matching this schema (and nothing else — no markdown, no commentary):
+pub const CODE_EDIT_PLANNER_PROMPT_V2: &str = r#"You are a precise code-editing planner. Respond with STRICTLY VALID JSON matching this schema (and nothing else  -  no markdown, no commentary):
 
 {schema}
 
@@ -512,14 +512,14 @@ Rules:
 - `depends_on` MUST reference earlier ids declared in this same response.
 - Keep `description` imperative and specific (e.g. "Add `Foo::bar` returning `Result<X, Error>`", not "update Foo").
 - Estimate `est_tokens` as the rough total tokens for prompt + response of that step (model output will be a unified diff, not a full file).
-- Use `kind = "review"` when an edit on another file *might* affect this file's compilation but you are not sure it does — the executor is allowed to return an empty diff for review steps.
+- Use `kind = "review"` when an edit on another file *might* affect this file's compilation but you are not sure it does  -  the executor is allowed to return an empty diff for review steps.
 - Return valid JSON. No prose, no markdown fences."#;
 
 pub const CODE_EDIT_PLANNER_RETRY_PROMPT: &str = r"Your previous JSON response failed validation:
 error: {error}
 raw: {raw}
 
-Produce a corrected JSON that matches the schema below. Return JSON only — no prose, no markdown fences.
+Produce a corrected JSON that matches the schema below. Return JSON only  -  no prose, no markdown fences.
 {schema}";
 
 pub fn render_planner_prompt(

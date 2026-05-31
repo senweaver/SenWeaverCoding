@@ -2,12 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 #![recursion_limit = "256"]
-#![allow(dead_code, unused_imports)]
-#[cfg(windows)]
-#[allow(unused_imports)]
-use std::os::windows::process::CommandExt;
-
-#[allow(unused_imports)]
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use dialoguer::Password;
@@ -29,90 +23,39 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     _bootstrap::parse_temperature(s)
 }
 
-#[inline]
-fn print_no_command_help() -> Result<()> {
-    _bootstrap::print_no_command_help()
-}
-
 mod agent { pub use senweavercoding::agent::*; }
-mod approval { pub use senweavercoding::approval::*; }
 mod auth { pub use senweavercoding::auth::*; }
-mod bootstrap { pub use senweavercoding::bootstrap::*; }
 mod channels { pub use senweavercoding::channels::*; }
 mod cli { pub use senweavercoding::cli::*; }
 mod commands { pub use senweavercoding::commands::*; }
-mod rag { pub use senweavercoding::rag::*; }
 mod config { pub use senweavercoding::config::*; }
 mod cost { pub use senweavercoding::cost::*; }
 mod cron { pub use senweavercoding::cron::*; }
 mod daemon { pub use senweavercoding::daemon::*; }
 mod doctor { pub use senweavercoding::doctor::*; }
-mod event_bus { pub use senweavercoding::event_bus::*; }
-mod evolution { pub use senweavercoding::evolution::*; }
 mod gateway { pub use senweavercoding::gateway::*; }
-mod guardrails { pub use senweavercoding::guardrails::*; }
-mod hands { pub use senweavercoding::hands::*; }
 mod hardware { pub use senweavercoding::hardware::*; }
-mod health { pub use senweavercoding::health::*; }
-mod heartbeat { pub use senweavercoding::heartbeat::*; }
-mod hooks { pub use senweavercoding::hooks::*; }
-mod i18n { pub use senweavercoding::i18n::*; }
-mod identity { pub use senweavercoding::identity::*; }
 mod integrations { pub use senweavercoding::integrations::*; }
 mod memory { pub use senweavercoding::memory::*; }
 mod migration { pub use senweavercoding::migration::*; }
-mod multimodal { pub use senweavercoding::multimodal::*; }
-mod nodes { pub use senweavercoding::nodes::*; }
 mod observability { pub use senweavercoding::observability::*; }
 mod onboard { pub use senweavercoding::onboard::*; }
 mod peripherals { pub use senweavercoding::peripherals::*; }
 #[cfg(feature = "plugins-wasm")]
 mod plugins { pub use senweavercoding::plugins::*; }
 mod providers { pub use senweavercoding::providers::*; }
-mod python_env { pub use senweavercoding::python_env::*; }
-mod query { pub use senweavercoding::query::*; }
-mod routines { pub use senweavercoding::routines::*; }
 mod rpc { pub use senweavercoding::rpc::*; }
 mod runtime { pub use senweavercoding::runtime::*; }
 mod security { pub use senweavercoding::security::*; }
 mod services { pub use senweavercoding::services::*; }
-mod skillforge { pub use senweavercoding::skillforge::*; }
-
-#[allow(unused_imports)]
-mod entrypoints {
-    #[allow(unused_imports)]
-    pub use senweavercoding::entrypoints::*;
-}
-mod bench_diff { pub use senweavercoding::bench_diff::*; }
-mod session { pub use senweavercoding::session::*; }
-
 mod apply_model { pub use senweavercoding::apply_model::*; }
 
-mod code_intel { pub use senweavercoding::code_intel::*; }
-mod constants { pub use senweavercoding::constants::*; }
-mod context { pub use senweavercoding::context::*; }
-#[cfg(feature = "crdt-coordination")]
-mod coordination { pub use senweavercoding::coordination::*; }
-
-mod context_resolver { pub use senweavercoding::context_resolver::*; }
-mod coordinator { pub use senweavercoding::coordinator::*; }
-mod editor_core { pub use senweavercoding::editor_core::*; }
-mod error { pub use senweavercoding::error::*; }
 mod inline_completion { pub use senweavercoding::inline_completion::*; }
-mod lsp { pub use senweavercoding::lsp::*; }
 mod inline_edit { pub use senweavercoding::inline_edit::*; }
 mod skills { pub use senweavercoding::skills::*; }
 mod sop { pub use senweavercoding::sop::*; }
-mod tasks { pub use senweavercoding::tasks::*; }
-mod tools { pub use senweavercoding::tools::*; }
 mod token_saver { pub use senweavercoding::token_saver::*; }
-mod trust { pub use senweavercoding::trust::*; }
-mod tunnel { pub use senweavercoding::tunnel::*; }
-mod user_rules { pub use senweavercoding::user_rules::*; }
 mod util { pub use senweavercoding::util::*; }
-mod verifiable_intent { pub use senweavercoding::verifiable_intent::*; }
-mod workflows { pub use senweavercoding::workflows::*; }
-
 use config::Config;
 
 pub use senweavercoding::{
@@ -152,9 +95,9 @@ enum EstopLevelArg {
 #[command(author = "senweaver")]
 #[command(version)]
 #[command(
-    about = "SenWeaverCoding — AI Code Editor",
+    about = "SenWeaverCoding \u{1F680} AI Code Editor",
     long_about = "\
-SenWeaverCoding — AI Code Editor
+SenWeaverCoding \u{1F680} AI Code Editor
 
 Usage:
   sen                          Start interactive session
@@ -1150,10 +1093,25 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(config_dir) = &cli.config_dir {
-        if config_dir.trim().is_empty() {
+        let trimmed = config_dir.trim();
+        if trimmed.is_empty() {
             bail!("--config-dir cannot be empty");
         }
-        crate::util::set_env_var("SEN_CONFIG_DIR", &config_dir);
+        let expanded = crate::config::schema::expand_tilde_path(trimmed);
+        let resolved = if expanded.is_absolute() {
+            expanded
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&expanded))
+                .unwrap_or(expanded)
+        };
+        if let Err(e) = std::fs::create_dir_all(&resolved) {
+            bail!(
+                "--config-dir '{}' is not usable: {e}",
+                resolved.display()
+            );
+        }
+        crate::util::set_runtime_var("SEN_CONFIG_DIR", resolved.to_string_lossy().as_ref());
     }
 
     if let Some(ref project) = cli.project {
@@ -1162,19 +1120,19 @@ async fn main() -> Result<()> {
         } else {
             std::env::current_dir().map(|cwd| cwd.join(project))?
         };
-        crate::util::set_env_var("SEN_WORKSPACE", project_path.to_string_lossy().as_ref());
+        crate::util::set_runtime_var("SEN_WORKSPACE", project_path.to_string_lossy().as_ref());
     }
 
     if cli.read_only {
-        crate::util::set_env_var("SEN_READ_ONLY", "1");
+        crate::util::set_runtime_var("SEN_READ_ONLY", "1");
     }
 
     if let Some(max_iters) = cli.max_iterations {
-        crate::util::set_env_var("SEN_MAX_ITERATIONS", max_iters.to_string());
+        crate::util::set_runtime_var("SEN_MAX_ITERATIONS", max_iters.to_string());
     }
 
     if cli.dry_run {
-        crate::util::set_env_var("SEN_DRY_RUN", "1");
+        crate::util::set_runtime_var("SEN_DRY_RUN", "1");
     }
 
     if let Some(Commands::Completions { shell }) = &cli.command {
@@ -1258,7 +1216,7 @@ async fn main() -> Result<()> {
                 let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S");
                 let backup_dir = format!("{}.backup.{}", sen_dir.display(), timestamp);
 
-                println!("⚠️  Reinitializing SenWeaverCoding configuration...");
+                println!("\u{2699}\u{FE0F}  Reinitializing SenWeaverCoding configuration...");
                 println!("   Current config directory: {}", sen_dir.display());
                 println!(
                     "   This will back up your existing config to: {}",
@@ -1326,7 +1284,7 @@ async fn main() -> Result<()> {
             println!();
         }
 
-        if crate::util::get_env_var("SEN_AUTOSTART_CHANNELS").as_deref() == Some("1") {
+        if crate::util::get_runtime_var("SEN_AUTOSTART_CHANNELS").as_deref() == Some("1") {
             Box::pin(channels::start_channels(config)).await?;
         }
         return Ok(());
@@ -1389,7 +1347,7 @@ async fn main() -> Result<()> {
                     senweavercoding::agent::coding_mode::CodingMode::from_str_loose(mode_str)
                 {
                     let _ = std::panic::catch_unwind(|| {
-                        let svc = senweavercoding::services::get_services();
+                        let svc = senweavercoding::services::require_services();
                         *svc.coding_mode.write() = coding_mode;
                     });
                 } else {
@@ -1562,11 +1520,11 @@ async fn main() -> Result<()> {
                 Some(senweavercoding::GatewayCommands::Restart { port, host }) => {
                     let (port, host) = resolve_gateway_addr(&config, port, host);
                     let addr = format!("{host}:{port}");
-                    info!("🔄 Restarting SenWeaverCoding Gateway on {addr}");
+                    info!("\u{1F501} Restarting SenWeaverCoding Gateway on {addr}");
 
                     match shutdown_gateway(&host, port).await {
                         Ok(()) => {
-                            info!("   ✓ Existing gateway on {addr} shut down gracefully");
+                            info!("   \u{2713} Existing gateway on {addr} shut down gracefully");
 
                             let deadline =
                                 tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
@@ -1600,11 +1558,13 @@ async fn main() -> Result<()> {
 
                     match fetch_paircode(host, port, new).await {
                         Ok(Some(code)) => {
-                            println!("🔐 Gateway pairing is enabled.");
+                            println!("\u{1F511} Gateway pairing is enabled.");
                             println!();
-                            println!("  ┌──────────────┐");
-                            println!("  │  {code}  │");
-                            println!("  └──────────────┘");
+                            let width = code.chars().count() + 4;
+                            let bar: String = std::iter::repeat('\u{2501}').take(width).collect();
+                            println!("  \u{250F}{bar}\u{2513}");
+                            println!("  \u{2503}  {code}  \u{2503}");
+                            println!("  \u{2517}{bar}\u{251B}");
                             println!();
                             println!("  Use this one-time code to pair a new device:");
                             println!("    POST /pair with header X-Pairing-Code: {code}");
@@ -1612,14 +1572,14 @@ async fn main() -> Result<()> {
                         Ok(None) => {
                             if config.gateway.require_pairing {
                                 println!(
-                                    "🔐 Gateway pairing is enabled, but no active pairing code available."
+                                    "\u{26A0}\u{FE0F} Gateway pairing is enabled, but no active pairing code available."
                                 );
                                 println!(
                                     "   The gateway may already be paired, or the code has been used."
                                 );
                                 println!("   Restart the gateway to generate a new pairing code.");
                             } else {
-                                println!("⚠️  Gateway pairing is disabled in config.");
+                                println!("\u{1F513}  Gateway pairing is disabled in config.");
                                 println!(
                                     "   All requests will be accepted without authentication."
                                 );
@@ -1630,7 +1590,7 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             println!(
-                                "❌ Failed to fetch pairing code from gateway at {host}:{port}"
+                                "\u{274C} Failed to fetch pairing code from gateway at {host}:{port}"
                             );
                             println!("   Error: {e}");
                             println!();
@@ -1668,9 +1628,9 @@ async fn main() -> Result<()> {
             let port = port.unwrap_or(config.gateway.port);
             let host = host.unwrap_or_else(|| config.gateway.host.clone());
             if port == 0 {
-                info!("🧠 Starting SenWeaverCoding Daemon on {host} (random port)");
+                info!("\u{1F680} Starting SenWeaverCoding Daemon on {host} (random port)");
             } else {
-                info!("🧠 Starting SenWeaverCoding Daemon on {host}:{port}");
+                info!("\u{1F680} Starting SenWeaverCoding Daemon on {host}:{port}");
             }
             Box::pin(daemon::run(config, host, port)).await
         }
@@ -1699,38 +1659,38 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            println!("🦀 SenWeaverCoding Status");
+            println!("\u{1F4CB} SenWeaverCoding Status");
             println!();
             println!("Version:     {}", env!("CARGO_PKG_VERSION"));
             println!("Workspace:   {}", config.workspace_dir.display());
             println!("Config:      {}", config.config_path.display());
             println!();
             println!(
-                "🤖 Provider:      {}",
+                "\u{1F916} Provider:      {}",
                 config.default_provider.as_deref().unwrap_or("openrouter")
             );
             println!(
                 "   Model:         {}",
                 config.default_model.as_deref().unwrap_or("(default)")
             );
-            println!("📊 Observability:  {}", config.observability.backend);
+            println!("\u{1F4CA} Observability:  {}", config.observability.backend);
             println!(
-                "🧾 Trace storage:  {} ({})",
+                "\u{1F4BE} Trace storage:  {} ({})",
                 config.observability.runtime_trace_mode, config.observability.runtime_trace_path
             );
-            println!("🛡️  Autonomy:      {:?}", config.autonomy.level);
-            println!("⚙️  Runtime:       {}", config.runtime.kind);
+            println!("\u{1F6E1}\u{FE0F}  Autonomy:      {:?}", config.autonomy.level);
+            println!("\u{2699}\u{FE0F}  Runtime:       {}", config.runtime.kind);
             if services::service::is_running() {
-                println!("🟢 Service:       running");
+                println!("\u{1F7E2} Service:       running");
             } else {
-                println!("🔴 Service:       stopped");
+                println!("\u{1F534} Service:       stopped");
             }
             let effective_memory_backend = memory::effective_memory_backend_name(
                 &config.memory.backend,
                 Some(&config.storage.provider.config),
             );
             println!(
-                "💓 Heartbeat:      {}",
+                "\u{1F493} Heartbeat:      {}",
                 if config.heartbeat.enabled {
                     format!("every {}min", config.heartbeat.interval_minutes)
                 } else {
@@ -1738,7 +1698,7 @@ async fn main() -> Result<()> {
                 }
             );
             println!(
-                "🧠 Memory:         {} (auto-save: {})",
+                "\u{1F9E0} Memory:         {} (auto-save: {})",
                 effective_memory_backend,
                 if config.memory.auto_save { "on" } else { "off" }
             );
@@ -1790,11 +1750,11 @@ async fn main() -> Result<()> {
                             );
                         }
                         Err(e) => {
-                            eprintln!("  ⚠ Could not load cost usage: {e}");
+                            eprintln!("  \u{26A0}\u{FE0F} Could not load cost usage: {e}");
                         }
                     },
                     Err(e) => {
-                        eprintln!("  ⚠ Could not init cost tracker: {e}");
+                        eprintln!("  \u{26A0}\u{FE0F} Could not init cost tracker: {e}");
                     }
                 }
             }
@@ -1802,15 +1762,15 @@ async fn main() -> Result<()> {
             println!("  E-stop enabled:    {}", config.security.estop.enabled);
             println!();
             println!("Channels:");
-            println!("  CLI:      ✅ always");
+            println!("  CLI:      \u{2713} always");
             for (channel, configured) in config.channels_config.channels() {
                 println!(
                     "  {:9} {}",
                     channel.name(),
                     if configured {
-                        "✅ configured"
+                        "\u{2713} configured"
                     } else {
-                        "❌ not configured"
+                        "\u{2717} not configured"
                     }
                 );
             }
@@ -1872,7 +1832,9 @@ async fn main() -> Result<()> {
                 .to_ascii_lowercase();
             println!("Supported providers ({} total):\n", providers.len());
             println!("  ID (use in config)  DESCRIPTION");
-            println!("  ─────────────────── ───────────");
+            let col1: String = std::iter::repeat('\u{2500}').take(19).collect();
+            let col2: String = std::iter::repeat('\u{2500}').take(33).collect();
+            println!("  {col1} {col2}");
             for p in &providers {
                 let is_active = p.name.eq_ignore_ascii_case(&current)
                     || p.aliases
@@ -2239,7 +2201,7 @@ async fn main() -> Result<()> {
                     println!("Installed plugins:");
                     for p in &plugins {
                         println!(
-                            "  {} v{} — {}",
+                            "  {} v{} \u{2192} {}",
                             p.name,
                             p.version,
                             p.description.as_deref().unwrap_or("(no description)")
@@ -2520,7 +2482,7 @@ fn handle_tokens_command(config: &Config, command: TokensCommands) -> Result<()>
                 } else {
                     (totals.tokens_saved as f64 / totals.tokens_before as f64) * 100.0
                 };
-                println!("Token Saver — cumulative savings");
+                println!("Token Saver \u{1F4B0} cumulative savings");
                 println!("  total commands : {}", totals.commands);
                 println!("  raw tokens     : {}", totals.tokens_before);
                 println!("  compacted      : {}", totals.tokens_after);
@@ -2804,9 +2766,9 @@ fn resolve_gateway_addr(config: &Config, port: Option<u16>, host: Option<String>
 
 fn log_gateway_start(host: &str, port: u16) {
     if port == 0 {
-        info!("🚀 Starting SenWeaverCoding Gateway on {host} (random port)");
+        info!("\u{1F680} Starting SenWeaverCoding Gateway on {host} (random port)");
     } else {
-        info!("🚀 Starting SenWeaverCoding Gateway on {host}:{port}");
+        info!("\u{1F680} Starting SenWeaverCoding Gateway on {host}:{port}");
     }
 }
 
@@ -3463,7 +3425,7 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                     {
                         Some(_) => {
                             let profile_name = profile.as_deref().unwrap_or("default");
-                            println!("✓ Gemini token refreshed successfully");
+                            println!("\u{2705} Gemini token refreshed successfully");
                             println!("  Profile: gemini:{}", profile_name);
                             Ok(())
                         }
@@ -3550,9 +3512,6 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
 }
 
 fn get_config_value(config: &Config, key: &str) -> Result<()> {
-    #[allow(unused_imports)]
-    use crate::security::SecretStore;
-
     let parts: Vec<&str> = key.split('.').collect();
     if parts.is_empty() {
         bail!("Key cannot be empty");
@@ -3866,7 +3825,14 @@ async fn run_inline_complete_command(
         }
     };
 
-    let registry = inline_completion::registry::default_provider(config).ok_or_else(|| {
+    let registry = {
+        let cfg = config.clone();
+        tokio::task::spawn_blocking(move || inline_completion::registry::default_provider(&cfg))
+            .await
+            .ok()
+            .flatten()
+    }
+    .ok_or_else(|| {
         anyhow::anyhow!(
             "inline completion is disabled: no provider configured. Run `sen onboard` first."
         )
@@ -3946,7 +3912,14 @@ async fn run_inline_edit_command(
     apply: bool,
     show_applied: bool,
 ) -> Result<()> {
-    let runner = inline_edit::service::default_runner(config).ok_or_else(|| {
+    let runner = {
+        let cfg = config.clone();
+        tokio::task::spawn_blocking(move || inline_edit::service::default_runner(&cfg))
+            .await
+            .ok()
+            .flatten()
+    }
+    .ok_or_else(|| {
         anyhow::anyhow!(
             "inline-edit runner unavailable: no provider configured. Run `sen onboard` first."
         )
@@ -4038,7 +4011,14 @@ async fn run_predict_next_command(
         request_id: uuid::Uuid::new_v4(),
     };
 
-    let registry = inline_completion::nep::registry::default_registry(config);
+    let registry = {
+        let cfg = config.clone();
+        tokio::task::spawn_blocking(move || {
+            inline_completion::nep::registry::default_registry(&cfg)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("nep registry init task failed: {e}"))?
+    };
     let response = registry
         .predict(req)
         .await
@@ -4059,7 +4039,13 @@ async fn run_predict_next_command(
         && let Some(suggestion) = suggestion
     {
         let opts = crate::apply_model::ApplyOptions::default();
-        let refiner = inline_edit::service::default_fast_refiner(config);
+        let refiner = {
+            let cfg = config.clone();
+            tokio::task::spawn_blocking(move || inline_edit::service::default_fast_refiner(&cfg))
+                .await
+                .ok()
+                .flatten()
+        };
         let refiner_ref: Option<&crate::apply_model::FastApplyRefiner> =
             refiner.as_deref();
         let _ = inline_completion::nep::apply_suggestion(suggestion, refiner_ref, &opts)
@@ -4134,11 +4120,12 @@ async fn run_team_command(config: &Config, action: TeamAction) -> Result<()> {
             let resolved_provider_name =
                 crate::providers::resolve_runtime_provider_name(&provider_name, config);
             let model = crate::providers::resolve_default_model(config)?;
-            let provider = crate::providers::create_provider_with_url(
-                &resolved_provider_name,
-                config.api_key.as_deref(),
-                config.api_url.as_deref(),
+            let provider = crate::providers::create_provider_with_url_async(
+                resolved_provider_name,
+                config.api_key.clone(),
+                config.api_url.clone(),
             )
+            .await
             .map_err(|e| {
                 anyhow::anyhow!("failed to build provider `{provider_name}`: {e}")
             })?;
@@ -4175,7 +4162,7 @@ async fn run_team_command(config: &Config, action: TeamAction) -> Result<()> {
                         stage
                             .error
                             .as_deref()
-                            .map(|e| format!(" — {e}"))
+                            .map(|e| format!(" \u{2717} {e}"))
                             .unwrap_or_default(),
                     );
                 }

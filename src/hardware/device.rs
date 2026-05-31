@@ -264,7 +264,7 @@ impl DeviceRegistry {
                 .as_deref()
                 .unwrap_or("unknown arch");
             lines.push(format!(
-                "  {} — {} ({}) [{}]",
+                "  {}  -  {} ({}) [{}]",
                 alias, entry.device.board_name, arch, status
             ));
         }
@@ -492,7 +492,7 @@ impl DeviceRegistry {
         let transport = HardwareSerialTransport::new(&port_path, DEFAULT_BAUD);
         if !transport.ping_handshake().await {
             anyhow::bail!(
-                "ping handshake failed after reconnect on {port_path} — \
+                "ping handshake failed after reconnect on {port_path}  -  \
                  firmware may not be running"
             );
         }

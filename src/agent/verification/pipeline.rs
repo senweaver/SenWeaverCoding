@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use super::lsp_bridge::LspPoolDiagnosticFetcher;
-use super::lsp_diag::LspDiagVerifier;
+use super::lsp::bridge::LspPoolDiagnosticFetcher;
+use super::lsp::diag::LspDiagVerifier;
 use super::syntactic::SyntacticVerifier;
 use super::test_runner::TestRunnerBuilder;
 use super::traits::{Artifact, VerificationReport, Verifier};

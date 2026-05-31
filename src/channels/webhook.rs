@@ -62,36 +62,11 @@ impl WebhookChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client("channel.webhook")
     }
 
-    fn verify_signature(&self, body: &[u8], signature: Option<&str>) -> bool {
-        let Some(ref secret) = self.secret else {
-            return true;
-        };
-
-        let Some(sig) = signature else {
-            return false;
-        };
-
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        type HmacSha256 = Hmac<Sha256>;
-
-        let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
-            return false;
-        };
-        mac.update(body);
-
-        let Ok(expected) = hex::decode(sig.trim_start_matches("sha256=")) else {
-            return false;
-        };
-
-        mac.verify_slice(&expected).is_ok()
-    }
 }
 
 #[async_trait]

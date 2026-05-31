@@ -47,7 +47,7 @@ pub struct MatrixChannel {
     otk_conflict_detected: Arc<AtomicBool>,
     recovery_key: Option<String>,
     transcription: Option<crate::config::TranscriptionConfig>,
-    transcription_manager: Option<Arc<super::transcription::TranscriptionManager>>,
+    transcription_manager: Option<Arc<super::pipeline::transcription::TranscriptionManager>>,
     stream_mode: crate::config::StreamMode,
     draft_update_interval_ms: u64,
     multi_message_delay_ms: u64,
@@ -272,7 +272,7 @@ impl MatrixChannel {
         if !config.enabled {
             return self;
         }
-        match super::transcription::TranscriptionManager::new(&config) {
+        match super::pipeline::transcription::TranscriptionManager::new(&config) {
             Ok(m) => {
                 self.transcription_manager = Some(Arc::new(m));
                 self.transcription = Some(config);
@@ -600,7 +600,7 @@ impl MatrixChannel {
                     match client.encryption().recovery().recover(key).await {
                         Ok(()) => {
                             tracing::info!(
-                                "Matrix E2EE recovery successful — room keys and cross-signing secrets restored from server backup."
+                                "Matrix E2EE recovery successful  -  room keys and cross-signing secrets restored from server backup."
                             );
                         }
                         Err(error) => {
@@ -1069,14 +1069,14 @@ impl Channel for MatrixChannel {
                                     if body.starts_with("[IMAGE:") {
                                         format!("[IMAGE:{}]", dest.display())
                                     } else {
-                                        format!("{} — saved to {}", body, dest.display())
+                                        format!("{}  -  saved to {}", body, dest.display())
                                     }
                                 }
-                                Err(_) => format!("{} — failed to write to disk", body),
+                                Err(_) => format!("{}  -  failed to write to disk", body),
                             },
-                            Err(_) => format!("{} — download failed", body),
+                            Err(_) => format!("{}  -  download failed", body),
                         },
-                        _ => format!("{} — download failed (auth error?)", body),
+                        _ => format!("{}  -  download failed (auth error?)", body),
                     }
                 } else {
                     body

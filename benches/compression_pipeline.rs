@@ -1,9 +1,3 @@
-// Benchmarks the hard-trim stage of the context compression pipeline.
-//
-// Measures throughput for shrinking 1K / 10K / 100K-token histories to a
-// fixed `max_messages` budget.  The LLM-based summarisation stage is not
-// measured here (it is bounded by provider latency, not local CPU).
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use senweavercoding::agent::context_pipeline::{ContextPipeline, HardTrimStage};
 use senweavercoding::providers::traits::ChatMessage;
@@ -57,8 +51,6 @@ fn bench_hard_trim_large(c: &mut Criterion) {
 }
 
 fn bench_no_op_path(c: &mut Criterion) {
-    // Pipeline runs but history already under target — measures the fast
-    // "nothing to do" code path.
     c.bench_function("compression_noop_path", |b| {
         b.iter(|| {
             let mut history = make_history(10, 100);

@@ -11,11 +11,11 @@ use tracing::{debug, info};
 use super::coordination::{Coordinator, CoordinatorHandle};
 use super::registry::{AgentRegistry, AgentRegistryHandle};
 use super::scheduler::{SchedulableTask, TaskOutcome, TaskScheduler};
-use super::scheduler_runtime::{SchedulerSpanContext, TaskExecutor, TaskSchedulerRuntime};
+use super::scheduler::runtime::{SchedulerSpanContext, TaskExecutor, TaskSchedulerRuntime};
 use super::subagent_limiter::{SubagentLimitConfig, SubagentLimiter};
 use super::supervisor::{Supervisor, SupervisorConfig, SupervisorHandle};
-use super::task_queue::{TaskQueue, TaskQueueHandle};
-use super::task_router::{RoutingDecision, Task, TaskRouter, TaskRouterConfig};
+use super::task_orchestrator::queue::{TaskQueue, TaskQueueHandle};
+use super::task_orchestrator::router::{RoutingDecision, Task, TaskRouter, TaskRouterConfig};
 use crate::error::SenError;
 use crate::memory::blackboard::{Blackboard, BlackboardHandle};
 
@@ -499,7 +499,7 @@ pub fn init_global_runtime_with_config(config: MultiAgentRuntimeConfig) -> Arc<M
                     conflicting_agent_id = %prior_agent,
                     caller_user_id = %caller_user_id,
                     "Multi-agent runtime: sub-agents share the same CallerIdentity \
-                     user_id — per-agent RBAC workspace isolation cannot be enforced. \
+                     user_id  -  per-agent RBAC workspace isolation cannot be enforced. \
                      Assign each sub-agent a distinct CallerIdentity."
                 );
             }

@@ -74,7 +74,7 @@ pub fn print_results(results: &[CheckResult]) {
         } else {
             "\x1b[31m✗\x1b[0m"
         };
-        println!("  {} {}/{} {} — {}", icon, i + 1, total, r.name, r.detail);
+        println!("  {} {}/{} {}  -  {}", icon, i + 1, total, r.name, r.detail);
     }
     println!();
     if failed == 0 {

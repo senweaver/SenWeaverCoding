@@ -71,7 +71,7 @@ impl InitEntrypoint {
             .and_then(|n| n.to_str())
             .unwrap_or("project");
         format!(
-            "# AGENTS.md — {project_name}\n\n\
+            "# AGENTS.md  -  {project_name}\n\n\
              Cross-tool agent instructions for this project.\n\n\
              ## Project Overview\n\n\
              <!-- Describe your project here -->\n\n\
@@ -104,7 +104,7 @@ impl InitEntrypoint {
 
         let legacy_path = config_dir.join("config.json");
         if legacy_path.exists() {
-            tracing::info!("Detected legacy config.json — migration available");
+            tracing::info!("Detected legacy config.json  -  migration available");
             applied.push("legacy_config_detected".to_string());
         }
         applied

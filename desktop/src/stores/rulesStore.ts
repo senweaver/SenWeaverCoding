@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { create } from 'zustand'
 import { guardrailsApi, type GuardrailsPatch } from '../api/guardrails'
 import type { GuardrailsConfig } from '../types/rules'

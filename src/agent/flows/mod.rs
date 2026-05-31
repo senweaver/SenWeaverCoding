@@ -4,7 +4,6 @@
 
 pub mod builtins;
 pub mod checkpoint;
-pub mod checkpoint_backend;
 
 pub mod code_edit_plan;
 pub mod plan_exec_verify;
@@ -12,7 +11,7 @@ pub mod registry;
 pub mod traits;
 
 pub use checkpoint::{Checkpoint, CheckpointStore};
-pub use checkpoint_backend::{
+pub use checkpoint::backend::{
     CheckpointBackend, CheckpointBackendError, CheckpointMeta, PersistentCheckpointBackend,
 };
 pub use code_edit_plan::{

@@ -45,7 +45,7 @@ impl DingTalkChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_channel_client("channel.dingtalk", self.proxy_url.as_deref())
     }
@@ -161,7 +161,7 @@ impl Channel for DingTalkChannel {
         let ws_url = format!("{}?ticket={}", gw.endpoint, gw.ticket);
 
         tracing::info!("DingTalk: connecting to stream WebSocket...");
-        let (ws_stream, _) = crate::services::get_services()
+        let (ws_stream, _) = crate::services::require_services()
             .proxy_runtime()
             .ws_connect(&ws_url, "channel.dingtalk", self.proxy_url.as_deref())
             .await?;

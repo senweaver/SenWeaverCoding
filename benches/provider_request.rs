@@ -1,19 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Provider-plumbing micro-benchmarks (Phase 3 D8).
-//!
-//! Three groups, all CPU-bound (no network IO), exercising the
-//! shared `providers::core` utilities that run on the hot path of
-//! every outbound LLM call:
-//!
-//! - `fingerprint` — idempotency-key computation (SHA-256 over the
-//!   canonicalised payload).
-//! - `sse_parse` — SseParser push/next cycle against a synthetic
-//!   32 KiB OpenAI-style delta stream.
-//! - `rate_limit` — TokenBucket acquire loop.
-//!
-//! Run: `cargo bench --bench provider_request`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -73,7 +60,7 @@ fn bench_sse_parse(c: &mut Criterion) {
                 let mut p = SseParser::new();
                 p.push(black_box(&chunk));
                 let mut count = 0usize;
-                while let Some(ev) = p.next() {
+                while let Some(ev) = p.next_event() {
                     black_box(&ev);
                     count += 1;
                 }

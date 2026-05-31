@@ -120,8 +120,6 @@ pub fn kill(id: &str) -> bool {
     }
     false
 }
-
-#[allow(dead_code)]
 pub fn snapshot() -> Vec<(String, String)> {
     let guard = registry()
         .children

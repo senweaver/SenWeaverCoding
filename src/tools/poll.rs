@@ -238,7 +238,7 @@ impl Tool for PollTool {
         }
 
         let native_note = if is_native {
-            " (native poll API available — text fallback used; trait extension needed for native support)"
+            " (native poll API available  -  text fallback used; trait extension needed for native support)"
         } else {
             ""
         };

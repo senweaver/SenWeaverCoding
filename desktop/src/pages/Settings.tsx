@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useState, useEffect, useMemo } from 'react'
 import { useSettingsStore, PII_KIND_LABELS, type PiiKindLabel } from '../stores/settingsStore'
 import { useChatStore } from '../stores/chatStore'
@@ -30,6 +34,8 @@ import { AgentsSettings } from './AgentsSettings'
 import { LspSettings } from './LspSettings'
 import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings'
 import { CredentialsSettings } from './CredentialsSettings'
+import { GlobalModelsPanel } from './GlobalModelsPanel'
+import { ProviderModelsPanel } from './ProviderModelsPanel'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 
 export function Settings() {
@@ -176,14 +182,19 @@ function ProviderSettings() {
     await fetchSettings()
   }
 
-  const toggleExpanded = (id: string) => {
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }))
+  const refreshProviderModels = async () => {
+    await fetchProviders()
+    await fetchSettings()
   }
 
-  const removeModelFromProvider = async (provider: SavedProvider, modelId: string) => {
-    const next = provider.models.filter((m) => m !== modelId)
-    await updateProvider(provider.id, { models: next })
+  const patchProvider = async (id: string, input: UpdateProviderInput) => {
+    const saved = await updateProvider(id, input)
     await fetchSettings()
+    return saved
+  }
+
+  const toggleExpanded = (id: string) => {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }))
   }
 
   return (
@@ -198,6 +209,15 @@ function ProviderSettings() {
           {t('settings.providers.addProvider')}
         </Button>
       </div>
+
+      {providers.length > 0 && (
+        <GlobalModelsPanel
+          providers={providers}
+          presetMap={presetMap}
+          onRefresh={refreshProviderModels}
+          onUpdateProvider={patchProvider}
+        />
+      )}
 
       {}
       {isLoading && providers.length === 0 ? (
@@ -285,38 +305,11 @@ function ProviderSettings() {
 
                 {isExpanded && (
                   <div className="px-4 pb-3 pt-1 border-t border-[var(--color-border-separator)]">
-                    <div className="text-xs uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
-                      {t('settings.providers.modelsHeader')}
-                    </div>
-                    {provider.models.length === 0 ? (
-                      <div className="text-xs text-[var(--color-text-tertiary)] italic py-2">
-                        {t('settings.providers.noModels')}
-                      </div>
-                    ) : (
-                      <div className="flex flex-col gap-1">
-                        {provider.models.map((modelId) => (
-                          <div
-                            key={modelId}
-                            className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-md bg-[var(--color-surface-container-low)] border border-[var(--color-border)]"
-                          >
-                            <span className="text-xs font-mono text-[var(--color-text-primary)] truncate">{modelId}</span>
-                            <button
-                              onClick={() => removeModelFromProvider(provider, modelId)}
-                              className="text-[var(--color-text-tertiary)] hover:text-[var(--color-error)] flex-shrink-0"
-                              title={t('common.delete')}
-                            >
-                              <span className="material-symbols-outlined text-[16px]">close</span>
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="mt-2 flex justify-end">
-                      <Button variant="ghost" size="sm" onClick={() => setEditingProvider(provider)}>
-                        <span className="material-symbols-outlined text-[14px]">edit</span>
-                        {t('settings.providers.editModels')}
-                      </Button>
-                    </div>
+                    <ProviderModelsPanel
+                      provider={provider}
+                      onUpdateProvider={patchProvider}
+                      onEditModels={() => setEditingProvider(provider)}
+                    />
                   </div>
                 )}
               </div>
@@ -427,6 +420,24 @@ function generateProviderEntityId(presetId: string): string {
   return `${seed}-${unique}`
 }
 
+type ModelRow = { id: string; value: string }
+
+function createModelRowId(): string {
+  try {
+    const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined
+    if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+      return cryptoApi.randomUUID()
+    }
+  } catch {
+
+  }
+  return `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`
+}
+
+function toModelRows(values: string[]): ModelRow[] {
+  return values.map((value) => ({ id: createModelRowId(), value }))
+}
+
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const createProvider = useProviderStore((s) => s.createProvider)
   const updateProvider = useProviderStore((s) => s.updateProvider)
@@ -451,8 +462,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const [apiFormat, setApiFormat] = useState<ApiFormat>(provider?.apiFormat ?? initialPreset.apiFormat ?? 'openai_chat')
   const [apiKey, setApiKey] = useState('')
   const [notes, setNotes] = useState(provider?.notes ?? '')
-  const [models, setModels] = useState<string[]>(
-    provider?.models ?? [...initialPreset.defaultModels],
+  const [modelRows, setModelRows] = useState<ModelRow[]>(() =>
+    toModelRows(provider?.models ?? [...initialPreset.defaultModels]),
   )
 
   const [modelContextWindows, setModelContextWindows] = useState<Record<string, string>>(() => {
@@ -504,7 +515,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setName(presetInitialName(preset))
     setBaseUrl(preset.baseUrl)
     setApiFormat(preset.apiFormat ?? 'openai_chat')
-    setModels([...preset.defaultModels])
+    setModelRows(toModelRows([...preset.defaultModels]))
 
     setModelContextWindows({})
     setTestResult(null)
@@ -516,12 +527,12 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     () =>
       Array.from(
         new Set(
-          models
-            .map((m) => m.trim())
+          modelRows
+            .map((row) => row.value.trim())
             .filter((m) => m.length > 0),
         ),
       ),
-    [models],
+    [modelRows],
   )
   const primaryModel = trimmedModels[0] ?? ''
   const canSubmit =
@@ -533,23 +544,34 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const addModel = (raw?: string) => {
     const candidate = (raw ?? newModelDraft).trim()
     if (!candidate) return
-    setModels((prev) => (prev.includes(candidate) ? prev : [...prev, candidate]))
+    setModelRows((prev) =>
+      prev.some((row) => row.value.trim() === candidate)
+        ? prev
+        : [...prev, { id: createModelRowId(), value: candidate }],
+    )
     setNewModelDraft('')
   }
 
-  const removeModel = (modelId: string) => {
-    setModels((prev) => prev.filter((m) => m !== modelId))
-    setModelContextWindows((prev) => {
-      if (!(modelId in prev)) return prev
-      const { [modelId]: _removed, ...rest } = prev
-      return rest
+  const removeModel = (rowId: string) => {
+    setModelRows((prev) => {
+      const removed = prev.find((row) => row.id === rowId)
+      if (removed) {
+        const modelId = removed.value.trim()
+        if (modelId) {
+          setModelContextWindows((windows) => {
+            if (!(modelId in windows)) return windows
+            const { [modelId]: _removed, ...rest } = windows
+            return rest
+          })
+        }
+      }
+      return prev.filter((row) => row.id !== rowId)
     })
   }
 
-  const updateModel = (index: number, value: string) => {
-    setModels((prev) => {
-      const previous = prev[index]
-      const next = prev.map((m, i) => (i === index ? value : m))
+  const updateModel = (rowId: string, value: string) => {
+    setModelRows((prev) => {
+      const previous = prev.find((row) => row.id === rowId)?.value
       if (previous && previous !== value) {
         setModelContextWindows((existing) => {
           const carried = existing[previous]
@@ -562,7 +584,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           return merged
         })
       }
-      return next
+      return prev.map((row) => (row.id === rowId ? { ...row, value } : row))
     })
   }
 
@@ -842,21 +864,21 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             <span className="ml-2 text-xs font-normal text-[var(--color-text-tertiary)]">{t('settings.providers.modelsHelp')}</span>
           </label>
           <div className="flex flex-col gap-1.5">
-            {models.length === 0 && (
+            {modelRows.length === 0 && (
               <div className="text-xs italic text-[var(--color-text-tertiary)] px-3 py-2 rounded-md border border-dashed border-[var(--color-border)]">
                 {t('settings.providers.noModels')}
               </div>
             )}
-            {models.map((m, idx) => {
-              const trimmedModelId = m.trim()
+            {modelRows.map((row, idx) => {
+              const trimmedModelId = row.value.trim()
               const contextWindowDraft = trimmedModelId
                 ? modelContextWindows[trimmedModelId] ?? ''
                 : ''
               return (
-                <div key={`${idx}-${m}`} className="flex items-center gap-2">
+                <div key={row.id} className="flex items-center gap-2">
                   <input
-                    value={m}
-                    onChange={(e) => updateModel(idx, e.target.value)}
+                    value={row.value}
+                    onChange={(e) => updateModel(row.id, e.target.value)}
                     placeholder="model-id"
                     className="flex-1 text-xs font-mono px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
                   />
@@ -879,7 +901,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     </span>
                   )}
                   <button
-                    onClick={() => removeModel(m)}
+                    onClick={() => removeModel(row.id)}
                     className="text-[var(--color-text-tertiary)] hover:text-[var(--color-error)] flex-shrink-0"
                     title={t('common.delete')}
                   >

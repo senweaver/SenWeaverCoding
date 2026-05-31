@@ -14,8 +14,6 @@ use crate::event_bus::types::{AgentId, Event, EventHistory, EventId, EventTarget
 pub mod backpressure;
 pub mod integration;
 pub mod types;
-
-#[allow(unused_imports)]
 pub use backpressure::BoundedSubscriber;
 
 const GLOBAL_CHANNEL_CAPACITY: usize = 1024;
@@ -53,7 +51,9 @@ fn glob_match_dp(pattern: &[char], value: &[char]) -> bool {
             }
         }
         std::mem::swap(&mut prev, &mut curr);
-        curr.iter_mut().for_each(|v| *v = false);
+        for v in curr.iter_mut() {
+            *v = false;
+        }
     }
     prev[vlen]
 }

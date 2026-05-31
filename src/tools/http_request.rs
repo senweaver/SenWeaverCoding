@@ -6,7 +6,6 @@ use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub struct HttpRequestTool {
     security: Arc<SecurityPolicy>,
@@ -94,25 +93,6 @@ impl HttpRequestTool {
         result
     }
 
-    fn redact_headers_for_display(headers: &[(String, String)]) -> Vec<(String, String)> {
-        headers
-            .iter()
-            .map(|(key, value)| {
-                let lower = key.to_lowercase();
-                let is_sensitive = lower.contains("authorization")
-                    || lower.contains("api-key")
-                    || lower.contains("apikey")
-                    || lower.contains("token")
-                    || lower.contains("secret");
-                if is_sensitive {
-                    (key.clone(), "***REDACTED***".into())
-                } else {
-                    (key.clone(), value.clone())
-                }
-            })
-            .collect()
-    }
-
     async fn execute_request(
         &self,
         url: &str,
@@ -126,14 +106,9 @@ impl HttpRequestTool {
         } else {
             self.timeout_secs
         };
-        let builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none());
-        let builder = crate::services::get_services()
+        let client = crate::services::require_services()
             .proxy_runtime()
-            .apply_to_builder(builder, "tool.http_request");
-        let client = builder.build()?;
+            .build_client_no_redirect_with_timeouts("tool.http_request", timeout_secs, 10);
 
         let mut request = client.request(method, url);
 

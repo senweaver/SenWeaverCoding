@@ -139,6 +139,7 @@ enum NodeMessage {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
 enum GatewayMessage {
     Registered {
         node_id: String,
@@ -211,7 +212,7 @@ pub async fn handle_ws_nodes(
         if token != expected_token {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide a valid node auth token",
+                "Unauthorized  -  provide a valid node auth token",
             )
                 .into_response();
         }
@@ -222,7 +223,7 @@ pub async fn handle_ws_nodes(
         if !state.pairing.is_authenticated(token) {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide Authorization header or ?token= query param",
+                "Unauthorized  -  provide Authorization header or ?token= query param",
             )
                 .into_response();
         }

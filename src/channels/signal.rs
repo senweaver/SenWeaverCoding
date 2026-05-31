@@ -96,7 +96,7 @@ impl SignalChannel {
 
     fn http_client(&self) -> Client {
         let builder = Client::builder().connect_timeout(Duration::from_secs(10));
-        let builder = crate::services::get_services()
+        let builder = crate::services::require_services()
             .proxy_runtime()
             .apply_channel_to_builder(builder, "channel.signal", self.proxy_url.as_deref());
         builder.build().unwrap_or_else(|e| {

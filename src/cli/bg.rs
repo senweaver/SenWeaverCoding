@@ -103,7 +103,7 @@ pub async fn kill_session(workspace: &Path, session_id: &str) -> Result<()> {
             tracing::warn!(
                 pid,
                 session_id,
-                "PID does not match recorded sen process (possible PID reuse) — skipping signal"
+                "PID does not match recorded sen process (possible PID reuse)  -  skipping signal"
             );
         } else {
             safe_terminate_pid(pid).await;

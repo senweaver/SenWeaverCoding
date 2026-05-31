@@ -283,7 +283,7 @@ fn aggregate_results(results: &[WorkerResult], strategy: MergeStrategy) -> Strin
                     truncate(&r.output, 240)
                 };
                 out.push_str(&format!(
-                    "- {} ({}): {} — {}\n",
+                    "- {} ({}): {}  -  {}\n",
                     r.title,
                     r.worker_id,
                     r.status.as_str(),

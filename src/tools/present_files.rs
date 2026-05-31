@@ -223,7 +223,7 @@ impl Tool for PresentFilesTool {
                 )
                 .ok();
             } else if file_type == "image" {
-                writeln!(output, "(image file — use view_image tool to inspect)").ok();
+                writeln!(output, "(image file  -  use view_image tool to inspect)").ok();
             }
 
             writeln!(output).ok();

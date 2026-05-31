@@ -1,8 +1,18 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useMemo, useState } from 'react'
 import { Button } from '../components/shared/Button'
 import { Input } from '../components/shared/Input'
-import { useTranslation } from '../i18n'
-import { listLspTemplates, lspTemplate, useLspStore } from '../stores/lspStore'
+import { useTranslation, type TranslationKey } from '../i18n'
+import {
+  listLspTemplates,
+  lspTemplate,
+  resolveLspServerDisplayStatus,
+  useLspStore,
+  type LspDisplayStatus,
+} from '../stores/lspStore'
 import { useUIStore } from '../stores/uiStore'
 import type { LspServerRecord, LspUpsertPayload } from '../types/lsp'
 
@@ -104,14 +114,24 @@ function buildPayload(draft: Draft): LspUpsertPayload {
   }
 }
 
-const STATUS_TONE: Record<string, string> = {
+const STATUS_TONE: Record<LspDisplayStatus, string> = {
   ready: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
   starting: 'bg-blue-500/10 text-blue-600 border-blue-500/20',
   failed: 'bg-rose-500/10 text-rose-600 border-rose-500/20',
   stopped: 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)] border-[var(--color-border)]',
-  installed: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
+  disabled: 'bg-[var(--color-surface-hover)] text-[var(--color-text-tertiary)] border-[var(--color-border)] opacity-70',
+  install: 'bg-[var(--color-brand)]/10 text-[var(--color-brand)] border-[var(--color-brand)]/25',
   installing: 'bg-amber-500/10 text-amber-600 border-amber-500/20',
-  not_installed: 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)] border-[var(--color-border)]',
+}
+
+const BADGE_I18N: Record<LspDisplayStatus, TranslationKey> = {
+  disabled: 'settings.lsp.badge.disabled',
+  stopped: 'settings.lsp.badge.stopped',
+  install: 'settings.lsp.badge.install',
+  installing: 'settings.lsp.badge.installing',
+  ready: 'settings.lsp.badge.ready',
+  starting: 'settings.lsp.badge.starting',
+  failed: 'settings.lsp.badge.failed',
 }
 
 export function LspSettings() {
@@ -246,7 +266,14 @@ export function LspSettings() {
     }
   }
 
-  const liveStatus = (serverId: string) => serverStatus[serverId]?.status
+  const displayStatusFor = (server: LspServerRecord): LspDisplayStatus =>
+    resolveLspServerDisplayStatus(
+      enabled,
+      server,
+      serverStatus[server.id]?.status ?? server.lifecycleStatus ?? null,
+      installProgress[server.id] ?? null,
+    )
+
   const installPhase = (serverId: string) => installProgress[serverId]
 
   const recentDiagnostics = useMemo(() => {
@@ -369,9 +396,9 @@ export function LspSettings() {
               </div>
             ) : (
               servers.map((s) => {
-                const status = liveStatus(s.id)
-                const installLabel = s.installState.status
+                const badge = displayStatusFor(s)
                 const isSelected = selected?.id === s.id
+                const rowMuted = !enabled || badge === 'disabled'
                 return (
                   <button
                     key={s.id}
@@ -383,7 +410,7 @@ export function LspSettings() {
                       isSelected
                         ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
                         : 'hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
-                    }`}
+                    } ${rowMuted ? 'opacity-60' : ''}`}
                   >
                     <div className="flex items-center gap-2 w-full">
                       <span className="material-symbols-outlined text-[16px]">
@@ -393,11 +420,11 @@ export function LspSettings() {
                         {s.displayName || s.id}
                       </span>
                       <span
-                        className={`px-1.5 py-0.5 text-[10px] font-medium rounded border ${
-                          STATUS_TONE[status ?? installLabel] ?? STATUS_TONE.not_installed
+                        className={`px-1.5 py-0.5 text-[10px] font-medium rounded border shrink-0 ${
+                          STATUS_TONE[badge]
                         }`}
                       >
-                        {status ?? installLabel}
+                        {t(BADGE_I18N[badge])}
                       </span>
                     </div>
                     <div className="text-[10px] text-[var(--color-text-tertiary)] font-mono truncate w-full">
@@ -541,6 +568,8 @@ export function LspSettings() {
               {selected && draft.managed && (
                 <ManagedActions
                   server={selected}
+                  globalEnabled={enabled}
+                  displayStatus={displayStatusFor(selected)}
                   progress={installPhase(selected.id)}
                   onInstall={() =>
                     void runWithToast(
@@ -557,6 +586,7 @@ export function LspSettings() {
                   <Button
                     variant="secondary"
                     size="sm"
+                    disabled={!enabled}
                     onClick={() =>
                       void runWithToast(
                         () => toggleServer(selected.id),
@@ -572,6 +602,7 @@ export function LspSettings() {
                   <Button
                     variant="secondary"
                     size="sm"
+                    disabled={!enabled || !selected.enabled}
                     onClick={() =>
                       void runWithToast(
                         () => restartServer(selected.id),
@@ -674,10 +705,14 @@ function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => voi
 
 function ManagedActions({
   server,
+  globalEnabled,
+  displayStatus,
   progress,
   onInstall,
 }: {
   server: LspServerRecord
+  globalEnabled: boolean
+  displayStatus: LspDisplayStatus
   progress?: { phase: string; percent?: number | null; message?: string }
   onInstall: () => void
 }) {
@@ -691,6 +726,10 @@ function ManagedActions({
 
   const installed = server.installState.status === 'installed'
   const failed = server.installState.status === 'failed' || phase === 'failed'
+  const canInstall =
+    globalEnabled &&
+    server.enabled &&
+    (installed || displayStatus === 'install' || displayStatus === 'failed')
 
   const description = (() => {
     if (server.installState.status === 'installed') {
@@ -721,7 +760,12 @@ function ManagedActions({
         </div>
       )}
       <div className="flex items-center gap-2">
-        <Button variant="primary" size="sm" onClick={onInstall} disabled={inProgress}>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={onInstall}
+          disabled={inProgress || !canInstall}
+        >
           <span className="material-symbols-outlined text-[14px]">download</span>
           {installed
             ? t('settings.lsp.action.reinstall')

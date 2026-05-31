@@ -70,7 +70,7 @@ impl WorkflowSpec {
                 ))
             }
             _ => Err(format!(
-                "unknown workflow file extension '{ext}' — expected .json"
+                "unknown workflow file extension '{ext}'  -  expected .json"
             )),
         }
     }

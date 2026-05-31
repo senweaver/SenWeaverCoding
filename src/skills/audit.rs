@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use std::fs;
@@ -25,10 +29,6 @@ impl SkillAuditReport {
     pub fn summary(&self) -> String {
         self.findings.join("; ")
     }
-}
-
-pub fn audit_skill_directory(skill_dir: &Path) -> Result<SkillAuditReport> {
-    audit_skill_directory_with_options(skill_dir, SkillAuditOptions::default())
 }
 
 pub fn audit_skill_directory_with_options(

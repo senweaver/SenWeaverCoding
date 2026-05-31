@@ -12,8 +12,6 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::agent::{Agent, TurnEvent};
 use crate::config::Config;
-use crate::observability::{Observer, ObserverEvent};
-use crate::providers::traits::TokenUsage;
 
 use super::sdk_types::{
     SdkConfig, SdkHookCallback, SdkMessage, SdkStatus, SdkToolCall, SdkTurnEvent,
@@ -25,60 +23,6 @@ struct SdkUsageAccumulator {
     output_tokens: u64,
     cache_read_tokens: u64,
     request_count: u64,
-}
-
-impl SdkUsageAccumulator {
-    fn update(&mut self, usage: &TokenUsage) {
-        self.input_tokens += usage.input_tokens.unwrap_or(0);
-        self.output_tokens += usage.output_tokens.unwrap_or(0);
-        self.cache_read_tokens += usage.cached_input_tokens.unwrap_or(0);
-        self.request_count += 1;
-    }
-}
-
-struct UsageTrackingObserver {
-    inner: Arc<dyn Observer>,
-    accumulator: Arc<Mutex<SdkUsageAccumulator>>,
-}
-
-impl UsageTrackingObserver {
-    fn new(inner: Arc<dyn Observer>, accumulator: Arc<Mutex<SdkUsageAccumulator>>) -> Self {
-        Self { inner, accumulator }
-    }
-}
-
-impl Observer for UsageTrackingObserver {
-    fn record_event(&self, event: &ObserverEvent) {
-        if let ObserverEvent::LlmResponse {
-            input_tokens,
-            output_tokens,
-            ..
-        } = event
-        {
-            let usage = TokenUsage {
-                input_tokens: *input_tokens,
-                output_tokens: *output_tokens,
-                cached_input_tokens: None,
-                cache_creation_input_tokens: None,
-            };
-            if let Ok(mut acc) = self.accumulator.try_lock() {
-                acc.update(&usage);
-            }
-        }
-        self.inner.record_event(event);
-    }
-
-    fn record_metric(&self, metric: &crate::observability::traits::ObserverMetric) {
-        self.inner.record_metric(metric);
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 pub struct SdkSession {
@@ -100,7 +44,7 @@ impl SdkSession {
         let mut guard = self.agent.lock().await;
         let agent = guard
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("no active session — call start_session() first"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active session  -  call start_session() first"))?;
 
         let start = std::time::Instant::now();
         let response_text = agent.turn(&message.content).await?;
@@ -123,7 +67,7 @@ impl SdkSession {
         let mut guard = self.agent.lock().await;
         let agent = guard
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("no active session — call start_session() first"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active session  -  call start_session() first"))?;
 
         let start = std::time::Instant::now();
 

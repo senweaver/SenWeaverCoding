@@ -148,7 +148,7 @@ impl DiagnosticsTool {
                 };
 
                 if trimmed.trim().is_empty() {
-                    Ok("No diagnostics found — project compiles cleanly.".to_string())
+                    Ok("No diagnostics found  -  project compiles cleanly.".to_string())
                 } else {
                     Ok(trimmed)
                 }

@@ -216,7 +216,7 @@ impl CopilotProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("provider.copilot", 120, 10)
     }

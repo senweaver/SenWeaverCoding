@@ -86,7 +86,7 @@ impl TokenCache {
 
         let new_state = self.acquire_token(client).await?;
         let token = new_state.access_token.clone();
-        self.persist_to_disk(&new_state);
+        self.persist_to_disk(&new_state).await;
         *self.inner.write() = Some(new_state);
         Ok(token)
     }
@@ -194,7 +194,7 @@ impl TokenCache {
             .context("ms365: failed to parse device code response")?;
 
         tracing::info!(
-            "ms365: device code auth required — follow the instructions shown to the user"
+            "ms365: device code auth required  -  follow the instructions shown to the user"
         );
 
         eprintln!("ms365: {}", device_resp.message);
@@ -306,9 +306,9 @@ impl TokenCache {
         serde_json::from_str(&data).ok()
     }
 
-    fn persist_to_disk(&self, state: &CachedTokenState) {
+    async fn persist_to_disk(&self, state: &CachedTokenState) {
         if let Ok(json) = serde_json::to_string_pretty(state) {
-            if let Err(e) = std::fs::write(&self.cache_path, json) {
+            if let Err(e) = tokio::fs::write(&self.cache_path, json).await {
                 tracing::warn!("ms365: failed to persist token cache: {e}");
             }
         }

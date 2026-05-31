@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useTranslation } from '../../i18n'
 import { getCategoryIcon, getToolCategory } from '../../utils/toolCategory'
 import { extractCommand, firstWord, truncate } from '../../utils/toolFormatters'

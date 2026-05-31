@@ -569,14 +569,14 @@ impl SopEngine {
             if is_critical {
 
                 info!(
-                    "SOP run {run_id}: approval timeout — auto-approving (critical/high priority)"
+                    "SOP run {run_id}: approval timeout  -  auto-approving (critical/high priority)"
                 );
                 match self.approve_step(&run_id) {
                     Ok(action) => actions.push(action),
                     Err(e) => warn!("SOP run {run_id}: auto-approve failed: {e}"),
                 }
             } else {
-                info!("SOP run {run_id}: approval timeout — waiting indefinitely (non-critical)");
+                info!("SOP run {run_id}: approval timeout  -  waiting indefinitely (non-critical)");
             }
         }
 
@@ -757,7 +757,7 @@ fn resolve_step_action(sop: &Sop, step: &SopStep, run_id: String, context: Strin
 
 fn format_step_context(sop: &Sop, run: &SopRun, step: &SopStep) -> String {
     let mut ctx = format!(
-        "[SOP: {} (run {}) — Step {} of {}]\n\n",
+        "[SOP: {} (run {})  -  Step {} of {}]\n\n",
         sop.name, run.run_id, step.number, run.total_steps
     );
 
@@ -775,7 +775,7 @@ fn format_step_context(sop: &Sop, run: &SopRun, step: &SopStep) -> String {
     if let Some(prev) = run.step_results.last() {
         let _ = writeln!(
             ctx,
-            "Previous: Step {} {} — {}",
+            "Previous: Step {} {}  -  {}",
             prev.step_number, prev.status, prev.output
         );
     }

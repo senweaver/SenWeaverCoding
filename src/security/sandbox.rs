@@ -18,7 +18,31 @@ fn warn_degraded(reason: &str) {
 }
 
 pub fn is_sandbox_active() -> bool {
-    cfg!(feature = "sandbox")
+    if !cfg!(feature = "sandbox") {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        #[cfg(feature = "sandbox-landlock")]
+        {
+            return true;
+        }
+        #[cfg(not(feature = "sandbox-landlock"))]
+        {
+            return false;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return cfg!(feature = "sandbox-windows-job");
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
 }
 
 pub fn sandbox_allows_path(path: &Path) -> bool {

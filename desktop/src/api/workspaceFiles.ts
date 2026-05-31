@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { api } from './client'
 import { getBaseUrl } from './client'
 import type {
@@ -144,28 +148,68 @@ export const workspaceFilesApi = {
       return () => {}
     }
     const url = `${getBaseUrl()}/api/workspace/watch${qs({ root })}`
-    const source = new window.EventSource(url, { withCredentials: false })
-    source.onmessage = (msg: MessageEvent) => {
-      try {
-        const data = JSON.parse(msg.data) as WorkspaceWatchEvent
-        if (data && typeof data.relPath === 'string' && typeof data.kind === 'string') {
-          if (typeof data.fromRelPath !== 'string') {
-            delete (data as { fromRelPath?: string }).fromRelPath
-          }
-          onEvent(data)
-        }
-      } catch {
+    let disposed = false
+    let source: EventSource | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let retryMs = 1000
 
+    const connect = () => {
+      if (disposed) return
+      if (source) {
+        try {
+          source.close()
+        } catch {
+        }
+        source = null
+      }
+      source = new window.EventSource(url, { withCredentials: false })
+      source.onmessage = (msg: MessageEvent) => {
+        try {
+          const data = JSON.parse(msg.data) as WorkspaceWatchEvent
+          if (data && typeof data.relPath === 'string' && typeof data.kind === 'string') {
+            if (typeof data.fromRelPath !== 'string') {
+              delete (data as { fromRelPath?: string }).fromRelPath
+            }
+            onEvent(data)
+          }
+        } catch {
+        }
+      }
+      source.onopen = () => {
+        retryMs = 1000
+      }
+      source.onerror = (event: Event) => {
+        if (source) {
+          try {
+            source.close()
+          } catch {
+          }
+          source = null
+        }
+        onError?.(event)
+        if (disposed || retryTimer) return
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          retryMs = Math.min(retryMs * 2, 30_000)
+          connect()
+        }, retryMs)
       }
     }
-    if (onError) {
-      source.onerror = onError
-    }
-    return () => {
-      try {
-        source.close()
-      } catch {
 
+    connect()
+
+    return () => {
+      disposed = true
+      if (retryTimer) {
+        clearTimeout(retryTimer)
+        retryTimer = null
+      }
+      if (source) {
+        try {
+          source.close()
+        } catch {
+        }
+        source = null
       }
     }
   },

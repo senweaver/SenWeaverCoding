@@ -9,6 +9,19 @@ import type { UIMessage } from '../types/chat'
 
 const seenIdsByMessages: WeakMap<readonly UIMessage[], Set<string>> = new WeakMap()
 
+const MUTATION_TOOLS = new Set([
+  'file_write',
+  'Write',
+  'file_create',
+  'file_edit',
+  'fileedit',
+  'editfile',
+  'multi_edit',
+  'patch_apply',
+  'glob_edit',
+  'notebook_edit',
+])
+
 let unsubscribe: (() => void) | null = null
 
 export function startAiWriteWatcher(): () => void {
@@ -41,6 +54,9 @@ function primeSeenIds(messages: readonly UIMessage[]) {
     if (msg.type === 'file_edit') {
       seen.add(msg.id)
     }
+    if (msg.type === 'tool_result') {
+      seen.add(`tool_result:${msg.toolUseId}`)
+    }
   }
 }
 
@@ -51,7 +67,7 @@ function handleSessions(
   const root = useWorkspaceFilesStore.getState().root
   if (!root) return
 
-  const register = useWorkspaceFilesStore.getState().registerAiPendingWrite
+  const notify = useWorkspaceFilesStore.getState().notifyAiFileChanged
 
   for (const [sessionId, state] of Object.entries(sessions)) {
     const messages = state.messages
@@ -60,22 +76,77 @@ function handleSessions(
 
     let seen = seenIdsByMessages.get(messages)
     if (!seen) {
-
       const prevSeen = prevMessages ? seenIdsByMessages.get(prevMessages) : undefined
       seen = new Set(prevSeen ?? [])
       seenIdsByMessages.set(messages, seen)
     }
 
+    const toolPaths = buildToolPathIndex(messages)
+
     for (const msg of messages) {
-      if (msg.type !== 'file_edit') continue
-      if (seen.has(msg.id)) continue
-      seen.add(msg.id)
-      const rel = normalizeRelPath(msg.path, root)
-      if (rel) {
-        register(rel)
+      if (msg.type === 'file_edit') {
+        if (seen.has(msg.id)) continue
+        seen.add(msg.id)
+        const rel = normalizeRelPath(msg.path, root)
+        if (rel) {
+          notify(rel)
+        }
+        continue
+      }
+
+      if (msg.type === 'tool_result') {
+        const key = `tool_result:${msg.toolUseId}`
+        if (seen.has(key)) continue
+        if (msg.isError) continue
+        seen.add(key)
+        const paths = toolPaths.get(msg.toolUseId)
+        if (!paths) continue
+        for (const rawPath of paths) {
+          const rel = normalizeRelPath(rawPath, root)
+          if (rel) {
+            notify(rel)
+          }
+        }
       }
     }
   }
+}
+
+function buildToolPathIndex(messages: readonly UIMessage[]): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  for (const msg of messages) {
+    if (msg.type !== 'tool_use') continue
+    if (!MUTATION_TOOLS.has(msg.toolName)) continue
+    const paths = extractMutationPaths(msg.toolName, msg.input)
+    if (paths.length > 0) {
+      map.set(msg.toolUseId, paths)
+    }
+  }
+  return map
+}
+
+function extractMutationPaths(toolName: string, input: unknown): string[] {
+  if (!input || typeof input !== 'object') return []
+  const obj = input as Record<string, unknown>
+
+  if (toolName === 'multi_edit' || toolName === 'glob_edit') {
+    const edits = obj.edits
+    if (Array.isArray(edits)) {
+      const paths: string[] = []
+      for (const edit of edits) {
+        if (!edit || typeof edit !== 'object') continue
+        const path = (edit as Record<string, unknown>).path
+        if (typeof path === 'string' && path.length > 0) {
+          paths.push(path)
+        }
+      }
+      if (paths.length > 0) return paths
+    }
+  }
+
+  if (typeof obj.path === 'string' && obj.path.length > 0) return [obj.path]
+  if (typeof obj.file_path === 'string' && obj.file_path.length > 0) return [obj.file_path]
+  return []
 }
 
 export function normalizeRelPath(rawPath: string, root: string): string | null {
@@ -84,7 +155,6 @@ export function normalizeRelPath(rawPath: string, root: string): string | null {
   let p = rawPath.replace(/\\/g, '/').replace(/\/$/, '')
 
   if (!p.includes('/') && !p.includes(':')) {
-
     return p
   }
 

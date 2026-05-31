@@ -898,18 +898,27 @@ pub async fn handle_export_delete(
         Ok(e) => e,
         Err(resp) => return resp.into_response(),
     };
-    let store = engine.store();
-    let record = match store.get_export(&id) {
-        Ok(Some(r)) => r,
-        Ok(None) => return json_error(StatusCode::NOT_FOUND, "export_not_found").into_response(),
-        Err(error) => {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                .into_response();
+    let store = std::sync::Arc::clone(engine.store());
+    let id_owned = id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let record = match store.get_export(&id_owned) {
+            Ok(Some(r)) => r,
+            Ok(None) => return Err(None),
+            Err(error) => return Err(Some(error.to_string())),
+        };
+        let _ = std::fs::remove_file(&record.path);
+        let _ = store.delete_export(&id_owned);
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(Err(None)) => json_error(StatusCode::NOT_FOUND, "export_not_found").into_response(),
+        Ok(Err(Some(msg))) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, &msg).into_response()
         }
-    };
-    let _ = std::fs::remove_file(&record.path);
-    let _ = store.delete_export(&id);
-    Json(serde_json::json!({"ok": true})).into_response()
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "delete_failed").into_response(),
+    }
 }
 
 fn export_record_to_json(record: crate::evolution::types::ExportRecord) -> serde_json::Value {

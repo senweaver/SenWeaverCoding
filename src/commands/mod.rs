@@ -44,8 +44,6 @@ pub mod vector_cmd;
 pub mod vim;
 pub mod voice_cmd;
 pub mod workflow_cmd;
-
-#[allow(unused_imports)]
 pub use registry::{
     CommandContext, CommandRegistry, CommandResult, SlashCommand, StaticSlashCommand,
 };

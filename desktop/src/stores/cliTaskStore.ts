@@ -1,8 +1,13 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { create } from 'zustand'
 import { cliTasksApi } from '../api/cliTasks'
 import type { CLITask, TaskStatus } from '../types/cliTask'
 
 type TodoItem = {
+  id?: string
   content: string
   status: string
   activeForm?: string
@@ -22,6 +27,7 @@ type CLITaskStore = {
   resetCompletedTasks: (sessionId: string) => Promise<void>
   clearTasks: (sessionId: string) => void
   toggleExpanded: (sessionId: string) => void
+  finalizeTasksOnTurnEnd: (sessionId: string) => void
 }
 
 function buildCompletedTaskKey(tasks: CLITask[]): string | null {
@@ -54,7 +60,7 @@ function resolveDismissState(
 
 function mapTodosToTasks(todos: TodoItem[], sessionId: string): CLITask[] {
   return todos.map((todo, index) => ({
-    id: String(index + 1),
+    id: todo.id?.trim() ? todo.id.trim() : String(index + 1),
     subject: todo.content,
     description: '',
     activeForm: todo.activeForm,
@@ -258,5 +264,40 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
         [sessionId]: !(state.expandedBySession[sessionId] ?? false),
       },
     }))
+  },
+
+  finalizeTasksOnTurnEnd: (sessionId) => {
+    if (!sessionId) return
+    set((state) => {
+      const tasks = state.tasksBySessionId[sessionId] ?? []
+      if (tasks.length === 0) return state
+
+      const incomplete = tasks.filter((task) => task.status !== 'completed')
+
+      let nextTasks = tasks
+      if (incomplete.length === 1 && tasks.length > 1) {
+        nextTasks = tasks.map((task) =>
+          task.status === 'pending' || task.status === 'in_progress'
+            ? { ...task, status: 'completed' as TaskStatus }
+            : task,
+        )
+      }
+
+      const completionKey = buildCompletedTaskKey(nextTasks)
+      if (!completionKey) return { ...state, tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: nextTasks } }
+
+      return {
+        tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: nextTasks },
+        completedAndDismissedBySession: {
+          ...state.completedAndDismissedBySession,
+          [sessionId]: true,
+        },
+        dismissedCompletionKeyBySession: {
+          ...state.dismissedCompletionKeyBySession,
+          [sessionId]: completionKey,
+        },
+        expandedBySession: { ...state.expandedBySession, [sessionId]: false },
+      }
+    })
   },
 }))

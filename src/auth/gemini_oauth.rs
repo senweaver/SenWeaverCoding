@@ -13,8 +13,6 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-
-#[allow(unused_imports)]
 pub use crate::auth::oauth_common::{PkceState, generate_pkce_state};
 
 pub fn gemini_oauth_client_id() -> Option<String> {

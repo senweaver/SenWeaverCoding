@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! HNSW insertion + search benchmark (Phase 3 D8).
-//!
-//! Two groups:
-//! - `hnsw_insert` — amortised cost of adding a single vector to an
-//!   index of 1 000 / 5 000 / 20 000 items.
-//! - `hnsw_search` — top-10 query latency against the same three
-//!   populations.
-//!
-//! Run: `cargo bench --bench hnsw_bench`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;

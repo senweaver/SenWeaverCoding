@@ -104,20 +104,26 @@ fn session_allowed_workspace_canonicals(state: &AppState) -> Vec<PathBuf> {
     out
 }
 
-fn allowed_workspace_root(state: &AppState, requested: &str) -> Result<PathBuf, FsError> {
-    let workspace = state.config.lock().workspace_dir.clone();
-    let workspace_canonical = workspace.canonicalize().map_err(|_| FsError::InvalidRoot)?;
-    let requested = PathBuf::from(requested);
-    let requested_canonical = requested.canonicalize().map_err(|_| FsError::InvalidRoot)?;
-    if requested_canonical == workspace_canonical {
-        return Ok(workspace_canonical);
-    }
-    for root in session_allowed_workspace_canonicals(state) {
-        if root == requested_canonical {
-            return Ok(requested_canonical);
+async fn allowed_workspace_root(state: &AppState, requested: &str) -> Result<PathBuf, FsError> {
+    let state = state.clone();
+    let requested = requested.to_string();
+    tokio::task::spawn_blocking(move || {
+        let workspace = state.config.lock().workspace_dir.clone();
+        let workspace_canonical = workspace.canonicalize().map_err(|_| FsError::InvalidRoot)?;
+        let requested = PathBuf::from(&requested);
+        let requested_canonical = requested.canonicalize().map_err(|_| FsError::InvalidRoot)?;
+        if requested_canonical == workspace_canonical {
+            return Ok(workspace_canonical);
         }
-    }
-    Err(FsError::InvalidRoot)
+        for root in session_allowed_workspace_canonicals(&state) {
+            if root == requested_canonical {
+                return Ok(requested_canonical);
+            }
+        }
+        Err(FsError::InvalidRoot)
+    })
+    .await
+    .map_err(|_| FsError::InvalidRoot)?
 }
 
 fn resolve_within(root: &Path, rel: &str, must_exist: bool) -> Result<PathBuf, FsError> {
@@ -207,7 +213,7 @@ pub async fn handle_workspace_tree(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &q.root) {
+    let root = match allowed_workspace_root(&state, &q.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -216,15 +222,11 @@ pub async fn handle_workspace_tree(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    if !target.is_dir() {
-        return FsError::InvalidName.into_response();
-    }
     let depth = q
         .depth
         .unwrap_or(DEFAULT_TREE_DEPTH)
         .clamp(0, MAX_TREE_DEPTH);
     let show_hidden = q.show_hidden.unwrap_or(false);
-    let mut budget = MAX_TREE_NODES;
 
     fn collect(
         root: &Path,
@@ -277,15 +279,38 @@ pub async fn handle_workspace_tree(
     }
 
     let initial_depth = depth.saturating_sub(1);
-    match collect(&root, &target, initial_depth, show_hidden, &mut budget) {
-        Ok(children) => Json(json!({
+    let root_for_io = root.clone();
+    let target_for_io = target.clone();
+    let result: Result<(Vec<serde_json::Value>, bool), FsError> =
+        tokio::task::spawn_blocking(move || {
+            if !target_for_io.is_dir() {
+                return Err(FsError::InvalidName);
+            }
+            let mut budget = MAX_TREE_NODES;
+            let children = collect(
+                &root_for_io,
+                &target_for_io,
+                initial_depth,
+                show_hidden,
+                &mut budget,
+            )
+            .map_err(FsError::Io)?;
+            Ok((children, budget == 0))
+        })
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(FsError::Io(std::io::Error::other(join_err.to_string())))
+        });
+
+    match result {
+        Ok((children, truncated)) => Json(json!({
             "root": root.to_string_lossy(),
             "relPath": relative_path(&root, &target),
             "entries": children,
-            "truncated": budget == 0,
+            "truncated": truncated,
         }))
         .into_response(),
-        Err(e) => FsError::Io(e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -303,7 +328,7 @@ pub async fn handle_workspace_file_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &q.root) {
+    let root = match allowed_workspace_root(&state, &q.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -845,7 +870,7 @@ async fn write_file_inner(
     body: FilePutBody,
     create_only: bool,
 ) -> axum::response::Response {
-    let root = match allowed_workspace_root(state, &body.root) {
+    let root = match allowed_workspace_root(state, &body.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -972,7 +997,7 @@ pub async fn handle_workspace_dir_post(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &body.root) {
+    let root = match allowed_workspace_root(&state, &body.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -980,7 +1005,11 @@ pub async fn handle_workspace_dir_post(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    if let Err(e) = std::fs::create_dir_all(&target) {
+    let target_io = target.clone();
+    let io = tokio::task::spawn_blocking(move || std::fs::create_dir_all(&target_io))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+    if let Err(e) = io {
         return FsError::Io(e).into_response();
     }
     Json(json!({
@@ -1007,7 +1036,7 @@ pub async fn handle_workspace_move(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &body.root) {
+    let root = match allowed_workspace_root(&state, &body.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -1019,22 +1048,27 @@ pub async fn handle_workspace_move(
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
-    if to.exists() {
-        return FsError::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "Destination already exists",
-        ))
-        .into_response();
-    }
-    if let Some(parent) = to.parent() {
-        if !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return FsError::Io(e).into_response();
+    let from_io = from.clone();
+    let to_io = to.clone();
+    let io: Result<(), FsError> = tokio::task::spawn_blocking(move || {
+        if to_io.exists() {
+            return Err(FsError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Destination already exists",
+            )));
+        }
+        if let Some(parent) = to_io.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(FsError::Io)?;
             }
         }
-    }
-    if let Err(e) = std::fs::rename(&from, &to) {
-        return FsError::Io(e).into_response();
+        std::fs::rename(&from_io, &to_io).map_err(FsError::Io)?;
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|e| Err(FsError::Io(std::io::Error::other(e.to_string()))));
+    if let Err(e) = io {
+        return e.into_response();
     }
     Json(json!({
         "ok": true,
@@ -1060,7 +1094,7 @@ pub async fn handle_workspace_delete(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &q.root) {
+    let root = match allowed_workspace_root(&state, &q.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -1071,21 +1105,25 @@ pub async fn handle_workspace_delete(
     if target == root {
         return FsError::OutsideRoot.into_response();
     }
-    let metadata = match std::fs::metadata(&target) {
-        Ok(m) => m,
-        Err(e) => return FsError::Io(e).into_response(),
-    };
-    let result = if metadata.is_dir() {
-        if q.recursive.unwrap_or(false) {
-            std::fs::remove_dir_all(&target)
+    let target_io = target.clone();
+    let recursive = q.recursive.unwrap_or(false);
+    let io: Result<(), FsError> = tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::metadata(&target_io).map_err(FsError::Io)?;
+        let result = if metadata.is_dir() {
+            if recursive {
+                std::fs::remove_dir_all(&target_io)
+            } else {
+                std::fs::remove_dir(&target_io)
+            }
         } else {
-            std::fs::remove_dir(&target)
-        }
-    } else {
-        std::fs::remove_file(&target)
-    };
-    if let Err(e) = result {
-        return FsError::Io(e).into_response();
+            std::fs::remove_file(&target_io)
+        };
+        result.map_err(FsError::Io)
+    })
+    .await
+    .unwrap_or_else(|e| Err(FsError::Io(std::io::Error::other(e.to_string()))));
+    if let Err(e) = io {
+        return e.into_response();
     }
     Json(json!({"ok": true})).into_response()
 }
@@ -1108,7 +1146,7 @@ pub async fn handle_workspace_upload(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &body.root) {
+    let root = match allowed_workspace_root(&state, &body.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -1130,17 +1168,22 @@ pub async fn handle_workspace_upload(
     if bytes.len() > MAX_UPLOAD_BYTES {
         return FsError::TooLarge(bytes.len() as u64).into_response();
     }
-    if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return FsError::Io(e).into_response();
+    let target_io = target.clone();
+    let io: Result<Option<std::fs::Metadata>, FsError> = tokio::task::spawn_blocking(move || {
+        if let Some(parent) = target_io.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(FsError::Io)?;
             }
         }
-    }
-    if let Err(e) = atomic_write(&target, &bytes) {
-        return FsError::Io(e).into_response();
-    }
-    let metadata = std::fs::metadata(&target).ok();
+        atomic_write(&target_io, &bytes).map_err(FsError::Io)?;
+        Ok(std::fs::metadata(&target_io).ok())
+    })
+    .await
+    .unwrap_or_else(|e| Err(FsError::Io(std::io::Error::other(e.to_string()))));
+    let metadata = match io {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
     Json(json!({
         "ok": true,
         "relPath": relative_path(&root, &target),
@@ -1178,7 +1221,7 @@ pub async fn handle_workspace_search(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &q.root) {
+    let root = match allowed_workspace_root(&state, &q.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -1194,61 +1237,68 @@ pub async fn handle_workspace_search(
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| "name".to_string());
 
-    if kind == "content" {
-        let case_sensitive = q.case_sensitive.unwrap_or(false);
-        let whole_word = q.whole_word.unwrap_or(false);
-        let regex = q.regex.unwrap_or(false);
-        let max_size = q.max_file_size_bytes.unwrap_or(2 * 1024 * 1024);
-        let results = run_content_search(
-            &root,
-            &needle_raw,
-            limit,
-            ContentSearchOptions {
-                show_hidden,
-                case_sensitive,
-                whole_word,
-                regex,
-            },
-            max_size,
-        );
+    let case_sensitive = q.case_sensitive.unwrap_or(false);
+    let whole_word = q.whole_word.unwrap_or(false);
+    let regex = q.regex.unwrap_or(false);
+    let max_size = q.max_file_size_bytes.unwrap_or(2 * 1024 * 1024);
+    let root_io = root.clone();
+
+    let body = tokio::task::spawn_blocking(move || {
+        if kind == "content" {
+            let results = run_content_search(
+                &root_io,
+                &needle_raw,
+                limit,
+                ContentSearchOptions {
+                    show_hidden,
+                    case_sensitive,
+                    whole_word,
+                    regex,
+                },
+                max_size,
+            );
+            let total = results.len();
+            return json!({
+                "results": results,
+                "total": total,
+                "limit": limit,
+                "kind": "content",
+            });
+        }
+
+        let needle_lower = needle_raw.to_ascii_lowercase();
+        let mut scored: Vec<FuzzyHit> = Vec::new();
+        walk_filenames_fuzzy(&root_io, &root_io, &needle_lower, show_hidden, &mut scored);
+        scored.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.depth.cmp(&b.depth))
+                .then_with(|| a.rel_path.cmp(&b.rel_path))
+        });
+        scored.truncate(limit);
+        let results: Vec<serde_json::Value> = scored
+            .iter()
+            .map(|hit| {
+                let mut payload =
+                    entry_to_json(&root_io, &hit.absolute_path, &hit.name, hit.is_dir);
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("score".into(), json!(hit.score));
+                }
+                payload
+            })
+            .collect();
         let total = results.len();
-        return Json(json!({
+        json!({
             "results": results,
             "total": total,
             "limit": limit,
-            "kind": "content",
-        }))
-        .into_response();
-    }
-
-    let needle_lower = needle_raw.to_ascii_lowercase();
-    let mut scored: Vec<FuzzyHit> = Vec::new();
-    walk_filenames_fuzzy(&root, &root, &needle_lower, show_hidden, &mut scored);
-    scored.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.depth.cmp(&b.depth))
-            .then_with(|| a.rel_path.cmp(&b.rel_path))
-    });
-    scored.truncate(limit);
-    let results: Vec<serde_json::Value> = scored
-        .iter()
-        .map(|hit| {
-            let mut payload = entry_to_json(&root, &hit.absolute_path, &hit.name, hit.is_dir);
-            if let Some(map) = payload.as_object_mut() {
-                map.insert("score".into(), json!(hit.score));
-            }
-            payload
+            "kind": "name",
         })
-        .collect();
-    let total = results.len();
-    Json(json!({
-        "results": results,
-        "total": total,
-        "limit": limit,
-        "kind": "name",
-    }))
-    .into_response()
+    })
+    .await
+    .unwrap_or_else(|_| json!({"results": [], "total": 0}));
+
+    Json(body).into_response()
 }
 
 #[derive(Debug)]
@@ -1685,7 +1735,7 @@ pub async fn handle_workspace_watch(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match allowed_workspace_root(&state, &q.root) {
+    let root = match allowed_workspace_root(&state, &q.root).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -2093,4 +2143,41 @@ mod watch_impl {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StructureDocQuery {
+    pub root: String,
+}
+
+pub async fn handle_workspace_structure_doc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StructureDocQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let root = match allowed_workspace_root(&state, &q.root).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let doc = match tokio::task::spawn_blocking(move || {
+        crate::services::magic_docs::structure_doc_for_workspace(
+            &root,
+            &crate::services::magic_docs::MagicDocsConfig::default(),
+        )
+    })
+    .await
+    {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "structure_doc_failed" })),
+            )
+                .into_response();
+        }
+    };
+    Json(doc).into_response()
 }

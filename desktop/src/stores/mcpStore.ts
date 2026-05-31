@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { create } from 'zustand'
 import { mcpApi } from '../api/mcp'
 import type { McpServerRecord, McpUpsertPayload } from '../types/mcp'

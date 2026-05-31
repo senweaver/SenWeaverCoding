@@ -135,7 +135,7 @@ impl WasmRuntime {
 
         if wasm_bytes.len() > 50 * 1024 * 1024 {
             bail!(
-                "WASM module {} is {} MB — exceeds 50 MB safety limit",
+                "WASM module {} is {} MB  -  exceeds 50 MB safety limit",
                 module_name,
                 wasm_bytes.len() / (1024 * 1024)
             );
@@ -182,7 +182,7 @@ impl WasmRuntime {
                     return Ok(WasmExecutionResult {
                         stdout: String::new(),
                         stderr: format!(
-                            "WASM module '{module_name}' exceeded fuel limit ({fuel} ticks) — likely an infinite loop"
+                            "WASM module '{module_name}' exceeded fuel limit ({fuel} ticks)  -  likely an infinite loop"
                         ),
                         exit_code: -1,
                         fuel_consumed: fuel,

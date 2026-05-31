@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -183,21 +183,21 @@ pub struct McpError {
 impl McpError {
     pub fn method_not_found(name: &str) -> Self {
         Self {
-            code: crate::tools::mcp_protocol::METHOD_NOT_FOUND,
+            code: crate::tools::mcp::protocol::METHOD_NOT_FOUND,
             message: format!("method not found: {name}"),
         }
     }
 
     pub fn invalid_params(msg: impl Into<String>) -> Self {
         Self {
-            code: crate::tools::mcp_protocol::INVALID_PARAMS,
+            code: crate::tools::mcp::protocol::INVALID_PARAMS,
             message: msg.into(),
         }
     }
 
     pub fn parse_error(msg: impl Into<String>) -> Self {
         Self {
-            code: crate::tools::mcp_protocol::PARSE_ERROR,
+            code: crate::tools::mcp::protocol::PARSE_ERROR,
             message: msg.into(),
         }
     }

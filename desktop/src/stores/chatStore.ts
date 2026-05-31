@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { create } from 'zustand'
 import { wsManager } from '../api/websocket'
 import { sessionsApi } from '../api/sessions'
@@ -21,6 +25,7 @@ import {
   hasUsableModelForSession,
   isNoModelConfiguredError,
 } from '../utils/modelAvailability'
+import { ensureSessionRuntimeSynced } from '../utils/runtimeSync'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { MessageEntry, PendingRewindSummary } from '../types/session'
 import type { PermissionMode } from '../types/settings'
@@ -281,7 +286,7 @@ type ChatStore = {
     requestId: string,
     response: ComputerUsePermissionResponse,
   ) => void
-  setSessionRuntime: (sessionId: string, selection: RuntimeSelection) => void
+  setSessionRuntime: (sessionId: string, selection: RuntimeSelection, options?: { persist?: boolean }) => void
 
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void
   setSessionCodingMode: (sessionId: string, mode: CodingModeId) => void
@@ -324,6 +329,8 @@ type ChatStore = {
   undoAllPendingEdits: (sessionId: string) => Promise<void>
 
   resumePlanExecution: (sessionId: string, planPath: string) => void
+
+  resumeCuratorExecution: (sessionId: string, implBlueprintPath: string) => void
 
   resetDebugPiiStats: (sessionId: string) => void
 }
@@ -409,7 +416,13 @@ function applyUpdatePlanSetToCard(
   const markdown = card.markdown
     ? rewritePlanMarkdownTodos(card.markdown, todos)
     : card.markdown
-  return { ...card, todos, markdown, pendingHydration: false }
+  return {
+    ...card,
+    todos,
+    markdown,
+    pendingHydration: false,
+    wasExecuted: true,
+  }
 }
 
 function normalizePlanMatchKey(value: string): string {
@@ -484,7 +497,7 @@ function applyUpdatePlanUpdateToCard(
   const currentNotes = (current as { notes?: string | null }).notes ?? null
   const notesChanged = trimmedNotes !== null && trimmedNotes !== currentNotes
   if (!statusChanged && !notesChanged) {
-    return { ...card }
+    return { ...card, wasExecuted: true }
   }
   const next = [...card.todos]
   const updatedStatus = statusChanged ? newStatus! : current.status
@@ -497,7 +510,91 @@ function applyUpdatePlanUpdateToCard(
   const markdown = card.markdown
     ? rewritePlanMarkdownTodos(card.markdown, next)
     : card.markdown
-  return { ...card, todos: next, markdown, pendingHydration: false }
+  return {
+    ...card,
+    todos: next,
+    markdown,
+    pendingHydration: false,
+    wasExecuted: true,
+  }
+}
+
+function findLatestCuratorCardIdx(messages: UIMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.type === 'curator_card') return i
+  }
+  return -1
+}
+
+function applyUpdatePlanSetToCuratorCard(
+  card: Extract<UIMessage, { type: 'curator_card' }>,
+  steps: unknown,
+): Extract<UIMessage, { type: 'curator_card' }> {
+  if (!Array.isArray(steps)) return card
+  const todos: PlanTodo[] = []
+  for (const s of steps) {
+    if (!s || typeof s !== 'object') continue
+    const o = s as Record<string, unknown>
+    const id = typeof o.id === 'string' ? (o.id as string).trim() : ''
+    const content =
+      (typeof o.title === 'string' && (o.title as string)) ||
+      (typeof o.content === 'string' && (o.content as string)) ||
+      ''
+    if (!id || !content) continue
+    const statusRaw = typeof o.status === 'string' ? (o.status as string) : ''
+    const status = statusRaw ? normalizeUpdatePlanStatus(statusRaw) : 'pending'
+    todos.push({ id, content, status })
+  }
+  if (todos.length === 0) return card
+  return {
+    ...card,
+    todos,
+    pendingHydration: false,
+    wasExecuted: true,
+  }
+}
+
+function applyUpdatePlanUpdateToCuratorCard(
+  card: Extract<UIMessage, { type: 'curator_card' }>,
+  input: Record<string, unknown>,
+): Extract<UIMessage, { type: 'curator_card' }> | null {
+  const existing = card.todos ?? []
+  const stepId = typeof input.step_id === 'string' ? (input.step_id as string).trim() : ''
+  const titleHint =
+    (typeof input.title === 'string' && (input.title as string).trim()) ||
+    (typeof input.content === 'string' && (input.content as string).trim()) ||
+    ''
+  if (!stepId && !titleHint) return null
+  const idx = findPlanTodoIdx(existing, stepId, titleHint)
+  if (idx < 0) return null
+  const statusRaw = typeof input.status === 'string' ? (input.status as string) : ''
+  const newStatus = statusRaw ? normalizeUpdatePlanStatus(statusRaw) : null
+  const notesRaw =
+    typeof input.notes === 'string'
+      ? (input.notes as string)
+      : typeof input.note === 'string'
+        ? (input.note as string)
+        : null
+  const current = existing[idx]!
+  const statusChanged = !!newStatus && current.status !== newStatus
+  const trimmedNotes = notesRaw?.trim() ?? null
+  const currentNotes = (current as { notes?: string | null }).notes ?? null
+  const notesChanged = trimmedNotes !== null && trimmedNotes !== currentNotes
+  if (!statusChanged && !notesChanged) {
+    return { ...card, wasExecuted: true }
+  }
+  const next = [...existing]
+  next[idx] = {
+    ...current,
+    status: statusChanged ? newStatus! : current.status,
+    ...(notesChanged ? { notes: trimmedNotes } : {}),
+  }
+  return {
+    ...card,
+    todos: next,
+    pendingHydration: false,
+    wasExecuted: true,
+  }
 }
 
 function makePendingPlanCardFromUpdatePlan(
@@ -826,6 +923,15 @@ function collectPlanAnswerItems(
   return out
 }
 
+function syncTasksAfterTurnEnd(sessionId: string) {
+  void useCLITaskStore
+    .getState()
+    .refreshTasks(sessionId)
+    .finally(() => {
+      useCLITaskStore.getState().finalizeTasksOnTurnEnd(sessionId)
+    })
+}
+
 const TODO_TOOL_NAMES = new Set(['TodoWrite', 'todo_write'])
 const TASK_TOOL_NAMES = new Set([
   'TaskCreate',
@@ -942,8 +1048,11 @@ function updateWorkerSubagentTimeline(
   const now = Date.now()
   const delta = detail.trim() ? `${action}: ${detail}` : action
   update((s) => {
-    const bucket = s.subagentTimelines[parentToolUseId]
-    if (!bucket) return {}
+    const bucket = s.subagentTimelines[parentToolUseId] ?? {
+      parentToolUseId,
+      parentToolName: 'spawn_workers',
+      agents: {},
+    }
     const prevTimeline: AgentTimeline = bucket.agents[workerId] ?? {
       agentId: workerId,
       status: 'running',
@@ -1120,6 +1229,91 @@ function consumePendingThinking(sessionId: string): string {
   return text
 }
 
+type ThinkingActivePatch = {
+  activeThinkingId: string | null
+  activeThinkingContent: string
+  activeThinkingStartedAt: number | null
+  activeThinkingLastChunkAt: number | null
+}
+
+function mergePendingThinkingIntoActive(
+  state: {
+    activeThinkingId: string | null
+    activeThinkingContent: string
+    activeThinkingStartedAt: number | null
+    activeThinkingLastChunkAt: number | null
+  },
+  sessionId: string,
+): ThinkingActivePatch {
+  const buffered = consumePendingThinking(sessionId)
+  if (!buffered) {
+    return {
+      activeThinkingId: state.activeThinkingId,
+      activeThinkingContent: state.activeThinkingContent,
+      activeThinkingStartedAt: state.activeThinkingStartedAt,
+      activeThinkingLastChunkAt: state.activeThinkingLastChunkAt,
+    }
+  }
+  const hasActive = Boolean(state.activeThinkingId)
+  const now = Date.now()
+  const id = hasActive ? (state.activeThinkingId as string) : nextId()
+  const startedAt = hasActive
+    ? (state.activeThinkingStartedAt ?? now)
+    : now
+  const prevContent = hasActive ? state.activeThinkingContent : ''
+  return {
+    activeThinkingId: id,
+    activeThinkingContent: prevContent + buffered,
+    activeThinkingStartedAt: startedAt,
+    activeThinkingLastChunkAt: now,
+  }
+}
+
+function sealThinkingForSession(
+  sessionId: string,
+  state: {
+    messages: UIMessage[]
+    activeThinkingId: string | null
+    activeThinkingContent: string
+    activeThinkingStartedAt: number | null
+    activeThinkingLastChunkAt: number | null
+  },
+): UIMessage[] {
+  const patch = mergePendingThinkingIntoActive(state, sessionId)
+  return sealThinkingFromState({
+    messages: state.messages,
+    activeThinkingId: patch.activeThinkingId,
+    activeThinkingContent: patch.activeThinkingContent,
+    activeThinkingStartedAt: patch.activeThinkingStartedAt,
+  })
+}
+
+function flushPendingDeltaIntoStreaming(
+  sessionId: string,
+  prevStreamingText: string,
+): string {
+  const buffered = consumePendingDelta(sessionId)
+  if (!buffered) return prevStreamingText
+  return prevStreamingText + buffered
+}
+
+function clearSessionStreamBuffers(sessionId: string): void {
+  const deltaTimer = flushTimerBySession.get(sessionId)
+  if (deltaTimer !== undefined) {
+    cancelScheduledFlush(deltaTimer)
+    flushTimerBySession.delete(sessionId)
+  }
+  pendingDeltaBySession.delete(sessionId)
+  pendingDeltaFirstAt.delete(sessionId)
+  const thinkingTimer = thinkingFlushTimerBySession.get(sessionId)
+  if (thinkingTimer !== undefined) {
+    cancelScheduledFlush(thinkingTimer)
+    thinkingFlushTimerBySession.delete(sessionId)
+  }
+  pendingThinkingBySession.delete(sessionId)
+  pendingThinkingFirstAt.delete(sessionId)
+}
+
 function hasPendingDelta(sessionId: string): boolean {
   const buf = pendingDeltaBySession.get(sessionId)
   return buf !== undefined && buf.length > 0
@@ -1208,9 +1402,22 @@ function appendAssistantTextMessage(
 
   const last = messages[messages.length - 1]
   if (last?.type === 'assistant_text') {
+    const prevContent = last.content
+    if (prevContent === content) {
+      return messages
+    }
+    if (prevContent.endsWith(content) && content.length > 0) {
+      return messages
+    }
+    let mergedContent: string
+    if (content.startsWith(prevContent) && prevContent.length > 0) {
+      mergedContent = content
+    } else {
+      mergedContent = prevContent + content
+    }
     const merged: UIMessage = {
       ...last,
-      content: last.content + content,
+      content: mergedContent,
       ...(model ?? last.model ? { model: model ?? last.model } : {}),
     }
     return [...messages.slice(0, -1), merged]
@@ -1314,8 +1521,181 @@ async function fetchAndMapSessionHistory(sessionId: string) {
     restoredNotifications: reconstructAgentNotifications(messages),
     lastTodos: extractLastTodoWriteFromHistory(messages),
     hasMessagesAfterTaskCompletion: hasUserMessagesAfterTaskCompletion(messages),
+    restoredSubagentTimelines: reconstructSubagentTimelines(messages),
     pendingRewind: pendingRewind ?? null,
   }
+}
+
+const ASK_ANSWER_TEXT_MARKER = 'Here are my answers to your clarifying questions:'
+
+function tryParseAskResponseUserText(
+  text: string,
+): { items: Array<{ question: string; answer: string | string[] }>; details?: string } | null {
+  const idx = text.indexOf(ASK_ANSWER_TEXT_MARKER)
+  if (idx < 0) return null
+  const body = text.slice(idx + ASK_ANSWER_TEXT_MARKER.length)
+  const items: Array<{ question: string; answer: string | string[] }> = []
+  const lines = body.split('\n')
+  let i = 0
+  let detailsBuf: string[] | null = null
+  while (i < lines.length) {
+    const line = lines[i] ?? ''
+    if (line.startsWith('Additional details from the user:') || line.startsWith('Additional details:')) {
+      detailsBuf = []
+      i++
+      continue
+    }
+    if (detailsBuf) {
+      detailsBuf.push(line)
+      i++
+      continue
+    }
+    const m = /^\s*(\d+)\.\s+(.+?)\s*$/.exec(line)
+    if (m && m[2]) {
+      const question = m[2]
+      const answers: string[] = []
+      i++
+      while (i < lines.length) {
+        const next = lines[i] ?? ''
+        const am = /^\s+->\s+(.+?)\s*$/.exec(next)
+        if (!am) break
+        if (am[1] && am[1] !== '(no answer)' && am[1] !== '(skipped)') answers.push(am[1])
+        i++
+      }
+      items.push({
+        question,
+        answer: answers.length === 0 ? '' : answers.length === 1 ? answers[0]! : answers,
+      })
+      continue
+    }
+    i++
+  }
+  const details = detailsBuf ? detailsBuf.join('\n').trim() : undefined
+  if (items.length === 0 && !details) return null
+  return details ? { items, details } : { items }
+}
+
+function reconstructSubagentTimelines(
+  messages: MessageEntry[],
+): Record<string, SubagentTimelineBucket> {
+  const buckets: Record<string, SubagentTimelineBucket> = {}
+  const ensureAgentTimeline = (
+    bucket: SubagentTimelineBucket,
+    agentId: string,
+    when: number,
+    taskId?: string,
+  ): AgentTimeline => {
+    const prev = bucket.agents[agentId]
+    if (prev) {
+      if (taskId && !prev.taskId) prev.taskId = taskId
+      return prev
+    }
+    const fresh: AgentTimeline = {
+      agentId,
+      taskId,
+      status: 'running',
+      entries: [],
+      startedAt: when,
+      updatedAt: when,
+    }
+    bucket.agents[agentId] = fresh
+    return fresh
+  }
+
+  for (const msg of messages) {
+    const baseTs = new Date(msg.timestamp).getTime()
+    if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
+      for (const rawBlock of msg.content as AssistantHistoryBlock[]) {
+        if (rawBlock.type === 'tool_use' && typeof rawBlock.name === 'string' && rawBlock.id) {
+          if (isSubagentParentTool(rawBlock.name)) {
+            if (!buckets[rawBlock.id]) {
+              buckets[rawBlock.id] = {
+                parentToolUseId: rawBlock.id,
+                parentToolName: rawBlock.name,
+                agents: {},
+              }
+            }
+          }
+        }
+        if (rawBlock.type === 'subagent_chunk' && typeof rawBlock.agent_id === 'string') {
+          const parentId = typeof rawBlock.parent_tool_use_id === 'string' ? rawBlock.parent_tool_use_id : ''
+          if (!parentId) continue
+          const bucket =
+            buckets[parentId] ?? {
+              parentToolUseId: parentId,
+              parentToolName: 'Task',
+              agents: {},
+            }
+          buckets[parentId] = bucket
+          const when = typeof rawBlock.timestamp_ms === 'number' && Number.isFinite(rawBlock.timestamp_ms)
+            ? rawBlock.timestamp_ms
+            : baseTs
+          const timeline = ensureAgentTimeline(
+            bucket,
+            rawBlock.agent_id,
+            when,
+            typeof rawBlock.task_id === 'string' ? rawBlock.task_id : undefined,
+          )
+          const entry = subagentChunkToEntry(
+            typeof rawBlock.kind === 'string' ? rawBlock.kind : 'Chunk',
+            typeof rawBlock.delta === 'string' ? rawBlock.delta : '',
+          )
+          const merged = appendTimelineEntry(timeline, entry, when)
+          bucket.agents[rawBlock.agent_id] = merged
+        }
+        if (rawBlock.type === 'worker_event' && typeof rawBlock.worker_id === 'string') {
+          const parentId = typeof rawBlock.parent_tool_use_id === 'string' ? rawBlock.parent_tool_use_id : ''
+          if (!parentId) continue
+          const bucket =
+            buckets[parentId] ?? {
+              parentToolUseId: parentId,
+              parentToolName: 'spawn_workers',
+              agents: {},
+            }
+          buckets[parentId] = bucket
+          const when = typeof rawBlock.timestamp_ms === 'number' && Number.isFinite(rawBlock.timestamp_ms)
+            ? rawBlock.timestamp_ms
+            : baseTs
+          const timeline = ensureAgentTimeline(bucket, rawBlock.worker_id, when)
+          const payload = rawBlock.payload as Record<string, unknown> | undefined
+          const kindStr = typeof rawBlock.kind === 'string' ? rawBlock.kind : 'status'
+          const detail = typeof payload?.detail === 'string' ? (payload.detail as string) : ''
+          const action = typeof payload?.action === 'string' ? (payload.action as string) : kindStr
+          const text = detail ? `${action}: ${detail}` : action
+          const entry = subagentChunkToEntry('Status', text)
+          const merged = appendTimelineEntry(timeline, entry, when)
+          if (kindStr === 'completed') {
+            const success = payload?.success !== false
+            merged.status = success ? 'completed' : 'error'
+            const summary = typeof payload?.summary === 'string' ? (payload.summary as string) : undefined
+            if (summary) merged.finalOutput = summary
+          } else if (kindStr === 'stopped') {
+            merged.status = 'error'
+          }
+          bucket.agents[rawBlock.worker_id] = merged
+        }
+      }
+    }
+    if ((msg.type === 'user' || msg.type === 'tool_result') && Array.isArray(msg.content)) {
+      for (const rawBlock of msg.content as UserHistoryBlock[]) {
+        if (rawBlock.type === 'tool_result' && typeof rawBlock.tool_use_id === 'string') {
+          const bucket = buckets[rawBlock.tool_use_id]
+          if (!bucket) continue
+          const finalText =
+            typeof rawBlock.content === 'string'
+              ? rawBlock.content
+              : extractTextFromRawContent(rawBlock.content)
+          const isError = !!rawBlock.is_error
+          for (const agentId of Object.keys(bucket.agents)) {
+            const t = bucket.agents[agentId]!
+            t.status = isError ? 'error' : 'completed'
+            if (finalText && !t.finalOutput) t.finalOutput = finalText
+          }
+        }
+      }
+    }
+  }
+  return buckets
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
@@ -1332,6 +1712,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       void useWorkersStore.getState().fetchByParent(sessionId)
       return
     }
+
+    clearSessionStreamBuffers(sessionId)
 
     set((s) => ({
       sessions: {
@@ -1361,13 +1743,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
-    if (runtimeSelection) {
-      wsManager.send(sessionId, {
-        type: 'set_runtime_config',
-        persist: false,
-        ...runtimeSelection,
-      })
-    }
+    void ensureSessionRuntimeSynced(sessionId, { persist: false }).catch(() => {
+      if (runtimeSelection) {
+        wsManager.send(sessionId, {
+          type: 'set_runtime_config',
+          persist: false,
+          ...runtimeSelection,
+        })
+      }
+    })
     if (!sessionId.startsWith('__') && !useTeamStore.getState().getMemberBySessionId(sessionId)) {
       wsManager.send(sessionId, { type: 'prewarm_session' })
     }
@@ -1429,7 +1813,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } else {
       consumePendingDelta(sessionId)
     }
-    consumePendingThinking(sessionId)
+    if (session) {
+      const sealedMessages = sealThinkingForSession(sessionId, session)
+      set((s) => ({
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({
+          messages: sealedMessages,
+          activeThinkingId: null,
+          activeThinkingContent: '',
+          activeThinkingStartedAt: null,
+          activeThinkingLastChunkAt: null,
+        })),
+      }))
+    } else {
+      consumePendingThinking(sessionId)
+    }
+    clearSessionStreamBuffers(sessionId)
     wsManager.disconnect(sessionId)
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
@@ -1581,7 +1979,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
-    wsManager.send(sessionId, { type: 'user_message', content, attachments })
+    void ensureSessionRuntimeSynced(sessionId, { persist: false })
+      .finally(() => {
+        wsManager.send(sessionId, { type: 'user_message', content, attachments })
+      })
   },
 
   respondToPermission: (sessionId, requestId, allowed, options) => {
@@ -1645,10 +2046,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }))
   },
 
-  setSessionRuntime: (sessionId, selection) => {
+  setSessionRuntime: (sessionId, selection, options) => {
     wsManager.send(sessionId, {
       type: 'set_runtime_config',
-      persist: true,
+      persist: options?.persist ?? true,
       ...selection,
     })
   },
@@ -1673,18 +2074,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } else {
       consumePendingDelta(sessionId)
     }
-    consumePendingThinking(sessionId)
     set((s) => {
       const session = s.sessions[sessionId]
       if (!session) return s
       if (session.elapsedTimer) clearInterval(session.elapsedTimer)
+      const sealedMessages = sealThinkingForSession(sessionId, session)
       return {
         sessions: {
           ...s.sessions,
           [sessionId]: {
             ...session,
+            messages: sealedMessages,
             chatState: 'idle',
             stopRequested: true,
+            activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
             pendingPermission: null,
             pendingComputerUsePermission: null,
             elapsedTimer: null,
@@ -1703,6 +2109,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         restoredNotifications,
         lastTodos,
         hasMessagesAfterTaskCompletion,
+        restoredSubagentTimelines,
         pendingRewind,
       } = await fetchAndMapSessionHistory(sessionId)
       const taggedMessages = applySupersededFromPendingRewind(uiMessages, pendingRewind)
@@ -1724,6 +2131,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             agentTaskNotifications: {
               ...s.agentTaskNotifications,
               ...restoredNotifications,
+            },
+            subagentTimelines: {
+              ...s.subagentTimelines,
+              ...restoredSubagentTimelines,
             },
             pendingRewind,
             historyLoaded: true,
@@ -1753,6 +2164,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         restoredNotifications,
         lastTodos,
         hasMessagesAfterTaskCompletion,
+        restoredSubagentTimelines,
         pendingRewind,
       } = await fetchAndMapSessionHistory(sessionId)
       const taggedMessages = applySupersededFromPendingRewind(uiMessages, pendingRewind)
@@ -1765,6 +2177,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           sessions: updateSessionIn(state.sessions, sessionId, () => ({
             messages: taggedMessages,
             agentTaskNotifications: restoredNotifications,
+            subagentTimelines: restoredSubagentTimelines,
             chatState: 'idle',
             activeThinkingId: null,
             activeToolUseId: null,
@@ -1971,12 +2384,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ) as Extract<UIMessage, { type: 'mode_switch_card' }> | undefined
     if (!card || card.status !== 'pending') return
 
+    const isCurator = card.handoffKind === 'curator'
+
     void useSettingsStore.getState().setCodingMode('agent')
     wsManager.send(sessionId, { type: 'set_coding_mode', mode: 'agent', scope: 'session' })
 
     wsManager.send(sessionId, {
       type: 'start_plan_execution',
       planPath: card.planPath,
+      ...(isCurator ? { kind: 'curator' as const } : {}),
     })
 
     set((s) => {
@@ -1987,7 +2403,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (m.id === messageId && m.type === 'mode_switch_card') {
           return { ...m, status: 'switched' }
         }
-        if (m.type === 'plan_card' && m.planPath === planPath) {
+        if (!isCurator && m.type === 'plan_card' && m.planPath === planPath) {
+          return { ...m, pendingHydration: true }
+        }
+        if (isCurator && m.type === 'curator_card' && m.implBlueprintPath === planPath) {
           return { ...m, pendingHydration: true }
         }
         return m
@@ -2043,6 +2462,41 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       const messages: UIMessage[] = sess.messages.map((m) => {
         if (m.type === 'plan_card' && m.planPath === planPath) {
+          return { ...m, pendingHydration: true }
+        }
+        return m
+      })
+      return {
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({
+          messages,
+          chatState: 'thinking',
+        })),
+      }
+    })
+  },
+
+  resumeCuratorExecution: (sessionId, implBlueprintPath) => {
+    if (!sessionId || !implBlueprintPath) return
+
+    void useSettingsStore.getState().setCodingMode('agent')
+    wsManager.send(sessionId, { type: 'set_coding_mode', mode: 'agent', scope: 'session' })
+    wsManager.send(sessionId, {
+      type: 'start_plan_execution',
+      planPath: implBlueprintPath,
+      resume: true,
+      kind: 'curator',
+    })
+    set((s) => {
+      const sess = s.sessions[sessionId]
+      if (!sess) {
+        return {
+          sessions: updateSessionIn(s.sessions, sessionId, () => ({
+            chatState: 'thinking',
+          })),
+        }
+      }
+      const messages: UIMessage[] = sess.messages.map((m) => {
+        if (m.type === 'curator_card' && m.implBlueprintPath === implBlueprintPath) {
           return { ...m, pendingHydration: true }
         }
         return m
@@ -2144,7 +2598,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const shouldFlush = hasPendingStreamText && msg.state === 'idle'
           const baseMessages =
             msg.state === 'idle'
-              ? sealThinkingFromState(session)
+              ? sealThinkingForSession(sessionId, session)
               : session.messages
           return {
             chatState: preserveStreamingTurn ? 'streaming' : msg.state,
@@ -2172,6 +2626,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             clearInterval(session.elapsedTimer)
             update(() => ({ elapsedTimer: null }))
           }
+          syncTasksAfterTurnEnd(sessionId)
         }
 
         useTabStore.getState().updateTabStatus(sessionId, msg.state === 'idle' ? 'idle' : 'running')
@@ -2189,21 +2644,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (msg.blockType === 'text') {
           update((s) => ({
-            messages: sealThinkingFromState(s),
+            messages: sealThinkingForSession(sessionId, s),
             ...(pendingText !== s.streamingText ? { streamingText: pendingText } : {}),
             chatState: 'streaming',
             activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
             providerRetry: null,
           }))
         } else if (msg.blockType === 'tool_use') {
-          update((s) => ({
-            messages: sealThinkingFromState(s),
-            activeToolUseId: msg.toolUseId ?? null,
-            activeToolName: msg.toolName ?? null,
-            chatState: 'tool_executing',
-            activeThinkingId: null,
-            providerRetry: null,
-          }))
+          update((s) => {
+            return {
+              messages: sealThinkingForSession(sessionId, s),
+              activeToolUseId: msg.toolUseId ?? null,
+              activeToolName: msg.toolName ?? null,
+              chatState: 'tool_executing',
+              activeThinkingId: null,
+              activeThinkingContent: '',
+              activeThinkingStartedAt: null,
+              activeThinkingLastChunkAt: null,
+              providerRetry: null,
+            }
+          })
 
           if (msg.toolName && isBrowserFamilyTool(msg.toolName)) {
             void useBrowserPanelStore.getState().openForTool(sessionId, {
@@ -2249,6 +2712,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
         break
+
+      case 'content_reset': {
+        update((s) => {
+          const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
+          const baseMessages = merged.trim()
+            ? appendAssistantTextMessage(s.messages, merged, Date.now())
+            : s.messages
+          const patch = mergePendingThinkingIntoActive(s, sessionId)
+          return {
+            messages: baseMessages,
+            streamingText: '',
+            activeThinkingId: patch.activeThinkingId,
+            activeThinkingContent: patch.activeThinkingId
+              ? patch.activeThinkingContent
+              : '',
+            activeThinkingStartedAt: patch.activeThinkingStartedAt,
+            activeThinkingLastChunkAt: patch.activeThinkingLastChunkAt,
+          }
+        })
+        break
+      }
 
       case 'thinking':
         if (msg.text !== undefined) {
@@ -2335,16 +2819,44 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           !isExitPlanMode &&
           !isPlanSave &&
           !isPlanModeAllowedTool(toolName)
+
+        let modeBlockedReason: 'plan' | 'read_only' | 'tool_not_allowed' | null = null
         if (planModeBlocked) {
+          modeBlockedReason = 'plan'
+        } else if (
+          sessionCodingMode !== 'plan' &&
+          !isExitPlanMode &&
+          !isExitCuratorMode &&
+          !isPlanSave &&
+          !isUpdatePlanSet &&
+          !isUpdatePlanUpdate
+        ) {
+          const allModes = useSettingsStore.getState().codingModes
+          const modeInfo = allModes.find((m) => m.id === sessionCodingMode)
+          const allowedTools = modeInfo?.allowedTools
+          if (allowedTools && allowedTools.length > 0 && !allowedTools.includes(toolName)) {
+            modeBlockedReason =
+              modeInfo?.permissionMode === 'plan' && sessionCodingMode === 'ask'
+                ? 'read_only'
+                : 'tool_not_allowed'
+          }
+        }
+
+        if (modeBlockedReason) {
           if (toolUseId)
             getOrCreateSessionSet(planModeBlockedToolUseIdsBySession, sessionId).add(
               toolUseId,
             )
           update((s) => {
-            const sealed = sealThinkingFromState(s)
+            const sealed = sealThinkingForSession(sessionId, s)
             const lastIdx = sealed.length - 1
             const last = lastIdx >= 0 ? sealed[lastIdx] : undefined
-            if (last && last.type === 'plan_mode_blocked') {
+            if (
+              last &&
+              last.type === 'plan_mode_blocked' &&
+              (last.reason ?? 'plan') === modeBlockedReason &&
+              (last.mode ?? 'plan') === sessionCodingMode
+            ) {
               const merged: UIMessage = {
                 ...last,
                 tools: [...last.tools, { name: toolName, input }],
@@ -2366,6 +2878,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   type: 'plan_mode_blocked',
                   timestamp: Date.now(),
                   tools: [{ name: toolName, input }],
+                  mode: sessionCodingMode,
+                  reason: modeBlockedReason,
                 },
               ],
               activeToolUseId: null,
@@ -2379,23 +2893,45 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         let inlinedToCard = false
         if (isUpdatePlanSet || isUpdatePlanUpdate) {
           update((s) => {
-            const sealed = sealThinkingFromState(s)
-            const cardIdx = findLatestPlanCardIdx(sealed)
-            if (cardIdx < 0) {
+            const sealed = sealThinkingForSession(sessionId, s)
+            const planIdx = findLatestPlanCardIdx(sealed)
+            const curatorIdx = planIdx < 0 ? findLatestCuratorCardIdx(sealed) : -1
+            if (planIdx < 0 && curatorIdx < 0) {
 
               return { messages: sealed, activeThinkingId: null }
             }
-            const cur = sealed[cardIdx] as Extract<UIMessage, { type: 'plan_card' }>
-            const upgraded = isUpdatePlanSet
-              ? applyUpdatePlanSetToCard(cur, (input as Record<string, unknown> | null)?.steps)
-              : applyUpdatePlanUpdateToCard(cur, input as Record<string, unknown>)
+            if (planIdx >= 0) {
+              const cur = sealed[planIdx] as Extract<UIMessage, { type: 'plan_card' }>
+              const upgraded = isUpdatePlanSet
+                ? applyUpdatePlanSetToCard(cur, (input as Record<string, unknown> | null)?.steps)
+                : applyUpdatePlanUpdateToCard(cur, input as Record<string, unknown>)
 
-            if (upgraded === null || upgraded === cur) {
+              if (upgraded === null || upgraded === cur) {
+                return { messages: sealed, activeThinkingId: null }
+              }
+              inlinedToCard = true
+              const next = [...sealed]
+              next[planIdx] = upgraded
+              return {
+                messages: next,
+                activeToolUseId: null,
+                activeToolName: null,
+                activeThinkingId: null,
+              }
+            }
+            const curCard = sealed[curatorIdx] as Extract<UIMessage, { type: 'curator_card' }>
+            const upgraded = isUpdatePlanSet
+              ? applyUpdatePlanSetToCuratorCard(
+                  curCard,
+                  (input as Record<string, unknown> | null)?.steps,
+                )
+              : applyUpdatePlanUpdateToCuratorCard(curCard, input as Record<string, unknown>)
+            if (upgraded === null || upgraded === curCard) {
               return { messages: sealed, activeThinkingId: null }
             }
             inlinedToCard = true
             const next = [...sealed]
-            next[cardIdx] = upgraded
+            next[curatorIdx] = upgraded
             return {
               messages: next,
               activeToolUseId: null,
@@ -2413,7 +2949,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
         update((s) => {
-          const sealed = sealThinkingFromState(s)
+          const sealed = sealThinkingForSession(sessionId, s)
           if (isExitPlanMode) {
 
             const card = makePendingPlanCardFromExitPlanMode(input, toolUseId)
@@ -2488,9 +3024,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (TODO_TOOL_NAMES.has(toolName) && Array.isArray((input as any)?.todos)) {
           const incomingSessionId = (msg as { sessionId?: string }).sessionId
           if (!incomingSessionId || incomingSessionId === sessionId) {
-            useCLITaskStore
-              .getState()
-              .setTasksFromTodos((input as any).todos, sessionId)
+            void useCLITaskStore.getState().refreshTasks(sessionId)
           }
         } else if (TASK_TOOL_NAMES.has(toolName)) {
           const useId = toolUseId
@@ -2522,6 +3056,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break
       }
 
+      case 'plan_progress':
+        update((s) => {
+          const sealed = sealThinkingForSession(sessionId, s)
+          return {
+            messages: [
+              ...sealed,
+              makePlanProgressCard({
+                id: nextId(),
+                planPath: msg.planPath,
+                title: msg.title,
+                todos: msg.todos,
+                timestamp:
+                  typeof msg.timestampMs === 'number' ? msg.timestampMs : Date.now(),
+                handoffKind: msg.handoffKind,
+              }),
+            ],
+            chatState: 'thinking',
+            activeThinkingId: null,
+          }
+        })
+        break
+
       case 'tool_result':
         if (
           deleteSessionToolUseId(
@@ -2531,7 +3087,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           )
         ) {
           update((s) => ({
-            messages: sealThinkingFromState(s),
+            messages: sealThinkingForSession(sessionId, s),
             chatState: 'thinking',
             activeThinkingId: null,
           }))
@@ -2545,14 +3101,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           )
         ) {
           update((s) => ({
-            messages: sealThinkingFromState(s),
+            messages: sealThinkingForSession(sessionId, s),
             chatState: 'thinking',
             activeThinkingId: null,
           }))
           break
         }
         update((s) => {
-          const sealed = sealThinkingFromState(s)
+          const sealed = sealThinkingForSession(sessionId, s)
 
           const cardIdx = sealed.findIndex(
             (m) => m.type === 'plan_card' && m.sourceToolUseId === msg.toolUseId,
@@ -2646,7 +3202,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'permission_request':
         update((s) => {
-          const sealed = sealThinkingFromState(s)
+          const sealed = sealThinkingForSession(sessionId, s)
           const isQuestionTool = isAskQuestionToolName(msg.toolName)
           return {
             pendingPermission: {
@@ -2677,7 +3233,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'computer_use_permission_request':
         update((s) => ({
-          messages: sealThinkingFromState(s),
+          messages: sealThinkingForSession(sessionId, s),
           pendingComputerUsePermission: {
             requestId: msg.requestId,
             request: msg.request,
@@ -2691,24 +3247,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'message_complete': {
         const session = get().sessions[sessionId]
         if (!session) break
-        consumePendingThinking(sessionId)
         const text = `${session.streamingText}${consumePendingDelta(sessionId)}`
         if (text.trim()) {
           update((s) => ({
             messages: appendAssistantTextMessage(
-              sealThinkingFromState(s),
+              sealThinkingForSession(sessionId, s),
               text,
               Date.now(),
             ),
             streamingText: '',
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
           }))
         } else if (text !== session.streamingText) {
           update((s) => ({
-            messages: sealThinkingFromState(s),
+            messages: sealThinkingForSession(sessionId, s),
             streamingText: text,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
           }))
         } else {
-          update((s) => ({ messages: sealThinkingFromState(s) }))
+          update((s) => ({
+            messages: sealThinkingForSession(sessionId, s),
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
+          }))
         }
         if (session.elapsedTimer) clearInterval(session.elapsedTimer)
 
@@ -2730,24 +3296,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }))
 
         void useUsageStore.getState().fetch()
+        syncTasksAfterTurnEnd(sessionId)
         break
       }
 
       case 'provider_retry': {
         const now = Date.now()
-        update(() => ({
-          providerRetry: {
-            attempt: msg.attempt,
-            maxAttempts: msg.maxAttempts,
-            waitMs: msg.waitMs,
-            waitDeadlineAt: now + Math.max(0, msg.waitMs),
-            class: msg.class,
-            provider: msg.provider,
-            model: msg.model,
-            message: msg.message,
-            receivedAt: now,
-          },
-        }))
+        update((s) => {
+          const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
+          const baseMessages = merged.trim()
+            ? appendAssistantTextMessage(s.messages, merged, Date.now())
+            : s.messages
+          return {
+            messages: baseMessages,
+            streamingText: '',
+            providerRetry: {
+              attempt: msg.attempt,
+              maxAttempts: msg.maxAttempts,
+              waitMs: msg.waitMs,
+              waitDeadlineAt: now + Math.max(0, msg.waitMs),
+              class: msg.class,
+              provider: msg.provider,
+              model: msg.model,
+              message: msg.message,
+              receivedAt: now,
+            },
+          }
+        })
         break
       }
 
@@ -2847,21 +3422,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'error': {
-        consumePendingThinking(sessionId)
         const isConfigError = isNoModelConfiguredError(msg.message, msg.code)
         update((s) => {
           const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
-          let newMessages = sealThinkingFromState(s)
+          let newMessages = sealThinkingForSession(sessionId, s)
           if (pendingText.trim()) {
             newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
           }
           if (!isConfigError) {
-            newMessages = [...newMessages, { id: nextId(), type: 'error', message: msg.message, code: msg.code, timestamp: Date.now() }]
+            newMessages = [...newMessages, {
+              id: nextId(),
+              type: 'error',
+              message: msg.message,
+              code: msg.code,
+              detail: msg.detail,
+              timestamp: Date.now(),
+            }]
           }
           return {
             messages: newMessages,
             chatState: 'idle',
             activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
             streamingText: '',
             pendingPermission: null,
             pendingComputerUsePermission: null,
@@ -2960,11 +3544,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (msg.sessionId && msg.sessionId !== sessionId) break
         const todos = Array.isArray(msg.todos) ? msg.todos : []
         const mapped = todos.map((t) => ({
+          id: String((t as { id?: unknown }).id ?? ''),
           content: String((t as { content?: unknown }).content ?? ''),
           status: String((t as { status?: unknown }).status ?? 'pending'),
           activeForm: (t as { activeForm?: string }).activeForm,
         }))
         useCLITaskStore.getState().setTasksFromTodos(mapped, sessionId)
+        break
+      }
+      case 'usage_updated': {
+        import('../stores/usageStore').then(({ useUsageStore }) => {
+          void useUsageStore.getState().fetch().catch(() => {})
+        }).catch(() => {})
         break
       }
       case 'system_notification': {
@@ -2980,6 +3571,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               message: text,
               duration: level === 'error' ? 8000 : 5000,
             })
+          }).catch(() => {})
+        }
+
+        if (msg.subtype === 'runtime_config_updated') {
+          import('../api/websocket').then(({ wsManager }) => {
+            wsManager.notifyRuntimeConfigUpdated(sessionId)
           }).catch(() => {})
         }
 
@@ -3143,7 +3740,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const now = Date.now()
           update((s) => ({
             messages: [
-              ...sealThinkingFromState(s),
+              ...sealThinkingForSession(sessionId, s),
               {
                 id: nextId(),
                 type: 'file_edit' as const,
@@ -3171,7 +3768,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const data = msg.data as Record<string, unknown>
           update((s) => ({
             messages: [
-              ...sealThinkingFromState(s),
+              ...sealThinkingForSession(sessionId, s),
               {
                 id: nextId(),
                 type: 'command_preview' as const,
@@ -3237,7 +3834,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
             return {
               messages: [
-                ...sealThinkingFromState(s),
+                ...sealThinkingForSession(sessionId, s),
                 flatMessage,
               ],
               subagentTimelines: nextTimelines,
@@ -3284,6 +3881,34 @@ type AssistantHistoryBlock = {
   name?: string
   id?: string
   input?: unknown
+
+  path?: string
+  additions?: number
+  deletions?: number
+  diff?: string | null
+  edit_batch_id?: string | null
+
+  tool_name?: string
+
+  agent_id?: string
+  kind?: string
+  delta?: string
+  task_id?: string
+  parent_tool_use_id?: string
+
+  worker_id?: string
+  payload?: unknown
+
+  plan_path?: string
+  target_mode?: string
+  handoff_kind?: string
+  status?: string
+  resume?: boolean
+
+  title?: string
+  todos?: unknown
+
+  timestamp_ms?: number
 }
 type UserHistoryBlock = { type: string; text?: string; tool_use_id?: string; content?: unknown; is_error?: boolean; source?: { data?: string }; mimeType?: string; media_type?: string; name?: string }
 
@@ -3410,6 +4035,66 @@ export function reconstructAgentNotifications(messages: MessageEntry[]): Record<
   return notifications
 }
 
+type PlanProgressTodo = {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  notes?: string | null
+}
+
+export function normalizePlanProgressTodos(raw: unknown): PlanProgressTodo[] {
+  if (!Array.isArray(raw)) return []
+  const out: PlanProgressTodo[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const obj = item as Record<string, unknown>
+    const content = typeof obj.content === 'string' ? obj.content : ''
+    if (!content) continue
+    const statusRaw = typeof obj.status === 'string' ? obj.status : 'completed'
+    const status: PlanProgressTodo['status'] =
+      statusRaw === 'pending' ||
+      statusRaw === 'in_progress' ||
+      statusRaw === 'completed' ||
+      statusRaw === 'cancelled'
+        ? statusRaw
+        : 'completed'
+    out.push({
+      id: typeof obj.id === 'string' && obj.id ? obj.id : `s${out.length + 1}`,
+      content,
+      status,
+      notes: typeof obj.notes === 'string' ? obj.notes : null,
+    })
+  }
+  return out
+}
+
+function deriveHandoffKindFromPath(planPath: string): 'plan' | 'curator' {
+  const norm = (planPath || '').replace(/\\/g, '/')
+  return norm.includes('/curators/') || norm.endsWith('impl_blueprint.md')
+    ? 'curator'
+    : 'plan'
+}
+
+export function makePlanProgressCard(args: {
+  id: string
+  planPath: string
+  title: string
+  todos: unknown
+  timestamp: number
+  handoffKind?: 'plan' | 'curator'
+}): Extract<UIMessage, { type: 'plan_progress' }> {
+  const handoffKind = args.handoffKind ?? deriveHandoffKindFromPath(args.planPath)
+  return {
+    id: args.id,
+    type: 'plan_progress',
+    timestamp: args.timestamp,
+    planPath: args.planPath,
+    title: args.title || (handoffKind === 'curator' ? 'Curator' : 'Plan'),
+    todos: normalizePlanProgressTodos(args.todos),
+    handoffKind,
+  }
+}
+
 export function mapHistoryMessagesToUiMessages(
   messages: MessageEntry[],
   options?: HistoryMappingOptions,
@@ -3436,6 +4121,18 @@ export function mapHistoryMessagesToUiMessages(
           ...sup,
         })
         if (!tombstoned) liveUserCount++
+        continue
+      }
+      const parsedAsk = tryParseAskResponseUserText(msg.content)
+      if (parsedAsk) {
+        uiMessages.push({
+          id: msg.id || nextId(),
+          type: 'plan_question_answers',
+          timestamp,
+          items: parsedAsk.items,
+          ...(parsedAsk.details ? { details: parsedAsk.details } : {}),
+          ...sup,
+        })
         continue
       }
       uiMessages.push({
@@ -3475,7 +4172,144 @@ export function mapHistoryMessagesToUiMessages(
           })
         }
         else if (block.type === 'text' && block.text) pushAssistantHistoryText(uiMessages, block.text, timestamp, msg.model, tombstoned)
-        else if (block.type === 'tool_use') uiMessages.push({ id: nextId(), type: 'tool_use', toolName: block.name ?? 'unknown', toolUseId: block.id ?? '', input: block.input, timestamp, parentToolUseId: msg.parentToolUseId, ...sup })
+        else if (block.type === 'tool_use') {
+          const blockToolName = block.name ?? 'unknown'
+          const blockToolUseId = block.id ?? ''
+          const blockInput = block.input
+          if (isPlanSaveCall(blockToolName, blockInput)) {
+            uiMessages.push({
+              ...makePendingPlanCardFromUpdatePlan(blockInput, blockToolUseId),
+              timestamp,
+              ...sup,
+            })
+          } else if (isExitPlanModeCall(blockToolName)) {
+            uiMessages.push({
+              ...makePendingPlanCardFromExitPlanMode(blockInput, blockToolUseId),
+              timestamp,
+              ...sup,
+            })
+          } else if (isExitCuratorModeCall(blockToolName)) {
+            uiMessages.push({
+              ...makePendingCuratorCardFromExitCuratorMode(blockInput, blockToolUseId),
+              timestamp,
+              ...sup,
+            })
+          } else if (isUpdatePlanSetCall(blockToolName, blockInput) || isUpdatePlanUpdateCall(blockToolName, blockInput)) {
+            const lastPlanIdx = (() => {
+              for (let i = uiMessages.length - 1; i >= 0; i--) {
+                if (uiMessages[i]!.type === 'plan_card') return i
+                const t = uiMessages[i]!.type
+                if (t === 'user_text' || t === 'mode_switch_card' || t === 'curator_card' || t === 'plan_question_answers') return -1
+              }
+              return -1
+            })()
+            if (lastPlanIdx >= 0) {
+              const cur = uiMessages[lastPlanIdx] as Extract<UIMessage, { type: 'plan_card' }>
+              const upgraded = isUpdatePlanSetCall(blockToolName, blockInput)
+                ? applyUpdatePlanSetToCard(cur, (blockInput as Record<string, unknown> | null)?.steps)
+                : applyUpdatePlanUpdateToCard(cur, blockInput as Record<string, unknown>)
+              if (upgraded && upgraded !== cur) {
+                uiMessages[lastPlanIdx] = upgraded
+              } else {
+                uiMessages[lastPlanIdx] = { ...cur, wasExecuted: true }
+              }
+            } else {
+              uiMessages.push({
+                id: nextId(),
+                type: 'tool_use',
+                toolName: blockToolName,
+                toolUseId: blockToolUseId,
+                input: blockInput,
+                timestamp,
+                parentToolUseId: msg.parentToolUseId,
+                ...sup,
+              })
+            }
+          } else {
+            uiMessages.push({
+              id: nextId(),
+              type: 'tool_use',
+              toolName: blockToolName,
+              toolUseId: blockToolUseId,
+              input: blockInput,
+              timestamp,
+              parentToolUseId: msg.parentToolUseId,
+              ...sup,
+            })
+          }
+        }
+        else if (block.type === 'file_edit' && typeof block.path === 'string') {
+          uiMessages.push({
+            id: nextId(),
+            type: 'file_edit',
+            path: block.path,
+            additions: typeof block.additions === 'number' ? block.additions : 0,
+            deletions: typeof block.deletions === 'number' ? block.deletions : 0,
+            diff: typeof block.diff === 'string' ? block.diff : null,
+            editBatchId: typeof block.edit_batch_id === 'string' ? block.edit_batch_id : null,
+            timestamp,
+            ...sup,
+          })
+        }
+        else if (block.type === 'command_preview' && typeof block.tool_name === 'string') {
+          uiMessages.push({
+            id: nextId(),
+            type: 'command_preview',
+            toolName: block.tool_name,
+            input: block.input ?? null,
+            timestamp,
+            ...sup,
+          })
+        }
+        else if (block.type === 'subagent_chunk' && typeof block.agent_id === 'string') {
+          uiMessages.push({
+            id: nextId(),
+            type: 'subagent_chunk',
+            agentId: block.agent_id,
+            delta: typeof block.delta === 'string' ? block.delta : '',
+            chunkKind: typeof block.kind === 'string' ? block.kind : 'Chunk',
+            taskId: typeof block.task_id === 'string' ? block.task_id : undefined,
+            parentToolUseId: typeof block.parent_tool_use_id === 'string' ? block.parent_tool_use_id : undefined,
+            timestamp,
+            ...sup,
+          })
+        }
+        else if (block.type === 'mode_switch') {
+          const planPath = typeof block.plan_path === 'string' ? block.plan_path : ''
+          const handoffKindRaw = typeof block.handoff_kind === 'string' ? block.handoff_kind : 'plan'
+          const handoffKind: 'plan' | 'curator' =
+            handoffKindRaw === 'curator' ? 'curator' : 'plan'
+          const targetModeRaw = typeof block.target_mode === 'string' ? block.target_mode : 'agent'
+          const statusRaw = typeof block.status === 'string' ? block.status : 'switched'
+          const status: 'pending' | 'switched' | 'dismissed' =
+            statusRaw === 'pending'
+              ? 'pending'
+              : statusRaw === 'dismissed'
+                ? 'dismissed'
+                : 'switched'
+          uiMessages.push({
+            id: nextId(),
+            type: 'mode_switch_card',
+            timestamp,
+            planPath,
+            targetMode: targetModeRaw as CodingModeId,
+            status,
+            handoffKind,
+            ...sup,
+          })
+        }
+        else if (block.type === 'plan_progress') {
+          uiMessages.push({
+            ...makePlanProgressCard({
+              id: nextId(),
+              planPath: typeof block.plan_path === 'string' ? block.plan_path : '',
+              title: typeof block.title === 'string' ? block.title : 'Plan',
+              todos: block.todos,
+              timestamp,
+            }),
+            ...sup,
+          })
+        }
       }
       continue
     }
@@ -3509,6 +4343,25 @@ export function mapHistoryMessagesToUiMessages(
             typeof block.content === 'string'
               ? block.content
               : extractTextFromRawContent(block.content)
+
+          const planCardIdx = uiMessages.findIndex(
+            (m) => m.type === 'plan_card' && m.sourceToolUseId === toolUseId,
+          )
+          if (planCardIdx >= 0) {
+            const cur = uiMessages[planCardIdx] as Extract<UIMessage, { type: 'plan_card' }>
+            uiMessages[planCardIdx] = upgradePlanCardFromResult(cur, block.content, isErrorResult)
+            continue
+          }
+
+          const curatorCardIdx = uiMessages.findIndex(
+            (m) => m.type === 'curator_card' && m.sourceToolUseId === toolUseId,
+          )
+          if (curatorCardIdx >= 0) {
+            const cur = uiMessages[curatorCardIdx] as Extract<UIMessage, { type: 'curator_card' }>
+            uiMessages[curatorCardIdx] = upgradeCuratorCardFromResult(cur, block.content, isErrorResult)
+            continue
+          }
+
           if (
             !isErrorResult &&
             resultText &&
@@ -3536,6 +4389,7 @@ export function mapHistoryMessagesToUiMessages(
               continue
             }
           }
+
           uiMessages.push({
             id: nextId(),
             type: 'tool_result',
@@ -3549,16 +4403,29 @@ export function mapHistoryMessagesToUiMessages(
         }
       }
       if (textParts.length > 0 || attachments.length > 0) {
-        uiMessages.push({
-          id: nextId(),
-          type: 'user_text',
-          content: textParts.join('\n'),
-          attachments: attachments.length > 0 ? attachments : undefined,
-          timestamp,
-          ...(tombstoned ? {} : { userMessageIndex: liveUserCount }),
-          ...sup,
-        })
-        if (!tombstoned) liveUserCount++
+        const joined = textParts.join('\n')
+        const parsedAsk = attachments.length === 0 ? tryParseAskResponseUserText(joined) : null
+        if (parsedAsk) {
+          uiMessages.push({
+            id: nextId(),
+            type: 'plan_question_answers',
+            timestamp,
+            items: parsedAsk.items,
+            ...(parsedAsk.details ? { details: parsedAsk.details } : {}),
+            ...sup,
+          })
+        } else {
+          uiMessages.push({
+            id: nextId(),
+            type: 'user_text',
+            content: joined,
+            attachments: attachments.length > 0 ? attachments : undefined,
+            timestamp,
+            ...(tombstoned ? {} : { userMessageIndex: liveUserCount }),
+            ...sup,
+          })
+          if (!tombstoned) liveUserCount++
+        }
       }
     }
   }

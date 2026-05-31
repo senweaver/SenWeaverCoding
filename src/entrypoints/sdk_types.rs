@@ -197,19 +197,6 @@ pub struct SdkMessageMetadata {
     pub duration_ms: Option<u64>,
 }
 
-impl SdkMessageMetadata {
-
-    fn with_duration(duration_ms: u64, model: Option<String>) -> Self {
-        Self {
-            model,
-            input_tokens: None,
-            output_tokens: None,
-            cost_usd: None,
-            duration_ms: Some(duration_ms),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SdkModelUsage {
 
@@ -249,6 +236,8 @@ pub enum SdkTurnEvent {
 
     Chunk { delta: String },
 
+    StreamReset,
+
     Thinking { delta: String },
 
     ToolCall {
@@ -266,6 +255,7 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
         use crate::agent::TurnEvent as T;
         match event {
             T::Chunk { delta } => Self::Chunk { delta },
+            T::StreamReset => Self::StreamReset,
             T::Thinking { delta } => Self::Thinking { delta },
             T::ToolCall {
                 name,
@@ -281,6 +271,9 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
                 name,
                 output,
                 success,
+            },
+            T::PlanProgressCommitted { title, .. } => Self::Chunk {
+                delta: format!("[plan_progress] {title}"),
             },
             T::Error { message } => Self::Error { message },
 

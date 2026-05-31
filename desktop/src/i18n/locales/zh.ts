@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import type { TranslationKey } from './en'
 
 export const zh: Record<TranslationKey, string> = {
@@ -247,6 +251,8 @@ export const zh: Record<TranslationKey, string> = {
   'files.tree.copyPath': '复制绝对路径',
   'files.tree.copyRelativePath': '复制相对路径',
   'files.tree.reveal': '在文件管理器中显示',
+  'files.tree.openInTerminal': '在集成终端中打开',
+  'files.tree.openTerminalFailed': '打开集成终端失败: {message}',
   'files.tree.pathLabel': '路径',
   'files.tree.sizeLabel': '大小',
   'files.tree.modifiedLabel': '修改时间',
@@ -582,6 +588,14 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.contextWindowPlaceholder': '上下文上限（如 1000000）',
   'settings.providers.contextWindowTooltip': '该模型的最大上下文 token 数。输入框右下角的消耗环会使用此值作为上限。留空则使用内置的启发式估算。',
   'settings.providers.editModels': '编辑模型列表',
+  'settings.providers.searchModels': '添加或搜索模型',
+  'settings.providers.searchAllModels': '按模型 ID 或服务商搜索',
+  'settings.providers.globalModelsHelp': '跨所有服务商启用或禁用模型。已禁用的模型不会出现在模型选择器中。',
+  'settings.providers.viewAllModels': '查看全部模型',
+  'settings.providers.showLessModels': '收起列表',
+  'settings.providers.modelsShowingCount': '显示 {shown} / {total} 个模型',
+  'settings.providers.refreshModels': '刷新模型列表',
+  'settings.providers.noModelsMatch': '没有匹配的模型',
   'settings.providers.noBaseUrl': '未配置接口地址',
   'settings.providers.connected': '已连接 ({latency}ms)',
   'settings.providers.failed': '失败: {error}',
@@ -763,8 +777,8 @@ export const zh: Record<TranslationKey, string> = {
 
   'settings.adapters.channels.voiceCall.name': '电话语音（Twilio/Telnyx/Plivo）',
   'settings.adapters.channels.voiceCall.tagline': '实时电话通话，带 STT/TTS 流式播放。',
-  'settings.adapters.channels.clawdtalk.name': 'ClawdTalk',
-  'settings.adapters.channels.clawdtalk.tagline': '基于 Telnyx SIP 基础设施的 AI 语音通话。',
+  'settings.adapters.channels.telnyx.name': 'Telnyx',
+  'settings.adapters.channels.telnyx.tagline': '基于 Telnyx SIP 基础设施的 AI 语音通话。',
   'settings.adapters.channels.voiceWake.name': '语音唤醒词',
   'settings.adapters.channels.voiceWake.tagline': '本地麦克风 — 唤醒词触发拾音。',
 
@@ -1402,6 +1416,7 @@ export const zh: Record<TranslationKey, string> = {
   'plan.copyPath': '复制计划文件路径：\n{path}',
   'plan.copyPathDone': '路径已复制',
   'plan.completed': '已完成',
+  'plan.progressCardTitle': '计划进度 · 已完成',
   'plan.stickyProgress': '{completed}/{total}',
   'plan.stickySucceeded': '({succeeded} 成功)',
   'plan.stickyProgressTitle': '{completed} 完成 + {cancelled} 跳过/取消，共 {total} 项',
@@ -1419,6 +1434,13 @@ export const zh: Record<TranslationKey, string> = {
 
   'plan.blockedTitle': 'Plan 模式已拦截',
   'plan.blockedBody': '模型尝试调用 {tools}。Plan 模式仅允许只读探索 + update_plan / exit_plan_mode / ask_question，请求已在执行前被拒绝，未对任何文件造成改动。',
+
+  'modeBlocked.readOnly.title': '只读模式已拦截',
+  'modeBlocked.readOnly.body': '模型尝试调用 {tools}，但当前模式仅允许只读操作。请求已被拦截，未对任何文件或环境造成改动。如需写入，请切换到允许写入的编程模式。',
+  'modeBlocked.toolNotAllowed.title': '当前模式不允许该工具',
+  'modeBlocked.toolNotAllowed.body': '{tools} 不在当前编程模式的工具白名单内。请求已被拦截。请切换到包含该工具的模式，或选择其他工具完成任务。',
+
+  'execTool.openFullLog': '在终端面板查看完整日志',
 
   'thinking.wordThought': '思考',
   'thinking.wordThinking': '思考中',
@@ -1793,6 +1815,21 @@ export const zh: Record<TranslationKey, string> = {
   'error.BAD_REQUEST': '请求无效。',
   'error.NOT_FOUND': '资源未找到。',
   'error.INTERNAL_ERROR': '内部服务器错误。',
+  'error.NO_MODEL_CONFIGURED': '尚未配置可用模型。请在设置中添加 Provider 和模型。',
+  'error.CONFIG_ERROR': '模型或 Provider 配置有误。请检查 API Key、接口地址和模型名称。',
+  'error.CONNECTION_FAILED': '无法连接到模型服务。请检查网络连接和 Provider 接口地址。',
+  'error.CONNECTION_TIMEOUT': '请求超时未完成。请检查网络后重试。',
+  'error.INSUFFICIENT_BALANCE': '账户余额或配额不足。请充值或切换其他 Provider。',
+  'error.GATEWAY_ERROR': '上游网关返回错误。请稍后重试或切换 Provider。',
+  'error.AUTH_ERROR': '身份验证失败。请检查 API Key 和账户权限。',
+  'error.RATE_LIMITED': '已触发限流。请稍候再试或切换其他 Provider。',
+  'error.MODEL_UNAVAILABLE': '所选模型不可用。请更换支持的模型或 Provider。',
+  'error.ENGINE_OVERLOADED': '上游模型引擎繁忙。请稍后重试或切换模型。',
+  'error.PROVIDER_FAILOVER': '所有可用模型/通道均失败。请检查网络或切换 Provider/Model 后重试。',
+  'error.AGENT_TURN_FAILED': '处理请求时出现问题。请重试。',
+  'error.UNKNOWN_ERROR': '处理请求时出现问题。请重试。',
+  'error.TURN_CANCELLED': '请求已取消。',
+  'error.VALIDATION_ERROR': '请求无效。请检查输入后重试。',
 
   'serverVerb.Thinking': '思考中',
   'serverVerb.Task started': '任务已启动',
@@ -1874,6 +1911,9 @@ export const zh: Record<TranslationKey, string> = {
   'curator.actions.buildSwitch': '构建 → Agent',
   'curator.statusWriting': '撰写中…',
   'curator.copyPath': '复制路径',
+  'curator.untitled': '未命名文档',
+  'curator.openDocx': '打开 DOCX',
+  'curator.progressCardTitle': '策展构建 · 已完成',
   'curator.modeSwitchTitle': '切换到 Agent · 按 impl_blueprint.md 落地完整工程',
   'curator.modeSwitchBody':
     '点击切换后，Agent 模式会读取 impl_blueprint.md，并按其工程化代码、配置与文档；Curator 阶段沉淀的资料会作为实施输入。',
@@ -2405,6 +2445,13 @@ export const zh: Record<TranslationKey, string> = {
   'settings.lsp.description':
     '管理用于编辑器实时诊断、悬停提示、自动补全以及智能体代码情报工具的 LSP 服务器。可在托管安装与手动命令覆盖之间逐项切换。',
   'settings.lsp.globalEnable': '启用 LSP 集成',
+  'settings.lsp.badge.disabled': '已停用',
+  'settings.lsp.badge.stopped': '已停止',
+  'settings.lsp.badge.install': '待安装',
+  'settings.lsp.badge.installing': '安装中',
+  'settings.lsp.badge.ready': '就绪',
+  'settings.lsp.badge.starting': '启动中',
+  'settings.lsp.badge.failed': '失败',
   'settings.lsp.addServer': '添加服务器',
   'settings.lsp.customTemplate': '自定义（手动）',
   'settings.lsp.customTemplateHint': '自行填写 command / args / env',

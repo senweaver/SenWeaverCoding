@@ -50,7 +50,7 @@ pub fn build_lesson_block(engine: &Arc<EvolutionEngine>, coding_mode: Option<&st
     for lesson in chosen {
         buf.push_str("- **");
         buf.push_str(lesson.title.trim());
-        buf.push_str("** — ");
+        buf.push_str("**  -  ");
         buf.push_str(lesson.body.trim());
         if !lesson.tags.is_empty() {
             buf.push_str(" _(");

@@ -144,7 +144,7 @@ impl WeatherTool {
             .connect_timeout(Duration::from_secs(WTTR_CONNECT_TIMEOUT_SECS))
             .user_agent("sen-weather/1.0");
 
-        let builder = crate::services::get_services()
+        let builder = crate::services::require_services()
             .proxy_runtime()
             .apply_to_builder(builder, "tool.weather");
         let client = builder.build()?;
@@ -194,7 +194,7 @@ impl WeatherTool {
             .map(|v| v.value.trim().to_string())
             .unwrap_or_default();
         format!(
-            "    {hour_display}: {temp} — {desc} | Wind: {wind_speed} {} | Rain: {}% | Snow: {}%",
+            "    {hour_display}: {temp}  -  {desc} | Wind: {wind_speed} {} | Rain: {}% | Snow: {}%",
             h.winddir_16point, h.chance_of_rain, h.chance_of_snow,
         )
     }

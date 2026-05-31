@@ -141,7 +141,7 @@ impl Tool for TodoWriteTool {
 
         "Use this tool to plan and track work for a multi-step user request. \
 You MUST use it whenever the request needs more than one tool call or \
-involves more than one logical step — registering the steps up front \
+involves more than one logical step  -  registering the steps up front \
 keeps your work transparent and recoverable across turns.\n\
 \n\
 WHEN TO USE\n\
@@ -161,7 +161,7 @@ LIFECYCLE RULES\n\
 move on. Don't leave todos `in_progress` indefinitely.\n\
 - **Update statuses incrementally, never silently in bulk at the end.** \
 Flip a step to `completed` *immediately* after finishing it, BEFORE you \
-start the next one. The user's task bar mirrors the latest call — if \
+start the next one. The user's task bar mirrors the latest call  -  if \
 you do five steps and only update once at the end, the bar is stuck at \
 0/5 for the whole turn.\n\
 - **If a single turn finishes multiple items**, update **all** of them \
@@ -251,7 +251,7 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
         let existing = guard.get(&session_id).cloned().unwrap_or_default();
         let old_count = existing.len();
 
-        let mut next = if merge {
+        let next = if merge {
             let mut base = existing;
             for item in incoming {
                 if let Some(pos) = base.iter().position(|t| t.id == item.id) {
@@ -264,10 +264,6 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
         } else {
             incoming
         };
-
-        if !next.is_empty() && next.iter().all(|t| t.status == TodoStatus::Completed) {
-            next.clear();
-        }
 
         let new_count = next.len();
         if next.is_empty() {

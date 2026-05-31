@@ -22,12 +22,6 @@ const QQ_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 
 const UPLOAD_CACHE_CAPACITY: usize = 500;
 
-const REPLY_LIMIT: u32 = 4;
-
-const REPLY_TTL_SECS: u64 = 3600;
-
-const REPLY_TRACKER_CAPACITY: usize = 10_000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QQMediaFileType {
 
@@ -46,16 +40,10 @@ struct QQMediaAttachment {
     target: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum QQSendSegment {
-    Text(String),
-    Media(QQMediaAttachment),
-}
-
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct QQUploadResponse {
     file_info: String,
-    #[allow(dead_code)]
     file_uuid: Option<String>,
     ttl: Option<u64>,
 }
@@ -63,11 +51,6 @@ struct QQUploadResponse {
 struct UploadCacheEntry {
     file_info: String,
     expires_at: u64,
-}
-
-struct ReplyRecord {
-    count: u32,
-    first_reply_at: u64,
 }
 
 fn ensure_https(url: &str) -> anyhow::Result<()> {
@@ -259,8 +242,6 @@ pub struct QQChannel {
 
     upload_cache: Arc<RwLock<HashMap<String, UploadCacheEntry>>>,
 
-    reply_tracker: Arc<RwLock<HashMap<String, ReplyRecord>>>,
-
     proxy_url: Option<String>,
 
     session_id: Arc<RwLock<Option<String>>>,
@@ -278,7 +259,6 @@ impl QQChannel {
             dedup: Arc::new(RwLock::new(HashSet::new())),
             workspace_dir: None,
             upload_cache: Arc::new(RwLock::new(HashMap::new())),
-            reply_tracker: Arc::new(RwLock::new(HashMap::new())),
             proxy_url: None,
             session_id: Arc::new(RwLock::new(None)),
             last_sequence: Arc::new(RwLock::new(None)),
@@ -296,7 +276,7 @@ impl QQChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_channel_client("channel.qq", self.proxy_url.as_deref())
     }
@@ -502,36 +482,6 @@ impl QQChannel {
                 expires_at: now_secs() + ttl,
             },
         );
-    }
-
-    async fn check_reply_allowed(&self, msg_id: &str) -> bool {
-        let now = now_secs();
-        let mut tracker = self.reply_tracker.write().await;
-
-        if tracker.len() >= REPLY_TRACKER_CAPACITY {
-            tracker.retain(|_, v| now - v.first_reply_at < REPLY_TTL_SECS);
-        }
-
-        if let Some(record) = tracker.get_mut(msg_id) {
-            if now - record.first_reply_at >= REPLY_TTL_SECS {
-
-                return false;
-            }
-            if record.count >= REPLY_LIMIT {
-                return false;
-            }
-            record.count += 1;
-            true
-        } else {
-            tracker.insert(
-                msg_id.to_string(),
-                ReplyRecord {
-                    count: 1,
-                    first_reply_at: now,
-                },
-            );
-            true
-        }
     }
 
     fn resolve_recipient(recipient: &str) -> (&str, String) {
@@ -950,7 +900,7 @@ impl Channel for QQChannel {
         let gw_url = self.get_gateway_url(&token).await?;
 
         tracing::info!("QQ: connecting to gateway WebSocket...");
-        let (ws_stream, _) = crate::services::get_services()
+        let (ws_stream, _) = crate::services::require_services()
             .proxy_runtime()
             .ws_connect(&gw_url, "channel.qq", self.proxy_url.as_deref())
             .await?;

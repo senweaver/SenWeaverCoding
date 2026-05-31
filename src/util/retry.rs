@@ -5,8 +5,23 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::error::ErrorClassification;
+use crate::error::{ErrorCategory, ErrorClassification};
 use crate::providers::core::retry::{exp_backoff, RetryBudget};
+
+#[derive(Debug, thiserror::Error)]
+pub enum RetryExhausted {
+    #[error("retry policy exhausted budget without any attempt being executed (max_attempts={max_attempts}, max_elapsed={max_elapsed:?})")]
+    BudgetEmpty {
+        max_attempts: u32,
+        max_elapsed: Duration,
+    },
+}
+
+impl ErrorClassification for RetryExhausted {
+    fn category(&self) -> ErrorCategory {
+        ErrorCategory::Internal
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -106,7 +121,7 @@ pub async fn retry<F, Fut, T, E>(policy: &RetryPolicy, mut op: F) -> Result<T, E
 where
     F: FnMut(u32) -> Fut,
     Fut: Future<Output = Result<T, E>>,
-    E: ErrorClassification,
+    E: ErrorClassification + From<RetryExhausted>,
 {
     let mut budget = RetryBudget::new(policy.max_attempts, policy.max_elapsed);
     let mut last_err: Option<E> = None;
@@ -144,14 +159,20 @@ where
         }
     }
 
-    Err(last_err.expect("retry budget exhausted without observing any error"))
+    match last_err {
+        Some(err) => Err(err),
+        None => Err(E::from(RetryExhausted::BudgetEmpty {
+            max_attempts: policy.max_attempts,
+            max_elapsed: policy.max_elapsed,
+        })),
+    }
 }
 
 pub async fn retry_simple<F, Fut, T, E>(op: F) -> Result<T, E>
 where
     F: FnMut(u32) -> Fut,
     Fut: Future<Output = Result<T, E>>,
-    E: ErrorClassification,
+    E: ErrorClassification + From<RetryExhausted>,
 {
     retry(&RetryPolicy::network(), op).await
 }

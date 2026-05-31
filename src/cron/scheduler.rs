@@ -24,7 +24,6 @@ use futures_util::{StreamExt, stream};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::process::Command;
 use tokio::time::{self, Duration};
 
 const MIN_POLL_SECONDS: u64 = 5;
@@ -490,6 +489,7 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
     }
 }
 
+#[cfg(feature = "channel-matrix")]
 fn resolve_matrix_delivery_room(configured_room_id: &str, target: &str) -> String {
     let target = target.trim();
     if target.is_empty() {
@@ -806,7 +806,7 @@ async fn run_job_command_with_timeout(
 fn build_cron_shell_command(
     command: &str,
     workspace_dir: &std::path::Path,
-) -> anyhow::Result<Command> {
+) -> anyhow::Result<tokio::process::Command> {
     let mut cmd = crate::util::hidden_async_command("sh");
     cmd.arg("-c")
         .arg(command)

@@ -1,125 +1,86 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-pub mod ask_question;
-pub mod ask_user;
+pub mod ask;
 pub mod backup_tool;
 pub mod background_registry;
 pub mod brief;
+pub mod coding;
 pub mod browser;
-pub mod browser_delegate;
-pub mod browser_open;
+pub mod claude_code;
+#[cfg(feature = "tool-cloud-ops")]
+pub mod cloud;
+pub mod code;
+#[cfg(feature = "tool-cron")]
+pub mod cron;
+pub mod file;
+pub mod flow;
+pub mod github;
+pub mod glob;
+#[cfg(feature = "hardware")]
+pub mod hardware;
+#[cfg(feature = "tool-image")]
+pub mod image;
+pub mod inline;
+pub mod mcp;
+pub mod memory;
+pub mod multi;
+pub mod plan_mode;
+pub mod read;
+#[cfg(feature = "tool-reports")]
+pub mod report;
+#[cfg(feature = "tool-sop")]
+pub mod sop;
+pub mod task;
+#[cfg(feature = "tool-team")]
+pub mod team;
+pub mod web;
+pub mod worktree;
 #[cfg(feature = "tool-utility-misc")]
 pub mod calculator;
 pub mod canvas;
-pub mod claude_code;
-pub mod claude_code_runner;
 pub mod cli_discovery;
-#[cfg(feature = "tool-cloud-ops")]
-pub mod cloud_ops;
-#[cfg(feature = "tool-cloud-ops")]
-pub mod cloud_patterns;
-pub mod code_graph_query;
-pub mod code_outline;
-pub mod code_search;
-pub mod code_to_spec;
-pub mod code_xfile_refactor;
 pub mod codex_cli;
 #[cfg(feature = "tool-productivity")]
 pub mod composio;
 pub mod content_search;
 pub mod custom_tool;
-#[cfg(feature = "tool-cron")]
-pub mod cron_add;
-#[cfg(feature = "tool-cron")]
-pub mod cron_list;
-#[cfg(feature = "tool-cron")]
-pub mod cron_remove;
-#[cfg(feature = "tool-cron")]
-pub mod cron_run;
-#[cfg(feature = "tool-cron")]
-pub mod cron_runs;
-#[cfg(feature = "tool-cron")]
-pub mod cron_update;
 #[cfg(feature = "tool-cloud-ops")]
 pub mod data_management;
 pub mod debug_test_report;
 pub mod delegate;
-pub mod delegate_parallel;
 pub mod spawn_workers;
 pub mod diagnostics;
 pub mod dir_list;
 #[cfg(feature = "tool-search-social")]
 pub mod discord_search;
 pub mod edit_history;
-pub mod enter_plan_mode;
 pub mod error;
 pub mod escalate;
 pub mod exa_search;
-pub mod exit_plan_mode;
-pub mod file_edit;
-pub mod file_read;
-pub mod file_write;
-pub mod flow_rollback;
-pub mod flow_run;
 pub mod fs_ops;
+pub mod handler;
 pub mod gemini_cli;
 pub mod git_operations;
 #[cfg(feature = "tool-curator")]
 pub mod curator;
-pub mod github_advanced_search;
-pub mod github_search;
-pub mod glob_edit;
-pub mod glob_search;
 #[cfg(feature = "tool-productivity")]
 pub mod google_workspace;
 pub mod handle;
-#[cfg(feature = "hardware")]
-pub mod hardware_board_info;
-#[cfg(feature = "hardware")]
-pub mod hardware_memory_map;
-#[cfg(feature = "hardware")]
-pub mod hardware_memory_read;
 pub mod http_request;
-#[cfg(feature = "tool-image")]
-pub mod image_gen;
-#[cfg(feature = "tool-image")]
-pub mod image_info;
-#[cfg(feature = "tool-image")]
-pub mod image_search;
 pub mod incremental_optimize;
-pub mod inline_complete;
 #[cfg(feature = "tool-productivity")]
 pub mod jira_tool;
 pub mod knowledge_tool;
 #[cfg(feature = "tool-linkedin")]
 pub mod linkedin;
-#[cfg(feature = "tool-linkedin")]
-pub mod linkedin_client;
+pub mod autoresearch;
 pub mod llm_task;
 pub mod lsp;
-pub mod lsp_rename;
-pub mod lsp_symbols;
-pub mod mcp_client;
-pub mod mcp_deferred;
-pub mod mcp_protocol;
-pub mod mcp_resources_list;
-pub mod mcp_resources_read;
-pub mod mcp_tool;
-pub mod mcp_transport;
-pub mod memory_export;
-pub mod memory_forget;
-pub mod memory_purge;
-pub mod memory_recall;
-pub mod memory_store;
 pub mod microsoft365;
-pub mod model_routing_config;
-pub mod model_switch;
-pub mod multi_edit;
-pub mod multi_search;
-pub mod node_capabilities;
-pub mod node_tool;
+pub mod model;
+pub mod node;
 pub mod notebook_edit;
 #[cfg(feature = "tool-productivity")]
 pub mod notion_tool;
@@ -136,15 +97,9 @@ pub mod proxy_config;
 #[cfg(feature = "tool-pushover")]
 pub mod pushover;
 pub mod reaction;
-pub mod read_skill;
-pub mod read_user_rule;
 #[cfg(feature = "tool-search-social")]
 pub mod reddit_search;
 pub mod registry;
-#[cfg(feature = "tool-reports")]
-pub mod report_template_tool;
-#[cfg(feature = "tool-reports")]
-pub mod report_templates;
 pub mod restore_file;
 #[cfg(feature = "tool-cron")]
 pub mod schedule;
@@ -157,38 +112,14 @@ pub mod send_message;
 pub mod sessions;
 pub mod setup_agent;
 pub mod shell;
-pub mod skill_http;
-pub mod skill_tool;
+pub mod skill;
 pub mod sleep;
-#[cfg(feature = "tool-sop")]
-pub mod sop_advance;
-#[cfg(feature = "tool-sop")]
-pub mod sop_approve;
-#[cfg(feature = "tool-sop")]
-pub mod sop_execute;
-#[cfg(feature = "tool-sop")]
-pub mod sop_list;
-#[cfg(feature = "tool-sop")]
-pub mod sop_status;
 pub mod spec_cache;
 pub mod structured_output;
 pub mod swarm;
-pub mod task_create;
-pub mod task_get;
-pub mod task_list;
-pub mod task_output;
-pub mod task_stop;
-pub mod task_update;
 pub mod tavily_search;
-#[cfg(feature = "tool-team")]
-pub mod team_create;
-#[cfg(feature = "tool-team")]
-pub mod team_delete;
 pub mod text_browser;
 pub mod todo_write;
-pub mod tool_groups;
-pub mod tool_search;
-pub mod tool_tier;
 pub mod traits;
 pub mod update_plan;
 pub mod verifiable_intent;
@@ -196,54 +127,47 @@ pub mod verifiable_intent;
 pub mod view_image;
 #[cfg(feature = "tool-utility-misc")]
 pub mod weather_tool;
-pub mod web_fetch;
-pub mod web_search;
-mod web_search_provider_routing;
-pub mod web_search_tool;
 #[cfg(feature = "tool-workspace-deep")]
 pub mod workspace_deep_search;
 pub mod workspace_tool;
-pub mod worktree_enter;
-pub mod worktree_exit;
 #[cfg(feature = "tool-search-social")]
 pub mod youtube_search;
 
-pub use ask_question::AskQuestionTool;
-pub use ask_user::AskUserTool;
+pub use ask::question::AskQuestionTool;
+pub use ask::user::AskUserTool;
 pub use backup_tool::BackupTool;
 pub use brief::BriefTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
-#[allow(unused_imports)]
-pub use browser_delegate::{BrowserDelegateConfig, BrowserDelegateTool};
-pub use browser_open::BrowserOpenTool;
+pub use browser::delegate::{BrowserDelegateConfig, BrowserDelegateTool};
+pub use browser::open::BrowserOpenTool;
 #[cfg(feature = "tool-utility-misc")]
 pub use calculator::CalculatorTool;
 pub use canvas::CanvasStore;
 #[cfg(feature = "tool-utility-misc")]
 pub use canvas::CanvasTool;
-pub use claude_code::ClaudeCodeTool;
-pub use claude_code_runner::ClaudeCodeRunnerTool;
+pub use claude_code::core::ClaudeCodeTool;
+pub use claude_code::runner::ClaudeCodeRunnerTool;
 #[cfg(feature = "tool-cloud-ops")]
-pub use cloud_ops::CloudOpsTool;
+pub use cloud::ops::CloudOpsTool;
 #[cfg(feature = "tool-cloud-ops")]
-pub use cloud_patterns::CloudPatternsTool;
-pub use code_to_spec::CodeToSpecTool;
+pub use cloud::patterns::CloudPatternsTool;
+pub use code::to_spec::CodeToSpecTool;
 pub use codex_cli::CodexCliTool;
 #[cfg(feature = "tool-productivity")]
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
 #[cfg(feature = "tool-cron")]
-pub use cron_add::CronAddTool;
+pub use cron::add::CronAddTool;
 #[cfg(feature = "tool-cron")]
-pub use cron_list::CronListTool;
+pub use cron::list::CronListTool;
 #[cfg(feature = "tool-cron")]
-pub use cron_remove::CronRemoveTool;
+pub use cron::remove::CronRemoveTool;
 #[cfg(feature = "tool-cron")]
-pub use cron_run::CronRunTool;
+pub use cron::run::CronRunTool;
 #[cfg(feature = "tool-cron")]
-pub use cron_runs::CronRunsTool;
+pub use cron::runs::CronRunsTool;
 #[cfg(feature = "tool-cron")]
-pub use cron_update::CronUpdateTool;
+pub use cron::update::CronUpdateTool;
 #[cfg(feature = "tool-cloud-ops")]
 pub use data_management::DataManagementTool;
 pub use delegate::DelegateTool;
@@ -251,72 +175,74 @@ pub use diagnostics::DiagnosticsTool;
 pub use dir_list::DirListTool;
 pub use error::ToolErrorCause;
 
-pub use code_graph_query::CodeGraphQueryTool;
-pub use code_xfile_refactor::CodeXfileRefactorTool;
-#[allow(unused_imports)]
+pub use code::graph_query::CodeGraphQueryTool;
+pub use code::review::CodeReviewTool;
+pub use code::xfile_refactor::CodeXfileRefactorTool;
 pub use delegate::{BackgroundDelegateResult, BackgroundTaskStatus};
 #[cfg(feature = "tool-search-social")]
 pub use discord_search::DiscordSearchTool;
-pub use enter_plan_mode::{EnterPlanModeTool, PlanModeFlag};
+pub use plan_mode::enter::{EnterPlanModeTool, PlanModeFlag};
 pub use escalate::EscalateToHumanTool;
 pub use exa_search::ExaSearchTool;
-pub use exit_plan_mode::ExitPlanModeTool;
-pub use file_edit::FileEditTool;
-pub use file_read::FileReadTool;
-pub use file_write::FileWriteTool;
-pub use flow_rollback::FlowRollbackTool;
-pub use flow_run::FlowRunTool;
+pub use plan_mode::exit::ExitPlanModeTool;
+pub use file::edit::FileEditTool;
+pub use file::read::FileReadTool;
+pub use file::write::FileWriteTool;
+pub use flow::rollback::FlowRollbackTool;
+pub use flow::run::FlowRunTool;
 pub use fs_ops::{CopyPathTool, CreateDirectoryTool, DeletePathTool, MovePathTool};
 pub use gemini_cli::GeminiCliTool;
 pub use git_operations::GitOperationsTool;
-pub use github_advanced_search::GitHubAdvancedSearchTool;
-pub use github_search::GitHubSearchTool;
-pub use glob_edit::GlobEditTool;
-pub use glob_search::GlobSearchTool;
+pub use github::advanced_search::GitHubAdvancedSearchTool;
+pub use github::search::GitHubSearchTool;
+pub use glob::edit::GlobEditTool;
+pub use glob::search::GlobSearchTool;
 #[cfg(feature = "tool-productivity")]
 pub use google_workspace::GoogleWorkspaceTool;
 #[cfg(feature = "hardware")]
-pub use hardware_board_info::HardwareBoardInfoTool;
+pub use hardware::board_info::HardwareBoardInfoTool;
 #[cfg(feature = "hardware")]
-pub use hardware_memory_map::HardwareMemoryMapTool;
+pub use hardware::memory::map::HardwareMemoryMapTool;
 #[cfg(feature = "hardware")]
-pub use hardware_memory_read::HardwareMemoryReadTool;
+pub use hardware::memory::read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 #[cfg(feature = "tool-image")]
-pub use image_gen::ImageGenTool;
+pub use image::generate::ImageGenTool;
 #[cfg(feature = "tool-image")]
-pub use image_info::ImageInfoTool;
+pub use image::info::ImageInfoTool;
 #[cfg(feature = "tool-image")]
-pub use image_search::ImageSearchTool;
+pub use image::search::ImageSearchTool;
 pub use incremental_optimize::IncrementalOptimizeTool;
 #[cfg(feature = "tool-productivity")]
 pub use jira_tool::JiraTool;
 pub use knowledge_tool::KnowledgeTool;
 #[cfg(feature = "tool-linkedin")]
 pub use linkedin::LinkedInTool;
+pub use autoresearch::{
+    AutoresearchRuntime, MultiPersonaReviewTool, ScenarioMatrixTool, SecurityAuditTool,
+};
 pub use llm_task::LlmTaskTool;
 pub use lsp::LspTool;
-pub use lsp_rename::LspRenameTool;
-pub use mcp_client::McpRegistry;
-pub use mcp_deferred::{
+pub use lsp::rename::LspRenameTool;
+pub use mcp::client::McpRegistry;
+pub use mcp::deferred::{
     ActivatedToolSet, DeferredBuiltinToolSet, DeferredMcpToolSet, build_deferred_builtin_section,
     build_deferred_builtin_section_with_surface, build_deferred_tools_section,
 };
-pub use mcp_resources_list::McpResourcesListTool;
-pub use mcp_resources_read::McpResourcesReadTool;
-pub use mcp_tool::McpToolWrapper;
-pub use memory_export::MemoryExportTool;
-pub use memory_forget::MemoryForgetTool;
-pub use memory_purge::MemoryPurgeTool;
-pub use memory_recall::MemoryRecallTool;
-pub use memory_store::MemoryStoreTool;
+pub use mcp::resources::list::McpResourcesListTool;
+pub use mcp::resources::read::McpResourcesReadTool;
+pub use mcp::tool::McpToolWrapper;
+pub use memory::export::MemoryExportTool;
+pub use memory::forget::MemoryForgetTool;
+pub use memory::purge::MemoryPurgeTool;
+pub use memory::recall::MemoryRecallTool;
+pub use memory::store::MemoryStoreTool;
 pub use microsoft365::Microsoft365Tool;
-pub use model_routing_config::ModelRoutingConfigTool;
-pub use model_switch::ModelSwitchTool;
-pub use multi_edit::MultiEditTool;
-pub use multi_search::MultiSearchTool;
-#[allow(unused_imports)]
-pub use node_tool::NodeTool;
+pub use model::routing_config::ModelRoutingConfigTool;
+pub use model::switch::ModelSwitchTool;
+pub use multi::edit::MultiEditTool;
+pub use multi::search::MultiSearchTool;
+pub use node::tool::NodeTool;
 pub use notebook_edit::NotebookEditTool;
 #[cfg(feature = "tool-productivity")]
 pub use notion_tool::NotionTool;
@@ -332,17 +258,16 @@ pub use proxy_config::ProxyConfigTool;
 #[cfg(feature = "tool-pushover")]
 pub use pushover::PushoverTool;
 pub use reaction::ReactionTool;
-pub use read_skill::ReadSkillTool;
-pub use read_user_rule::ReadUserRuleTool;
+pub use read::skill::ReadSkillTool;
+pub use read::user_rule::ReadUserRuleTool;
 #[cfg(feature = "tool-search-social")]
 pub use reddit_search::RedditSearchTool;
 pub use registry::ToolRegistry;
 #[cfg(feature = "tool-reports")]
-pub use report_template_tool::ReportTemplateTool;
+pub use report::template_tool::ReportTemplateTool;
 pub use restore_file::RestoreFileTool;
 #[cfg(feature = "tool-cron")]
 pub use schedule::ScheduleTool;
-#[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
 #[cfg(feature = "tool-image")]
 pub use screenshot::ScreenshotTool;
@@ -352,39 +277,36 @@ pub use send_message::SendMessageTool;
 pub use sessions::{SessionsHistoryTool, SessionsListTool, SessionsSendTool};
 pub use setup_agent::SetupAgentTool;
 pub use shell::ShellTool;
-#[allow(unused_imports)]
-pub use skill_http::SkillHttpTool;
-#[allow(unused_imports)]
-pub use skill_tool::SkillShellTool;
+pub use skill::http::SkillHttpTool;
+pub use skill::tool::SkillShellTool;
 pub use sleep::SleepTool;
 #[cfg(feature = "tool-sop")]
-pub use sop_advance::SopAdvanceTool;
+pub use sop::advance::SopAdvanceTool;
 #[cfg(feature = "tool-sop")]
-pub use sop_approve::SopApproveTool;
+pub use sop::approve::SopApproveTool;
 #[cfg(feature = "tool-sop")]
-pub use sop_execute::SopExecuteTool;
+pub use sop::execute::SopExecuteTool;
 #[cfg(feature = "tool-sop")]
-pub use sop_list::SopListTool;
+pub use sop::list::SopListTool;
 #[cfg(feature = "tool-sop")]
-pub use sop_status::SopStatusTool;
+pub use sop::status::SopStatusTool;
 pub use structured_output::StructuredOutputTool;
 pub use swarm::SwarmTool;
-pub use task_create::TaskCreateTool;
-pub use task_get::TaskGetTool;
-pub use task_list::TaskListTool;
-pub use task_output::TaskOutputTool;
-pub use task_stop::TaskStopTool;
-pub use task_update::TaskUpdateTool;
+pub use task::create::TaskCreateTool;
+pub use task::get::TaskGetTool;
+pub use task::list::TaskListTool;
+pub use task::output::TaskOutputTool;
+pub use task::stop::TaskStopTool;
+pub use task::update::TaskUpdateTool;
 pub use tavily_search::TavilySearchTool;
 #[cfg(feature = "tool-team")]
-pub use team_create::TeamCreateTool;
+pub use team::create::TeamCreateTool;
 #[cfg(feature = "tool-team")]
-pub use team_delete::TeamDeleteTool;
+pub use team::delete::TeamDeleteTool;
 pub use text_browser::TextBrowserTool;
 pub use todo_write::TodoWriteTool;
-pub use tool_search::ToolSearchTool;
-#[allow(unused_imports)]
-pub use tool_tier::{
+pub use handler::search::ToolSearchTool;
+pub use handler::tier::{
     BuiltinDeferredRegistrationOptions, BuiltinToolTier, TOOL_TIERS, ToolRiskLevel,
     ToolSurfaceBaseline, ToolTierEntry, apply_builtin_deferred_registration,
     apply_builtin_deferred_registration_with_options, build_deferred_builtin_set_for_surface,
@@ -392,7 +314,6 @@ pub use tool_tier::{
     partition_for_llm, risk_for, tier_for,
 };
 pub use traits::Tool;
-#[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
 pub use update_plan::UpdatePlanTool;
 pub use verifiable_intent::VerifiableIntentTool;
@@ -400,11 +321,11 @@ pub use verifiable_intent::VerifiableIntentTool;
 pub use view_image::ViewImageTool;
 #[cfg(feature = "tool-utility-misc")]
 pub use weather_tool::WeatherTool;
-pub use web_fetch::WebFetchTool;
-pub use web_search_tool::WebSearchTool;
+pub use web::fetch::WebFetchTool;
+pub use web::search::tool::WebSearchTool;
 pub use workspace_tool::WorkspaceTool;
-pub use worktree_enter::WorktreeEnterTool;
-pub use worktree_exit::WorktreeExitTool;
+pub use worktree::enter::WorktreeEnterTool;
+pub use worktree::exit::WorktreeExitTool;
 #[cfg(feature = "tool-search-social")]
 pub use youtube_search::YouTubeSearchTool;
 
@@ -412,13 +333,11 @@ use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::{SecurityPolicy, create_sandbox};
-pub mod task_types;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-#[allow(unused_imports)]
-pub use task_types::{TaskInfo, TaskManager, TaskManagerHandle, TaskState};
+pub use task::types::{TaskInfo, TaskManager, TaskManagerHandle, TaskState};
 
 pub type DelegateParentToolsHandle = Arc<RwLock<Vec<Arc<dyn Tool>>>>;
 
@@ -657,7 +576,7 @@ pub fn all_tools_with_runtime(
     #[cfg(not(feature = "tool-productivity"))]
     let _ = (composio_key, composio_entity_id);
     #[cfg(feature = "tool-team")]
-    let team_registry: team_create::TeamRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let team_registry: team::create::TeamRegistry = Arc::new(RwLock::new(HashMap::new()));
     let optimization_state: incremental_optimize::OptimizationStateHandle = Arc::new(
         parking_lot::RwLock::new(incremental_optimize::OptimizationState::default()),
     );
@@ -737,8 +656,8 @@ pub fn all_tools_with_runtime(
         {
             let registry = crate::inline_completion::registry::default_provider(root_config);
             let tool = match registry {
-                Some(r) => crate::tools::inline_complete::InlineCompleteTool::with_registry(r),
-                None => crate::tools::inline_complete::InlineCompleteTool::new(),
+                Some(r) => crate::tools::inline::complete::InlineCompleteTool::with_registry(r),
+                None => crate::tools::inline::complete::InlineCompleteTool::new(),
             };
             Arc::new(tool)
         },
@@ -750,7 +669,7 @@ pub fn all_tools_with_runtime(
             let pending_plan = if let Some(svc) = crate::services::try_get_services() {
                 svc.pending_plan.clone()
             } else {
-                crate::tools::exit_plan_mode::new_pending_plan()
+                crate::tools::plan_mode::exit::new_pending_plan()
             };
             Arc::new(
                 ExitPlanModeTool::new_with_pending_plan(
@@ -806,6 +725,30 @@ pub fn all_tools_with_runtime(
         #[cfg(feature = "tool-curator")]
         {
             let svc = crate::services::try_get_services();
+            let state = svc
+                .as_ref()
+                .map(|s| s.curator_state.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+            Arc::new(crate::tools::curator::CuratorGitReferenceTool::new(
+                state,
+                security.clone(),
+            ))
+        },
+        #[cfg(feature = "tool-curator")]
+        {
+            let svc = crate::services::try_get_services();
+            let state = svc
+                .as_ref()
+                .map(|s| s.curator_state.clone())
+                .unwrap_or_else(crate::tools::curator::state::new_curator_state);
+            Arc::new(crate::tools::curator::CuratorLocalReferenceTool::new(
+                state,
+                security.clone(),
+            ))
+        },
+        #[cfg(feature = "tool-curator")]
+        {
+            let svc = crate::services::try_get_services();
             let curator_flag = svc
                 .as_ref()
                 .map(|s| s.curator_mode_flag.clone())
@@ -830,6 +773,7 @@ pub fn all_tools_with_runtime(
         Arc::new(FlowRunTool::new()),
         Arc::new(FlowRollbackTool::new()),
         Arc::new(CodeGraphQueryTool::new()),
+        Arc::new(CodeReviewTool::new()),
         Arc::new(CodeXfileRefactorTool::new()),
         #[cfg(feature = "tool-utility-misc")]
         Arc::new(WeatherTool::new()),
@@ -968,6 +912,15 @@ pub fn all_tools_with_runtime(
                     provider_max_tokens: root_config.provider_max_tokens,
                     model_context_windows: root_config.model_context_windows.clone(),
                 };
+                let autoresearch_runtime = Arc::new(AutoresearchRuntime::new(
+                    security.clone(),
+                    llm_task_provider.clone(),
+                    llm_task_model.clone(),
+                    root_config.default_temperature,
+                    root_config.api_key.clone(),
+                    llm_task_runtime_options.clone(),
+                    Arc::clone(&security.workspace_root_handle()),
+                ));
                 tool_arcs.push(Arc::new(LlmTaskTool::new(
                     security.clone(),
                     llm_task_provider,
@@ -976,11 +929,20 @@ pub fn all_tools_with_runtime(
                     root_config.api_key.clone(),
                     llm_task_runtime_options,
                 )));
+                tool_arcs.push(Arc::new(MultiPersonaReviewTool::new(
+                    autoresearch_runtime.clone(),
+                )));
+                tool_arcs.push(Arc::new(ScenarioMatrixTool::new(
+                    autoresearch_runtime.clone(),
+                )));
+                tool_arcs.push(Arc::new(SecurityAuditTool::new(
+                    autoresearch_runtime.clone(),
+                )));
             }
             Err(e) => {
                 tracing::warn!(
                     target = "config",
-                    "no_model_configured: skipping LlmTaskTool registration: {e}"
+                    "no_model_configured: skipping LlmTaskTool + autoresearch suite registration: {e}"
                 );
             }
         }
@@ -1135,9 +1097,9 @@ pub fn all_tools_with_runtime(
                 "Jira tool enabled but no API token found (set jira.api_token or JIRA_API_TOKEN env var)"
             );
         } else if root_config.jira.base_url.trim().is_empty() {
-            tracing::warn!("Jira tool enabled but jira.base_url is empty — skipping registration");
+            tracing::warn!("Jira tool enabled but jira.base_url is empty  -  skipping registration");
         } else if root_config.jira.email.trim().is_empty() {
-            tracing::warn!("Jira tool enabled but jira.email is empty — skipping registration");
+            tracing::warn!("Jira tool enabled but jira.email is empty  -  skipping registration");
         } else {
             tool_arcs.push(Arc::new(JiraTool::new(
                 root_config.jira.base_url.trim().to_string(),
@@ -1254,8 +1216,8 @@ pub fn all_tools_with_runtime(
     #[cfg(feature = "tool-image")]
     tool_arcs.push(Arc::new(ImageInfoTool::new(security.clone())));
 
-    if let Ok(session_store) = crate::channels::session_store::SessionStore::new(workspace_dir) {
-        let backend: Arc<dyn crate::channels::session_backend::SessionBackend> =
+    if let Ok(session_store) = crate::channels::session::store::SessionStore::new(workspace_dir) {
+        let backend: Arc<dyn crate::channels::session::backend::SessionBackend> =
             Arc::new(session_store);
         tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
         tool_arcs.push(Arc::new(SessionsHistoryTool::new(
@@ -1351,7 +1313,7 @@ pub fn all_tools_with_runtime(
                     .map_or(true, |s| s.trim().is_empty())
             {
                 tracing::error!(
-                    "microsoft365: client_credentials auth_flow requires a non-empty client_secret — skipping M365 tool"
+                    "microsoft365: client_credentials auth_flow requires a non-empty client_secret  -  skipping M365 tool"
                 );
             } else {
                 let resolved = microsoft365::types::Microsoft365ResolvedConfig {
@@ -1443,7 +1405,7 @@ pub fn all_tools_with_runtime(
     };
 
     let mut delegate_parallel_tool =
-        crate::tools::delegate_parallel::DelegateParallelTool::new()
+        crate::tools::delegate::parallel::DelegateParallelTool::new()
             .with_multimodal_config(root_config.multimodal.clone())
             .with_workspace_root(security.workspace_root_handle())
             .with_delegate_config(root_config.delegate.clone());
@@ -1522,7 +1484,7 @@ pub fn all_tools_with_runtime(
                     let tool_manifests = host.tool_plugins();
                     let count = tool_manifests.len();
                     for manifest in tool_manifests {
-                        tool_arcs.push(Arc::new(crate::plugins::wasm_tool::WasmTool::new(
+                        tool_arcs.push(Arc::new(crate::plugins::wasm::tool::WasmTool::new(
                             manifest.name.clone(),
                             manifest.description.clone().unwrap_or_default(),
                             manifest.name.clone(),
@@ -1590,7 +1552,7 @@ pub fn all_tools_with_runtime(
     }
 
     if !root_config.tool_groups.groups.is_empty() {
-        let group_registry = tool_groups::ToolGroupRegistry::from_config(&root_config.tool_groups);
+        let group_registry = handler::groups::ToolGroupRegistry::from_config(&root_config.tool_groups);
         let active_names = group_registry.active_tools();
         if !active_names.is_empty() {
             let before = tool_arcs.len();

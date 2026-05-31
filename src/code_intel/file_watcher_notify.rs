@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
-use super::symbol_graph_incremental::{FileEvent, FileWatcher};
+use super::symbol_graph::incremental::{FileEvent, FileWatcher};
 
 pub struct NotifyWatcher {
     _watcher: RecommendedWatcher,

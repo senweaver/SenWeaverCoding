@@ -105,7 +105,7 @@ pub fn build_judge_prompt(successful: &[&SubTaskResult]) -> String {
          candidate answers for sub-tasks of a larger user request.  Synthesize \
          the single best answer.  Prefer factual accuracy over verbosity.  \
          If candidates conflict, reconcile them or pick the most confident one \
-         and briefly justify.  Output ONLY the final answer — no preamble, no \
+         and briefly justify.  Output ONLY the final answer  -  no preamble, no \
          commentary about the judging process.\n\n",
     );
     buf.push_str("Candidates for judgment:\n\n");

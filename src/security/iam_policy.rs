@@ -52,6 +52,13 @@ struct CompiledRole {
 
 impl IamPolicy {
 
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            role_map: HashMap::new(),
+        }
+    }
+
     pub fn from_mappings(mappings: &[RoleMapping]) -> Result<Self> {
         let mut role_map = HashMap::new();
 
@@ -86,7 +93,7 @@ impl IamPolicy {
             if role_map.contains_key(&key) {
                 bail!(
                     "IAM policy: duplicate role mapping for normalized key '{}' \
-                     (from nevis_role '{}') — remove or merge the duplicate entry",
+                     (from nevis_role '{}')  -  remove or merge the duplicate entry",
                     key,
                     mapping.nevis_role
                 );

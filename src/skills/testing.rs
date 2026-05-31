@@ -214,7 +214,7 @@ pub fn print_results(results: &[SkillTestResult]) {
     for r in results {
         if r.tests_run == 0 {
             println!(
-                "  {} {} — no test cases",
+                "  {} {}  -  no test cases",
                 console::style("-").dim(),
                 r.skill_name,
             );
@@ -223,7 +223,7 @@ pub fn print_results(results: &[SkillTestResult]) {
 
         if r.failures.is_empty() {
             println!(
-                "  {} {} — {}/{} passed",
+                "  {} {}  -  {}/{} passed",
                 console::style("✓").green().bold(),
                 console::style(&r.skill_name).white().bold(),
                 r.tests_passed,
@@ -231,7 +231,7 @@ pub fn print_results(results: &[SkillTestResult]) {
             );
         } else {
             println!(
-                "  {} {} — {}/{} passed",
+                "  {} {}  -  {}/{} passed",
                 console::style("✗").red().bold(),
                 console::style(&r.skill_name).white().bold(),
                 r.tests_passed,

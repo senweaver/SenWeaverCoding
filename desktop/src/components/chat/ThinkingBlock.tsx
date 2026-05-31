@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useTranslation } from '../../i18n'
 
@@ -21,14 +25,25 @@ export function ThinkingBlock({
   compact = false,
 }: Props) {
   const t = useTranslation()
-  const [expanded, setExpanded] = useState(defaultExpanded)
+  const [userOverride, setUserOverride] = useState<boolean | null>(null)
   const [elapsedSec, setElapsedSec] = useState(0)
   const contentRef = useRef<HTMLDivElement>(null)
+  const prevIsActiveRef = useRef<boolean>(isActive)
+
+  const expanded =
+    userOverride !== null ? userOverride : isActive || defaultExpanded
 
   const completedSeconds = useMemo(() => {
     if (!startedAt || !completedAt || completedAt < startedAt) return null
     return Math.max(1, Math.round((completedAt - startedAt) / 1000))
   }, [startedAt, completedAt])
+
+  useEffect(() => {
+    if (prevIsActiveRef.current !== isActive) {
+      setUserOverride(null)
+      prevIsActiveRef.current = isActive
+    }
+  }, [isActive])
 
   useEffect(() => {
     if (!isActive || startedAt == null) {
@@ -56,8 +71,10 @@ export function ThinkingBlock({
   const durationSeconds =
     isActive ? (startedAt != null ? elapsedSec : null) : completedSeconds
 
-  const canExpand = !isActive && content.trim().length > 0
-  const showInlinePreview = isActive || (compact && !expanded)
+  const hasContent = content.trim().length > 0
+  const canExpand = hasContent
+  const showInlinePreview = (compact || isActive) && !expanded
+  const contentMaxHeightClass = isActive ? 'max-h-[240px]' : 'max-h-[320px]'
 
   return (
     <div className={compact ? 'mb-1' : 'mb-1.5'}>
@@ -65,7 +82,7 @@ export function ThinkingBlock({
       <button
         type="button"
         onClick={() => {
-          if (canExpand) setExpanded((v) => !v)
+          if (canExpand) setUserOverride(!expanded)
         }}
         aria-expanded={expanded}
         disabled={!canExpand}
@@ -105,7 +122,7 @@ export function ThinkingBlock({
       {expanded && canExpand && (
         <div
           ref={contentRef}
-          className="mt-1 max-h-[300px] overflow-y-auto rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-lowest)] px-2.5 py-2 font-[var(--font-mono)] text-[11px] leading-[1.45] whitespace-pre-wrap break-words text-[var(--color-text-secondary)]"
+          className={`mt-1 ${contentMaxHeightClass} overflow-y-auto rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-lowest)] px-2.5 py-2 font-[var(--font-mono)] text-[11px] leading-[1.45] whitespace-pre-wrap break-words text-[var(--color-text-secondary)]`}
         >
           {content}
         </div>

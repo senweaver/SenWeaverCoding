@@ -107,7 +107,7 @@ impl WebhookAuditHook {
         if config.enabled && config.url.is_empty() {
             tracing::warn!(
                 hook = "webhook-audit",
-                "webhook-audit hook is enabled but no URL is configured — audit events will be dropped"
+                "webhook-audit hook is enabled but no URL is configured  -  audit events will be dropped"
             );
         }
 

@@ -13,7 +13,7 @@ pub struct WatiChannel {
     tenant_id: Option<String>,
     allowed_numbers: Vec<String>,
     client: reqwest::Client,
-    transcription_manager: Option<std::sync::Arc<super::transcription::TranscriptionManager>>,
+    transcription_manager: Option<std::sync::Arc<super::pipeline::transcription::TranscriptionManager>>,
 }
 
 impl WatiChannel {
@@ -38,7 +38,7 @@ impl WatiChannel {
             api_url,
             tenant_id,
             allowed_numbers,
-            client: crate::services::get_services()
+            client: crate::services::require_services()
                 .proxy_runtime()
                 .build_channel_client("channel.wati", proxy_url.as_deref()),
             transcription_manager: None,
@@ -49,7 +49,7 @@ impl WatiChannel {
         if !config.enabled {
             return self;
         }
-        match super::transcription::TranscriptionManager::new(&config) {
+        match super::pipeline::transcription::TranscriptionManager::new(&config) {
             Ok(m) => {
                 self.transcription_manager = Some(std::sync::Arc::new(m));
             }
@@ -358,7 +358,7 @@ impl Channel for WatiChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let error_body = resp.text().await.unwrap_or_default();
-            tracing::error!("WATI send failed: {status} — {error_body}");
+            tracing::error!("WATI send failed: {status}  -  {error_body}");
             anyhow::bail!("WATI API error: {status}");
         }
 

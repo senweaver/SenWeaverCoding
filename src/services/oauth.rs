@@ -52,6 +52,7 @@ struct OAuthInner {
     pending_flows: HashMap<String, PendingOAuthFlow>,
 }
 
+#[allow(dead_code)]
 struct PendingOAuthFlow {
     state: String,
     code_verifier: Option<String>,

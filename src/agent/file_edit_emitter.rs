@@ -127,11 +127,11 @@ pub async fn emit_file_edit(
         .into_owned();
     let (additions, deletions) = if before_bytes.is_none() {
         let lines = after_text.split('\n').count() as i32;
-        let trailing = if after_text.ends_with('\n') { 1 } else { 0 };
+        let trailing = i32::from(after_text.ends_with('\n'));
         (std::cmp::max(0, lines - trailing), 0i32)
     } else if after_bytes.is_none() {
         let lines = before_text.split('\n').count() as i32;
-        let trailing = if before_text.ends_with('\n') { 1 } else { 0 };
+        let trailing = i32::from(before_text.ends_with('\n'));
         (0i32, std::cmp::max(0, lines - trailing))
     } else {
         count_line_changes(&before_text, &after_text)
@@ -139,7 +139,12 @@ pub async fn emit_file_edit(
     if additions == 0 && deletions == 0 && before_bytes.is_some() && after_bytes.is_some() {
         return;
     }
-    let rel = relativize_for_workspace(path);
+    let rel = {
+        let path_owned = path.to_path_buf();
+        tokio::task::spawn_blocking(move || relativize_for_workspace(&path_owned))
+            .await
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
     let diff = render_minimal_diff(&rel, &before_text, &after_text);
     let event = DraftEvent::FileEdit {
         path: rel.to_string_lossy().into_owned(),

@@ -57,6 +57,19 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     let _multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
 
     {
+        let svc_data_dir = config
+            .config_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| config.workspace_dir.join(".senweavercoding"));
+        let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
+            data_dir: svc_data_dir,
+            shared_config: None,
+            ..Default::default()
+        });
+    }
+
+    {
         let workspace_root = if config.workspace_dir.as_os_str().is_empty() {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         } else {
@@ -279,7 +292,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
     );
     let metrics = engine.metrics();
     let delivery = resolve_heartbeat_delivery(&config)?;
-    let two_phase = config.heartbeat.two_phase;
+    let two_phase = config.heartbeat.decision_before_execute;
     let adaptive = config.heartbeat.adaptive;
     let start_time = std::time::Instant::now();
 
@@ -622,7 +635,7 @@ fn load_heartbeat_session_context(config: &Config) -> Option<String> {
     let has_user_message = recent.iter().any(|m| m.role == "user");
     if !has_user_message {
         tracing::debug!(
-            "💓 Heartbeat session context: no user messages in recent history — skipping"
+            "💓 Heartbeat session context: no user messages in recent history  -  skipping"
         );
         return None;
     }
@@ -658,7 +671,7 @@ fn load_heartbeat_session_context(config: &Config) -> Option<String> {
     );
 
     let mut ctx = format!(
-        "[Recent conversation history — use this for context when composing your message] {silence_note}",
+        "[Recent conversation history  -  use this for context when composing your message] {silence_note}",
     );
     for msg in &recent {
         let label = if msg.role == "user" { "User" } else { "You" };

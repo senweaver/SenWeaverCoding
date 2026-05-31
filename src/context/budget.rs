@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
 use std::fmt;
 
-use crate::agent::token_budget::TokenBudgetManager;
+use crate::agent::token::budget::TokenBudgetManager;
 use crate::context::builder::QueryContext;
 use crate::observability::code_intel_metrics;
 

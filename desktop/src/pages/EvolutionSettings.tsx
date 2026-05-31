@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from '../i18n'
 import { Button } from '../components/shared/Button'
@@ -774,7 +778,7 @@ function LessonsCard({
       {lessons.length === 0 ? (
         <div className="text-xs text-[var(--color-text-tertiary)]">{t('settings.evolution.lessons.empty')}</div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2 max-h-[360px] overflow-y-auto pr-1">
           {lessons.map((l) => (
             <div
               key={l.id}

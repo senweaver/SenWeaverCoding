@@ -2,8 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-pub mod openai_sft;
-pub mod openai_dpo;
+pub mod openai;
 pub mod anthropic_messages;
 pub mod hf_trl_dpo;
 pub mod rl_sar;
@@ -217,8 +216,8 @@ type ProjectFn = Box<dyn Fn(&TurnRecord, &ExportOptions, &EvolutionExportConfig)
 
 fn make_processor(format: EvolutionExportFormat) -> ProjectFn {
     match format {
-        EvolutionExportFormat::OpenaiSft => Box::new(openai_sft::project),
-        EvolutionExportFormat::OpenaiDpo => Box::new(openai_dpo::project),
+        EvolutionExportFormat::OpenaiSft => Box::new(openai::sft::project),
+        EvolutionExportFormat::OpenaiDpo => Box::new(openai::dpo::project),
         EvolutionExportFormat::AnthropicMessages => Box::new(anthropic_messages::project),
         EvolutionExportFormat::HfTrlDpo => Box::new(hf_trl_dpo::project),
         EvolutionExportFormat::RlSar => Box::new(rl_sar::project),

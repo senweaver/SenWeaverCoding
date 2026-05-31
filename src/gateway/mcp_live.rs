@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -181,7 +181,7 @@ async fn try_reconnect_and_publish(
         svc.set_server_status(&name, McpServerStatus::Connecting, None)
             .await;
     }
-    match crate::tools::mcp_client::McpServer::connect(server_cfg.clone()).await {
+    match crate::tools::mcp::client::McpServer::connect(server_cfg.clone()).await {
         Ok(server) => {
             if let Some(svc) = svc_mcp_opt.as_ref() {
                 let tools = server.tools().await;

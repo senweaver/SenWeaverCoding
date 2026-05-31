@@ -27,16 +27,10 @@ pub mod serial;
 pub mod uf2;
 
 #[cfg(feature = "hardware")]
-pub mod pico_flash;
-
-#[cfg(feature = "hardware")]
-pub mod pico_code;
+pub mod pico;
 
 #[cfg(feature = "hardware")]
 pub mod aardvark;
-
-#[cfg(feature = "hardware")]
-pub mod aardvark_tools;
 
 #[cfg(feature = "hardware")]
 pub mod datasheet;
@@ -50,13 +44,11 @@ pub mod subprocess;
 pub mod tool_registry;
 
 #[cfg(feature = "hardware")]
-#[allow(unused_imports)]
 pub use aardvark::AardvarkTransport;
 
 use crate::config::Config;
 use crate::hardware::device::DeviceRegistry;
 use anyhow::Result;
-#[allow(unused_imports)]
 pub use tool_registry::{ToolError, ToolRegistry};
 
 pub use crate::config::{HardwareConfig, HardwareTransport};
@@ -459,8 +451,8 @@ fn run_discover() -> Result<()> {
     println!();
     for d in &devices {
         let board = d.board_name.as_deref().unwrap_or("(unknown)");
-        let arch = d.architecture.as_deref().unwrap_or("—");
-        let product = d.product_string.as_deref().unwrap_or("—");
+        let arch = d.architecture.as_deref().unwrap_or(" - ");
+        let product = d.product_string.as_deref().unwrap_or(" - ");
         println!(
             "  {:04x}:{:04x}  {}  {}  {}",
             d.vid, d.pid, board, arch, product
@@ -512,7 +504,7 @@ fn run_info(chip: &str) -> Result<()> {
                 println!(
                     "Ensure Nucleo is connected via USB. The ST-Link is built into the board."
                 );
-                println!("No firmware needs to be flashed — probe-rs reads chip info over SWD.");
+                println!("No firmware needs to be flashed  -  probe-rs reads chip info over SWD.");
                 return Err(e.into());
             }
         }
@@ -527,7 +519,7 @@ fn run_info(chip: &str) -> Result<()> {
         println!("Then run: sen hardware info --chip {}", chip);
         println!();
         println!("This uses probe-rs to attach to the Nucleo's ST-Link over USB");
-        println!("and read chip info (memory map, etc.) — no firmware on target needed.");
+        println!("and read chip info (memory map, etc.)  -  no firmware on target needed.");
         Ok(())
     }
 }
@@ -569,6 +561,6 @@ fn info_via_probe(chip: &str) -> anyhow::Result<()> {
         }
     }
     println!();
-    println!("Info read via USB (SWD) — no firmware on target needed.");
+    println!("Info read via USB (SWD)  -  no firmware on target needed.");
     Ok(())
 }

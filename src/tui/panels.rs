@@ -20,7 +20,7 @@ pub fn render_budget(f: &mut Frame, area: Rect, view: &BudgetView) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" Budget — {} ", view.header_line())),
+                .title(format!(" Budget  -  {} ", view.header_line())),
         )
         .ratio((view.usage_ratio() as f64).clamp(0.0, 1.0))
         .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
@@ -77,7 +77,7 @@ pub fn render_budget(f: &mut Frame, area: Rect, view: &BudgetView) {
 pub fn render_provider_health(f: &mut Frame, area: Rect, view: &ProviderHealthView) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Provider health — {} ", view.header_line()));
+        .title(format!(" Provider health  -  {} ", view.header_line()));
 
     if view.row_count() == 0 {
         let para = Paragraph::new("No provider health signals yet.").block(block);

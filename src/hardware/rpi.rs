@@ -231,7 +231,7 @@ impl RpiSystemContext {
             let _ = writeln!(s);
             s.push_str(
                 "Use `gpio_rpi_write`, `gpio_rpi_read`, and `gpio_rpi_blink` for all GPIO \
-                operations — they access /dev/gpiomem directly, no serial port or mpremote needed.\n",
+                operations  -  they access /dev/gpiomem directly, no serial port or mpremote needed.\n",
             );
         }
         s
@@ -261,7 +261,7 @@ impl RpiSystemContext {
 
     fn device_profile_markdown(&self) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "# rpi0 — {}", self.model.display_name());
+        let _ = writeln!(s, "# rpi0  -  {}", self.model.display_name());
         let _ = writeln!(s);
         let _ = writeln!(s, "## System");
         let _ = writeln!(s, "- Hostname: {}", self.hostname);
@@ -269,17 +269,17 @@ impl RpiSystemContext {
         let _ = writeln!(s, "- RAM: {}MB total", self.total_ram_mb);
         let _ = writeln!(
             s,
-            "- Runtime: SenWeaverCoding native (rppal — no serial, no mpremote)"
+            "- Runtime: SenWeaverCoding native (rppal  -  no serial, no mpremote)"
         );
         if let Some(ref iface) = self.wifi_interface {
             let _ = writeln!(s, "- WiFi interface: {}", iface);
         }
         let _ = writeln!(s);
-        let _ = writeln!(s, "## GPIO — BCM numbering");
+        let _ = writeln!(s, "## GPIO  -  BCM numbering");
         if let Some(led_pin) = self.model.onboard_led_gpio() {
             let _ = writeln!(
                 s,
-                "- GPIO {led_pin}: ACT LED (onboard green LED) — use gpio_rpi_write/blink"
+                "- GPIO {led_pin}: ACT LED (onboard green LED)  -  use gpio_rpi_write/blink"
             );
         }
         let _ = writeln!(s, "- GPIO 2/3: I2C SDA/SCL");
@@ -296,11 +296,11 @@ impl RpiSystemContext {
         let _ = writeln!(s, "- System stats → `rpi_system_info()`");
         let _ = writeln!(
             s,
-            "- DO NOT use `device_exec` or `mpremote` — not available on this board"
+            "- DO NOT use `device_exec` or `mpremote`  -  not available on this board"
         );
         let _ = writeln!(
             s,
-            "- DO NOT use `gpio_write` (serial JSON) — use `gpio_rpi_write` instead"
+            "- DO NOT use `gpio_write` (serial JSON)  -  use `gpio_rpi_write` instead"
         );
         s
     }
@@ -317,7 +317,7 @@ impl Tool for GpioRpiWriteTool {
     fn description(&self) -> &str {
         "Set a GPIO pin HIGH (1) or LOW (0) directly on this Raspberry Pi. \
         Uses BCM pin numbers (e.g. 47 for the ACT LED on RPi 3B). \
-        No serial port needed — accesses /dev/gpiomem via rppal."
+        No serial port needed  -  accesses /dev/gpiomem via rppal."
     }
 
     fn parameters_schema(&self) -> Value {

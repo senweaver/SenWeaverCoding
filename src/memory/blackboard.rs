@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use super::sharded_map::ShardedMap;
+use super::sharded::map::ShardedMap;
 use crate::observability::coordination_metrics;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +93,7 @@ pub enum BlackboardError {
 const CHANGE_CHANNEL_CAPACITY: usize = 4096;
 
 pub struct BlackboardJournal {
-    file: parking_lot::Mutex<std::fs::File>,
+    writer: std::sync::mpsc::Sender<Vec<u8>>,
     path: PathBuf,
     in_memory: parking_lot::Mutex<Vec<BlackboardChange>>,
 }
@@ -120,8 +120,24 @@ impl BlackboardJournal {
             }
         }
 
+        let (writer, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let spawned = std::thread::Builder::new()
+            .name("blackboard-journal".to_string())
+            .spawn(move || {
+                use std::io::Write;
+                let mut file = file;
+                while let Ok(bytes) = rx.recv() {
+                    if let Err(e) = file.write_all(&bytes) {
+                        warn!("blackboard journal append failed: {e}");
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            warn!("blackboard journal writer thread failed to start: {e}; persistence disabled");
+        }
+
         Ok(Self {
-            file: parking_lot::Mutex::new(file),
+            writer,
             path,
             in_memory: parking_lot::Mutex::new(in_memory),
         })
@@ -134,13 +150,15 @@ impl BlackboardJournal {
     pub fn append(&self, change: &BlackboardChange) {
         if let Ok(mut line) = serde_json::to_string(change) {
             line.push('\n');
-            let mut file = self.file.lock();
-            use std::io::Write;
-            if let Err(e) = file.write_all(line.as_bytes()) {
-                warn!("blackboard journal append failed: {e}");
-            }
+            let _ = self.writer.send(line.into_bytes());
         }
-        self.in_memory.lock().push(change.clone());
+        const MAX_IN_MEMORY_CHANGES: usize = 4096;
+        let mut buf = self.in_memory.lock();
+        buf.push(change.clone());
+        if buf.len() > MAX_IN_MEMORY_CHANGES {
+            let drop_count = buf.len() - MAX_IN_MEMORY_CHANGES;
+            buf.drain(0..drop_count);
+        }
     }
 
     pub fn replay_since(&self, since: u64) -> Vec<BlackboardChange> {

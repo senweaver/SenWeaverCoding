@@ -5,7 +5,6 @@ use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use directories::UserDirs;
 use rusqlite::{Connection, OpenFlags};
-use std::path::Path;
 use tokio::sync::mpsc;
 
 fn extract_text_from_attributed_body(blob: &[u8]) -> Option<String> {
@@ -275,56 +274,3 @@ end tell"#
     }
 }
 
-async fn get_max_rowid(db_path: &Path) -> anyhow::Result<i64> {
-    let path = db_path.to_path_buf();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
-        let conn = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        let mut stmt = conn.prepare("SELECT MAX(ROWID) FROM message WHERE is_from_me = 0")?;
-        let rowid: Option<i64> = stmt.query_row([], |row| row.get(0))?;
-        Ok(rowid.unwrap_or(0))
-    })
-    .await??;
-    Ok(result)
-}
-
-async fn fetch_new_messages(
-    db_path: &Path,
-    since_rowid: i64,
-) -> anyhow::Result<Vec<(i64, String, String)>> {
-    let path = db_path.to_path_buf();
-    let results =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(i64, String, String)>> {
-            let conn = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )?;
-            let mut stmt = conn.prepare(
-                "SELECT m.ROWID, h.id, m.text, m.attributedBody \
-             FROM message m \
-             JOIN handle h ON m.handle_id = h.ROWID \
-             WHERE m.ROWID > ?1 \
-             AND m.is_from_me = 0 \
-             AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL) \
-             ORDER BY m.ROWID ASC \
-             LIMIT 20",
-            )?;
-            let rows = stmt.query_map([since_rowid], |row| {
-                let rowid = row.get::<_, i64>(0)?;
-                let sender = row.get::<_, String>(1)?;
-                let text: Option<String> = row.get(2)?;
-                let body: Option<Vec<u8>> = row.get(3)?;
-                Ok((rowid, sender, resolve_message_content(rowid, text, body)))
-            })?;
-            let results: Vec<_> = rows
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .filter(|(_, _, content)| !content.trim().is_empty())
-                .collect();
-            Ok(results)
-        })
-        .await??;
-    Ok(results)
-}

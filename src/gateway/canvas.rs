@@ -178,7 +178,7 @@ pub async fn handle_ws_canvas(
         if !state.pairing.is_authenticated(token) {
             return (
                 StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide Authorization header or Sec-WebSocket-Protocol bearer",
+                "Unauthorized  -  provide Authorization header or Sec-WebSocket-Protocol bearer",
             )
                 .into_response();
         }

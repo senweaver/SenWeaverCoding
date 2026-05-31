@@ -3,10 +3,9 @@
 // Licensed under the MIT License.
 
 import { useProviderStore } from '../stores/providerStore'
-import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import type { SavedProvider } from '../types/provider'
-import { isValidRuntimeSelection } from './runtimeSelection'
+import { resolveEffectiveRuntimeSelection } from './runtimeSelection'
 
 export const NO_MODEL_CONFIGURED_CODE = 'NO_MODEL_CONFIGURED'
 
@@ -34,9 +33,16 @@ export function hasAnyAvailableModel(): boolean {
 
 export function hasUsableModelForSession(sessionId: string | null | undefined): boolean {
   if (sessionId) {
-    const runtime = useSessionRuntimeStore.getState().selections[sessionId]
     const providers = useProviderStore.getState().providers
-    if (runtime && isValidRuntimeSelection(runtime, providers)) return true
+    const activeId = useProviderStore.getState().activeId
+    const settingsModelId = useSettingsStore.getState().currentModel?.id
+    const runtime = resolveEffectiveRuntimeSelection(
+      sessionId,
+      providers,
+      activeId,
+      settingsModelId,
+    )
+    if (runtime?.providerId && runtime.modelId.trim()) return true
   }
   return hasAnyAvailableModel()
 }

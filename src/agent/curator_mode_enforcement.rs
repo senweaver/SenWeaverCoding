@@ -9,7 +9,7 @@ pub const MAX_CURATOR_NUDGES: usize = 4;
 
 pub const CURATOR_MODE_NUDGE_MESSAGE: &str =
     "[Curator-Mode Enforcement] You ended your response without calling \
-     `exit_curator_mode`. In Curator mode this is invalid — the deliverable \
+     `exit_curator_mode`. In Curator mode this is invalid  -  the deliverable \
      is a saved `.senweavercoding/curators/<slug>/final.md` + `impl_blueprint.md` \
      (+ `final.docx`).\n\n\
      Your next message MUST either (a) continue research with curator-allowed \
@@ -20,15 +20,15 @@ pub const CURATOR_MODE_NUDGE_MESSAGE: &str =
      outside the Curator allowlist. Before exiting, you MUST have made at least \
      5 distinct `web_search` calls, fetched at least 8 long web pages (via \
      `curator_deep_collect` or `web_fetch`), and run at least 1 \
-     `workspace_deep_search` — otherwise the document is too shallow and \
+     `workspace_deep_search`  -  otherwise the document is too shallow and \
      `exit_curator_mode` will be rejected.";
 
 pub const CURATOR_MODE_NUDGE_STRONG: &str =
-    "[Curator-Mode Enforcement — CRITICAL] You have failed to land the Curator \
+    "[Curator-Mode Enforcement  -  CRITICAL] You have failed to land the Curator \
      document multiple times. This is your last warning. You are in Curator mode \
      and MUST call `exit_curator_mode` with the complete `final_content` and \
      `impl_blueprint` arguments RIGHT NOW. Do NOT add any other text or tool \
-     calls before `exit_curator_mode`. Do NOT stop without exiting — Curator mode \
+     calls before `exit_curator_mode`. Do NOT stop without exiting  -  Curator mode \
      ends only by `exit_curator_mode` (success or rejection).";
 
 #[derive(Debug, Default, Clone, Copy)]

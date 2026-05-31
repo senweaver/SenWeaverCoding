@@ -290,7 +290,7 @@ impl OpenAiCompatibleProvider {
                 .timeout(std::time::Duration::from_secs(timeout))
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .default_headers(headers);
-            let builder = crate::services::get_services()
+            let builder = crate::services::require_services()
                 .proxy_runtime()
                 .apply_to_builder(builder, "provider.compatible");
 
@@ -302,7 +302,7 @@ impl OpenAiCompatibleProvider {
             });
         }
 
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("provider.compatible", timeout, 5)
     }
@@ -340,7 +340,7 @@ impl OpenAiCompatibleProvider {
         if !headers.is_empty() {
             builder = builder.default_headers(headers);
         }
-        let builder = crate::services::get_services()
+        let builder = crate::services::require_services()
             .proxy_runtime()
             .apply_to_builder(builder, "provider.compatible.stream");
 
@@ -426,22 +426,6 @@ impl OpenAiCompatibleProvider {
         } else {
             format!("{normalized_base}/v1/responses")
         }
-    }
-
-    fn tool_specs_to_openai_format(tools: &[crate::tools::ToolSpec]) -> Vec<serde_json::Value> {
-        crate::tools::dedupe_tool_specs(tools)
-            .iter()
-            .map(|tool| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters
-                    }
-                })
-            })
-            .collect()
     }
 
     fn reasoning_effort_for_model(&self, model: &str) -> Option<String> {
@@ -667,7 +651,7 @@ struct Choice {
 }
 
 const REASONING_PLACEHOLDER: &str =
-    "(chain-of-thought unavailable for this turn 鈥?placeholder injected to satisfy thinking-mode round-trip requirements)";
+    "(chain-of-thought unavailable for this turn  - placeholder injected to satisfy thinking-mode round-trip requirements)";
 
 fn strip_think_tags(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -1018,20 +1002,6 @@ impl OpenAiCompatibleProvider {
             AuthStyle::XApiKey => req.header("x-api-key", credential),
             AuthStyle::Custom(header) => req.header(header, credential),
         }
-    }
-
-    pub(crate) fn try_acquire_rate_slot(&self) -> bool {
-        use crate::providers::core::rate_limit::RateLimiterMap;
-        use std::sync::OnceLock;
-
-        static LIMITERS: OnceLock<std::sync::Arc<RateLimiterMap<String>>> = OnceLock::new();
-        let map = LIMITERS
-            .get_or_init(|| {
-
-                std::sync::Arc::new(RateLimiterMap::new(60.0, 1.0))
-            })
-            .clone();
-        map.try_acquire(&self.name, 1.0)
     }
 
     async fn chat_via_responses(
@@ -1759,7 +1729,7 @@ impl Provider for OpenAiCompatibleProvider {
             )
         })?;
 
-        let sanitized_input = super::traits::sanitize_messages_for_legacy(messages);
+        let sanitized_input = super::traits::flatten_messages_for_text_only_wire(messages);
         let budgeted_input = super::traits::enforce_context_budget_with_window(
             sanitized_input,
             model,
@@ -2308,7 +2278,7 @@ impl Provider for OpenAiCompatibleProvider {
         }
 
         if !allow_native_tools {
-            effective_messages = super::traits::sanitize_messages_for_legacy(&effective_messages);
+            effective_messages = super::traits::flatten_messages_for_text_only_wire(&effective_messages);
             effective_messages = super::traits::enforce_context_budget_with_window(
                 effective_messages,
                 model,
@@ -2711,7 +2681,7 @@ impl Provider for OpenAiCompatibleProvider {
             }
         };
 
-        let sanitized_input = super::traits::sanitize_messages_for_legacy(messages);
+        let sanitized_input = super::traits::flatten_messages_for_text_only_wire(messages);
         let budgeted_input = super::traits::enforce_context_budget_with_window(
             sanitized_input,
             model,

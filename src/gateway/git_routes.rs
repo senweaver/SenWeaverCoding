@@ -83,7 +83,7 @@ pub async fn handle_git_status(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let root = match resolve_root(&state, &q.root) {
+    let root = match resolve_root(&state, &q.root).await {
         Some(p) => p,
         None => {
             return (
@@ -171,32 +171,39 @@ fn compute_entries_etag(is_repo: bool, entries: &[GitStatusEntry]) -> String {
     hex
 }
 
-fn resolve_root(state: &AppState, requested: &str) -> Option<PathBuf> {
-    let requested_path = PathBuf::from(requested);
-    let canonical = requested_path.canonicalize().ok()?;
-    let workspace = state.config.lock().workspace_dir.clone();
-    if let Ok(canon_ws) = workspace.canonicalize() {
-        if canon_ws == canonical {
-            return Some(canonical);
-        }
-    }
-    if let Some(backend) = state.session_backend.as_ref() {
-        for meta in backend.list_sessions_with_metadata() {
-            let Some(wd) = meta.work_dir.as_deref() else {
-                continue;
-            };
-            let trimmed = wd.trim();
-            if trimmed.is_empty() {
-                continue;
+async fn resolve_root(state: &AppState, requested: &str) -> Option<PathBuf> {
+    let state = state.clone();
+    let requested = requested.to_string();
+    tokio::task::spawn_blocking(move || {
+        let requested_path = PathBuf::from(&requested);
+        let canonical = requested_path.canonicalize().ok()?;
+        let workspace = state.config.lock().workspace_dir.clone();
+        if let Ok(canon_ws) = workspace.canonicalize() {
+            if canon_ws == canonical {
+                return Some(canonical);
             }
-            if let Ok(p) = PathBuf::from(trimmed).canonicalize() {
-                if p == canonical {
-                    return Some(canonical);
+        }
+        if let Some(backend) = state.session_backend.as_ref() {
+            for meta in backend.list_sessions_with_metadata() {
+                let Some(wd) = meta.work_dir.as_deref() else {
+                    continue;
+                };
+                let trimmed = wd.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(p) = PathBuf::from(trimmed).canonicalize() {
+                    if p == canonical {
+                        return Some(canonical);
+                    }
                 }
             }
         }
-    }
-    None
+        None
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn serialize_status(cached: &CachedGitStatus) -> serde_json::Value {

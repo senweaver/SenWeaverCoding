@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -6,7 +6,7 @@ use super::traits::{Tool, ToolResult};
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
-use crate::tools::ask_user::ChannelMapHandle;
+use crate::tools::ask::user::ChannelMapHandle;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::json;
@@ -134,7 +134,7 @@ impl EscalateToHumanTool {
             .text("title", "Agent Escalation")
             .text("priority", priority.to_string());
 
-        let client = crate::services::get_services()
+        let client = crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts(
                 "tool.escalate_to_human",

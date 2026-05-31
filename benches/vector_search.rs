@@ -1,8 +1,3 @@
-// Benchmarks the vector-search code path: dot-product hot loop with
-// pre-computed norm versus naive per-row norm computation.
-//
-// Run: `cargo bench --bench vector_search`
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 

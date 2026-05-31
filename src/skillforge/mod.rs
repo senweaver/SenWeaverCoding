@@ -107,7 +107,7 @@ impl SkillForge {
 
     pub async fn forge(&self) -> Result<ForgeReport> {
         if !self.config.enabled {
-            warn!("SkillForge is disabled — skipping");
+            warn!("SkillForge is disabled  -  skipping");
             return Ok(ForgeReport {
                 discovered: 0,
                 evaluated: 0,
@@ -145,7 +145,8 @@ impl SkillForge {
                     let base_url = std::env::var("CLAWHUB_API_URL")
                         .unwrap_or_else(|_| "https://api.clawhub.dev/v1".to_string());
                     let url = format!("{base_url}/skills?query=sen&limit=20");
-                    match reqwest::Client::new()
+                    match crate::services::proxy::runtime::ProxyRuntime::global()
+                        .build_client("tool.skillforge")
                         .get(&url)
                         .header("Accept", "application/json")
                         .timeout(std::time::Duration::from_secs(10))
@@ -209,7 +210,8 @@ impl SkillForge {
                 }
                 ScoutSource::HuggingFace => {
                     let url = "https://huggingface.co/api/models?search=sen-skill&limit=20";
-                    match reqwest::Client::new()
+                    match crate::services::proxy::runtime::ProxyRuntime::global()
+                        .build_client("tool.skillforge")
                         .get(url)
                         .header("Accept", "application/json")
                         .timeout(std::time::Duration::from_secs(10))

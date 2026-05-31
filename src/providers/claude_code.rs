@@ -189,7 +189,7 @@ impl Provider for ClaudeCodeProvider {
     ) -> anyhow::Result<String> {
         Self::validate_temperature(temperature)?;
 
-        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let sanitized = super::traits::flatten_messages_for_text_only_wire(messages);
 
         let system = sanitized
             .iter()

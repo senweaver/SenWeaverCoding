@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 struct RawEstimate {
     point_estimate: f64,
     confidence_interval: Option<ConfidenceInterval>,
@@ -16,6 +17,7 @@ struct RawEstimate {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct ConfidenceInterval {
     confidence_level: f64,
     lower_bound: f64,
@@ -172,7 +174,7 @@ pub fn load_estimates(root: impl AsRef<Path>) -> std::io::Result<BenchReport> {
 
 pub fn format_regression_table(report: &BenchReport, regression_threshold: f64) -> String {
     let mut out = format!(
-        "Benchmark regression report — source: {}\n",
+        "Benchmark regression report  -  source: {}\n",
         report.root.display()
     );
     out.push_str("─────────────────────────────────────────────────────────────────\n");
@@ -183,7 +185,7 @@ pub fn format_regression_table(report: &BenchReport, regression_threshold: f64) 
     out.push_str("─────────────────────────────────────────────────────────────────\n");
 
     if report.entries.is_empty() {
-        out.push_str("(no benchmark data found — run `cargo bench` first)\n");
+        out.push_str("(no benchmark data found  -  run `cargo bench` first)\n");
         return out;
     }
 

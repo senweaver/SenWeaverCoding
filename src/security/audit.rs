@@ -1,4 +1,6 @@
-
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
 
 use crate::config::AuditConfig;
 use anyhow::{Result, bail};
@@ -190,7 +192,6 @@ struct ChainState {
 pub struct AuditLogger {
     log_path: PathBuf,
     config: AuditConfig,
-    buffer: Mutex<Vec<AuditEvent>>,
     chain: Mutex<ChainState>,
 
     signing_key: Option<Vec<u8>>,
@@ -236,7 +237,6 @@ impl AuditLogger {
         Ok(Self {
             log_path,
             config,
-            buffer: Mutex::new(Vec::new()),
             chain: Mutex::new(chain_state),
             signing_key,
         })

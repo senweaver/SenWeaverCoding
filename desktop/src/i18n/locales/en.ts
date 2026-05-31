@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 export const en = {
 
   'common.cancel': 'Cancel',
@@ -251,6 +255,8 @@ export const en = {
   'files.tree.copyPath': 'Copy absolute path',
   'files.tree.copyRelativePath': 'Copy relative path',
   'files.tree.reveal': 'Reveal in file manager',
+  'files.tree.openInTerminal': 'Open in integrated terminal',
+  'files.tree.openTerminalFailed': 'Failed to open integrated terminal: {message}',
   'files.tree.pathLabel': 'Path',
   'files.tree.sizeLabel': 'Size',
   'files.tree.modifiedLabel': 'Modified',
@@ -594,6 +600,14 @@ export const en = {
   'settings.providers.contextWindowPlaceholder': 'Tokens (e.g. 1000000)',
   'settings.providers.contextWindowTooltip': 'Maximum context window for this model in tokens. The composer\u2019s token-usage ring uses this as the upper bound. Leave blank to use the built-in heuristic.',
   'settings.providers.editModels': 'Edit Models',
+  'settings.providers.searchModels': 'Add or search models',
+  'settings.providers.searchAllModels': 'Search models by id or provider',
+  'settings.providers.globalModelsHelp': 'Enable or disable models across all providers. Disabled models are hidden from the model selector.',
+  'settings.providers.viewAllModels': 'View All Models',
+  'settings.providers.showLessModels': 'Show Less',
+  'settings.providers.modelsShowingCount': 'Showing {shown} of {total} models',
+  'settings.providers.refreshModels': 'Refresh models',
+  'settings.providers.noModelsMatch': 'No matching models',
   'settings.providers.noBaseUrl': 'No base URL set',
   'settings.providers.connected': 'Connected ({latency}ms)',
   'settings.providers.failed': 'Failed: {error}',
@@ -775,8 +789,8 @@ export const en = {
 
   'settings.adapters.channels.voiceCall.name': 'Voice Call (Twilio/Telnyx/Plivo)',
   'settings.adapters.channels.voiceCall.tagline': 'Real-time phone calls with STT/TTS streaming.',
-  'settings.adapters.channels.clawdtalk.name': 'ClawdTalk',
-  'settings.adapters.channels.clawdtalk.tagline': 'AI voice calls via Telnyx SIP infrastructure.',
+  'settings.adapters.channels.telnyx.name': 'Telnyx',
+  'settings.adapters.channels.telnyx.tagline': 'AI voice calls via Telnyx SIP infrastructure.',
   'settings.adapters.channels.voiceWake.name': 'Voice Wake-Word',
   'settings.adapters.channels.voiceWake.tagline': 'Local microphone — wake word triggered capture.',
 
@@ -1415,6 +1429,7 @@ export const en = {
   'plan.copyPath': 'Copy plan file path:\n{path}',
   'plan.copyPathDone': 'Path copied',
   'plan.completed': 'Completed',
+  'plan.progressCardTitle': 'Plan Progress · Completed',
   'plan.stickyProgress': '{completed}/{total}',
   'plan.stickySucceeded': '({succeeded} succeeded)',
   'plan.stickyProgressTitle': '{completed} completed + {cancelled} skipped/cancelled out of {total}',
@@ -1433,6 +1448,13 @@ export const en = {
 
   'plan.blockedTitle': 'Blocked in Plan mode',
   'plan.blockedBody': 'The model tried to call {tools}. Plan mode only allows read-only exploration plus update_plan / exit_plan_mode / ask_question — the call was refused before any change was made.',
+
+  'modeBlocked.readOnly.title': 'Blocked by read-only mode',
+  'modeBlocked.readOnly.body': 'The model tried to call {tools} but the current mode only allows read-only operations. The call was refused with no changes to your files or environment. Switch to a write-capable mode if writes are required.',
+  'modeBlocked.toolNotAllowed.title': 'Tool not allowed in this mode',
+  'modeBlocked.toolNotAllowed.body': '{tools} is not in the allowed-tools whitelist of the current coding mode. The call was refused. Switch to a mode that allows it, or pick a different tool to accomplish the task.',
+
+  'execTool.openFullLog': 'View full log in terminal panel',
 
   'thinking.wordThought': 'Thought',
   'thinking.wordThinking': 'Thinking',
@@ -1808,6 +1830,21 @@ export const en = {
   'error.BAD_REQUEST': 'Bad request.',
   'error.NOT_FOUND': 'Resource not found.',
   'error.INTERNAL_ERROR': 'Internal server error.',
+  'error.NO_MODEL_CONFIGURED': 'No model is configured. Add at least one provider and model in settings.',
+  'error.CONFIG_ERROR': 'Model or provider configuration is invalid. Check API key, endpoint URL, and model name.',
+  'error.CONNECTION_FAILED': 'Unable to connect to the model provider. Check your network and provider endpoint.',
+  'error.CONNECTION_TIMEOUT': 'The request timed out before completing. Check your network and try again.',
+  'error.INSUFFICIENT_BALANCE': 'Account balance or quota is insufficient. Top up or switch to another provider.',
+  'error.GATEWAY_ERROR': 'The upstream gateway returned an error. Try again later or switch provider.',
+  'error.AUTH_ERROR': 'Authentication failed. Verify your API key and account permissions.',
+  'error.RATE_LIMITED': 'Rate limit reached. Wait a moment or switch to another provider.',
+  'error.MODEL_UNAVAILABLE': 'The selected model is unavailable. Choose a supported model or provider.',
+  'error.ENGINE_OVERLOADED': 'The upstream model engine is overloaded. Retry shortly or switch model.',
+  'error.PROVIDER_FAILOVER': 'All configured providers failed. Check network and provider settings, then retry.',
+  'error.AGENT_TURN_FAILED': 'Something went wrong while processing your request. Try again.',
+  'error.UNKNOWN_ERROR': 'Something went wrong while processing your request. Try again.',
+  'error.TURN_CANCELLED': 'The request was cancelled.',
+  'error.VALIDATION_ERROR': 'The request was invalid. Check your input and try again.',
 
   'serverVerb.Thinking': 'Thinking',
   'serverVerb.Task started': 'Task started',
@@ -1890,6 +1927,9 @@ export const en = {
   'curator.actions.buildSwitch': 'Build → Agent',
   'curator.statusWriting': 'Writing…',
   'curator.copyPath': 'Copy path',
+  'curator.untitled': 'Untitled document',
+  'curator.openDocx': 'Open DOCX',
+  'curator.progressCardTitle': 'Curator build · Completed',
   'curator.modeSwitchTitle': 'Switch to Agent · execute impl_blueprint.md verbatim',
   'curator.modeSwitchBody':
     'After switching, Agent mode will load impl_blueprint.md and engineer the full codebase, configs and docs accordingly. Curator-stage assets feed in as implementation inputs.',
@@ -2467,6 +2507,13 @@ export const en = {
   'settings.lsp.description':
     'Manage LSP servers that power in-editor squiggles, hover tooltips, completion, and the Agent\'s code-intelligence tools. Switch between managed installs and manual command overrides per server.',
   'settings.lsp.globalEnable': 'Enable LSP integration',
+  'settings.lsp.badge.disabled': 'Disabled',
+  'settings.lsp.badge.stopped': 'Stopped',
+  'settings.lsp.badge.install': 'Install',
+  'settings.lsp.badge.installing': 'Installing',
+  'settings.lsp.badge.ready': 'Ready',
+  'settings.lsp.badge.starting': 'Starting',
+  'settings.lsp.badge.failed': 'Failed',
   'settings.lsp.addServer': 'Add server',
   'settings.lsp.customTemplate': 'Custom (manual)',
   'settings.lsp.customTemplateHint': 'Provide your own command, args, and env',

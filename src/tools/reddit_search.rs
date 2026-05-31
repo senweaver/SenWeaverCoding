@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
 use super::traits::{Tool, ToolResult};
-use super::web_search_tool::WebSearchTool;
+use crate::tools::web::search::tool::WebSearchTool;
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -30,7 +30,7 @@ impl Tool for RedditSearchTool {
     fn description(&self) -> &str {
         "Search Reddit for posts and discussions via the unified web_search Reddit engine. \
          Supports subreddit / sort / time_filter filtering. Returns titles, scores, comments, \
-         and URLs — useful for finding community discussions, opinions, troubleshooting advice."
+         and URLs  -  useful for finding community discussions, opinions, troubleshooting advice."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -127,7 +127,6 @@ pub struct RegionRequest {
 #[derive(Debug, Clone)]
 struct FileRegionLockEntry {
     id: u64,
-    path: PathBuf,
     range: Range<usize>,
     holder: AgentId,
     exclusive: bool,
@@ -281,6 +280,9 @@ pub struct LockManager {
     wait_graph: RwLock<HashMap<AgentId, HashSet<AgentId>>>,
 
     next_token_id: AtomicU64,
+
+    region_release_mutex: parking_lot::Mutex<()>,
+    region_release_cv: parking_lot::Condvar,
 }
 
 impl LockManager {
@@ -292,7 +294,20 @@ impl LockManager {
             file_regions: RwLock::new(HashMap::new()),
             wait_graph: RwLock::new(HashMap::new()),
             next_token_id: AtomicU64::new(1),
+            region_release_mutex: parking_lot::Mutex::new(()),
+            region_release_cv: parking_lot::Condvar::new(),
         }
+    }
+
+    fn wait_for_region_release(&self, deadline: Instant) {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let cap = Duration::from_millis(50);
+        let wait_for = deadline.saturating_duration_since(now).min(cap);
+        let mut guard = self.region_release_mutex.lock();
+        let _ = self.region_release_cv.wait_for(&mut guard, wait_for);
     }
 
     pub fn acquire(&self, resource: &str, agent_id: &str, reason: &str) -> LockResult {
@@ -471,7 +486,6 @@ impl LockManager {
                     let id = self.next_token_id.fetch_add(1, Ordering::Relaxed);
                     entries.push(FileRegionLockEntry {
                         id,
-                        path: path_buf.clone(),
                         range: range.clone(),
                         holder: agent_id.to_string(),
                         exclusive: true,
@@ -537,9 +551,8 @@ impl LockManager {
                         range,
                     });
                 }
-                Some(_) => {
-
-                    std::thread::sleep(Duration::from_millis(5));
+                Some(t) => {
+                    self.wait_for_region_release(t);
                 }
             }
         }
@@ -588,7 +601,6 @@ impl LockManager {
                     let id = self.next_token_id.fetch_add(1, Ordering::Relaxed);
                     entries.push(FileRegionLockEntry {
                         id,
-                        path: path_buf.clone(),
                         range: range.clone(),
                         holder: agent_id.to_string(),
                         exclusive: false,
@@ -641,8 +653,8 @@ impl LockManager {
                         range,
                     });
                 }
-                Some(_) => {
-                    std::thread::sleep(Duration::from_millis(5));
+                Some(t) => {
+                    self.wait_for_region_release(t);
                 }
             }
         }
@@ -753,13 +765,16 @@ impl LockManager {
     }
 
     fn release_region_entry(&self, id: u64, path: &Path) {
-        let mut regions = self.file_regions.write();
-        if let Some(entries) = regions.get_mut(path) {
-            entries.retain(|e| e.id != id);
-            if entries.is_empty() {
-                regions.remove(path);
+        {
+            let mut regions = self.file_regions.write();
+            if let Some(entries) = regions.get_mut(path) {
+                entries.retain(|e| e.id != id);
+                if entries.is_empty() {
+                    regions.remove(path);
+                }
             }
         }
+        self.region_release_cv.notify_all();
         coordination_metrics::incr_lockmgr_release();
     }
 
@@ -955,10 +970,6 @@ pub struct Vote {
 #[derive(Debug, Clone)]
 struct VotingSession {
 
-    topic: String,
-
-    initiator: AgentId,
-
     eligible: HashSet<AgentId>,
 
     votes: Vec<Vote>,
@@ -1004,7 +1015,7 @@ impl VotingManager {
         &self,
         session_id: &str,
         topic: &str,
-        initiator: &str,
+        _initiator: &str,
         eligible: HashSet<AgentId>,
         timeout: Duration,
         majority: f64,
@@ -1013,8 +1024,6 @@ impl VotingManager {
         sessions.insert(
             session_id.to_string(),
             VotingSession {
-                topic: topic.to_string(),
-                initiator: initiator.to_string(),
                 eligible: eligible.clone(),
                 votes: Vec::new(),
                 created_at: Instant::now(),

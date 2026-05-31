@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1746,7 +1749,7 @@ impl DockSharedState {
     fn set_url(&self, id: TabId, url: impl Into<String>) {
         let mut g = self.0.lock();
         if let Some(rec) = g.tabs.get_mut(&id) {
-            rec.last_url = Some(url.into());
+            rec.last_url = Some(canonicalize_loopback_url(&url.into()));
         }
     }
     fn set_title(&self, id: TabId, title: impl Into<String>) {
@@ -1809,7 +1812,37 @@ fn parse_target_url(input: Option<String>) -> Result<Url, String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| ABOUT_BLANK.to_string());
-    Url::parse(&raw).map_err(|err| format!("invalid url '{raw}': {err}"))
+    let normalized = canonicalize_loopback_url(&raw);
+    Url::parse(&normalized).map_err(|err| format!("invalid url '{raw}': {err}"))
+}
+
+fn canonicalize_loopback_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == ABOUT_BLANK {
+        return trimmed.to_string();
+    }
+    let Ok(mut url) = Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+    match url.scheme() {
+        "http" | "https" | "ws" | "wss" => {}
+        _ => return trimmed.to_string(),
+    }
+    let Some(host) = url.host_str() else {
+        return trimmed.to_string();
+    };
+    if host.ends_with(".localhost") {
+        return trimmed.to_string();
+    }
+    let rewrite = host.eq_ignore_ascii_case("localhost") || host == "::1";
+    if !rewrite {
+        return trimmed.to_string();
+    }
+    if url.set_host(Some("127.0.0.1")).is_ok() {
+        url.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn dispatch_bridge_event(
@@ -2186,6 +2219,10 @@ fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), St
     if want_visible != was_visible {
         if want_visible {
             wv.show().map_err(|e| format!("show(dock) failed: {e}"))?;
+            if let Some(active) = state.active() {
+                state.forget_state_url(active);
+            }
+            let _ = dock_navigate_active(app, state);
         } else {
             wv.hide().map_err(|e| format!("hide(dock) failed: {e}"))?;
         }
@@ -3280,7 +3317,8 @@ fn urls_logically_match(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    normalize_url_for_match(a) == normalize_url_for_match(b)
+    normalize_url_for_match(&canonicalize_loopback_url(a))
+        == normalize_url_for_match(&canonicalize_loopback_url(b))
 }
 
 fn current_session_id() -> Option<String> {

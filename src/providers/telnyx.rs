@@ -196,7 +196,7 @@ impl Provider for TelnyxProvider {
             )
         })?;
 
-        let sanitized = super::traits::sanitize_messages_for_legacy(messages);
+        let sanitized = super::traits::flatten_messages_for_text_only_wire(messages);
         let budgeted = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             sanitized,

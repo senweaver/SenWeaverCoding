@@ -232,7 +232,7 @@ pub async fn revert_single_hunk(
     let diff = entry
         .diff
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("pending edit has no diff text — hunk revert impossible"))?;
+        .ok_or_else(|| anyhow::anyhow!("pending edit has no diff text  -  hunk revert impossible"))?;
     let hunks = parse_unified_diff(diff);
     let target = hunks.get(hunk_index).ok_or_else(|| {
         anyhow::anyhow!(

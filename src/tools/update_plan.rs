@@ -67,6 +67,7 @@ pub type PlanHandle = Arc<RwLock<Vec<PlanStep>>>;
 pub struct UpdatePlanTool {
     plan: PlanHandle,
     workspace_root: Arc<RwLock<PathBuf>>,
+    active_plan_name: Arc<RwLock<Option<String>>>,
 }
 
 impl UpdatePlanTool {
@@ -74,6 +75,7 @@ impl UpdatePlanTool {
         Self {
             plan,
             workspace_root: Arc::new(RwLock::new(PathBuf::new())),
+            active_plan_name: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -81,6 +83,33 @@ impl UpdatePlanTool {
         Self {
             plan,
             workspace_root,
+            active_plan_name: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    async fn persist_active_plan_progress(&self) {
+        let Some(plan_name) = self.active_plan_name.read().clone() else {
+            return;
+        };
+        let file_path = self
+            .plans_dir_snapshot()
+            .join(format!("{plan_name}.plan.md"));
+        let Ok(content) = tokio::fs::read_to_string(&file_path).await else {
+            return;
+        };
+        let updated = {
+            let plan = self.plan.read();
+            rewrite_frontmatter_statuses(&content, &plan)
+        };
+        if updated != content {
+            if let Err(e) = tokio::fs::write(&file_path, &updated).await {
+                tracing::warn!(
+                    target: "tools.update_plan",
+                    error = %e,
+                    path = %file_path.display(),
+                    "failed to persist plan progress to disk"
+                );
+            }
         }
     }
 
@@ -94,10 +123,10 @@ impl UpdatePlanTool {
         safe_root.join(".senweavercoding").join("plans")
     }
 
-    fn ensure_plans_dir(&self) -> anyhow::Result<()> {
+    async fn ensure_plans_dir(&self) -> anyhow::Result<()> {
         let plans_dir = self.plans_dir_snapshot();
-        if !plans_dir.as_os_str().is_empty() && !plans_dir.exists() {
-            std::fs::create_dir_all(&plans_dir)?;
+        if !plans_dir.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(&plans_dir).await?;
         }
         Ok(())
     }
@@ -126,7 +155,7 @@ impl UpdatePlanTool {
 
     fn render_plan_progress_header(total: usize, completed: usize) -> String {
         if Self::current_mode_is_plan() {
-            format!("Plan draft — {total} todo(s) outlined")
+            format!("Plan draft  -  {total} todo(s) outlined")
         } else {
             format!("{total} To-dos ({completed}/{total} completed)")
         }
@@ -261,6 +290,78 @@ fn parse_plan_checkbox_list(content: &str) -> Vec<PlanStep> {
     steps
 }
 
+fn rewrite_frontmatter_statuses(content: &str, plan: &[PlanStep]) -> String {
+    let status_for = |id_raw: &str| -> Option<&'static str> {
+        let key = normalize_plan_key(id_raw);
+        plan.iter()
+            .find(|s| s.id == id_raw || (!key.is_empty() && normalize_plan_key(&s.id) == key))
+            .map(|s| frontmatter_status(&s.status))
+    };
+
+    let mut out = String::with_capacity(content.len() + 32);
+    let mut frontmatter_open = false;
+    let mut frontmatter_done = false;
+    let mut in_todos = false;
+    let mut current_id: Option<String> = None;
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if !frontmatter_done {
+            if trimmed == "---" {
+                if frontmatter_open {
+                    frontmatter_done = true;
+                    in_todos = false;
+                    current_id = None;
+                } else if line_idx == 0 {
+                    frontmatter_open = true;
+                }
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            if frontmatter_open {
+                let indented = line.starts_with(' ') || line.starts_with('\t');
+                if !in_todos {
+                    if !indented && trimmed.starts_with("todos:") {
+                        in_todos = true;
+                    }
+                } else {
+                    if !indented && !trimmed.is_empty() {
+                        in_todos = false;
+                        current_id = None;
+                    } else if let Some(rest) = trimmed.strip_prefix("- id:") {
+                        current_id = Some(rest.trim().trim_matches('"').to_string());
+                    } else if trimmed.strip_prefix("status:").is_some() {
+                        if let Some(id) = current_id.as_deref() {
+                            if let Some(new_status) = status_for(id) {
+                                let indent: String = line
+                                    .chars()
+                                    .take_while(|c| *c == ' ' || *c == '\t')
+                                    .collect();
+                                out.push_str(&indent);
+                                out.push_str("status: ");
+                                out.push_str(new_status);
+                                out.push('\n');
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if !content.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn frontmatter_status(status: &PlanStepStatus) -> &'static str {
     match status {
         PlanStepStatus::Pending => "pending",
@@ -366,7 +467,7 @@ pub(crate) fn render_plan_frontmatter_doc(
     );
     md.push_str("- **验收门**: `cargo check` / `cargo test` / 自定义脚本（见 `## 验收` 段）。\n\n");
 
-    md.push_str("## Track 1 — 任务清单\n\n");
+    md.push_str("## Track 1  -  任务清单\n\n");
     if todos.is_empty() {
         md.push_str("> 计划尚未生成具体步骤。\n\n");
     } else {
@@ -410,7 +511,7 @@ impl Tool for UpdatePlanTool {
 Actions: 'set' (replace the whole plan), 'update' (flip ONE step's status/notes), 'get' (view current plan), \
 'save' (persist as .plan.md file), 'load' (read .plan.md from disk), 'list' (list saved plans).\n\
 \n\
-LIFECYCLE RULES — read carefully, the user UI mirrors EVERY call:\n\
+LIFECYCLE RULES  -  read carefully, the user UI mirrors EVERY call:\n\
 - Call 'set' exactly once at the very start of plan execution to seed the in-memory tracker. \
 After that, prefer 'update' for status flips so completion is preserved.\n\
 - For every step, the canonical execution sequence is THREE separate update_plan calls in this order:\n\
@@ -423,13 +524,13 @@ and then fire a long sequence of `update_plan(action=\"update\", …)` calls bac
 The user is watching a live progress bar fed by these calls; batching makes the bar look \
 frozen at 0/N until everything jumps to N/N at once, which is exactly what they DON'T want.\n\
 - If a single piece of work genuinely closes multiple steps simultaneously, you MAY emit \
-several `action=\"update\"` calls in a row — but ONLY because each step truly just finished, \
+several `action=\"update\"` calls in a row  -  but ONLY because each step truly just finished, \
 not as a deferred end-of-turn cleanup.\n\
 - Use 'skipped' (with a `notes` reason) for steps that turn out unnecessary; do not silently \
 leave them `pending`.\n\
 - If you intend to add a brand-new todo that wasn't in the original plan, you MUST call \
 'set' with the full updated list. Calling 'update' with a non-existent step_id will fail with a \
-list of valid ids — fix the call, do not retry the same id.\n\
+list of valid ids  -  fix the call, do not retry the same id.\n\
 \n\
 ID MATCHING\n\
 - 'update' resolves step_id with case- and punctuation-insensitive matching, and falls back \
@@ -525,54 +626,75 @@ will."
                     .or_else(|| args.get("content").and_then(|v| v.as_str()))
                     .unwrap_or("");
 
-                let mut plan = self.plan.write();
+                let update_outcome: Result<(String, String), String> = {
+                    let mut plan = self.plan.write();
 
-                let mut idx: Option<usize> = plan.iter().position(|s| s.id == step_id);
+                    let mut idx: Option<usize> = plan.iter().position(|s| s.id == step_id);
 
-                if idx.is_none() {
-                    let key = normalize_plan_key(step_id);
-                    if !key.is_empty() {
-                        idx = plan.iter().position(|s| normalize_plan_key(&s.id) == key);
-                    }
-                }
-
-                if idx.is_none() && !title_hint.is_empty() {
-                    let title_key = normalize_plan_key(title_hint);
-                    if !title_key.is_empty() {
-                        idx = plan
-                            .iter()
-                            .position(|s| normalize_plan_key(&s.title) == title_key);
-                        if idx.is_none() {
-                            idx = plan.iter().position(|s| {
-                                let tk = normalize_plan_key(&s.title);
-                                !tk.is_empty()
-                                    && (tk.contains(&title_key) || title_key.contains(&tk))
-                            });
+                    if idx.is_none() {
+                        let key = normalize_plan_key(step_id);
+                        if !key.is_empty() {
+                            idx = plan.iter().position(|s| normalize_plan_key(&s.id) == key);
                         }
                     }
-                }
 
-                match idx {
-                    Some(i) => {
-                        let s = &mut plan[i];
-                        if let Some(status_str) = args.get("status").and_then(|v| v.as_str()) {
-                            s.status = match status_str {
-                                "in_progress" => PlanStepStatus::InProgress,
-                                "completed" => PlanStepStatus::Completed,
-                                "skipped" => PlanStepStatus::Skipped,
-                                _ => PlanStepStatus::Pending,
+                    if idx.is_none() && !title_hint.is_empty() {
+                        let title_key = normalize_plan_key(title_hint);
+                        if !title_key.is_empty() {
+                            idx = plan
+                                .iter()
+                                .position(|s| normalize_plan_key(&s.title) == title_key);
+                            if idx.is_none() {
+                                idx = plan.iter().position(|s| {
+                                    let tk = normalize_plan_key(&s.title);
+                                    !tk.is_empty()
+                                        && (tk.contains(&title_key) || title_key.contains(&tk))
+                                });
+                            }
+                        }
+                    }
+
+                    match idx {
+                        Some(i) => {
+                            let s = &mut plan[i];
+                            if let Some(status_str) = args.get("status").and_then(|v| v.as_str()) {
+                                s.status = match status_str {
+                                    "in_progress" => PlanStepStatus::InProgress,
+                                    "completed" => PlanStepStatus::Completed,
+                                    "skipped" => PlanStepStatus::Skipped,
+                                    _ => PlanStepStatus::Pending,
+                                };
+                            }
+                            if let Some(notes) = args.get("notes").and_then(|v| v.as_str()) {
+                                s.notes = Some(notes.to_string());
+                            }
+                            Ok((s.title.clone(), s.status.to_string()))
+                        }
+                        None => {
+                            let available = plan
+                                .iter()
+                                .map(|s| format!("'{}' (\"{}\")", s.id, s.title))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let hint = if available.is_empty() {
+                                "Plan is empty  -  call action='set' first to seed the todo list.".to_string()
+                            } else {
+                                format!(
+                                    "Available steps: {available}. If this is a brand new todo, call action='set' with the FULL updated list (do not 'update' an id that does not exist)."
+                                )
                             };
+                            Err(format!("Step '{step_id}' not found in plan. {hint}"))
                         }
-                        if let Some(notes) = args.get("notes").and_then(|v| v.as_str()) {
-                            s.notes = Some(notes.to_string());
-                        }
+                    }
+                };
+
+                match update_outcome {
+                    Ok((title, status)) => {
+                        self.persist_active_plan_progress().await;
                         let output = if Self::current_mode_is_plan() {
-                            format!(
-                                "Plan todo '{}' annotated (status={}).",
-                                s.title, s.status
-                            )
+                            format!("Plan todo '{title}' annotated (status={status}).")
                         } else {
-                            format!("Updated step '{}': status={}", s.title, s.status)
+                            format!("Updated step '{title}': status={status}")
                         };
                         Ok(ToolResult {
                             success: true,
@@ -580,25 +702,11 @@ will."
                             error: None,
                         })
                     }
-                    None => {
-                        let available = plan
-                            .iter()
-                            .map(|s| format!("'{}' (\"{}\")", s.id, s.title))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let hint = if available.is_empty() {
-                            "Plan is empty — call action='set' first to seed the todo list.".to_string()
-                        } else {
-                            format!(
-                                "Available steps: {available}. If this is a brand new todo, call action='set' with the FULL updated list (do not 'update' an id that does not exist)."
-                            )
-                        };
-                        Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!("Step '{step_id}' not found in plan. {hint}")),
-                        })
-                    }
+                    Err(error_message) => Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(error_message),
+                    }),
                 }
             }
             "get" => {
@@ -646,15 +754,14 @@ will."
                 })
             }
             "save" => {
-                let plan = self.plan.read();
-                if plan.is_empty() {
+                let plan_is_empty = { self.plan.read().is_empty() };
+                if plan_is_empty {
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),
                         error: Some("No plan to save. Use action='set' first.".to_string()),
                     });
                 }
-                drop(plan);
 
                 let plan_name = args
                     .get("plan_name")
@@ -669,12 +776,13 @@ will."
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                self.ensure_plans_dir()?;
+                self.ensure_plans_dir().await?;
 
                 let filename = format!("{plan_name}.plan.md");
                 let file_path = self.plans_dir_snapshot().join(&filename);
                 let md = self.render_plan_md(title, description);
-                std::fs::write(&file_path, &md)?;
+                tokio::fs::write(&file_path, &md).await?;
+                *self.active_plan_name.write() = Some(plan_name.to_string());
 
                 let header = if Self::current_mode_is_plan() {
                     format!("Plan draft saved to `{}`", file_path.display())
@@ -705,7 +813,7 @@ will."
                     });
                 }
 
-                let content = std::fs::read_to_string(&file_path)?;
+                let content = tokio::fs::read_to_string(&file_path).await?;
                 let steps = Self::parse_plan_md(&content);
                 let count = steps.len();
                 let completed = steps
@@ -713,6 +821,7 @@ will."
                     .filter(|s| s.status == PlanStepStatus::Completed)
                     .count();
                 *self.plan.write() = steps;
+                *self.active_plan_name.write() = Some(plan_name.to_string());
 
                 Ok(ToolResult {
                     success: true,
@@ -729,25 +838,30 @@ will."
             }
 
             "list" => {
-                self.ensure_plans_dir()?;
-                let mut plans = Vec::new();
+                self.ensure_plans_dir().await?;
                 let plans_dir = self.plans_dir_snapshot();
-                if plans_dir.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&plans_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                                if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                                    if name.ends_with(".plan")
-                                        || path.to_string_lossy().contains(".plan.md")
-                                    {
-                                        plans.push(name.to_string());
+                let plans_dir_for_scan = plans_dir.clone();
+                let plans: Vec<String> = tokio::task::spawn_blocking(move || {
+                    let mut plans = Vec::new();
+                    if plans_dir_for_scan.exists() {
+                        if let Ok(entries) = std::fs::read_dir(&plans_dir_for_scan) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                                    if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                                        if name.ends_with(".plan")
+                                            || path.to_string_lossy().contains(".plan.md")
+                                        {
+                                            plans.push(name.to_string());
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
+                    plans
+                })
+                .await?;
 
                 if plans.is_empty() {
                     Ok(ToolResult {

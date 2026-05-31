@@ -30,6 +30,7 @@ impl NotionTool {
     }
 
     fn headers(&self) -> anyhow::Result<reqwest::header::HeaderMap> {
+        use reqwest::header::HeaderValue;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "Authorization",
@@ -37,8 +38,11 @@ impl NotionTool {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid Notion API key header value: {e}"))?,
         );
-        headers.insert("Notion-Version", NOTION_VERSION.parse().unwrap());
-        headers.insert("Content-Type", "application/json".parse().unwrap());
+        headers.insert("Notion-Version", HeaderValue::from_static(NOTION_VERSION));
+        headers.insert(
+            "Content-Type",
+            HeaderValue::from_static("application/json"),
+        );
         Ok(headers)
     }
 

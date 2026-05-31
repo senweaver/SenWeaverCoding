@@ -472,7 +472,7 @@ impl Tool for JiraTool {
                 "level_of_details": {
                     "type": "string",
                     "enum": ["basic", "basic_search", "full", "changelog"],
-                    "description": "How much data to return for get_ticket. Omit to use the default ('basic'). Options: 'basic' — summary, status, priority, assignee, rendered description, and rendered comments (best for reading a ticket in full); 'basic_search' — lightweight fields only, no description or comments (best when you only need to identify the ticket); 'full' — all Jira fields plus rendered HTML (verbose, use sparingly); 'changelog' — issue key and full change history only."
+                    "description": "How much data to return for get_ticket. Omit to use the default ('basic'). Options: 'basic'  -  summary, status, priority, assignee, rendered description, and rendered comments (best for reading a ticket in full); 'basic_search'  -  lightweight fields only, no description or comments (best when you only need to identify the ticket); 'full'  -  all Jira fields plus rendered HTML (verbose, use sparingly); 'changelog'  -  issue key and full change history only."
                 },
                 "jql": {
                     "type": "string",
@@ -485,7 +485,7 @@ impl Tool for JiraTool {
                 },
                 "comment": {
                     "type": "string",
-                    "description": "Comment body for comment_ticket. Supports a limited markdown-like syntax converted to Atlassian Document Format (ADF). Mention a user with @user@domain.com — the leading @ is required (a bare email without @ prefix is treated as plain text). Bold with **text**. Bullet list items with a leading '- '. Newlines become line breaks. Everything else is plain text. Example: 'Hi @john@company.com, this is **important**.\n- Check the logs\n- Rerun the pipeline'"
+                    "description": "Comment body for comment_ticket. Supports a limited markdown-like syntax converted to Atlassian Document Format (ADF). Mention a user with @user@domain.com  -  the leading @ is required (a bare email without @ prefix is treated as plain text). Bold with **text**. Bullet list items with a leading '- '. Newlines become line breaks. Everything else is plain text. Example: 'Hi @john@company.com, this is **important**.\n- Check the logs\n- Rerun the pipeline'"
                 }
             },
             "required": ["action"]

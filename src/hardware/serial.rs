@@ -142,6 +142,6 @@ async fn do_send(path: &str, baud: u32, json: &str) -> Result<ZcResponse, Transp
     }
 
     serde_json::from_str(trimmed).map_err(|e| {
-        TransportError::Protocol(format!("invalid JSON response: {e} — got: {trimmed:?}"))
+        TransportError::Protocol(format!("invalid JSON response: {e}  -  got: {trimmed:?}"))
     })
 }

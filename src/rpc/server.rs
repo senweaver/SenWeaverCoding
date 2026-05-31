@@ -41,6 +41,7 @@ pub enum RpcTransport {
     },
 }
 
+#[cfg(unix)]
 fn default_socket_mode() -> String {
     "0755".to_string()
 }

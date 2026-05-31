@@ -105,13 +105,13 @@ fn sanitize_segment(input: &str) -> String {
 }
 
 fn redact(value: &Value) -> Value {
-    let after_vault = crate::services::credential_vault::redact_args_optional(value);
-    let (after_pii, _) = crate::services::pii_sanitizer::global_sanitizer().sanitize_json(&after_vault);
+    let after_vault = crate::services::governance::credential_vault::redact_args_optional(value);
+    let (after_pii, _) = crate::services::governance::pii_sanitizer::global_sanitizer().sanitize_json(&after_vault);
     after_pii
 }
 
 fn pii_only_str(input: &str) -> String {
-    let (clean, _) = crate::services::pii_sanitizer::global_sanitizer().sanitize(input);
+    let (clean, _) = crate::services::governance::pii_sanitizer::global_sanitizer().sanitize(input);
     clean
 }
 
@@ -281,7 +281,7 @@ fn timestamp_now() -> String {
 }
 
 fn redact_str(s: &str) -> String {
-    let after_vault = crate::services::credential_vault::redact_for_audit_optional(s);
+    let after_vault = crate::services::governance::credential_vault::redact_for_audit_optional(s);
     pii_only_str(&after_vault)
 }
 
@@ -918,7 +918,7 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
     let raw_report = render_report(&events, summary_note.as_deref());
 
     let (sanitized_report, pii_report) =
-        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_report);
+        crate::services::governance::pii_sanitizer::global_sanitizer().sanitize(&raw_report);
     let report_md = inject_pii_summary(&sanitized_report, &pii_report);
 
     let report_path = run_dir(&run_id).join("report.md");
@@ -930,21 +930,21 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
 
     let raw_tech_doc = render_tech_doc(&events, summary_note.as_deref());
     let (sanitized_tech_doc, _) =
-        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_tech_doc);
+        crate::services::governance::pii_sanitizer::global_sanitizer().sanitize(&raw_tech_doc);
     let tech_doc_path = run_dir(&run_id).join("tech_doc.md");
     tokio::fs::write(&tech_doc_path, &sanitized_tech_doc).await?;
     let tech_doc_path_str = tech_doc_path.to_string_lossy().to_string();
 
     let raw_analysis = render_analysis(&events, summary_note.as_deref());
     let (sanitized_analysis, _) =
-        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_analysis);
+        crate::services::governance::pii_sanitizer::global_sanitizer().sanitize(&raw_analysis);
     let analysis_path = run_dir(&run_id).join("analysis.md");
     tokio::fs::write(&analysis_path, &sanitized_analysis).await?;
     let analysis_path_str = analysis_path.to_string_lossy().to_string();
 
     let raw_runbook = render_runbook(&events, summary_note.as_deref());
     let (sanitized_runbook, _) =
-        crate::services::pii_sanitizer::global_sanitizer().sanitize(&raw_runbook);
+        crate::services::governance::pii_sanitizer::global_sanitizer().sanitize(&raw_runbook);
     let runbook_path = run_dir(&run_id).join("runbook.md");
     tokio::fs::write(&runbook_path, &sanitized_runbook).await?;
     let runbook_path_str = runbook_path.to_string_lossy().to_string();
@@ -1007,7 +1007,7 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
 
 fn inject_pii_summary(
     report_md: &str,
-    pii_report: &crate::services::pii_sanitizer::SanitizationReport,
+    pii_report: &crate::services::governance::pii_sanitizer::SanitizationReport,
 ) -> String {
     let mut header = String::new();
     header.push_str("> 隐私脱敏 (PII Redaction): ");
@@ -1201,7 +1201,7 @@ fn render_tech_doc(events: &[ReportEvent], summary_note: Option<&str>) -> String
                 let suffix = if title_part.is_empty() {
                     String::new()
                 } else {
-                    format!(" — {}", title_part)
+                    format!("  -  {}", title_part)
                 };
                 out.push_str(&format!(
                     "- (depth {}) {}{} [http={}]\n",
@@ -1321,7 +1321,7 @@ fn render_tech_doc(events: &[ReportEvent], summary_note: Option<&str>) -> String
             for s in shots {
                 let caption = s.caption.clone().unwrap_or_else(|| s.id.clone());
                 out.push_str(&format!(
-                    "- ![{caption}]({path}) — `{id}` @ {ts}\n",
+                    "- ![{caption}]({path})  -  `{id}` @ {ts}\n",
                     caption = caption,
                     path = s.relative_path,
                     id = s.id,
@@ -1469,7 +1469,7 @@ fn render_analysis(events: &[ReportEvent], summary_note: Option<&str>) -> String
             out.push_str("### 相关 findings\n\n");
             for f in &matched_findings {
                 out.push_str(&format!(
-                    "- `{}` `[{}]` {} — {}\n",
+                    "- `{}` `[{}]` {}  -  {}\n",
                     f.id, f.severity, f.title, f.description
                 ));
             }
@@ -1571,6 +1571,7 @@ fn render_runbook(events: &[ReportEvent], summary_note: Option<&str>) -> String 
     out
 }
 
+#[allow(dead_code)]
 struct AnalysisNoteRow {
     id: String,
     category: String,
@@ -1580,6 +1581,7 @@ struct AnalysisNoteRow {
     evidence_refs: Vec<String>,
 }
 
+#[allow(dead_code)]
 struct RunbookSectionRow {
     id: String,
     kind: String,
@@ -1872,7 +1874,7 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
     if !cases.is_empty() {
         out.push_str("\n## Test Cases\n");
         for (case_id, ctitle, status, steps, assertions, shots) in &cases {
-            out.push_str(&format!("\n### {} — {} `[{}]`\n", case_id, ctitle, status));
+            out.push_str(&format!("\n### {}  -  {} `[{}]`\n", case_id, ctitle, status));
             if !steps.is_empty() {
                 out.push_str("\n**Steps**\n\n");
                 for (i, s) in steps.iter().enumerate() {
@@ -1932,8 +1934,8 @@ fn render_report(events: &[ReportEvent], summary_note: Option<&str>) -> String {
         out.push_str("\n## Attachments\n\n");
         for (id, rel, caption, step_ref) in &screenshots {
             let label = match (step_ref, caption) {
-                (Some(step), Some(cap)) => format!("{} — {} ({})", id, cap, step),
-                (None, Some(cap)) => format!("{} — {}", id, cap),
+                (Some(step), Some(cap)) => format!("{}  -  {} ({})", id, cap, step),
+                (None, Some(cap)) => format!("{}  -  {}", id, cap),
                 (Some(step), None) => format!("{} ({})", id, step),
                 (None, None) => id.clone(),
             };

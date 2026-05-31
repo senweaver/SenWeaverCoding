@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 
 
 export type ApiFormat = 'anthropic' | 'openai_chat' | 'openai_responses'
@@ -25,6 +29,7 @@ export type SavedProvider = {
 
   models: string[]
 
+  modelEnabled?: Record<string, boolean>
   modelContextWindows?: Record<string, number>
   customHeaders?: CustomHttpHeader[]
   notes?: string
@@ -38,6 +43,7 @@ export type CreateProviderInput = {
   baseUrl: string
   apiFormat?: ApiFormat
   models: string[]
+  modelEnabled?: Record<string, boolean>
   modelContextWindows?: Record<string, number>
   customHeaders?: CustomHttpHeader[]
   notes?: string
@@ -49,6 +55,7 @@ export type UpdateProviderInput = {
   baseUrl?: string
   apiFormat?: ApiFormat
   models?: string[]
+  modelEnabled?: Record<string, boolean>
   modelContextWindows?: Record<string, number>
   customHeaders?: CustomHttpHeader[]
   notes?: string

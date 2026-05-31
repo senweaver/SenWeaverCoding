@@ -188,7 +188,7 @@ pub fn compact_grep(matches: &[GrepHit], opts: &GrepOpts) -> String {
         }
         if opts.total_cap > 0 && emitted >= opts.total_cap {
             out.push_str(&format!(
-                "... [{} more matches not shown — total cap reached]\n",
+                "... [{} more matches not shown  -  total cap reached]\n",
                 matches.len().saturating_sub(emitted)
             ));
             break;

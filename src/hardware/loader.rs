@@ -85,7 +85,7 @@ pub fn scan_plugin_dir() -> Vec<LoadedPlugin> {
 
         if !manifest_path.exists() {
             tracing::debug!(
-                "[registry] no tool.toml in {:?} — skipping",
+                "[registry] no tool.toml in {:?}  -  skipping",
                 plugin_dir.file_name().unwrap_or_default()
             );
             continue;

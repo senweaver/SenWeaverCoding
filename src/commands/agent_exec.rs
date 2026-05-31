@@ -107,11 +107,13 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
 
     let resolved_provider_name =
         crate::providers::resolve_runtime_provider_name(&provider_name, &cfg);
-    let provider = match crate::providers::create_provider_with_url(
-        &resolved_provider_name,
-        api_key.as_deref(),
+    let provider = match crate::providers::create_provider_with_url_async(
+        resolved_provider_name,
+        api_key,
         None,
-    ) {
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             return CommandResult::err(format!("Failed to build provider '{provider_name}': {e}"));

@@ -45,7 +45,7 @@ fn smart_compact(content: &str) -> String {
         out.push('\n');
     }
     out.push_str(&format!(
-        "... [{} lines elided — use level=default for full content] ...\n",
+        "... [{} lines elided  -  use level=default for full content] ...\n",
         total - SMART_HEAD_LINES - SMART_TAIL_LINES
     ));
     for l in lines.iter().skip(total - SMART_TAIL_LINES) {
@@ -121,7 +121,7 @@ fn signatures_compact(path: &str, content: &str) -> String {
         return smart_compact(content);
     }
     out.push_str(&format!(
-        "\n[signatures only — {hits} declarations; use level=default for full content]\n"
+        "\n[signatures only  -  {hits} declarations; use level=default for full content]\n"
     ));
     out
 }

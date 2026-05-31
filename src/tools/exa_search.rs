@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
 use super::traits::{Tool, ToolResult};
-use super::web_search_tool::WebSearchTool;
+use crate::tools::web::search::tool::WebSearchTool;
 use async_trait::async_trait;
 use serde_json::json;
 

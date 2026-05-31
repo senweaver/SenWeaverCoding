@@ -14,7 +14,7 @@ with a newline.  Use exact file-path headers (`--- a/…`, `+++ b/…`)
 when present in the broken diff.  Preserve context line prefixes
 (` `, `+`, `-`).";
 
-const REFINE_USER_PROMPT_V2_FOOTER: &str = "\n# Task\n\nReturn ONLY the corrected unified diff.\nUse a *small* hunk — ideally one or two lines of pre-image context\non each side of the change so the heuristic locator has high\nprecision.  Do NOT rewrite unrelated code.  Do NOT widen the hunk\nbeyond the failure site indicated above.\n";
+const REFINE_USER_PROMPT_V2_FOOTER: &str = "\n# Task\n\nReturn ONLY the corrected unified diff.\nUse a *small* hunk  -  ideally one or two lines of pre-image context\non each side of the change so the heuristic locator has high\nprecision.  Do NOT rewrite unrelated code.  Do NOT widen the hunk\nbeyond the failure site indicated above.\n";
 
 #[must_use]
 pub fn build_refine_user_prompt(source: &str, failed_diff: &str, hint: Option<&str>) -> String {
@@ -74,16 +74,16 @@ pub fn build_refine_user_prompt_v2(
         body.push_str("\n# Failure type\n\n");
         match kind {
             crate::apply_model::llm_refine::FailureKind::ContextMismatch => {
-                body.push_str("context_mismatch — the failed diff's pre-image lines do not match the current file. Re-read the file contents above and locate the actual surrounding context.\n");
+                body.push_str("context_mismatch  -  the failed diff's pre-image lines do not match the current file. Re-read the file contents above and locate the actual surrounding context.\n");
             }
             crate::apply_model::llm_refine::FailureKind::LineDrift { delta } => {
                 body.push_str(&format!(
-                    "line_drift — the previous attempt landed {delta} lines off target. Use the *current* line numbers from the file above when emitting the new `@@` header.\n"
+                    "line_drift  -  the previous attempt landed {delta} lines off target. Use the *current* line numbers from the file above when emitting the new `@@` header.\n"
                 ));
             }
             crate::apply_model::llm_refine::FailureKind::TreeSitterError { node_kind, line } => {
                 body.push_str(&format!(
-                    "tree_sitter_error at line {line}: {node_kind}. The post-apply file fails to parse — fix the structural error around line {line} in the diff. {context}\n",
+                    "tree_sitter_error at line {line}: {node_kind}. The post-apply file fails to parse  -  fix the structural error around line {line} in the diff. {context}\n",
                     context = surrounding_lines(source, *line, 3)
                 ));
             }
@@ -104,7 +104,7 @@ pub fn build_refine_user_prompt_v2(
     }
 
     if let Some(p) = prev {
-        body.push_str("\n# Previous attempt\n\nThis is the diff your *previous* response produced, plus why it failed. Do NOT repeat the same diff — read the failure above and produce a *different* correction.\n\n```diff\n");
+        body.push_str("\n# Previous attempt\n\nThis is the diff your *previous* response produced, plus why it failed. Do NOT repeat the same diff  -  read the failure above and produce a *different* correction.\n\n```diff\n");
         body.push_str(&p.diff);
         if !p.diff.ends_with('\n') {
             body.push('\n');

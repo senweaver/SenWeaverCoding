@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::memory::ivf_index::IvfVectorIndex;
-use crate::memory::vector_index::VectorIndex;
+use crate::memory::vector::index::VectorIndex;
 
 use super::embedding::EmbeddingProvider;
 

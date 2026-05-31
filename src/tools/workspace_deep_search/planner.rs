@@ -107,11 +107,9 @@ fn tokenize_loose(raw_query: &str) -> Vec<String> {
     for ch in raw_query.chars() {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
             cur.push(ch);
-        } else {
-            if !cur.is_empty() {
-                push_camel_split(&cur, &mut tokens);
-                cur.clear();
-            }
+        } else if !cur.is_empty() {
+            push_camel_split(&cur, &mut tokens);
+            cur.clear();
         }
     }
     if !cur.is_empty() {

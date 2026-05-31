@@ -76,7 +76,7 @@ fn format_experience(exp: &super::types::RecycledExperience) -> String {
     };
     let mut text = format!("- **{}** ({outcome_tag}, reward {:.2})", exp.headline.trim(), exp.reward);
     if !exp.tools_summary.is_empty() {
-        text.push_str(" — tools: ");
+        text.push_str("  -  tools: ");
         text.push_str(exp.tools_summary.trim());
     }
     if !exp.context_excerpt.is_empty() {

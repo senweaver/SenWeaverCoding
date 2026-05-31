@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { t } from '../../i18n'
 

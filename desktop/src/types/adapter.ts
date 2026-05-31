@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 
 
 export type StreamMode = 'off' | 'partial' | 'multi_message'
@@ -282,7 +286,7 @@ export type NostrConfig = {
   allowedPubkeys?: string[]
 }
 
-export type ClawdTalkConfig = {
+export type TelnyxConfig = {
   apiKey?: string
   connectionId?: string
   fromNumber?: string
@@ -353,7 +357,7 @@ export type AdapterFileConfig = {
   twitter?: TwitterConfig | null
   mochat?: MochatConfig | null
   nostr?: NostrConfig | null
-  clawdtalk?: ClawdTalkConfig | null
+  telnyx?: TelnyxConfig | null
   reddit?: RedditConfig | null
   bluesky?: BlueskyConfig | null
   voiceCall?: VoiceCallConfig | null
@@ -385,7 +389,7 @@ export const CHANNEL_IDS = [
   'twitter',
   'mochat',
   'nostr',
-  'clawdtalk',
+  'telnyx',
   'reddit',
   'bluesky',
   'voiceCall',

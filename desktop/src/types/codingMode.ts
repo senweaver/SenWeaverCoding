@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 
 
 import type { PermissionMode } from './settings'
@@ -111,5 +115,47 @@ export const CODING_MODE_ACCENT: Partial<Record<CodingModeId, CodingModeAccentTo
     accent: 'var(--color-harness-accent)',
     accentHover: 'var(--color-harness-accent-hover)',
     onAccent: 'var(--color-on-harness-accent)',
+  },
+  architect: {
+    container: 'var(--color-spec-accent-container)',
+    onContainer: 'var(--color-on-spec-accent-container)',
+    accent: 'var(--color-spec-accent)',
+    accentHover: 'var(--color-spec-accent-hover)',
+    onAccent: 'var(--color-on-spec-accent)',
+  },
+  pair: {
+    container: 'var(--color-agent-accent-container)',
+    onContainer: 'var(--color-on-agent-accent-container)',
+    accent: 'var(--color-agent-accent)',
+    accentHover: 'var(--color-agent-accent-hover)',
+    onAccent: 'var(--color-on-agent-accent)',
+  },
+  context: {
+    container: 'var(--color-curator-accent-container)',
+    onContainer: 'var(--color-on-curator-accent-container)',
+    accent: 'var(--color-curator-accent)',
+    accentHover: 'var(--color-curator-accent-hover)',
+    onAccent: 'var(--color-on-curator-accent)',
+  },
+  mvai: {
+    container: 'var(--color-debug-accent-container)',
+    onContainer: 'var(--color-on-debug-accent-container)',
+    accent: 'var(--color-debug-accent)',
+    accentHover: 'var(--color-debug-accent-hover)',
+    onAccent: 'var(--color-on-debug-accent)',
+  },
+  tdd: {
+    container: 'var(--color-harness-accent-container)',
+    onContainer: 'var(--color-on-harness-accent-container)',
+    accent: 'var(--color-harness-accent)',
+    accentHover: 'var(--color-harness-accent-hover)',
+    onAccent: 'var(--color-on-harness-accent)',
+  },
+  vibe: {
+    container: 'var(--color-ask-accent-container)',
+    onContainer: 'var(--color-on-ask-accent-container)',
+    accent: 'var(--color-ask-accent)',
+    accentHover: 'var(--color-ask-accent-hover)',
+    onAccent: 'var(--color-on-ask-accent)',
   },
 }

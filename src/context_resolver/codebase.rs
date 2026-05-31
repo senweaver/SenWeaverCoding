@@ -154,7 +154,7 @@ fn rrf_fuse(path_hits: &[(PathBuf, usize)], symbol_hits: &[(PathBuf, usize)]) ->
 
 fn render_body(root: &Path, hits: &[&CodebaseHit]) -> String {
     if hits.is_empty() {
-        return "(no codebase matches — try a broader query or \
+        return "(no codebase matches  -  try a broader query or \
 re-run `sen rag reindex` to rebuild the SymbolGraph)"
             .to_string();
     }

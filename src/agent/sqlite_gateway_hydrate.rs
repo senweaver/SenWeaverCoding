@@ -88,7 +88,7 @@ fn merge_desktop_assistant_array(blocks: &[Value]) -> Option<ConversationMessage
 
     if !tool_calls.is_empty() && reasoning_opt.is_none() {
         reasoning_opt = Some(
-            "(chain-of-thought unavailable — rehydrated tool-call turn had no stored thinking block)"
+            "(chain-of-thought unavailable  -  rehydrated tool-call turn had no stored thinking block)"
                 .to_string(),
         );
     }
@@ -98,6 +98,21 @@ fn merge_desktop_assistant_array(blocks: &[Value]) -> Option<ConversationMessage
         tool_calls,
         reasoning_content: reasoning_opt,
     })
+}
+
+fn is_ui_only_block(block: &Value) -> bool {
+    let Some(ty) = block.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    matches!(
+        ty,
+        "mode_switch"
+            | "plan_progress"
+            | "file_edit"
+            | "command_preview"
+            | "subagent_chunk"
+            | "worker_event"
+    )
 }
 
 pub(crate) fn hydrate_gateway_sqlite_messages(messages: &[ChatMessage]) -> Vec<ConversationMessage> {
@@ -113,6 +128,9 @@ pub(crate) fn hydrate_gateway_sqlite_messages(messages: &[ChatMessage]) -> Vec<C
                 let s = msg.content.trim();
                 if s.starts_with('[') {
                     if let Ok(vals) = serde_json::from_str::<Vec<Value>>(s) {
+                        if !vals.is_empty() && vals.iter().all(is_ui_only_block) {
+                            continue;
+                        }
                         if let Some(m) = merge_desktop_assistant_array(&vals) {
                             out.push(m);
                             continue;

@@ -80,6 +80,9 @@ pub struct StreamDelta {
     #[serde(
         default,
         alias = "reasoning",
+        alias = "thinking",
+        alias = "thinking_content",
+        alias = "chain_of_thought",
         deserialize_with = "deserialize_reasoning_content"
     )]
     pub reasoning_content: Option<String>,
@@ -98,13 +101,38 @@ where
         serde_json::Value::Null => Ok(None),
         serde_json::Value::String(text) => Ok(Some(text)),
         serde_json::Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-                return Ok(Some(text.to_string()));
-            }
-            if let Some(text) = map.get("content").and_then(|v| v.as_str()) {
-                return Ok(Some(text.to_string()));
+            for key in [
+                "text",
+                "content",
+                "thinking",
+                "reasoning",
+                "reasoning_content",
+            ] {
+                if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        return Ok(Some(text.to_string()));
+                    }
+                }
             }
             Ok(None)
+        }
+        serde_json::Value::Array(items) => {
+            let mut buf = String::new();
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    buf.push_str(s);
+                    continue;
+                }
+                if let Some(map) = item.as_object() {
+                    for key in ["text", "content", "thinking", "reasoning"] {
+                        if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
+                            buf.push_str(text);
+                            break;
+                        }
+                    }
+                }
+            }
+            if buf.is_empty() { Ok(None) } else { Ok(Some(buf)) }
         }
         _ => Ok(None),
     }
@@ -312,18 +340,15 @@ pub fn sse_bytes_to_chunks(
                                 continue;
                             }
                             let line = format!("data: {}", ev.data);
-                            match parse_sse_line_tolerant(&line) {
-                                Some(chunk) => {
-                                    let chunk = if count_tokens {
-                                        chunk.with_token_estimate()
-                                    } else {
-                                        chunk
-                                    };
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        return;
-                                    }
+                            if let Some(chunk) = parse_sse_line_tolerant(&line) {
+                                let chunk = if count_tokens {
+                                    chunk.with_token_estimate()
+                                } else {
+                                    chunk
+                                };
+                                if tx.send(Ok(chunk)).await.is_err() {
+                                    return;
                                 }
-                                None => {}
                             }
                         }
                     }

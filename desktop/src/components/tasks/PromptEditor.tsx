@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { PermissionModeSelector } from '../controls/PermissionModeSelector'
 import { CodingModeSelector } from '../controls/CodingModeSelector'
 import { ModelSelector } from '../controls/ModelSelector'

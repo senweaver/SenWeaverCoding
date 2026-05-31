@@ -31,7 +31,7 @@ impl Microsoft365Tool {
         sen_dir: &std::path::Path,
     ) -> anyhow::Result<Self> {
         let http_client =
-            crate::services::get_services()
+            crate::services::require_services()
                 .proxy_runtime()
                 .build_client_with_timeouts("tool.microsoft365", 60, 10);
         let token_cache = Arc::new(auth::TokenCache::new(config.clone(), sen_dir)?);

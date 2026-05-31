@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useState, useRef, useEffect } from 'react'
 import type { CronTask } from '../../types/task'
 import { useTaskStore } from '../../stores/taskStore'

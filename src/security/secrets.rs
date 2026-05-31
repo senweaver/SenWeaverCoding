@@ -9,8 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-const KEY_LEN: usize = 32;
-
 const NONCE_LEN: usize = 12;
 
 static DISABLED_ENCRYPTION_WARN_ONCE: Once = Once::new();
@@ -123,10 +121,10 @@ impl SecretStore {
 
         let plaintext_bytes = cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|_| anyhow::anyhow!("Decryption failed — wrong key or tampered data"))?;
+            .map_err(|_| anyhow::anyhow!("Decryption failed  -  wrong key or tampered data"))?;
 
         String::from_utf8(plaintext_bytes)
-            .context("Decrypted secret is not valid UTF-8 — corrupt data")
+            .context("Decrypted secret is not valid UTF-8  -  corrupt data")
     }
 
     fn decrypt_legacy_xor(&self, hex_str: &str) -> Result<String> {
@@ -144,7 +142,7 @@ impl SecretStore {
 
         let plaintext_bytes = xor_cipher(&ciphertext, &derived_key);
         String::from_utf8(plaintext_bytes)
-            .context("Decrypted legacy secret is not valid UTF-8 — wrong key or corrupt data")
+            .context("Decrypted legacy secret is not valid UTF-8  -  wrong key or corrupt data")
     }
 
     pub fn is_encrypted(value: &str) -> bool {

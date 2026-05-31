@@ -45,7 +45,7 @@ impl ToolRegistry {
         #[cfg(feature = "hardware")]
         {
             let tool: Box<dyn Tool> =
-                Box::new(super::pico_flash::PicoFlashTool::new(devices.clone()));
+                Box::new(super::pico::flash::PicoFlashTool::new(devices.clone()));
             let name = tool.name().to_string();
             if tools.contains_key(&name) {
                 anyhow::bail!("duplicate built-in tool name: '{}'", name);
@@ -56,7 +56,7 @@ impl ToolRegistry {
 
         #[cfg(feature = "hardware")]
         {
-            for tool in super::pico_code::device_code_tools(devices.clone()) {
+            for tool in super::pico::code::device_code_tools(devices.clone()) {
                 let name = tool.name().to_string();
                 if tools.contains_key(&name) {
                     anyhow::bail!("duplicate built-in tool name: '{}'", name);
@@ -73,7 +73,7 @@ impl ToolRegistry {
                 reg.has_aardvark()
             };
             if has_aardvark {
-                for tool in super::aardvark_tools::aardvark_tools(devices.clone()) {
+                for tool in super::aardvark::tools::aardvark_tools(devices.clone()) {
                     let name = tool.name().to_string();
                     if tools.contains_key(&name) {
                         anyhow::bail!("duplicate built-in tool name: '{}'", name);

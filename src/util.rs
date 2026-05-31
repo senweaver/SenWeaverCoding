@@ -33,19 +33,19 @@ fn registry() -> Arc<ProcessEnvRegistry> {
 }
 
 #[inline]
-pub fn set_env_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
+pub fn set_runtime_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
     let key = key.as_ref().to_string_lossy().into_owned();
     let value = value.as_ref().to_string_lossy().into_owned();
     registry().vars.insert(key, value);
 }
 
 #[inline]
-pub fn remove_env_var<K: AsRef<OsStr>>(key: K) {
+pub fn remove_runtime_var<K: AsRef<OsStr>>(key: K) {
     let key = key.as_ref().to_string_lossy().into_owned();
     registry().vars.remove(&key);
 }
 
-pub fn set_env_vars_batch(entries: &[(impl AsRef<str>, Option<impl AsRef<str>>)]) {
+pub fn set_runtime_vars_batch(entries: &[(impl AsRef<str>, Option<impl AsRef<str>>)]) {
     let reg = registry();
     let _guard = reg.batch_lock.lock();
     for (key, value) in entries {
@@ -62,18 +62,26 @@ pub fn set_env_vars_batch(entries: &[(impl AsRef<str>, Option<impl AsRef<str>>)]
     }
 }
 
-pub fn get_env_var(key: &str) -> Option<String> {
+pub fn get_runtime_var(key: &str) -> Option<String> {
     if let Some(v) = registry().vars.get(key) {
         return Some(v.clone());
     }
     std::env::var(key).ok()
 }
 
-pub fn get_env_var_os(key: &str) -> Option<OsString> {
+pub fn get_runtime_var_os(key: &str) -> Option<OsString> {
     if let Some(v) = registry().vars.get(key) {
         return Some(OsString::from(v.as_str()));
     }
     std::env::var_os(key)
+}
+
+#[inline]
+pub fn is_bare_mode() -> bool {
+    matches!(
+        get_runtime_var("SEN_CLI_BARE").as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 const SERIAL_ALLOWED_PATH_PREFIXES: &[&str] = &[
@@ -163,4 +171,8 @@ pub fn hidden_async_command<S: AsRef<OsStr>>(program: S) -> tokio::process::Comm
     let mut cmd = tokio::process::Command::new(program);
     cmd.hide_window();
     cmd
+}
+
+pub fn decode_subprocess_bytes(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).into_owned()
 }

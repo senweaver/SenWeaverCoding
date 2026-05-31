@@ -817,7 +817,7 @@ fn safe_char_slice_from_end(text: &str, len: usize) -> String {
     text.chars().skip(start).collect()
 }
 
-pub fn sanitize_messages_for_legacy(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+pub fn flatten_messages_for_text_only_wire(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
     for msg in messages {
         match msg.role.as_str() {

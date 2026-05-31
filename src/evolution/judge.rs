@@ -19,9 +19,9 @@ const JUDGE_SYSTEM_PROMPT: &str = "You are a Process Reward Judge for an AI codi
 You are given the assistant's previous response and the next message that came afterwards (from the user or a tool).\n\
 Decide if the assistant's previous response was helpful, neutral, or wrong, based on what happened next.\n\
 Reply with EXACTLY one of:\n\
-\\boxed{1}  — clearly helpful / made real progress / next state confirms success\n\
-\\boxed{-1} — clearly wrong / regressed / user had to correct it / verification failed\n\
-\\boxed{0}  — unclear or only partially helpful / neutral\n\
+\\boxed{1}   -  clearly helpful / made real progress / next state confirms success\n\
+\\boxed{-1}  -  clearly wrong / regressed / user had to correct it / verification failed\n\
+\\boxed{0}   -  unclear or only partially helpful / neutral\n\
 Output only the boxed verdict, no other text.";
 
 #[derive(Clone, Debug)]
@@ -87,7 +87,7 @@ async fn process_request(engine: Arc<EvolutionEngine>, req: JudgeRequest) -> Res
         .clone()
         .unwrap_or(provider_ref.model.clone());
     let prompt = format!(
-        "[Previous assistant response]\n{}\n\n[Next state — {} message that came after]\n{}\n\n\
+        "[Previous assistant response]\n{}\n\n[Next state  -  {} message that came after]\n{}\n\n\
          Verdict (only \\boxed{{1}}, \\boxed{{-1}}, or \\boxed{{0}}):",
         truncate_for_prompt(&req.prev_response, 4_000),
         req.next_state.role,

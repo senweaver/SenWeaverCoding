@@ -51,13 +51,6 @@ impl GitOperationsTool {
         )
     }
 
-    fn is_read_only(&self, operation: &str) -> bool {
-        matches!(
-            operation,
-            "status" | "diff" | "log" | "show" | "branch" | "rev-parse"
-        )
-    }
-
     fn resolve_working_dir(&self, path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
         let workspace_dir = self.security.workspace_dir();
         let base = match path {

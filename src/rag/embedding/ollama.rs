@@ -27,7 +27,7 @@ impl OllamaCodeEmbedding {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client("rag.embedding.ollama")
     }

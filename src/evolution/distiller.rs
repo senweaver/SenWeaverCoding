@@ -15,7 +15,7 @@ pub const DISTILL_QUEUE_CAPACITY: usize = 64;
 const DISTILL_SYSTEM_PROMPT: &str = "You distil reusable coding lessons from successful AI assistant turns.\n\
 Read the assistant's response and tool outcomes, then output 0–3 short, GENERAL lessons that future similar tasks should follow.\n\
 \n\
-STRICT format — output ONE JSON array on a single line, no surrounding text:\n\
+STRICT format  -  output ONE JSON array on a single line, no surrounding text:\n\
 [{\"title\":\"...\",\"body\":\"...\",\"tags\":[\"...\"]}]\n\
 \n\
 Rules:\n\

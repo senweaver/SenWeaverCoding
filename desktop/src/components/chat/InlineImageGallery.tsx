@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ImageGalleryModal } from './ImageGalleryModal'
 import { getBaseUrl } from '../../api/client'

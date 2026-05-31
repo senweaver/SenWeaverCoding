@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-pub use crate::memory::vector_index::{
+pub use crate::memory::vector::index::{
     LinearIndex, VectorBackend, VectorIndex as AnnIndex, build_backend as build_vector_backend,
 };
 

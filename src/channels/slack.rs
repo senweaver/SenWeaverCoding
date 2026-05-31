@@ -41,7 +41,7 @@ pub struct SlackChannel {
     proxy_url: Option<String>,
 
     transcription: Option<crate::config::TranscriptionConfig>,
-    transcription_manager: Option<std::sync::Arc<super::transcription::TranscriptionManager>>,
+    transcription_manager: Option<std::sync::Arc<super::pipeline::transcription::TranscriptionManager>>,
 
     stream_drafts: bool,
 
@@ -204,7 +204,7 @@ impl SlackChannel {
         if !config.enabled {
             return self;
         }
-        match super::transcription::TranscriptionManager::new(&config) {
+        match super::pipeline::transcription::TranscriptionManager::new(&config) {
             Ok(m) => {
                 self.transcription_manager = Some(std::sync::Arc::new(m));
                 self.transcription = Some(config);
@@ -345,7 +345,7 @@ impl SlackChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_channel_client_with_timeouts(
                 "channel.slack",
@@ -699,18 +699,6 @@ impl SlackChannel {
         }
 
         Some(Self::strip_bot_mentions(text, bot_user_id))
-    }
-
-    fn normalize_incoming_content(
-        text: &str,
-        require_mention: bool,
-        bot_user_id: &str,
-    ) -> Option<String> {
-        let normalized = Self::normalize_incoming_text(text, require_mention, bot_user_id)?;
-        if normalized.is_empty() {
-            return None;
-        }
-        Some(normalized)
     }
 
     fn is_supported_message_subtype(subtype: Option<&str>) -> bool {
@@ -1423,7 +1411,7 @@ impl SlackChannel {
     }
 
     fn slack_media_http_client_no_redirect(&self) -> anyhow::Result<reqwest::Client> {
-        let builder = crate::services::get_services()
+        let builder = crate::services::require_services()
             .proxy_runtime()
             .apply_channel_to_builder(
                 reqwest::Client::builder()
@@ -2489,7 +2477,7 @@ impl SlackChannel {
                 }
             };
 
-            let (ws_stream, _) = match crate::services::get_services()
+            let (ws_stream, _) = match crate::services::require_services()
                 .proxy_runtime()
                 .ws_connect(&ws_url, "channel.slack", self.proxy_url.as_deref())
                 .await

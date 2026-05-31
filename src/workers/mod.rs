@@ -14,7 +14,6 @@ pub use events::{WorkerMeta, WorkerResult, WorkerSpec, WorkerStatus, WorkerSumma
 pub use persistence::{
     WorkerEventLog, list_meta, read_meta, scan_and_recover, workers_root, write_meta,
 };
-pub use router::router as workers_router;
 pub use runner::{WorkerRunContext, run_worker};
 pub use supervisor::{
     WorkerSupervisor, ensure_supervisor, global_supervisor, init_global_supervisor,

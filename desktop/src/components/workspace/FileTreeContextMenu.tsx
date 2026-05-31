@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useRef } from 'react'
 import { useTranslation } from '../../i18n'
 import type { FileTreeNode } from '../../types/workspaceFile'
@@ -11,6 +15,7 @@ type Props = {
   y: number
   target: ContextMenuTarget
   canReveal: boolean
+  canOpenTerminal: boolean
   onClose: () => void
   onNewFile: (parent: FileTreeNode | null) => void
   onNewFolder: (parent: FileTreeNode | null) => void
@@ -22,6 +27,7 @@ type Props = {
   onCopyRelativePath: (node: FileTreeNode) => void
   onCopyAsMarkdown?: (node: FileTreeNode) => void
   onReveal: (node: FileTreeNode) => void
+  onOpenInTerminal: (node: FileTreeNode) => void
 }
 
 export function FileTreeContextMenu({
@@ -29,6 +35,7 @@ export function FileTreeContextMenu({
   y,
   target,
   canReveal,
+  canOpenTerminal,
   onClose,
   onNewFile,
   onNewFolder,
@@ -40,6 +47,7 @@ export function FileTreeContextMenu({
   onCopyRelativePath,
   onCopyAsMarkdown,
   onReveal,
+  onOpenInTerminal,
 }: Props) {
   const t = useTranslation()
   const ref = useRef<HTMLDivElement | null>(null)
@@ -155,6 +163,16 @@ export function FileTreeContextMenu({
               icon="folder_open"
               onClick={() => {
                 onReveal(node)
+                onClose()
+              }}
+            />
+          )}
+          {canOpenTerminal && (
+            <MenuItem
+              label={t('files.tree.openInTerminal')}
+              icon="terminal"
+              onClick={() => {
+                onOpenInTerminal(node)
                 onClose()
               }}
             />

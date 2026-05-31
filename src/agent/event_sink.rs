@@ -98,7 +98,7 @@ impl EventSink {
 #[must_use]
 pub fn draft_to_turn(event: DraftEvent) -> Option<TurnEvent> {
     match event {
-        DraftEvent::Clear => None,
+        DraftEvent::Clear => Some(TurnEvent::StreamReset),
         DraftEvent::Progress(text) => Some(TurnEvent::StatusUpdate {
             action: "thinking".into(),
             detail: text,
@@ -124,6 +124,15 @@ pub fn draft_to_turn(event: DraftEvent) -> Option<TurnEvent> {
             output,
             success,
             tool_call_id,
+        }),
+        DraftEvent::PlanProgressCommitted {
+            plan_path,
+            title,
+            todos_json,
+        } => Some(TurnEvent::PlanProgressCommitted {
+            plan_path,
+            title,
+            todos_json,
         }),
         DraftEvent::FileEdit {
             path,
@@ -153,6 +162,17 @@ pub fn draft_to_turn(event: DraftEvent) -> Option<TurnEvent> {
         } => Some(TurnEvent::ContextCompressed {
             tokens_before,
             tokens_after,
+        }),
+        DraftEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            description,
+        } => Some(TurnEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            description,
         }),
         DraftEvent::Cancelling { reason } => Some(TurnEvent::Cancelling { reason }),
         DraftEvent::Error { message } => Some(TurnEvent::Error { message }),

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-//! Phase 4 D1.1 — multi-writer contention bench for the Blackboard /
-//! ShardedMap.  Compares 16-shard vs 1-shard concurrent write
-//! throughput on 8 threads × 2000 disjoint keys.  The sharded layout
-//! should deliver ≥ 3× throughput on any multi-core host.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;

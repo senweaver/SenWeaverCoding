@@ -82,7 +82,7 @@ impl RpcConfig {
             errors.push("rpc.max_sessions must be >= 1".into());
         }
         if self.max_sessions > 10_000 {
-            errors.push("rpc.max_sessions > 10_000 is unusual — likely misconfigured".into());
+            errors.push("rpc.max_sessions > 10_000 is unusual  -  likely misconfigured".into());
         }
         if let Some(ref http) = self.http {
             if http.port == 0 {

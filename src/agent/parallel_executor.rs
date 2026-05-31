@@ -15,7 +15,7 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker as DequeWorker};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::Value;
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{SchedulerError, SenError};
@@ -98,21 +98,12 @@ impl Default for ExecutorConfig {
 struct QueuedTask {
     task_id: u64,
     handle: TaskHandle,
-    priority: Priority,
-    created_at: Instant,
     timeout: Duration,
     future_factory: TaskFutureFactory,
     result: Arc<Mutex<Option<TaskOutput>>>,
-    done_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 struct TaskEntry {
-    #[allow(dead_code)]
-    handle: TaskHandle,
-    #[allow(dead_code)]
-    priority: Priority,
-    #[allow(dead_code)]
-    created_at: Instant,
     result: Arc<Mutex<Option<TaskOutput>>>,
     done_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -304,7 +295,6 @@ impl Drop for RunningGuard {
 
 pub struct ParallelExecutor {
     config: ExecutorConfig,
-    semaphore: Arc<Semaphore>,
 
     injector: Arc<Injector<QueuedTask>>,
 
@@ -319,7 +309,6 @@ pub struct ParallelExecutor {
 
     completed: Arc<Mutex<HashMap<u64, TaskOutput>>>,
     task_counter: Arc<AtomicU64>,
-    shutdown_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 
     shutdown: CancellationToken,
     metrics: Arc<ExecutorMetrics>,
@@ -342,7 +331,6 @@ impl Drop for ParallelExecutor {
 impl ParallelExecutor {
 
     pub fn new(config: ExecutorConfig) -> Self {
-        let (shutdown_tx, _) = mpsc::channel(1);
         let worker_count = num_cpus::get().min(config.max_concurrent).max(1);
 
         let mut owned_workers: Vec<DequeWorker<QueuedTask>> = Vec::with_capacity(worker_count);
@@ -369,7 +357,6 @@ impl ParallelExecutor {
         let per_worker_cap = (config.queue_capacity / worker_count.max(1)).max(16);
 
         let executor = Self {
-            semaphore: semaphore.clone(),
             injector: injector.clone(),
             stealers: stealers.clone(),
             worker_notifies: worker_notifies.clone(),
@@ -378,7 +365,6 @@ impl ParallelExecutor {
             running: running.clone(),
             completed: completed.clone(),
             task_counter: Arc::new(AtomicU64::new(0)),
-            shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
             shutdown: shutdown.clone(),
             metrics: metrics.clone(),
             worker_count,
@@ -413,7 +399,7 @@ impl ParallelExecutor {
     pub async fn submit<F, Fut>(
         &self,
         task: F,
-        priority: Priority,
+        _priority: Priority,
         timeout_secs: Option<u64>,
     ) -> Result<TaskHandle, SenError>
     where
@@ -437,15 +423,11 @@ impl ParallelExecutor {
         let result: Arc<Mutex<Option<TaskOutput>>> = Arc::new(Mutex::new(None));
         let done_tx_holder: Arc<Mutex<Option<oneshot::Sender<()>>>> = Arc::new(Mutex::new(None));
 
-        let created_at = Instant::now();
         {
             let mut running = self.running.lock();
             running.insert(
                 task_id,
                 TaskEntry {
-                    handle: handle.clone(),
-                    priority,
-                    created_at,
                     result: Arc::clone(&result),
                     done_tx: Arc::clone(&done_tx_holder),
                 },
@@ -470,12 +452,9 @@ impl ParallelExecutor {
         let queued = QueuedTask {
             task_id,
             handle: handle_clone,
-            priority,
-            created_at,
             timeout: timeout_duration,
             future_factory: factory,
             result: result_factory,
-            done_tx: Arc::clone(&done_tx_holder),
         };
 
         let worker_idx =

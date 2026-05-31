@@ -952,14 +952,14 @@ pub fn skills_to_tools(
         for tool in &skill.tools {
             match tool.kind.as_str() {
                 "shell" | "script" => {
-                    tools.push(Box::new(crate::tools::skill_tool::SkillShellTool::new(
+                    tools.push(Box::new(crate::tools::skill::tool::SkillShellTool::new(
                         &skill.name,
                         tool,
                         security.clone(),
                     )));
                 }
                 "http" => {
-                    tools.push(Box::new(crate::tools::skill_http::SkillHttpTool::new(
+                    tools.push(Box::new(crate::tools::skill::http::SkillHttpTool::new(
                         &skill.name,
                         tool,
                     )));
@@ -1424,6 +1424,11 @@ fn install_clawhub_skill_source(
 }
 
 #[allow(clippy::too_many_lines)]
+enum SkillTestOutcome {
+    NoTests(String),
+    Results(Vec<testing::SkillTestResult>),
+}
+
 pub async fn handle_command(
     command: crate::SkillCommands,
     config: &crate::config::Config,
@@ -1446,7 +1451,7 @@ pub async fn handle_command(
                 println!();
                 for skill in &skills {
                     println!(
-                        "  {} {} — {}",
+                        "  {} {}  -  {}",
                         console::style(&skill.name).white().bold(),
                         console::style(format!("v{}", skill.version)).dim(),
                         skill.description
@@ -1512,17 +1517,29 @@ pub async fn handle_command(
             println!("Installing skill from: {source}");
 
             let skills_path = skills_dir(workspace_dir);
-            std::fs::create_dir_all(&skills_path)?;
-
-            let (installed_dir, files_scanned) = if is_clawhub_source(&source) {
-                install_clawhub_skill_source(&source, &skills_path, config.skills.allow_scripts)
-                    .with_context(|| format!("failed to install skill from ClawHub: {source}"))?
-            } else if is_git_source(&source) {
-                install_git_skill_source(&source, &skills_path, config.skills.allow_scripts)
-                    .with_context(|| format!("failed to install git skill source: {source}"))?
-            } else {
-                install_local_skill_source(&source, &skills_path, config.skills.allow_scripts)
-                    .with_context(|| format!("failed to install local skill source: {source}"))?
+            let allow_scripts = config.skills.allow_scripts;
+            let (installed_dir, files_scanned) = {
+                let source = source.clone();
+                tokio::task::spawn_blocking(move || -> Result<(PathBuf, usize)> {
+                    std::fs::create_dir_all(&skills_path)?;
+                    let out = if is_clawhub_source(&source) {
+                        install_clawhub_skill_source(&source, &skills_path, allow_scripts)
+                            .with_context(|| {
+                                format!("failed to install skill from ClawHub: {source}")
+                            })?
+                    } else if is_git_source(&source) {
+                        install_git_skill_source(&source, &skills_path, allow_scripts)
+                            .with_context(|| format!("failed to install git skill source: {source}"))?
+                    } else {
+                        install_local_skill_source(&source, &skills_path, allow_scripts)
+                            .with_context(|| {
+                                format!("failed to install local skill source: {source}")
+                            })?
+                    };
+                    Ok(out)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("skill install task failed: {e}"))??
             };
             println!(
                 "  {} Skill installed and audited: {} ({} files scanned)",
@@ -1564,21 +1581,37 @@ pub async fn handle_command(
             Ok(())
         }
         crate::SkillCommands::Test { name, verbose } => {
-            let results = if let Some(ref skill_name) = name {
+            let skills_path = skills_dir(workspace_dir);
+            let outcome = tokio::task::spawn_blocking(move || -> Result<SkillTestOutcome> {
+                if let Some(skill_name) = name {
+                    let source_path = PathBuf::from(&skill_name);
+                    let target = if source_path.exists() {
+                        source_path
+                    } else {
+                        skills_path.join(&skill_name)
+                    };
 
-                let source_path = PathBuf::from(skill_name);
-                let target = if source_path.exists() {
-                    source_path
+                    if !target.exists() {
+                        anyhow::bail!("Skill not found: {}", skill_name);
+                    }
+
+                    let r = testing::test_skill(&target, &skill_name, verbose)?;
+                    if r.tests_run == 0 {
+                        return Ok(SkillTestOutcome::NoTests(skill_name));
+                    }
+                    Ok(SkillTestOutcome::Results(vec![r]))
                 } else {
-                    skills_dir(workspace_dir).join(skill_name)
-                };
-
-                if !target.exists() {
-                    anyhow::bail!("Skill not found: {}", skill_name);
+                    let dirs = vec![skills_path];
+                    Ok(SkillTestOutcome::Results(testing::test_all_skills(
+                        &dirs, verbose,
+                    )?))
                 }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("skill test task failed: {e}"))??;
 
-                let r = testing::test_skill(&target, skill_name, verbose)?;
-                if r.tests_run == 0 {
+            let results = match outcome {
+                SkillTestOutcome::NoTests(skill_name) => {
                     println!(
                         "  {} No TEST.sh found for skill '{}'.",
                         console::style("-").dim(),
@@ -1586,11 +1619,7 @@ pub async fn handle_command(
                     );
                     return Ok(());
                 }
-                vec![r]
-            } else {
-
-                let dirs = vec![skills_dir(workspace_dir)];
-                testing::test_all_skills(&dirs, verbose)?
+                SkillTestOutcome::Results(results) => results,
             };
 
             testing::print_results(&results);
@@ -1632,7 +1661,7 @@ pub async fn handle_command(
                 println!();
                 for r in matching.iter().take(20) {
                     println!(
-                        "  {} {} — {}",
+                        "  {} {}  -  {}",
                         console::style(&r.candidate.name).white().bold(),
                         console::style(format!("[{:?}]", r.candidate.source)).dim(),
                         r.candidate.description

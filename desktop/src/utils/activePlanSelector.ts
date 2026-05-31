@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 
 
 import type { ChatState, UIMessage } from '../types/chat'
@@ -44,13 +48,11 @@ function allTodosTerminal(card: PlanCardMsg): boolean {
   )
 }
 
-function hasNewUserTurnAfter(
+function hasUserTurnAfterIndex(
   messages: UIMessage[],
-  switchMessageId: string,
+  fromIdx: number,
 ): boolean {
-  const switchIdx = messages.findIndex((m) => m.id === switchMessageId)
-  if (switchIdx < 0) return false
-  for (let j = switchIdx + 1; j < messages.length; j++) {
+  for (let j = fromIdx + 1; j < messages.length; j++) {
     const m = messages[j]
     if (m && m.type === 'user_text') return true
   }
@@ -67,14 +69,28 @@ export function selectPlanCardExecutionState(
   )
   if (idx < 0) return 'idle'
   const card = messages[idx] as PlanCardMsg
+
+  if (hasUserTurnAfterIndex(messages, idx)) {
+    return 'completed_run'
+  }
+
+  if (card.wasExecuted && allTodosTerminal(card)) {
+    return 'completed_run'
+  }
+
   const switchCard = findFollowingSwitchCard(messages, idx, card)
-  if (!switchCard) return 'idle'
+  if (!switchCard) {
+    if (card.wasExecuted) {
+      return chatState === undefined || chatState === 'idle'
+        ? 'completed_run'
+        : 'executing'
+    }
+    return 'idle'
+  }
   if (switchCard.status === 'pending') return 'pending_switch'
   if (switchCard.status === 'dismissed') return 'idle'
 
   if (allTodosTerminal(card)) return 'completed_run'
-
-  if (hasNewUserTurnAfter(messages, switchCard.id)) return 'completed_run'
 
   if (chatState !== undefined && chatState === 'idle') {
     const hasTodos = card.todos.length > 0

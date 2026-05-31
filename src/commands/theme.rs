@@ -17,7 +17,7 @@ inventory::submit!(StaticSlashCommand {
 
 pub async fn handle_theme(ctx: CommandContext) -> CommandResult {
     if ctx.args.is_empty() {
-        let current = crate::util::get_env_var("SEN_THEME").unwrap_or_else(|| "default".to_string());
+        let current = crate::util::get_runtime_var("SEN_THEME").unwrap_or_else(|| "default".to_string());
         return CommandResult::ok(format!(
             "Current theme: {current}\nAvailable themes: default, concise, detailed, formal, code-only\nUsage: /theme <name>"
         ));
@@ -31,6 +31,6 @@ pub async fn handle_theme(ctx: CommandContext) -> CommandResult {
         ));
     }
 
-    crate::util::set_env_var("SEN_THEME", &theme);
+    crate::util::set_runtime_var("SEN_THEME", &theme);
     CommandResult::ok(format!("Theme set to: {theme}"))
 }

@@ -1,5 +1,6 @@
-// Copyright (C) SenWeaverCoding contributors. Licensed under the Apache-2.0
-// license.  See the LICENSE file in the workspace root for details.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};

@@ -76,6 +76,7 @@ const INTERNAL_ERROR: i32 = -32603;
 const SESSION_NOT_FOUND: i32 = -32000;
 const SESSION_LIMIT_REACHED: i32 = -32001;
 
+#[allow(dead_code)]
 struct Session {
     agent: Agent,
     created_at: Instant,
@@ -316,6 +317,14 @@ impl AcpServer {
                         "content": delta,
                     }),
                 },
+                TurnEvent::StreamReset => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "content_reset",
+                    }),
+                },
                 TurnEvent::ToolCall {
                     name,
                     args,
@@ -337,7 +346,7 @@ impl AcpServer {
                     tool_call_id: _,
                 } => {
                     let is_error = !success
-                        || crate::agent::tool_event_status::output_indicates_error(output);
+                        || crate::agent::tool_handler::event_status::output_indicates_error(output);
                     JsonRpcNotification {
                         jsonrpc: "2.0",
                         method: "session/event",
@@ -351,6 +360,22 @@ impl AcpServer {
                         }),
                     }
                 }
+                TurnEvent::PlanProgressCommitted {
+                    plan_path,
+                    title,
+                    todos_json,
+                } => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "plan_progress",
+                        "planPath": plan_path,
+                        "title": title,
+                        "todos": serde_json::from_str::<serde_json::Value>(&todos_json)
+                            .unwrap_or(serde_json::Value::Null),
+                    }),
+                },
                 TurnEvent::Thinking { delta } => JsonRpcNotification {
                     jsonrpc: "2.0",
                     method: "session/event",
@@ -710,6 +735,7 @@ impl AcpServer {
     }
 }
 
+#[allow(dead_code)]
 struct RpcError {
     code: i32,
     message: String,

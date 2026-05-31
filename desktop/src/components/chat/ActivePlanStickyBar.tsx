@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
@@ -6,35 +10,71 @@ import {
   selectActiveExecutingPlan,
   type PlanExecutionState,
 } from '../../utils/activePlanSelector'
-import type { UIMessage } from '../../types/chat'
+import { selectActiveExecutingCurator } from '../../utils/activeCuratorSelector'
 
 type Props = {
   sessionId?: string | null
 }
 
-type ActivePlanSelection = {
-  card: Extract<UIMessage, { type: 'plan_card' }>
-  state: PlanExecutionState
+type ActiveTracker = {
+  kind: 'plan' | 'curator'
+  title: string
+  fileName: string
+  overview: string
+  todos: Array<{
+    id: string
+    content: string
+    status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+    notes?: string | null
+  }>
+  resumePath: string
+  pendingHydration: boolean
+  state: PlanExecutionState | 'executing' | 'incomplete_run'
 }
 
 export function ActivePlanStickyBar({ sessionId }: Props) {
   const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const resumePlanExecution = useChatStore((s) => s.resumePlanExecution)
+  const resumeCuratorExecution = useChatStore((s) => s.resumeCuratorExecution)
 
-  const selection = useChatStore(
-    useShallow((s): ActivePlanSelection | null => {
+  const view = useChatStore(
+    useShallow((s): ActiveTracker | null => {
       if (!sessionId) return null
       const session = s.sessions[sessionId]
       if (!session) return null
-      return selectActiveExecutingPlan(session.messages, session.chatState)
+      const plan = selectActiveExecutingPlan(session.messages, session.chatState)
+      if (plan) {
+        return {
+          kind: 'plan',
+          title: plan.card.title || t('plan.untitledPlan'),
+          fileName: plan.card.fileName || '',
+          overview: plan.card.overview || '',
+          todos: plan.card.todos,
+          resumePath: plan.card.planPath,
+          pendingHydration: !!plan.card.pendingHydration,
+          state: plan.state,
+        }
+      }
+      const curator = selectActiveExecutingCurator(session.messages, session.chatState)
+      if (curator) {
+        return {
+          kind: 'curator',
+          title: curator.card.title || t('curator.untitled'),
+          fileName: curator.card.slug || '',
+          overview: '',
+          todos: curator.card.todos ?? [],
+          resumePath: curator.card.implBlueprintPath || curator.card.finalMdPath,
+          pendingHydration: !!curator.card.pendingHydration,
+          state: curator.state,
+        }
+      }
+      return null
     }),
   )
-  const card = selection?.card ?? null
-  const execState: PlanExecutionState | null = selection?.state ?? null
 
   const stats = useMemo(() => {
-    if (!card)
+    if (!view)
       return {
         total: 0,
         completed: 0,
@@ -43,10 +83,10 @@ export function ActivePlanStickyBar({ sessionId }: Props) {
         done: 0,
         ratio: 0,
       }
-    const total = card.todos.length
-    const completed = card.todos.filter((x) => x.status === 'completed').length
-    const cancelled = card.todos.filter((x) => x.status === 'cancelled').length
-    const inProgress = card.todos.filter((x) => x.status === 'in_progress').length
+    const total = view.todos.length
+    const completed = view.todos.filter((x) => x.status === 'completed').length
+    const cancelled = view.todos.filter((x) => x.status === 'cancelled').length
+    const inProgress = view.todos.filter((x) => x.status === 'in_progress').length
     const done = completed + cancelled
     return {
       total,
@@ -56,14 +96,14 @@ export function ActivePlanStickyBar({ sessionId }: Props) {
       done,
       ratio: total > 0 ? done / total : 0,
     }
-  }, [card])
+  }, [view])
 
-  if (!card) return null
+  if (!view) return null
 
-  const fileName = card.fileName || ''
-  const title = card.title || t('plan.untitledPlan')
-  const isIncomplete = execState === 'incomplete_run'
-  const isHydrating = !!card.pendingHydration && !isIncomplete
+  const fileName = view.fileName
+  const title = view.title
+  const isIncomplete = view.state === 'incomplete_run'
+  const isHydrating = !!view.pendingHydration && !isIncomplete
 
   return (
     <div className="shrink-0 px-8">
@@ -147,10 +187,14 @@ export function ActivePlanStickyBar({ sessionId }: Props) {
               type="button"
               onClick={(e) => {
                 e.stopPropagation()
-                if (!sessionId || !card.planPath) return
-                resumePlanExecution(sessionId, card.planPath)
+                if (!sessionId || !view.resumePath) return
+                if (view.kind === 'curator') {
+                  resumeCuratorExecution(sessionId, view.resumePath)
+                } else {
+                  resumePlanExecution(sessionId, view.resumePath)
+                }
               }}
-              disabled={!sessionId || !card.planPath}
+              disabled={!sessionId || !view.resumePath}
               title={t('plan.resumeTitle')}
               className="flex items-center gap-1 shrink-0 rounded-[var(--radius-md)] bg-[var(--color-plan-accent)] px-2 py-0.5 text-[11px] font-semibold text-[var(--color-on-plan-accent-container)] hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
             >
@@ -183,13 +227,13 @@ export function ActivePlanStickyBar({ sessionId }: Props) {
                 <span>{t('plan.hydratingDetail')}</span>
               </div>
             )}
-            {card.overview && (
+            {view.overview && (
               <div className="mb-2 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
-                {card.overview}
+                {view.overview}
               </div>
             )}
             <ul className={isHydrating ? 'space-y-1 opacity-60' : 'space-y-1'}>
-              {card.todos.map((todo) => (
+              {view.todos.map((todo) => (
                 <li
                   key={todo.id}
                   className="flex items-start gap-2 text-[12px] leading-snug"

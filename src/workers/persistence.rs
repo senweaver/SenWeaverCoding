@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 
 use crate::session::event::SessionEvent;
 use crate::workers::events::{WorkerMeta, WorkerStatus};
@@ -16,7 +17,8 @@ const META_FILE: &str = "meta.json";
 
 pub struct WorkerEventLog {
     root: PathBuf,
-    writer: Mutex<BufWriter<File>>,
+    writer: Mutex<Option<mpsc::Sender<SessionEvent>>>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     seq: AtomicU64,
 }
 
@@ -40,9 +42,16 @@ impl WorkerEventLog {
             start_seq = reader.lines().map_while(Result::ok).count() as u64;
         }
 
+        let (tx, rx) = mpsc::channel::<SessionEvent>();
+        let handle = std::thread::Builder::new()
+            .name("worker-event-log".to_string())
+            .spawn(move || worker_writer_loop(file, rx))
+            .ok();
+
         Ok(Self {
             root: dir,
-            writer: Mutex::new(BufWriter::new(file)),
+            writer: Mutex::new(Some(tx)),
+            handle: Mutex::new(handle),
             seq: AtomicU64::new(start_seq),
         })
     }
@@ -52,17 +61,15 @@ impl WorkerEventLog {
     }
 
     pub fn append(&self, evt: &SessionEvent) -> std::io::Result<u64> {
-        let line = serde_json::to_string(evt).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        if let Some(tx) = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
         {
-            let mut w = self
-                .writer
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            w.write_all(line.as_bytes())?;
-            w.write_all(b"\n")?;
-            w.flush()?;
+            if tx.send(evt.clone()).is_err() {
+                tracing::warn!("worker event log writer thread is gone; append dropped");
+            }
         }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(seq)
@@ -92,6 +99,39 @@ impl WorkerEventLog {
             }
         }
         Ok(events)
+    }
+}
+
+impl Drop for WorkerEventLog {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.writer.lock() {
+            guard.take();
+        }
+        if let Ok(mut guard) = self.handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+fn worker_writer_loop(file: File, rx: mpsc::Receiver<SessionEvent>) {
+    let mut writer = BufWriter::new(file);
+    while let Ok(evt) = rx.recv() {
+        match serde_json::to_string(&evt) {
+            Ok(line) => {
+                let result = writer
+                    .write_all(line.as_bytes())
+                    .and_then(|()| writer.write_all(b"\n"))
+                    .and_then(|()| writer.flush());
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "worker event log append failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "worker event serialize failed");
+            }
+        }
     }
 }
 

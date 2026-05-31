@@ -33,7 +33,7 @@ fn require_auth(
         Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
-                "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
+                "error": "Unauthorized  -  pair first via POST /pair, then send Authorization: Bearer <token>"
             })),
         ))
     }
@@ -147,7 +147,7 @@ pub async fn handle_hardware_pin(
     let line = if notes.is_empty() {
         format!("- GPIO {}: {}\n", req.pin, component)
     } else {
-        format!("- GPIO {}: {} — {}\n", req.pin, component, notes)
+        format!("- GPIO {}: {}  -  {}\n", req.pin, component, notes)
     };
 
     match append_to_file(&device_path, &line).await {
@@ -211,7 +211,7 @@ pub async fn handle_hardware_context_post(
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({
-                "error": format!("Content too large — max {} bytes", MAX_APPEND_BYTES)
+                "error": format!("Content too large  -  max {} bytes", MAX_APPEND_BYTES)
             })),
         )
             .into_response();

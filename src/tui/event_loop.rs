@@ -34,6 +34,7 @@ pub fn spawn_input_thread() -> InputThreadHandle {
     tokio::task::spawn_blocking(move || {
 
         let poll_budget = Duration::from_millis(50);
+        let mut backoff_ms = 50u64;
         loop {
             if shutdown_thread.load(Ordering::Acquire) {
                 break;
@@ -41,7 +42,7 @@ pub fn spawn_input_thread() -> InputThreadHandle {
             match event::poll(poll_budget) {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
-
+                        backoff_ms = 50;
                         if tx.send(ev).is_err() {
                             break;
                         }
@@ -54,14 +55,18 @@ pub fn spawn_input_thread() -> InputThreadHandle {
                         break;
                     }
                 },
-                Ok(false) => continue,
+                Ok(false) => {
+                    backoff_ms = 50;
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!(
                         target: "tui.event_loop",
-                        "crossterm::event::poll failed: {e}"
+                        "crossterm::event::poll failed (retry in {backoff_ms}ms): {e}"
                     );
 
-                    std::thread::sleep(Duration::from_millis(100));
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(200);
                 }
             }
         }

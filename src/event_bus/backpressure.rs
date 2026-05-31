@@ -30,7 +30,7 @@ impl BoundedSubscriber {
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(
                                 skipped,
-                                "bounded subscriber lagged behind — events dropped"
+                                "bounded subscriber lagged behind  -  events dropped"
                             );
                             continue;
                         }

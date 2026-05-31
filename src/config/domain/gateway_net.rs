@@ -45,7 +45,7 @@ impl GatewayNetExtras {
         for (prefix, level) in &self.auth_override {
             if !allowed.contains(&level.as_str()) {
                 errors.push(format!(
-                    "gateway_net.auth_override['{prefix}'] = '{level}' — must be one of {allowed:?}"
+                    "gateway_net.auth_override['{prefix}'] = '{level}'  -  must be one of {allowed:?}"
                 ));
             }
             if !prefix.starts_with('/') {

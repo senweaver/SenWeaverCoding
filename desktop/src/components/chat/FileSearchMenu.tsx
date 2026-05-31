@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { forwardRef, useState, useEffect, useRef, useCallback, useImperativeHandle } from 'react'
 import { ApiError } from '../../api/client'
 import { filesystemApi } from '../../api/filesystem'

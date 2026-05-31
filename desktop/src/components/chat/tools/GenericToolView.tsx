@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import type { ToolViewProps, Translator } from './ToolViewProps'
 import { CodeViewer } from '../CodeViewer'
 import { CopyButton } from '../../shared/CopyButton'

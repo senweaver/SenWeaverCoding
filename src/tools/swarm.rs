@@ -39,7 +39,7 @@ impl SwarmTool {
         }
     }
 
-    fn create_provider_for_agent(
+    async fn create_provider_for_agent(
         &self,
         agent_config: &DelegateAgentConfig,
         agent_name: &str,
@@ -57,11 +57,12 @@ impl SwarmTool {
             None => agent_config.provider.clone(),
         };
 
-        providers::create_provider_with_options(
-            &runtime_provider_name,
-            credential.as_deref(),
-            &self.provider_runtime_options,
+        providers::create_provider_with_options_async(
+            runtime_provider_name,
+            credential,
+            self.provider_runtime_options.clone(),
         )
+        .await
         .map_err(|e| ToolResult {
             success: false,
             output: String::new(),
@@ -81,6 +82,7 @@ impl SwarmTool {
     ) -> Result<String, String> {
         let provider = self
             .create_provider_for_agent(agent_config, agent_name)
+            .await
             .map_err(|r| r.error.unwrap_or_default())?;
 
         let temperature = agent_config.temperature.unwrap_or(0.7);
@@ -168,7 +170,7 @@ impl SwarmTool {
         Ok(ToolResult {
             success: true,
             output: format!(
-                "[Swarm sequential — {} agents]\n\n{}",
+                "[Swarm sequential  -  {} agents]\n\n{}",
                 swarm_config.agents.len(),
                 results.join("\n\n")
             ),
@@ -215,11 +217,13 @@ impl SwarmTool {
                 None => agent_config.provider.clone(),
             };
 
-            let provider = match providers::create_provider_with_options(
-                &runtime_provider_name,
-                credential.as_deref(),
-                &self.provider_runtime_options,
-            ) {
+            let provider = match providers::create_provider_with_options_async(
+                runtime_provider_name,
+                credential,
+                self.provider_runtime_options.clone(),
+            )
+            .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     return Ok(ToolResult {
@@ -283,7 +287,7 @@ impl SwarmTool {
         Ok(ToolResult {
             success: true,
             output: format!(
-                "[Swarm parallel — {} agents]\n\n{}",
+                "[Swarm parallel  -  {} agents]\n\n{}",
                 swarm_config.agents.len(),
                 results.join("\n\n---\n\n")
             ),
@@ -338,6 +342,7 @@ impl SwarmTool {
 
         let router_provider = self
             .create_provider_for_agent(first_agent_config, first_agent_name)
+            .await
             .map_err(|r| anyhow::anyhow!(r.error.unwrap_or_default()))?;
 
         let base_router_prompt = swarm_config
@@ -416,7 +421,7 @@ impl SwarmTool {
             Ok(output) => Ok(ToolResult {
                 success: true,
                 output: format!(
-                    "[Swarm router — selected '{matched_name}' ({}/{})]\n{output}",
+                    "[Swarm router  -  selected '{matched_name}' ({}/{})]\n{output}",
                     agent_config.provider, agent_config.model
                 ),
                 error: None,

@@ -189,17 +189,16 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
 
                 if config.output_format == OutputFormat::StreamJson {
                     if let Some(svc) = crate::services::try_get_services() {
-                        if let Ok(summary) = svc.tool_use_summary.lock() {
-                            let stats = summary.aggregate();
-                            for s in &stats {
-                                tracing::info!(
-                                    tool = %s.tool_name,
-                                    calls = s.call_count,
-                                    ok = s.success_count,
-                                    fail = s.failure_count,
-                                    "headless tool usage"
-                                );
-                            }
+                        let summary = svc.tool_use_summary.lock();
+                        let stats = summary.aggregate();
+                        for s in &stats {
+                            tracing::info!(
+                                tool = %s.tool_name,
+                                calls = s.call_count,
+                                ok = s.success_count,
+                                fail = s.failure_count,
+                                "headless tool usage"
+                            );
                         }
                     }
                 }

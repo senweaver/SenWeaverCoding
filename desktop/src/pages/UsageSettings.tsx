@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useEffect, useMemo } from 'react'
 import { useTranslation } from '../i18n'
 import type { TranslationKey } from '../i18n'
@@ -16,11 +20,19 @@ import type {
 } from '../types/usage'
 
 const CODING_MODE_BACKEND_TO_ID: Record<string, CodingModeId> = {
-  agent: 'agent',
+  vibe: 'vibe',
+  spec: 'spec',
   plan: 'plan',
   ask: 'ask',
+  tdd: 'tdd',
   debug: 'debug',
+  agent: 'agent',
+  architect: 'architect',
+  pair: 'pair',
+  context: 'context',
+  mvai: 'mvai',
   harness: 'harness',
+  curator: 'curator',
 }
 
 const CODING_MODE_ORDER: CodingModeId[] = [
@@ -28,7 +40,15 @@ const CODING_MODE_ORDER: CodingModeId[] = [
   'plan',
   'ask',
   'debug',
+  'architect',
+  'pair',
+  'context',
+  'mvai',
   'harness',
+  'curator',
+  'spec',
+  'tdd',
+  'vibe',
 ]
 
 const CODING_MODE_ICON: Record<CodingModeId, string> = {
@@ -126,6 +146,8 @@ export function UsageSettings() {
   const isLoading = useUsageStore((s) => s.isLoading)
   const error = useUsageStore((s) => s.error)
   const fetchUsage = useUsageStore((s) => s.fetch)
+  const subscribeRealtime = useUsageStore((s) => s.subscribeRealtime)
+  const unsubscribeRealtime = useUsageStore((s) => s.unsubscribeRealtime)
   const sessions = useSessionStore((s) => s.sessions)
   const runtimeSnapshot = useRuntimeStore((s) => s.snapshot)
   const runtimeError = useRuntimeStore((s) => s.error)
@@ -135,7 +157,11 @@ export function UsageSettings() {
   useEffect(() => {
     void fetchUsage()
     void fetchRuntime()
-  }, [fetchUsage, fetchRuntime])
+    subscribeRealtime()
+    return () => {
+      unsubscribeRealtime()
+    }
+  }, [fetchUsage, fetchRuntime, subscribeRealtime, unsubscribeRealtime])
 
   const handleRefresh = () => {
     void fetchUsage()

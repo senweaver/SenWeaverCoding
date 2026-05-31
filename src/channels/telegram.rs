@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use crate::config::{Config, StreamMode};
 use crate::security::pairing::PairingGuard;
@@ -309,7 +313,7 @@ pub struct TelegramChannel {
 
     api_base: String,
     transcription: Option<crate::config::TranscriptionConfig>,
-    transcription_manager: Option<std::sync::Arc<super::transcription::TranscriptionManager>>,
+    transcription_manager: Option<std::sync::Arc<super::pipeline::transcription::TranscriptionManager>>,
     voice_transcriptions: Mutex<std::collections::HashMap<String, String>>,
     workspace_dir: Option<std::path::PathBuf>,
     ack_reactions: bool,
@@ -400,7 +404,7 @@ impl TelegramChannel {
         if !config.enabled {
             return self;
         }
-        match super::transcription::TranscriptionManager::new(&config) {
+        match super::pipeline::transcription::TranscriptionManager::new(&config) {
             Ok(m) => {
                 self.transcription_manager = Some(std::sync::Arc::new(m));
                 self.transcription = Some(config);
@@ -470,7 +474,7 @@ impl TelegramChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_channel_client("channel.telegram", self.proxy_url.as_deref())
     }
@@ -498,7 +502,7 @@ impl TelegramChannel {
             .await
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
         let mut config: Config = toml::from_str(&contents).context(
-            "Failed to parse config.toml — check [channels.telegram] section for syntax errors",
+            "Failed to parse config.toml  -  check [channels.telegram] section for syntax errors",
         )?;
         config.config_path = config_path;
         config.workspace_dir = sen_dir.join("workspace");
@@ -572,7 +576,7 @@ impl TelegramChannel {
         text: &str,
         tts_config: &crate::config::TtsConfig,
     ) -> anyhow::Result<()> {
-        let tts_manager = super::tts::TtsManager::new(tts_config)?;
+        let tts_manager = super::pipeline::tts::TtsManager::new(tts_config)?;
         let audio_bytes = tts_manager.synthesize(text).await?;
         let audio_len = audio_bytes.len();
         tracing::info!("Telegram TTS: synthesized {audio_len} bytes of audio");
@@ -582,7 +586,7 @@ impl TelegramChannel {
         }
 
         let url = format!("{api_base}/bot{bot_token}/sendVoice");
-        let client = crate::services::get_services()
+        let client = crate::services::require_services()
             .proxy_runtime()
             .build_client("channel.telegram");
 
@@ -1439,48 +1443,6 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             interruption_scope_id: None,
             attachments: vec![],
         })
-    }
-
-    async fn resolve_photo_data_uri(&self, file_id: &str) -> anyhow::Result<String> {
-        use base64::Engine as _;
-
-        let get_file_url = self.api_url(&format!("getFile?file_id={}", file_id));
-        let resp = self.http_client().get(&get_file_url).send().await?;
-        let json: serde_json::Value = resp.json().await?;
-        let file_path = json
-            .get("result")
-            .and_then(|r| r.get("file_path"))
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| anyhow::anyhow!("getFile: no file_path in response"))?
-            .to_string();
-
-        let download_url = format!(
-            "https://api.telegram.org/file/bot{}/{}",
-            self.bot_token, file_path
-        );
-        let img_resp = self.http_client().get(&download_url).send().await?;
-        let bytes = img_resp.bytes().await?;
-
-        let resized_bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-            let img = image::load_from_memory(&bytes)?;
-            let (w, h) = (img.width(), img.height());
-            let max_dim = 512u32;
-            let resized = if w > max_dim || h > max_dim {
-                img.thumbnail(max_dim, max_dim)
-            } else {
-                img
-            };
-            let mut buf = Vec::new();
-            resized.write_to(
-                &mut std::io::Cursor::new(&mut buf),
-                image::ImageFormat::Jpeg,
-            )?;
-            Ok(buf)
-        })
-        .await??;
-
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&resized_bytes);
-        Ok(format!("data:image/jpeg;base64,{}", b64))
     }
 
     fn markdown_to_telegram_html(text: &str) -> String {

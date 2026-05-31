@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -235,7 +235,7 @@ pub async fn handle_models_set_current(
             .into_response();
     }
     state.push_live_config(snapshot);
-    state.rebuild_runtime_from_config();
+    state.rebuild_runtime_from_config_async().await;
     Json(serde_json::json!({ "ok": true, "model": body.model_id })).into_response()
 }
 
@@ -288,7 +288,7 @@ pub async fn handle_effort_set(
             .into_response();
     }
     state.push_live_config(snapshot);
-    state.rebuild_runtime_from_config();
+    state.rebuild_runtime_from_config_async().await;
     Json(serde_json::json!({ "ok": true, "level": body.level })).into_response()
 }
 
@@ -1007,7 +1007,7 @@ pub async fn handle_providers_create(
             .into_response();
     }
     state.push_live_config(snapshot);
-    state.rebuild_runtime_from_config();
+    state.rebuild_runtime_from_config_async().await;
 
     let config_snapshot = state.config.lock().clone();
     let saved = provider_to_saved_provider(&id, &profile, &config_snapshot);
@@ -1114,7 +1114,7 @@ pub async fn handle_providers_update(
             .into_response();
     }
     state.push_live_config(snapshot);
-    state.rebuild_runtime_from_config();
+    state.rebuild_runtime_from_config_async().await;
 
     let config_snapshot = state.config.lock().clone();
     let profile = config_snapshot
@@ -1165,7 +1165,7 @@ pub async fn handle_providers_delete(
             .into_response();
     }
     state.push_live_config(snapshot);
-    state.rebuild_runtime_from_config();
+    state.rebuild_runtime_from_config_async().await;
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -1197,7 +1197,7 @@ pub async fn handle_providers_activate(
             .into_response();
     }
     state.push_live_config(snapshot);
-    state.rebuild_runtime_from_config();
+    state.rebuild_runtime_from_config_async().await;
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -1699,16 +1699,26 @@ pub async fn handle_user_rule_get(
         )
             .into_response();
     }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => Json(serde_json::json!({
+    let path_for_read = path.clone();
+    let read_result = tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&path_for_read)
+    })
+    .await;
+    match read_result {
+        Ok(Ok(content)) => Json(serde_json::json!({
             "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             "path": path.display().to_string(),
             "content": content,
         }))
         .into_response(),
-        Err(err) => (
+        Ok(Err(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("read failed: {err}") })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("read task failed: {err}") })),
         )
             .into_response(),
     }
@@ -1739,21 +1749,35 @@ pub async fn handle_user_rule_upsert(
             return (code, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("failed to create rules dir: {err}"),
-            })),
-        )
-            .into_response();
-    }
-    if let Err(err) = std::fs::write(&path, body.content.as_bytes()) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("write failed: {err}") })),
-        )
-            .into_response();
+    let dir_owned = dir.clone();
+    let path_owned = path.clone();
+    let content_bytes = body.content.into_bytes();
+    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir_owned)?;
+        std::fs::write(&path_owned, &content_bytes)?;
+        Ok(())
+    })
+    .await;
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("write failed: {err}"),
+                })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("write task failed: {err}"),
+                })),
+            )
+                .into_response();
+        }
     }
     Json(serde_json::json!({
         "status": "ok",
@@ -1784,11 +1808,19 @@ pub async fn handle_user_rule_delete(
         )
             .into_response();
     }
-    match std::fs::remove_file(&path) {
-        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
-        Err(err) => (
+    let path_for_remove = path.clone();
+    let remove_result =
+        tokio::task::spawn_blocking(move || std::fs::remove_file(&path_for_remove)).await;
+    match remove_result {
+        Ok(Ok(_)) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Ok(Err(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("delete failed: {err}") })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("delete task failed: {err}") })),
         )
             .into_response(),
     }
@@ -1879,16 +1911,23 @@ pub async fn handle_user_skill_get(
         )
             .into_response();
     }
-    match std::fs::read_to_string(&entry) {
-        Ok(content) => Json(serde_json::json!({
+    let entry_for_read = entry.clone();
+    let read_result = tokio::task::spawn_blocking(move || std::fs::read_to_string(&entry_for_read)).await;
+    match read_result {
+        Ok(Ok(content)) => Json(serde_json::json!({
             "name": q.name,
             "path": entry.display().to_string(),
             "content": content,
         }))
         .into_response(),
-        Err(err) => (
+        Ok(Err(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("read failed: {err}") })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("read task failed: {err}") })),
         )
             .into_response(),
     }
@@ -1919,21 +1958,35 @@ pub async fn handle_user_skill_upsert(
             return (code, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("failed to create skill dir: {err}"),
-            })),
-        )
-            .into_response();
-    }
-    if let Err(err) = std::fs::write(&entry, body.content.as_bytes()) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("write failed: {err}") })),
-        )
-            .into_response();
+    let dir_owned = dir.clone();
+    let entry_owned = entry.clone();
+    let content_bytes = body.content.into_bytes();
+    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir_owned)?;
+        std::fs::write(&entry_owned, &content_bytes)?;
+        Ok(())
+    })
+    .await;
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("write failed: {err}"),
+                })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("write task failed: {err}"),
+                })),
+            )
+                .into_response();
+        }
     }
     Json(serde_json::json!({
         "status": "ok",
@@ -2015,7 +2068,6 @@ fn derive_skill_dirname(raw: &str) -> Result<String, String> {
     }
     Ok(truncated)
 }
-
 
 const USER_SKILL_INSTALL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const USER_SKILL_INSTALL_MAX_FILES: usize = 2_000;
@@ -2219,6 +2271,20 @@ pub async fn handle_user_skill_install(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    let join = tokio::task::spawn_blocking(move || handle_user_skill_install_blocking(body)).await;
+    match join {
+        Ok(resp) => resp,
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("skill install task failed: {err}"),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn handle_user_skill_install_blocking(body: UserSkillInstallBody) -> axum::response::Response {
     let Some(root) = user_skills_root() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2505,11 +2571,19 @@ pub async fn handle_user_skill_delete(
         )
             .into_response();
     }
-    match std::fs::remove_dir_all(&dir) {
-        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
-        Err(err) => (
+    let dir_for_remove = dir.clone();
+    let remove_result =
+        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir_for_remove)).await;
+    match remove_result {
+        Ok(Ok(_)) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Ok(Err(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("delete failed: {err}") })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("delete task failed: {err}") })),
         )
             .into_response(),
     }
@@ -3653,7 +3727,7 @@ fn build_adapters_payload(config: &crate::config::Config) -> serde_json::Value {
         "twitter": channel_to_camel_json(&cc.twitter),
         "mochat": channel_to_camel_json(&cc.mochat),
         "nostr": nostr_value,
-        "clawdtalk": channel_to_camel_json(&cc.clawdtalk),
+        "telnyx": channel_to_camel_json(&cc.telnyx),
         "reddit": channel_to_camel_json(&cc.reddit),
         "bluesky": channel_to_camel_json(&cc.bluesky),
         "voiceCall": channel_to_camel_json(&cc.voice_call),
@@ -3784,7 +3858,7 @@ pub async fn handle_adapters_put(
         patch_channel!("qq", qq);
         patch_channel!("twitter", twitter);
         patch_channel!("mochat", mochat);
-        patch_channel!("clawdtalk", clawdtalk);
+        patch_channel!("telnyx", telnyx);
         patch_channel!("reddit", reddit);
         patch_channel!("bluesky", bluesky);
         patch_channel!("voiceCall", voice_call);
@@ -3807,8 +3881,28 @@ pub async fn handle_adapters_put(
     }
     *state.config.lock() = snapshot.clone();
     state.push_live_config(snapshot.clone());
+    if let Err(err) = super::channel_supervisor::restart_channels(&state).await {
+        tracing::warn!(error = %err, "adapters save: channel restart failed");
+    }
 
     Json(build_adapters_payload(&snapshot)).into_response()
+}
+
+pub async fn handle_channels_restart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    match super::channel_supervisor::restart_channels(&state).await {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err})),
+        )
+            .into_response(),
+    }
 }
 
 fn detect_python() -> Option<(String, String)> {
@@ -3930,7 +4024,8 @@ pub async fn handle_computer_use_setup(
 
     let venv_dir = computer_use_venv_dir();
     if let Some(parent) = venv_dir.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let parent = parent.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || std::fs::create_dir_all(parent)).await;
     }
 
     if !venv_dir.exists() {
@@ -4176,44 +4271,52 @@ pub async fn handle_filesystem_browse(
         .unwrap_or_default();
     let include_files = q.include_files.unwrap_or(false) || q.search.is_some();
 
-    let mut entries: Vec<serde_json::Value> = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(&current_path) {
-        for entry in read_dir.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let is_dir = file_type.is_dir();
-            if !is_dir && !include_files {
-                continue;
+    let search_needle = q.search.clone();
+    let max_results_cap = q.max_results;
+    let current_path_for_scan = current_path.clone();
+    let entries: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&current_path_for_scan) {
+            for entry in read_dir.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let is_dir = file_type.is_dir();
+                if !is_dir && !include_files {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if let Some(needle) = search_needle.as_ref()
+                    && !name.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+                {
+                    continue;
+                }
+                entries.push(serde_json::json!({
+                    "name": name,
+                    "path": entry.path().to_string_lossy().to_string(),
+                    "isDirectory": is_dir,
+                }));
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            if let Some(needle) = q.search.as_ref()
-                && !name.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
-            {
-                continue;
-            }
-            entries.push(serde_json::json!({
-                "name": name,
-                "path": entry.path().to_string_lossy().to_string(),
-                "isDirectory": is_dir,
-            }));
         }
-    }
-    entries.sort_by(|a, b| {
-        let a_dir = a.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false);
-        let b_dir = b.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false);
-        let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        b_dir.cmp(&a_dir).then(a_name.cmp(b_name))
-    });
-    if let Some(max) = q.max_results
-        && entries.len() > max
-    {
-        entries.truncate(max);
-    }
+        entries.sort_by(|a, b| {
+            let a_dir = a.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false);
+            let b_dir = b.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false);
+            let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            b_dir.cmp(&a_dir).then(a_name.cmp(b_name))
+        });
+        if let Some(max) = max_results_cap
+            && entries.len() > max
+        {
+            entries.truncate(max);
+        }
+        entries
+    })
+    .await
+    .unwrap_or_default();
     Json(serde_json::json!({
         "currentPath": raw_path,
         "parentPath": parent_path,
@@ -4459,7 +4562,11 @@ pub async fn handle_permissions_mode_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let mode = super::ws_desktop::desktop_runtime_state().permission_mode();
+    let mode = tokio::task::spawn_blocking(|| {
+        super::ws::desktop::desktop_runtime_state().permission_mode()
+    })
+    .await
+    .unwrap_or_else(|_| "default".to_string());
     Json(serde_json::json!({ "mode": mode })).into_response()
 }
 
@@ -4476,7 +4583,7 @@ pub async fn handle_permissions_mode_put(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    super::ws_desktop::desktop_runtime_state().set_permission_mode(&body.mode);
+    super::ws::desktop::desktop_runtime_state().set_permission_mode(&body.mode);
     Json(serde_json::json!({ "ok": true, "mode": body.mode })).into_response()
 }
 
@@ -4676,7 +4783,7 @@ pub async fn handle_coding_mode_put(
         .map(|svc| svc.config())
         .unwrap_or_else(|| std::sync::Arc::new(state.config.lock().clone()));
     let whitelist: &[String] = cfg.autonomy.auto_approve_mode_transitions.as_slice();
-    let auto_approved = crate::agent::mode_transition::is_auto_approved(
+    let auto_approved = crate::agent::mode::transition::is_auto_approved(
         whitelist,
         previous_mode,
         parsed,
@@ -4704,7 +4811,7 @@ pub async fn handle_coding_mode_put(
         *svc.coding_mode.write() = parsed;
     }
     let permission = derive_permission_from_coding(&parsed);
-    super::ws_desktop::desktop_runtime_state().set_permission_mode(permission);
+    super::ws::desktop::desktop_runtime_state().set_permission_mode(permission);
     Json(serde_json::json!({
         "ok": true,
         "mode": parsed.display_name(),
@@ -6033,8 +6140,12 @@ pub async fn handle_usage_get(
         .unwrap_or(true);
 
     let aggregates = if include_lifetime {
-        let config = state.config.lock().clone();
-        compute_lifetime_by_model_and_session(&config.workspace_dir)
+        let workspace_dir = state.config.lock().workspace_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            compute_lifetime_by_model_and_session(&workspace_dir)
+        })
+        .await
+        .unwrap_or_else(|_| UsageAggregates::empty())
     } else {
         UsageAggregates::empty()
     };

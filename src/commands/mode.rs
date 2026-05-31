@@ -27,7 +27,7 @@ pub async fn handle_mode(ctx: CommandContext) -> CommandResult {
         for mode in CodingMode::all() {
             let marker = if *mode == current { " (active)" } else { "" };
             lines.push(format!(
-                "  /mode {:<10} — {}{}",
+                "  /mode {:<10}  -  {}{}",
                 mode.display_name(),
                 mode.description(),
                 marker,

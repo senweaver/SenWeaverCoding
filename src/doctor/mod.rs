@@ -56,14 +56,6 @@ impl DiagItem {
         }
     }
 
-    fn icon(&self) -> &'static str {
-        match self.severity {
-            Severity::Ok => "✅",
-            Severity::Warn => "⚠️ ",
-            Severity::Error => "❌",
-        }
-    }
-
     fn into_result(self) -> DiagResult {
         DiagResult {
             severity: self.severity,
@@ -92,7 +84,7 @@ fn check_token_saver(config: &Config, items: &mut Vec<DiagItem>) {
     if !cfg.enabled {
         items.push(DiagItem::warn(
             cat,
-            "token saver disabled — LLM context will not be compacted",
+            "token saver disabled  -  LLM context will not be compacted",
         ));
         return;
     }
@@ -145,7 +137,7 @@ fn check_token_saver(config: &Config, items: &mut Vec<DiagItem>) {
             }
         }
     } else {
-        items.push(DiagItem::warn(cat, "tracking disabled — `sen tokens stats` will be empty"));
+        items.push(DiagItem::warn(cat, "tracking disabled  -  `sen tokens stats` will be empty"));
     }
 
     let rule_count = crate::token_saver::dispatcher::list_rules().len();
@@ -157,12 +149,12 @@ fn check_token_saver(config: &Config, items: &mut Vec<DiagItem>) {
     if cfg.tee_enabled {
         items.push(DiagItem::ok(
             cat,
-            "tee enabled — full raw output is preserved on failure",
+            "tee enabled  -  full raw output is preserved on failure",
         ));
     } else {
         items.push(DiagItem::warn(
             cat,
-            "tee disabled — `Show raw` will not be available on failures",
+            "tee disabled  -  `Show raw` will not be available on failures",
         ));
     }
 }
@@ -278,7 +270,7 @@ pub async fn run_models(
         anyhow::bail!("No providers available for model probing");
     }
 
-    println!("🩺 SenWeaverCoding Doctor — Model Catalog Probe");
+    println!("🩺 SenWeaverCoding Doctor  -  Model Catalog Probe");
     println!("  Providers to probe: {}", targets.len());
     println!(
         "  Mode: {}",
@@ -660,7 +652,7 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     } else {
         items.push(DiagItem::warn(
             cat,
-            "no channels configured — run `sen onboard` to set one up",
+            "no channels configured  -  run `sen onboard` to set one up",
         ));
     }
 
@@ -837,7 +829,7 @@ fn check_daemon_state(config: &Config, items: &mut Vec<DiagItem>) {
         items.push(DiagItem::error(
             cat,
             format!(
-                "state file not found: {} — is the daemon running?",
+                "state file not found: {}  -  is the daemon running?",
                 state_file.display()
             ),
         ));
@@ -998,7 +990,7 @@ fn check_cli_tools(items: &mut Vec<DiagItem>) {
                 .unwrap_or_else(|| "unknown version".to_string());
             items.push(DiagItem::ok(
                 cat,
-                format!("{} ({}) — {}", cli.name, cli.category, version_info),
+                format!("{} ({})  -  {}", cli.name, cli.category, version_info),
             ));
         }
         items.push(DiagItem::ok(

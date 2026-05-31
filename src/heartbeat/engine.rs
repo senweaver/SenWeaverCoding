@@ -305,7 +305,7 @@ impl HeartbeatEngine {
             "\nRespond with ONLY one of:\n\
              - `run: 1,2,3` (comma-separated task numbers to execute)\n\
              - `skip` (nothing needs to run right now)\n\n\
-             Be conservative — skip if tasks are routine and not time-sensitive.",
+             Be conservative  -  skip if tasks are routine and not time-sensitive.",
         );
 
         prompt

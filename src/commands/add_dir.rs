@@ -18,7 +18,7 @@ inventory::submit!(StaticSlashCommand {
 pub async fn handle_add_dir(ctx: CommandContext) -> CommandResult {
     if ctx.args.is_empty() {
         return CommandResult::err(
-            "Usage: /add-dir <path> — add a directory to the working context",
+            "Usage: /add-dir <path>  -  add a directory to the working context",
         );
     }
     let dir = &ctx.args[0];

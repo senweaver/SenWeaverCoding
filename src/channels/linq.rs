@@ -277,7 +277,7 @@ impl Channel for LinqChannel {
             if !create_resp.status().is_success() {
                 let status = create_resp.status();
                 let error_body = create_resp.text().await.unwrap_or_default();
-                tracing::error!("Linq create chat failed: {status} — {error_body}");
+                tracing::error!("Linq create chat failed: {status}  -  {error_body}");
                 anyhow::bail!("Linq API error: {status}");
             }
 
@@ -286,7 +286,7 @@ impl Channel for LinqChannel {
 
         let status = resp.status();
         let error_body = resp.text().await.unwrap_or_default();
-        tracing::error!("Linq send failed: {status} — {error_body}");
+        tracing::error!("Linq send failed: {status}  -  {error_body}");
         anyhow::bail!("Linq API error: {status}");
     }
 

@@ -37,7 +37,7 @@ impl NextcloudTalkChannel {
             app_token,
             bot_name: bot_name.to_ascii_lowercase(),
             allowed_users,
-            client: crate::services::get_services()
+            client: crate::services::require_services()
                 .proxy_runtime()
                 .build_channel_client("channel.nextcloud_talk", proxy_url.as_deref()),
         }
@@ -347,7 +347,7 @@ impl NextcloudTalkChannel {
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        tracing::error!("Nextcloud Talk send failed: {status} — {body}");
+        tracing::error!("Nextcloud Talk send failed: {status}  -  {body}");
         anyhow::bail!("Nextcloud Talk API error: {status}");
     }
 }

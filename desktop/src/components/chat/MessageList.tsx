@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
 import { useRef, useEffect, useMemo, memo, useState, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { ApiError } from '../../api/client'
@@ -26,6 +30,7 @@ import { ProviderRetryBanner } from './ProviderRetryBanner'
 import { InlineTaskSummary } from './InlineTaskSummary'
 import { AnswersCard } from './AnswersCard'
 import { PlanCard } from './PlanCard'
+import { PlanProgressCard } from './PlanProgressCard'
 import { CuratorCard } from './CuratorCard'
 import { parseCuratorEnvelope } from '../../utils/parseCuratorMd'
 import { ModeSwitchCard } from './ModeSwitchCard'
@@ -47,48 +52,41 @@ type RenderItem =
   | { kind: 'explored'; id: string; items: UIMessage[]; summary: ExploredSummary }
   | { kind: 'message'; message: UIMessage }
 
-function displayMessageFromKey(errorText: string | null, errorKey: string | null): string | null {
-  if (!errorText || !errorKey) return null
-  if (errorText === errorKey) return null
-  return errorText
-}
+const USER_FACING_ERROR_CODES = new Set([
+  'NO_MODEL_CONFIGURED',
+  'CONFIG_ERROR',
+  'CONNECTION_FAILED',
+  'CONNECTION_TIMEOUT',
+  'INSUFFICIENT_BALANCE',
+  'GATEWAY_ERROR',
+  'AUTH_ERROR',
+  'RATE_LIMITED',
+  'MODEL_UNAVAILABLE',
+  'ENGINE_OVERLOADED',
+  'PROVIDER_FAILOVER',
+  'AGENT_TURN_FAILED',
+  'UNKNOWN_ERROR',
+  'TURN_CANCELLED',
+  'VALIDATION_ERROR',
+])
 
-const PROVIDER_FAIL_HINT_REGEX =
-  /All providers\/models failed after (\d+) attempts/i
-const PROVIDER_TOOL_DISPATCH_REGEX = /tool dispatch failed:\s*/i
-const PROVIDER_BACKEND_NOISE_REGEX = /\(responses fallback failed:[^)]*\)/i
-
-function humanizeErrorMessage(raw: string | undefined | null, fallback: string | null): string {
-  const text = (raw ?? '').trim()
-  if (!text) {
-    return fallback ?? 'Unknown error'
-  }
-  let summary = text.replace(PROVIDER_TOOL_DISPATCH_REGEX, '').trim()
-  summary = summary.replace(PROVIDER_BACKEND_NOISE_REGEX, '').trim()
-  const m = summary.match(PROVIDER_FAIL_HINT_REGEX)
-  if (m) {
-    const attempts = m[1]
-    return `所有可用模型/通道都失败了（已尝试 ${attempts} 次）。请检查网络或切换其他 Provider/Model 后再试。`
-  }
-  if (/error decoding response body/i.test(summary)) {
-    return '上游响应体解码失败，连接可能被中断。系统已自动重试若干次仍未恢复，建议稍后重试或更换模型。'
-  }
-  if (/url\.not_found|page not found|\b404\b/i.test(summary)) {
-    return '上游接口路径不存在或已下线。建议切换到当前服务商支持的模型/接口。'
-  }
-  if (/insufficient_quota|insufficient balance|quota exhausted|out of credits/i.test(summary)) {
-    return '当前 Provider 配额已用完或账户余额不足，请补充余额或切换备用通道。'
-  }
-  if (/rate.?limit|429/i.test(summary)) {
-    return '当前 Provider 触发限流（rate limit），请稍候再试或切换备用通道。'
-  }
-  if (/captcha|安全验证|人机验证|please verify/i.test(summary)) {
-    return '上游触发了反爬验证。系统会自动跳过该来源并尝试其他通道。'
-  }
-  if (summary.length > 240) {
-    return summary.slice(0, 200).trim() + '… (完整错误见详情)'
-  }
-  return summary
+function resolveErrorDisplay(
+  message: { message: string; code: string; detail?: string },
+  t: (key: TranslationKey) => string,
+): { friendly: string; technicalDetail: string | null } {
+  const errorKey = message.code ? (`error.${message.code}` as TranslationKey) : null
+  const i18nText = errorKey ? t(errorKey) : null
+  const hasI18n = Boolean(
+    errorKey &&
+      i18nText &&
+      i18nText !== errorKey &&
+      USER_FACING_ERROR_CODES.has(message.code),
+  )
+  const friendly = hasI18n ? i18nText! : message.message.trim() || t('error.UNKNOWN_ERROR')
+  const technicalDetail =
+    message.detail?.trim() ||
+    (message.message.trim() && message.message.trim() !== friendly ? message.message.trim() : null)
+  return { friendly, technicalDetail }
 }
 
 function signatureMatches(
@@ -238,6 +236,13 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
         planIdx = i
         break
       }
+      if (
+        m.type === 'curator_card' &&
+        m.implBlueprintPath === modeSwitchPlanPath
+      ) {
+        planIdx = i
+        break
+      }
     }
     if (planIdx >= 0 && planIdx < modeSwitchIdx - 1) {
       const planItem = items[planIdx]!
@@ -256,6 +261,10 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
         m.type === 'plan_card' &&
         (m.status === 'writing' || m.status === 'completed')
       ) {
+        activePlanIdx = i
+        break
+      }
+      if (m.type === 'curator_card') {
         activePlanIdx = i
         break
       }
@@ -1473,23 +1482,17 @@ export const MessageBlock = memo(function MessageBlock({
         />
       )
     case 'error': {
-      const errorKey = message.code ? `error.${message.code}` as TranslationKey : null
-      const errorText = errorKey ? t(errorKey) : null
-      const friendly = humanizeErrorMessage(message.message, displayMessageFromKey(errorText, errorKey))
-      const showRawDetail =
-        Boolean(message.message) &&
-        message.message.trim() !== '' &&
-        message.message !== friendly
+      const { friendly, technicalDetail } = resolveErrorDisplay(message, t)
       return supersededWrap(
         <div className="mb-2 px-4 py-2 rounded-lg border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/28 text-sm text-[var(--color-error)]">
           <strong>Error:</strong> {friendly}
-          {showRawDetail && (
+          {technicalDetail && (
             <details className="mt-1 group">
               <summary className="cursor-pointer text-xs text-[var(--color-on-error-container)]/75 hover:text-[var(--color-on-error-container)] select-none">
                 {t('chat.errorDetails')}
               </summary>
               <pre className="mt-1 whitespace-pre-wrap break-words font-[var(--font-mono)] text-[11px] leading-[1.5] text-[var(--color-on-error-container)]/85 max-h-64 overflow-y-auto">
-                {message.message}
+                {technicalDetail}
               </pre>
             </details>
           )}
@@ -1573,6 +1576,16 @@ export const MessageBlock = memo(function MessageBlock({
           handoffKind={message.handoffKind}
         />
       )
+    case 'plan_progress':
+      return (
+        <PlanProgressCard
+          planPath={message.planPath}
+          title={message.title}
+          todos={message.todos}
+          superseded={message.superseded}
+          handoffKind={message.handoffKind}
+        />
+      )
     case 'curator_card':
       return supersededWrap(
         <CuratorCard
@@ -1593,6 +1606,9 @@ export const MessageBlock = memo(function MessageBlock({
         <PlanModeBlockedNotice
           tools={message.tools}
           superseded={message.superseded}
+          mode={(message.mode as never) ?? 'plan'}
+          reason={message.reason ?? 'plan'}
+          detail={message.detail}
         />
       )
   }

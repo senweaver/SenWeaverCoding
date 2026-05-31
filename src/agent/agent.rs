@@ -29,6 +29,8 @@ pub enum TurnEvent {
 
     Chunk { delta: String },
 
+    StreamReset,
+
     Thinking { delta: String },
 
     ToolCall {
@@ -42,6 +44,12 @@ pub enum TurnEvent {
         output: String,
         success: bool,
         tool_call_id: Option<String>,
+    },
+
+    PlanProgressCommitted {
+        plan_path: String,
+        title: String,
+        todos_json: String,
     },
 
     Error { message: String },
@@ -90,7 +98,7 @@ pub enum TurnEvent {
     },
 
     PiiSanitized {
-        report: crate::services::pii_sanitizer::SanitizationReport,
+        report: crate::services::governance::pii_sanitizer::SanitizationReport,
     },
 
     ProviderRetry {
@@ -197,13 +205,13 @@ pub struct Agent {
 
     surface: crate::tools::ToolSurfaceBaseline,
 
-    user_profile_config: crate::agent::user_profile::UserProfileConfig,
+    user_profile_config: crate::agent::user::profile::UserProfileConfig,
     skill_evolution_config: crate::agent::skill_evolution::SkillEvolutionConfig,
-    prompt_optimizer_config: crate::agent::prompt_optimizer::PromptOptimizerConfig,
+    prompt_optimizer_config: crate::agent::prompt::optimizer::PromptOptimizerConfig,
 
     rbac_engine: Option<std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<crate::security::rbac::CallerIdentity>,
-    experience_replay: Option<crate::agent::experience::ExperienceReplay>,
+    experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     plan_mode_config: crate::agent::plan_mode::PlanModeConfig,
 
     mode_tool_filter: Option<std::collections::HashSet<String>>,
@@ -234,14 +242,6 @@ pub struct Agent {
     hook_runner: Option<std::sync::Arc<crate::hooks::HotHookRunner>>,
 
     cached_tools_signature: u64,
-
-    merged_specs_cache: parking_lot::Mutex<Option<MergedSpecsCacheEntry>>,
-}
-
-struct MergedSpecsCacheEntry {
-    activation_revision: u64,
-    base_ptr: usize,
-    merged: std::sync::Arc<Vec<ToolSpec>>,
 }
 
 pub struct AgentBuilder {
@@ -272,12 +272,12 @@ pub struct AgentBuilder {
     autonomy_level: Option<crate::security::AutonomyLevel>,
     activated_tools: Option<Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
     surface: Option<crate::tools::ToolSurfaceBaseline>,
-    user_profile_config: Option<crate::agent::user_profile::UserProfileConfig>,
+    user_profile_config: Option<crate::agent::user::profile::UserProfileConfig>,
     skill_evolution_config: Option<crate::agent::skill_evolution::SkillEvolutionConfig>,
-    prompt_optimizer_config: Option<crate::agent::prompt_optimizer::PromptOptimizerConfig>,
+    prompt_optimizer_config: Option<crate::agent::prompt::optimizer::PromptOptimizerConfig>,
     rbac_engine: Option<std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<crate::security::rbac::CallerIdentity>,
-    experience_replay: Option<crate::agent::experience::ExperienceReplay>,
+    experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     plan_mode_config: Option<crate::agent::plan_mode::PlanModeConfig>,
     shared_config: Option<crate::config::live::LiveConfig>,
 
@@ -483,7 +483,7 @@ impl AgentBuilder {
 
     pub fn user_profile_config(
         mut self,
-        cfg: crate::agent::user_profile::UserProfileConfig,
+        cfg: crate::agent::user::profile::UserProfileConfig,
     ) -> Self {
         self.user_profile_config = Some(cfg);
         self
@@ -499,7 +499,7 @@ impl AgentBuilder {
 
     pub fn prompt_optimizer_config(
         mut self,
-        cfg: crate::agent::prompt_optimizer::PromptOptimizerConfig,
+        cfg: crate::agent::prompt::optimizer::PromptOptimizerConfig,
     ) -> Self {
         self.prompt_optimizer_config = Some(cfg);
         self
@@ -606,7 +606,6 @@ impl AgentBuilder {
             plan_execution_armed: parking_lot::Mutex::new(None),
             hook_runner: self.hook_runner,
             cached_tools_signature: 0,
-            merged_specs_cache: parking_lot::Mutex::new(None),
         })
     }
 
@@ -622,7 +621,7 @@ impl AgentBuilder {
 
     pub fn experience_replay(
         mut self,
-        replay: Option<crate::agent::experience::ExperienceReplay>,
+        replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     ) -> Self {
         self.experience_replay = replay;
         self
@@ -680,58 +679,6 @@ impl Agent {
         self.last_usage.as_ref()
     }
 
-    fn current_tool_specs_with_activated(&self) -> std::sync::Arc<Vec<ToolSpec>> {
-        let Some(ref activated_arc) = self.activated_tools else {
-            return std::sync::Arc::clone(&self.tool_specs);
-        };
-
-        let (revision, extra_empty) = {
-            let guard = activated_arc.lock();
-            (guard.revision(), guard.is_empty())
-        };
-        if extra_empty {
-            return std::sync::Arc::clone(&self.tool_specs);
-        }
-
-        let base_ptr = std::sync::Arc::as_ptr(&self.tool_specs) as usize;
-
-        let mut cache = self.merged_specs_cache.lock();
-        if let Some(entry) = cache.as_ref() {
-            if entry.activation_revision == revision && entry.base_ptr == base_ptr {
-                return std::sync::Arc::clone(&entry.merged);
-            }
-        }
-
-        let extra = activated_arc.lock().tool_specs();
-        if extra.is_empty() {
-            *cache = None;
-            return std::sync::Arc::clone(&self.tool_specs);
-        }
-        let base = self.tool_specs.as_ref();
-        let mut merged: Vec<ToolSpec> = Vec::with_capacity(base.len() + extra.len());
-        let mut existing: std::collections::HashSet<String> =
-            std::collections::HashSet::with_capacity(base.len() + extra.len());
-        for spec in base.iter() {
-            if existing.insert(spec.name.clone()) {
-                merged.push(spec.clone());
-            }
-        }
-        for spec in extra {
-            if existing.insert(spec.name.clone()) {
-                merged.push(spec);
-            }
-        }
-        let merged_arc = std::sync::Arc::new(merged);
-
-        *cache = Some(MergedSpecsCacheEntry {
-            activation_revision: revision,
-            base_ptr,
-            merged: std::sync::Arc::clone(&merged_arc),
-        });
-
-        merged_arc
-    }
-
     pub async fn turn_streamed(
         &mut self,
         user_message: &str,
@@ -772,7 +719,18 @@ impl Agent {
         self.apply_gui_model_switch(&event_tx).await;
         let effective_model = self.classify_model(user_message);
 
+        let armed_plan_path: Option<String> = self.plan_execution_armed.lock().take();
+
         let mut history_chat = self.tool_dispatcher.to_provider_messages(&self.history);
+
+        let plan_exec_full_history: Option<Vec<crate::providers::traits::ChatMessage>> =
+            if armed_plan_path.is_some() {
+                let full = history_chat.clone();
+                history_chat = Self::focus_history_for_plan_execution(history_chat);
+                Some(full)
+            } else {
+                None
+            };
 
         let cancel = self.cancel_signal.load_full().as_ref().clone();
         let live_cfg = self.shared_config.load_ref();
@@ -789,7 +747,7 @@ impl Agent {
         let gui_hooks: Arc<GuiHooksFromAgent> = Arc::new(GuiHooksFromAgent::from_agent(self));
 
         let final_text = {
-            let policy = crate::agent::loop_policy::PolicyBundle::gui(
+            let policy = crate::agent::loop_::policy::PolicyBundle::gui(
                 self.provider.as_ref(),
                 &self.tools,
                 self.observer.as_ref(),
@@ -815,9 +773,10 @@ impl Agent {
             .with_gui_model_switch_hook(Some(gui_hooks.clone()))
             .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
             .with_experience_recorder_hook(Some(gui_hooks.clone()))
-            .with_plan_mode_nudge_hook(Some(gui_hooks.clone()));
+            .with_plan_mode_nudge_hook(Some(gui_hooks.clone()))
+            .with_plan_execution_path(armed_plan_path.as_deref());
 
-            match crate::agent::loop_unified::UnifiedLoop::new(policy)
+            match crate::agent::loop_::unified::UnifiedLoop::new(policy)
                 .run(&mut history_chat)
                 .await
             {
@@ -834,7 +793,14 @@ impl Agent {
             }
         };
 
-        Self::replace_history_from_flat(&mut self.history, history_chat);
+        if let Some(mut full) = plan_exec_full_history {
+            full.push(crate::providers::traits::ChatMessage::assistant(
+                final_text.clone(),
+            ));
+            Self::replace_history_from_flat(&mut self.history, full);
+        } else {
+            Self::replace_history_from_flat(&mut self.history, history_chat);
+        }
         self.trim_history();
 
         crate::evolution::record_provider_model(
@@ -966,7 +932,7 @@ impl Agent {
                     .push(ConversationMessage::Chat(ChatMessage::system(body)));
 
                 if matches!(mode, crate::agent::coding_mode::CodingMode::Plan) {
-                    let reset_body = "[Plan-Mode Reset] Disregard any prior \"Step N completed\", \"开始执行 Step N\", \"Starting step …\", \"executing\", \"已完成\" or other execution-voice framing inherited from earlier turns or other modes. You are now ONLY drafting/refining a plan document; no step has been executed yet, no work is in progress, and the user has not clicked Build. Speak strictly in planning voice (\"will\", \"propose\", \"draft\", \"would\"); never claim any todo is finished, never narrate progress. If the user has not asked you anything new, simply wait — do not start a fake execution recap.";
+                    let reset_body = "[Plan-Mode Reset] Disregard any prior \"Step N completed\", \"开始执行 Step N\", \"Starting step …\", \"executing\", \"已完成\" or other execution-voice framing inherited from earlier turns or other modes. You are now ONLY drafting/refining a plan document; no step has been executed yet, no work is in progress, and the user has not clicked Build. Speak strictly in planning voice (\"will\", \"propose\", \"draft\", \"would\"); never claim any todo is finished, never narrate progress. If the user has not asked you anything new, simply wait  -  do not start a fake execution recap.";
                     self.history.push(ConversationMessage::Chat(
                         ChatMessage::system(reset_body.to_string()),
                     ));
@@ -976,7 +942,7 @@ impl Agent {
                     target: "agent.mode",
                     from = %prev_mode,
                     to = %mode,
-                    "coding mode switched mid-turn — contract pushed to history"
+                    "coding mode switched mid-turn  -  contract pushed to history"
                 );
             }
         }
@@ -984,10 +950,6 @@ impl Agent {
 
     pub fn arm_plan_execution(&self, plan_path: impl Into<String>) {
         *self.plan_execution_armed.lock() = Some(plan_path.into());
-    }
-
-    pub(crate) fn take_plan_execution_arm(&self) -> Option<String> {
-        self.plan_execution_armed.lock().take()
     }
 
     pub fn cancel_token(&self) -> Arc<std::sync::atomic::AtomicBool> {
@@ -1141,34 +1103,97 @@ impl Agent {
         let model_routes = config.model_routes.clone();
         let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
 
-        let new_provider = providers::create_routed_provider_with_options(
-            &provider_name,
-            if api_key.is_empty() {
-                None
-            } else {
-                Some(&api_key)
-            },
-            if api_url.is_empty() {
-                None
-            } else {
-                Some(&api_url)
-            },
-            &reliability,
-            &model_routes,
-            &model_name,
-            &provider_runtime_options,
-        )
+        let provider_name_for_blocking = provider_name;
+        let api_key_for_blocking = api_key.clone();
+        let api_url_for_blocking = api_url.clone();
+        let model_name_for_blocking = model_name.clone();
+        let reliability_for_blocking = reliability;
+        let model_routes_for_blocking = model_routes;
+        let options_for_blocking = provider_runtime_options;
+        let new_provider = tokio::task::spawn_blocking(move || {
+            providers::create_routed_provider_with_options(
+                &provider_name_for_blocking,
+                if api_key_for_blocking.is_empty() {
+                    None
+                } else {
+                    Some(api_key_for_blocking.as_str())
+                },
+                if api_url_for_blocking.is_empty() {
+                    None
+                } else {
+                    Some(api_url_for_blocking.as_str())
+                },
+                &reliability_for_blocking,
+                &model_routes_for_blocking,
+                &model_name_for_blocking,
+                &options_for_blocking,
+            )
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Provider reload task failed: {}", e))?
         .map_err(|e| anyhow::anyhow!("Failed to create provider: {}", e))?;
 
         self.provider = new_provider;
+        let model_actually_changed = model_name != self.model_name;
         self.model_name = model_name;
 
         self.cached_provider = provider_name_raw;
         self.cached_api_key = crate::security::secret_string::SecretString::new(api_key);
         self.cached_api_url = api_url;
 
+        if model_actually_changed {
+            self.refresh_history_system_prompt();
+        }
+
         tracing::info!("Provider reloaded successfully");
         Ok(())
+    }
+
+    pub fn signal_runtime_model_switch(&mut self, provider: String, model: String) {
+        let trimmed_provider = provider.trim();
+        let trimmed_model = model.trim();
+        if !trimmed_provider.is_empty() {
+            self.cached_provider = trimmed_provider.to_string();
+        }
+        if !trimmed_model.is_empty() && trimmed_model != self.model_name {
+            tracing::info!(
+                target = "runtime_model_switch",
+                old_model = %self.model_name,
+                new_model = %trimmed_model,
+                provider = %trimmed_provider,
+                "UI-initiated model switch: updating in-memory model_name"
+            );
+            self.model_name = trimmed_model.to_string();
+            self.refresh_history_system_prompt();
+        }
+    }
+
+    pub async fn apply_runtime_config_now(&mut self) -> Result<()> {
+        self.reload_provider().await?;
+        self.refresh_history_system_prompt();
+        Ok(())
+    }
+
+    fn refresh_history_system_prompt(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let new_prompt = match self.build_system_prompt() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target = "runtime_model_switch",
+                    error = %e,
+                    "failed to rebuild system prompt after model switch"
+                );
+                return;
+            }
+        };
+        if let Some(ConversationMessage::Chat(chat)) = self.history.first_mut() {
+            if chat.role == "system" {
+                chat.content = new_prompt;
+            }
+        }
     }
 
     pub async fn execute_tool(
@@ -1571,6 +1596,43 @@ impl Agent {
         self.history.extend(expanded);
     }
 
+    fn focus_history_for_plan_execution(
+        history: Vec<crate::providers::traits::ChatMessage>,
+    ) -> Vec<crate::providers::traits::ChatMessage> {
+        let Some(last_user_idx) = history.iter().rposition(|m| m.role == "user") else {
+            return history;
+        };
+        let first_system_idx = history.iter().position(|m| m.role == "system");
+        let dropped = history
+            .len()
+            .saturating_sub(1 + usize::from(first_system_idx.is_some()));
+        if dropped == 0 {
+            return history;
+        }
+        let chars_before: usize = history.iter().map(|m| m.content.len()).sum();
+        let system_chars = first_system_idx.map(|i| history[i].content.len()).unwrap_or(0);
+        let trigger_chars = history[last_user_idx].content.len();
+        let mut focused: Vec<crate::providers::traits::ChatMessage> = Vec::with_capacity(2);
+        if let Some(i) = first_system_idx {
+            focused.push(history[i].clone());
+        }
+        focused.push(history[last_user_idx].clone());
+        let chars_after: usize = focused.iter().map(|m| m.content.len()).sum();
+        tracing::info!(
+            target: "agent.plan_execution",
+            dropped,
+            chars_before,
+            chars_after,
+            system_chars,
+            trigger_chars,
+            "plan execution armed: focusing context on the base system prompt + plan trigger \
+             only, dropping the entire conversation backlog (including accumulated system \
+             reminders / summaries) so the model executes the plan on a clean, minimal context \
+             instead of being overwhelmed or answering stale questions"
+        );
+        focused
+    }
+
     fn activate_deferred_tools_from_history(&self, history: &[ConversationMessage]) {
         if self.activated_tools.is_none() {
             return;
@@ -1589,10 +1651,10 @@ impl Agent {
                         mcp_pending.push(tc.name.clone());
                         continue;
                     }
-                    let entry = crate::tools::tool_tier::classify(&tc.name, surface);
+                    let entry = crate::tools::handler::tier::classify(&tc.name, surface);
                     if !matches!(
                         entry.tier,
-                        crate::tools::tool_tier::BuiltinToolTier::OnDemand
+                        crate::tools::handler::tier::BuiltinToolTier::OnDemand
                     ) {
                         continue;
                     }
@@ -1655,13 +1717,13 @@ impl Agent {
         denied_tools: Option<Vec<String>>,
         shared_config: Option<crate::config::live::LiveConfig>,
     ) -> Result<Self> {
-        if crate::services::credential_vault::try_get_credential_vault().is_none() {
+        if crate::services::governance::credential_vault::try_get_credential_vault().is_none() {
             let anchor = if config.workspace_dir.as_os_str().is_empty() {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             } else {
                 config.workspace_dir.clone()
             };
-            if let Err(err) = crate::services::credential_vault::init_credential_vault(&anchor) {
+            if let Err(err) = crate::services::governance::credential_vault::init_credential_vault(&anchor) {
                 tracing::warn!(error = %err, "credential vault initialisation failed for agent session");
             }
         }
@@ -1674,13 +1736,16 @@ impl Agent {
             &config.workspace_dir,
         ));
 
-        let memory: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
-            &config.memory,
-            &config.embedding_routes,
-            Some(&config.storage.provider.config),
-            &config.workspace_dir,
-            config.api_key.as_deref(),
-        )?);
+        let memory: Arc<dyn Memory> = Arc::from(
+            memory::create_memory_with_storage_and_routes_async(
+                config.memory.clone(),
+                config.embedding_routes.clone(),
+                Some(config.storage.provider.config.clone()),
+                config.workspace_dir.clone(),
+                config.api_key.clone(),
+            )
+            .await?,
+        );
 
         let composio_key = if config.composio.enabled {
             config.composio.api_key.as_deref()
@@ -1723,7 +1788,7 @@ impl Agent {
             crate::tools::deferred_loading_effective(config);
         if config.mcp.enabled && !config.mcp.servers.is_empty() {
             tracing::info!(
-                "Initializing MCP client — {} server(s) configured",
+                "Initializing MCP client  -  {} server(s) configured",
                 config.mcp.servers.len()
             );
             match tools::McpRegistry::connect_all(&config.mcp.servers).await {
@@ -1835,15 +1900,16 @@ impl Agent {
 
         let provider_runtime_options = providers::provider_runtime_options_from_config(config);
 
-        let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
-            &provider_name,
-            config.api_key.as_deref(),
-            config.api_url.as_deref(),
-            &config.reliability,
-            &config.model_routes,
-            &model_name,
-            &provider_runtime_options,
-        )?;
+        let provider: Box<dyn Provider> = providers::create_routed_provider_with_options_async(
+            provider_name.clone(),
+            config.api_key.clone(),
+            config.api_url.clone(),
+            config.reliability.clone(),
+            config.model_routes.clone(),
+            model_name.clone(),
+            provider_runtime_options.clone(),
+        )
+        .await?;
 
         let dispatcher_choice = config.agent.tool_dispatcher.as_str();
         let tool_dispatcher: Box<dyn ToolDispatcher> = match dispatcher_choice {
@@ -1861,26 +1927,31 @@ impl Agent {
         let available_hints: Vec<String> = route_model_by_hint.keys().cloned().collect();
 
         let response_cache = if config.memory.response_cache_enabled {
-            crate::memory::response_cache::ResponseCache::with_hot_cache(
-                &config.workspace_dir,
-                config.memory.response_cache_ttl_minutes,
-                config.memory.response_cache_max_entries,
-                config.memory.response_cache_hot_entries,
-            )
+            let cache_ws = config.workspace_dir.clone();
+            let cache_ttl = config.memory.response_cache_ttl_minutes;
+            let cache_max = config.memory.response_cache_max_entries;
+            let cache_hot = config.memory.response_cache_hot_entries;
+            tokio::task::spawn_blocking(move || {
+                crate::memory::response_cache::ResponseCache::with_hot_cache(
+                    &cache_ws, cache_ttl, cache_max, cache_hot,
+                )
+            })
+            .await
             .ok()
+            .and_then(|r| r.ok())
             .map(Arc::new)
         } else {
             None
         };
 
-        crate::agent::token_optimizer::ensure_global_optimizer_from_config(config);
+        crate::agent::token::optimizer::ensure_global_optimizer_from_config(config);
 
         crate::token_saver::set_enabled(config.token_saver.enabled);
         crate::token_saver::set_global(config.token_saver.to_runtime_ctx());
         crate::guardrails::ensure_global_guardrails(config.guardrails.clone());
 
         let experience_replay = if config.experience.enabled {
-            Some(crate::agent::experience::ExperienceReplay::new(
+            Some(crate::agent::reward::experience::ExperienceReplay::new(
                 &config.experience,
             ))
         } else {
@@ -2162,13 +2233,16 @@ impl Agent {
     }
 
     fn build_system_prompt(&self) -> Result<String> {
-        let instructions = self.tool_dispatcher.prompt_instructions(&self.tools);
         let live_cfg = self.shared_config.load();
         let coding_mode_label = self.current_coding_mode.map(|m| m.label());
+        let allowed_tool_names = self.current_coding_mode.and_then(|m| m.allowed_tools());
+
+        let instructions = self.tool_dispatcher.prompt_instructions(&self.tools);
         let ctx = PromptContext {
             workspace_dir: &self.workspace_dir,
             model_name: &self.model_name,
             tools: &self.tools,
+            allowed_tool_names: allowed_tool_names.clone(),
             skills: &self.skills,
             skills_prompt_mode: self.skills_prompt_mode,
             identity_config: Some(&self.identity_config),
@@ -2181,7 +2255,7 @@ impl Agent {
         };
         let mut prompt = self.prompt_builder.build(&ctx)?;
 
-        let user_profile = crate::agent::user_profile::UserProfile::new(
+        let user_profile = crate::agent::user::profile::UserProfile::new(
             &self.workspace_dir,
             self.user_profile_config.clone(),
         );
@@ -2196,7 +2270,7 @@ impl Agent {
         }
 
         let prompt_optimizer =
-            crate::agent::prompt_optimizer::PromptOptimizer::new(&self.prompt_optimizer_config);
+            crate::agent::prompt::optimizer::PromptOptimizer::new(&self.prompt_optimizer_config);
         if let Some(po_text) = prompt_optimizer.prompt_injection() {
             prompt.push_str(&po_text);
         }
@@ -2223,6 +2297,37 @@ impl Agent {
 
         if let Some(ref mode) = self.current_coding_mode {
             prompt.push_str(&mode.system_prompt_injection());
+        }
+
+        if let Some(theme) = crate::util::get_runtime_var("SEN_THEME") {
+            let theme = theme.trim();
+            if !theme.is_empty()
+                && theme != crate::constants::output_styles::STYLE_DEFAULT
+            {
+                if let Some(style) = crate::constants::output_styles::builtin_output_styles()
+                    .into_iter()
+                    .find(|s| s.name == theme)
+                {
+                    if !style.system_prompt_addition.is_empty() {
+                        prompt.push_str("\n\n");
+                        prompt.push_str(&style.system_prompt_addition);
+                    }
+                }
+            }
+        }
+
+        let max_chars = live_cfg.agent.max_system_prompt_chars;
+        if max_chars > 0 && prompt.len() > max_chars {
+            let mut take = max_chars.saturating_sub(160);
+            while take > 0 && !prompt.is_char_boundary(take) {
+                take -= 1;
+            }
+            if take > 0 {
+                let truncated = &prompt[..take];
+                prompt = format!(
+                    "{truncated}\n\n[system prompt truncated to {max_chars} chars to preserve token budget]\n"
+                );
+            }
         }
 
         Ok(prompt)
@@ -2294,9 +2399,9 @@ impl Agent {
                          Allowed tools: {}{}",
                         call.name, label, hint, preview, extra
                     );
-                    crate::agent::mode_effects::record_mode_intercept(
-                        crate::agent::mode_effects::ModeInterceptReason::ToolNotAllowed,
-                        &crate::agent::mode_effects::ModeInterceptContext {
+                    crate::agent::mode::effects::record_mode_intercept(
+                        crate::agent::mode::effects::ModeInterceptReason::ToolNotAllowed,
+                        &crate::agent::mode::effects::ModeInterceptContext {
                             mode,
                             channel: Some("desktop"),
                             provider: Some(self.cached_provider.as_str()),
@@ -2317,11 +2422,11 @@ impl Agent {
                 }
             }
             if let Some(reason) =
-                crate::agent::mode_effects::mode_blocks_tool(mode, call.name.as_str())
+                crate::agent::mode::effects::mode_blocks_tool(mode, call.name.as_str())
             {
-                crate::agent::mode_effects::record_mode_intercept(
-                    crate::agent::mode_effects::ModeInterceptReason::ReadOnlyPolicy,
-                    &crate::agent::mode_effects::ModeInterceptContext {
+                crate::agent::mode::effects::record_mode_intercept(
+                    crate::agent::mode::effects::ModeInterceptReason::ReadOnlyPolicy,
+                    &crate::agent::mode::effects::ModeInterceptContext {
                         mode,
                         channel: Some("desktop"),
                         provider: Some(self.cached_provider.as_str()),
@@ -2345,7 +2450,7 @@ impl Agent {
         let coding_label = self.current_coding_mode.map(|m| m.label().to_string());
         let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
         let perm_mode_lc =
-            crate::gateway::ws_desktop::desktop_runtime_state().permission_mode();
+            crate::gateway::ws::desktop::desktop_runtime_state().permission_mode();
         let tool_lc = call.name.to_ascii_lowercase();
         let guardrail_ctx = crate::guardrails::GuardrailContext {
             coding_mode: coding_label_lc.as_deref(),
@@ -2464,10 +2569,10 @@ impl Agent {
                         success: r.success,
                     });
                     if r.success {
-                        let scrubbed = crate::agent::pii_sanitize::scrub_credentials(&r.output);
+                        let scrubbed = crate::agent::profile::pii_sanitize::scrub_credentials(&r.output);
                         let call_name_owned = call.name.clone();
                         let out = tokio::task::spawn_blocking(move || {
-                            crate::agent::token_optimizer::compress_output(
+                            crate::agent::token::optimizer::compress_output(
                                 &call_name_owned,
                                 &scrubbed,
                             )
@@ -2478,7 +2583,7 @@ impl Agent {
                     } else {
                         let reason = r.error.unwrap_or(r.output);
                         (
-                            format!("Error: {}", crate::agent::pii_sanitize::scrub_credentials(&reason)),
+                            format!("Error: {}", crate::agent::profile::pii_sanitize::scrub_credentials(&reason)),
                             false,
                         )
                     }
@@ -2537,7 +2642,7 @@ impl Agent {
             wall_ms,
             "tool execution end"
         );
-        crate::agent::runtime_hooks::publish_tool_event(&dispatch_call.name, success, wall_ms);
+        crate::agent::profile::runtime_hooks::publish_tool_event(&dispatch_call.name, success, wall_ms);
 
         if crate::agent::web_search_url_guard::is_web_search_tool_name(&dispatch_call.name) {
             if success {
@@ -2638,7 +2743,7 @@ impl Agent {
     }
 
     pub async fn turn_via_loop_core(&mut self, user_message: &str) -> Result<String, AgentError> {
-        use crate::agent::loop_core::AgentLoopCore;
+        use crate::agent::loop_::core::AgentLoopCore;
         use crate::providers::traits::ChatMessage;
 
         if self.history.is_empty() {
@@ -2734,17 +2839,22 @@ impl Agent {
                 )));
         }
 
-        let context = self
-            .memory_loader
-            .load_context(
-                self.memory.as_ref(),
-                user_message,
-                self.memory_session_id.as_deref(),
-            )
-            .await
-            .unwrap_or_default();
+        let plan_armed = self.plan_execution_armed.lock().is_some();
 
-        if self.auto_save {
+        let context = if plan_armed {
+            String::new()
+        } else {
+            self.memory_loader
+                .load_context(
+                    self.memory.as_ref(),
+                    user_message,
+                    self.memory_session_id.as_deref(),
+                )
+                .await
+                .unwrap_or_default()
+        };
+
+        if self.auto_save && !plan_armed {
             let autosave_key = format!("user_msg_{}", Uuid::new_v4());
             let _ = self
                 .memory
@@ -2761,26 +2871,30 @@ impl Agent {
 
         if let Some(svc) = crate::services::try_get_services() {
             let mode = *svc.coding_mode.read();
-            if let Some(reminder) = crate::agent::mode_effects::pre_turn_reminder(mode) {
+            if let Some(reminder) = crate::agent::mode::effects::pre_turn_reminder(mode) {
                 enriched.push_str("\n\n");
                 enriched.push_str(reminder);
             }
-            let cfg = svc.config();
-            if let Some(web_reminder) = crate::agent::mode_effects::web_research_disabled_reminder(
-                mode,
-                cfg.web_search.enabled,
-                cfg.web_fetch.enabled,
-            ) {
-                enriched.push_str("\n\n");
-                enriched.push_str(web_reminder);
-            }
-            if let Some(web_active) = crate::agent::mode_effects::web_research_active_reminder(
-                mode,
-                cfg.web_search.enabled,
-                cfg.web_fetch.enabled,
-            ) {
-                enriched.push_str("\n\n");
-                enriched.push_str(web_active);
+            if !plan_armed {
+                let cfg = svc.config();
+                if let Some(web_reminder) =
+                    crate::agent::mode::effects::web_research_disabled_reminder(
+                        mode,
+                        cfg.web_search.enabled,
+                        cfg.web_fetch.enabled,
+                    )
+                {
+                    enriched.push_str("\n\n");
+                    enriched.push_str(web_reminder);
+                }
+                if let Some(web_active) = crate::agent::mode::effects::web_research_active_reminder(
+                    mode,
+                    cfg.web_search.enabled,
+                    cfg.web_fetch.enabled,
+                ) {
+                    enriched.push_str("\n\n");
+                    enriched.push_str(web_active);
+                }
             }
         }
 
@@ -2889,7 +3003,7 @@ pub(crate) struct GuiHooksFromAgent {
     auto_classify: Option<crate::agent::eval::AutoClassifyConfig>,
     default_model: String,
     temperature: f64,
-    experience_replay: Option<crate::agent::experience::ExperienceReplay>,
+    experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     observer: Arc<dyn Observer>,
     cached_provider: String,
 }
@@ -2915,7 +3029,7 @@ impl GuiHooksFromAgent {
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::ResponseCacheHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::ResponseCacheHook for GuiHooksFromAgent {
     fn build_key(&self, messages: &[ChatMessage], model: &str) -> Option<String> {
         if self.temperature != 0.0 {
             return None;
@@ -2938,8 +3052,11 @@ impl crate::agent::loop_hooks::ResponseCacheHook for GuiHooksFromAgent {
         let cache = self.response_cache.as_ref()?;
         let provider_label = self.cached_provider.clone();
         let model_label = self.default_model.clone();
-        match cache.get(key) {
-            Ok(Some(cached)) => {
+        let cache = Arc::clone(cache);
+        let key_owned = key.to_string();
+        let lookup = tokio::task::spawn_blocking(move || cache.get(&key_owned)).await;
+        match lookup {
+            Ok(Ok(Some(cached))) => {
                 self.observer.record_event(&ObserverEvent::CacheHit {
                     cache_type: "response".into(),
                     tokens_saved: 0,
@@ -2971,13 +3088,20 @@ impl crate::agent::loop_hooks::ResponseCacheHook for GuiHooksFromAgent {
 
     async fn write_back(&self, key: &str, model: &str, response: &str, output_tokens: u32) {
         if let Some(cache) = &self.response_cache {
-            let _ = cache.put(key, model, response, output_tokens);
+            let cache = Arc::clone(cache);
+            let key = key.to_string();
+            let model = model.to_string();
+            let response = response.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                cache.put(&key, &model, &response, output_tokens)
+            })
+            .await;
         }
     }
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::MemorySessionHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::MemorySessionHook for GuiHooksFromAgent {
     async fn on_turn_start(&self, user_message: &str) {
         if !self.auto_save {
             return;
@@ -3011,7 +3135,7 @@ impl crate::agent::loop_hooks::MemorySessionHook for GuiHooksFromAgent {
     }
 }
 
-impl crate::agent::loop_hooks::ModelClassifierHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::ModelClassifierHook for GuiHooksFromAgent {
     fn classify(&self, user_message: &str) -> Option<String> {
         if let Some(decision) = crate::agent::classifier::classify_with_decision(
             &self.classification_config,
@@ -3054,7 +3178,7 @@ impl crate::agent::loop_hooks::ModelClassifierHook for GuiHooksFromAgent {
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::TurnPreambleHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::TurnPreambleHook for GuiHooksFromAgent {
     async fn apply(
         &self,
         _user_message: &str,
@@ -3065,14 +3189,14 @@ impl crate::agent::loop_hooks::TurnPreambleHook for GuiHooksFromAgent {
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::GuiModelSwitchHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::GuiModelSwitchHook for GuiHooksFromAgent {
     async fn poll(&self, _event_tx: &tokio::sync::mpsc::Sender<TurnEvent>) -> Option<String> {
         None
     }
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::IterationContextBudgetHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::IterationContextBudgetHook for GuiHooksFromAgent {
     async fn prepare(
         &self,
         _iteration: usize,
@@ -3082,8 +3206,8 @@ impl crate::agent::loop_hooks::IterationContextBudgetHook for GuiHooksFromAgent 
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::ExperienceRecorderHook for GuiHooksFromAgent {
-    async fn record(&self, summary: &crate::agent::loop_hooks::TurnExperienceSummary) {
+impl crate::agent::loop_::traits::ExperienceRecorderHook for GuiHooksFromAgent {
+    async fn record(&self, summary: &crate::agent::loop_::traits::TurnExperienceSummary) {
         let Some(ref replay) = self.experience_replay else {
             return;
         };
@@ -3095,7 +3219,7 @@ impl crate::agent::loop_hooks::ExperienceRecorderHook for GuiHooksFromAgent {
             .iter()
             .map(|(n, s)| (n.as_str(), *s))
             .collect();
-        let dims = crate::agent::self_eval::heuristic_eval(
+        let dims = crate::agent::self_assess::eval::heuristic_eval(
             &summary.user_query,
             &summary.assistant_response,
             &refs,
@@ -3104,7 +3228,7 @@ impl crate::agent::loop_hooks::ExperienceRecorderHook for GuiHooksFromAgent {
         let query_category =
             crate::agent::classifier::classify(&self.classification_config, &summary.user_query)
                 .unwrap_or_else(|| "general".to_string());
-        let experience = crate::agent::experience::Experience {
+        let experience = crate::agent::reward::experience::Experience {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: self.memory_session_id.clone().unwrap_or_default(),
             timestamp: chrono::Utc::now(),
@@ -3121,7 +3245,7 @@ impl crate::agent::loop_hooks::ExperienceRecorderHook for GuiHooksFromAgent {
 }
 
 #[async_trait::async_trait]
-impl crate::agent::loop_hooks::PlanModeNudgeHook for GuiHooksFromAgent {
+impl crate::agent::loop_::traits::PlanModeNudgeHook for GuiHooksFromAgent {
     async fn try_inject(
         &self,
         _iteration: usize,

@@ -65,93 +65,174 @@ pub struct RuntimeTraceEvent {
 }
 
 struct RuntimeTraceLogger {
-    mode: RuntimeTraceStorageMode,
-    max_entries: usize,
-    path: PathBuf,
-    write_lock: std::sync::Mutex<()>,
+    tx: Option<std::sync::mpsc::Sender<RuntimeTraceEvent>>,
 }
 
 impl RuntimeTraceLogger {
     fn new(mode: RuntimeTraceStorageMode, max_entries: usize, path: PathBuf) -> Self {
+        if mode == RuntimeTraceStorageMode::None {
+            return Self { tx: None };
+        }
+        let max_entries = max_entries.max(1);
+        let (tx, rx) = std::sync::mpsc::channel::<RuntimeTraceEvent>();
+        let spawned = std::thread::Builder::new()
+            .name("runtime-trace".to_string())
+            .spawn(move || trace_writer_loop(mode, max_entries, path, rx))
+            .ok();
         Self {
-            mode,
-            max_entries: max_entries.max(1),
-            path,
-            write_lock: std::sync::Mutex::new(()),
+            tx: spawned.map(|_| tx),
         }
     }
 
-    fn append(&self, event: &RuntimeTraceEvent) -> Result<()> {
-        if self.mode == RuntimeTraceStorageMode::None {
-            return Ok(());
+    fn submit(&self, event: RuntimeTraceEvent) {
+        if let Some(tx) = &self.tx {
+            if tx.send(event).is_err() {
+                tracing::warn!("runtime trace writer thread is gone; trace event dropped");
+            }
+        }
+    }
+}
+
+fn trace_writer_loop(
+    mode: RuntimeTraceStorageMode,
+    max_entries: usize,
+    path: PathBuf,
+    rx: std::sync::mpsc::Receiver<RuntimeTraceEvent>,
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+
+    const BATCH_MAX: usize = 64;
+    const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+
+    let mut batch: Vec<RuntimeTraceEvent> = Vec::new();
+    let mut last_flush = Instant::now();
+
+    loop {
+        let wait = FLUSH_INTERVAL.saturating_sub(last_flush.elapsed());
+        match rx.recv_timeout(wait) {
+            Ok(event) => {
+                batch.push(event);
+                if batch.len() >= BATCH_MAX {
+                    flush_trace_batch(mode, max_entries, &path, &mut batch);
+                    last_flush = Instant::now();
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if !batch.is_empty() {
+                    flush_trace_batch(mode, max_entries, &path, &mut batch);
+                }
+                last_flush = Instant::now();
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                flush_trace_batch(mode, max_entries, &path, &mut batch);
+                break;
+            }
         }
 
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+        if !batch.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
+            flush_trace_batch(mode, max_entries, &path, &mut batch);
+            last_flush = Instant::now();
         }
+    }
+}
 
+fn flush_trace_batch(
+    mode: RuntimeTraceStorageMode,
+    max_entries: usize,
+    path: &Path,
+    batch: &mut Vec<RuntimeTraceEvent>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    if let Err(err) = write_trace_batch(mode, max_entries, path, batch) {
+        tracing::warn!("Failed to write runtime trace batch: {err}");
+    }
+    batch.clear();
+}
+
+fn write_trace_batch(
+    mode: RuntimeTraceStorageMode,
+    max_entries: usize,
+    path: &Path,
+    batch: &[RuntimeTraceEvent],
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let file = options.open(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    for event in batch {
         let line = serde_json::to_string(event)?;
-        let mut options = OpenOptions::new();
-        options.create(true).append(true);
+        writeln!(writer, "{line}")?;
+    }
+    writer.flush()?;
+    let file = writer
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("failed to flush runtime trace buffer: {e}"))?;
+    file.sync_data()?;
+    drop(file);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let mut file = options.open(&self.path)?;
-        writeln!(file, "{line}")?;
-        file.sync_data()?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
-        }
-
-        if self.mode == RuntimeTraceStorageMode::Rolling {
-            self.trim_to_last_entries()?;
-        }
-
-        Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 
-    fn trim_to_last_entries(&self) -> Result<()> {
-        let raw = fs::read_to_string(&self.path).unwrap_or_default();
-        let lines: Vec<&str> = raw
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-
-        if lines.len() <= self.max_entries {
-            return Ok(());
-        }
-
-        let keep_from = lines.len().saturating_sub(self.max_entries);
-        let kept = &lines[keep_from..];
-        let mut rewritten = kept.join("\n");
-        rewritten.push('\n');
-
-        let tmp = self.path.with_extension(format!(
-            "tmp.{}.{}",
-            std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        fs::write(&tmp, rewritten)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-
-        fs::rename(tmp, &self.path)?;
-        Ok(())
+    if mode == RuntimeTraceStorageMode::Rolling {
+        trim_to_last_entries(path, max_entries)?;
     }
+
+    Ok(())
+}
+
+fn trim_to_last_entries(path: &Path, max_entries: usize) -> Result<()> {
+    let raw = fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.len() <= max_entries {
+        return Ok(());
+    }
+
+    let keep_from = lines.len().saturating_sub(max_entries);
+    let kept = &lines[keep_from..];
+    let mut rewritten = kept.join("\n");
+    rewritten.push('\n');
+
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&tmp, rewritten)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+
+    fs::rename(tmp, path)?;
+    Ok(())
 }
 
 static TRACE_LOGGER: LazyLock<RwLock<Option<Arc<RuntimeTraceLogger>>>> =
@@ -270,9 +351,7 @@ pub fn record_event_with_ctx(
         payload,
     };
 
-    if let Err(err) = logger.append(&event) {
-        tracing::warn!("Failed to write runtime trace event: {err}");
-    }
+    logger.submit(event);
 }
 
 pub fn load_events(

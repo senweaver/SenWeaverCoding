@@ -26,12 +26,6 @@ fn char_at(slice: ropey::RopeSlice<'_>, col: usize) -> Option<char> {
     slice.chars().nth(col)
 }
 
-#[inline]
-fn byte_at(slice: ropey::RopeSlice<'_>, col: usize) -> Option<u8> {
-    let s = slice.to_string();
-    s.as_bytes().get(col).copied()
-}
-
 pub fn next_word_start(buffer: &TextBuffer, pos: Position) -> Position {
     let line_count = buffer.line_count();
     if line_count == 0 {

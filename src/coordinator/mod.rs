@@ -2,7 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-#![allow(unused_imports)]
 pub mod delegation;
 
 pub use delegation::{

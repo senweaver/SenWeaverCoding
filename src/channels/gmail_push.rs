@@ -251,7 +251,7 @@ impl GmailPushChannel {
             *last_id = watch.history_id;
         }
         info!(
-            "Gmail watch registered — historyId={}, expiration={}",
+            "Gmail watch registered  -  historyId={}, expiration={}",
             watch.history_id, watch.expiration
         );
         Ok(watch)
@@ -508,7 +508,7 @@ impl Channel for GmailPushChannel {
             *tx_guard = Some(tx);
         }
 
-        info!("Gmail push channel started — registering watch subscription");
+        info!("Gmail push channel started  -  registering watch subscription");
 
         if !self.config.webhook_url.is_empty() {
             if let Err(e) = self.register_watch().await {

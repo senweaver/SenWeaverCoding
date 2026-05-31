@@ -91,7 +91,7 @@ fn show_integration_info(config: &Config, name: &str) -> Result<()> {
 
     println!();
     println!(
-        "  {} {} — {}",
+        "  {} {}  -  {}",
         icon,
         console::style(entry.name).white().bold(),
         entry.description
@@ -155,7 +155,7 @@ fn show_integration_info(config: &Config, name: &str) -> Result<()> {
         }
         "Weather" => {
             println!("  Built-in:");
-            println!("    Fetches live conditions from wttr.in — no API key required.");
+            println!("    Fetches live conditions from wttr.in  -  no API key required.");
             println!("    Supports city names, IATA airport codes, GPS coordinates,");
             println!("    postal/zip codes, and Unicode location names.");
             println!("    Ask the agent: \"What's the weather in Tulsa?\"");

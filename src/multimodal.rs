@@ -140,7 +140,7 @@ pub async fn prepare_messages_for_provider(
         });
     }
 
-    let remote_client = crate::services::get_services()
+    let remote_client = crate::services::require_services()
         .proxy_runtime()
         .build_client_with_timeouts("provider.ollama", 30, 10);
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use senweavercoding::tools::web_fetch::{
+use senweavercoding::tools::web::fetch::{
     FetchController, FetchedPage, install_fetch_controller,
 };
 use serde_json::Value;

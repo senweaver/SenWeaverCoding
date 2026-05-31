@@ -2,7 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-#![allow(unused_imports)]
 pub mod bridge;
 pub mod chat_view;
 pub mod event;
@@ -343,7 +342,7 @@ pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
             tool_call_id,
         } => {
             let is_error = !success
-                || crate::agent::tool_event_status::output_indicates_error(&output);
+                || crate::agent::tool_handler::event_status::output_indicates_error(&output);
             SessionEventKind::ToolResult {
                 tool_call_id: tool_call_id
                     .filter(|id| !id.is_empty())
@@ -382,7 +381,9 @@ pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
         | TurnEvent::CommandPreview { .. }
         | TurnEvent::Cancelling { .. }
         | TurnEvent::PermissionRequest { .. }
-        | TurnEvent::PiiSanitized { .. } => {
+        | TurnEvent::PiiSanitized { .. }
+        | TurnEvent::PlanProgressCommitted { .. }
+        | TurnEvent::StreamReset => {
 
             return None;
         }

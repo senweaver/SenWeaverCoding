@@ -222,9 +222,6 @@ async fn build_flat_listing(
     Some(entries)
 }
 
-#[async_trait::async_trait]
-trait DirListAsync {}
-
 async fn list_dir_recursive(
     dir: &Path,
     prefix: &str,

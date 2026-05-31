@@ -59,7 +59,7 @@ impl MarkdownMemory {
                 "# Long-Term Memory\n\n"
             } else {
                 let date = Local::now().format("%Y-%m-%d").to_string();
-                &format!("# Daily Log — {date}\n\n")
+                &format!("# Daily Log  -  {date}\n\n")
             };
             format!("{header}{content}\n")
         } else {

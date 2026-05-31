@@ -221,7 +221,7 @@ pub async fn cancel_task(
 
 async fn notify_callback(url: Option<&str>, task: &A2aTask) {
     let Some(url) = url else { return };
-    let client = reqwest::Client::new();
+    let client = crate::services::proxy::runtime::ProxyRuntime::global().build_client("gateway.a2a");
     if let Err(e) = client
         .post(url)
         .json(task)

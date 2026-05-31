@@ -23,35 +23,6 @@ pub struct AnthropicProvider {
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 4096;
 
 #[derive(Debug, Serialize)]
-struct ChatRequest {
-    model: String,
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    messages: Vec<Message>,
-    temperature: f64,
-}
-
-#[derive(Debug, Serialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    content: Vec<ContentBlock>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 struct NativeChatRequest<'a> {
     model: String,
     max_tokens: u32,
@@ -266,10 +237,6 @@ impl AnthropicProvider {
             ])),
             None => Some(SystemPrompt::Blocks(vec![prefix])),
         }
-    }
-
-    fn should_cache_system(text: &str) -> bool {
-        text.len() > 3072
     }
 
     fn should_cache_conversation(messages: &[ChatMessage]) -> bool {
@@ -697,15 +664,6 @@ impl AnthropicProvider {
         (system_prompt, native_messages)
     }
 
-    fn parse_text_response(response: ChatResponse) -> anyhow::Result<String> {
-        response
-            .content
-            .into_iter()
-            .find(|c| c.kind == "text")
-            .and_then(|c| c.text)
-            .ok_or_else(|| anyhow::anyhow!("No response from Anthropic"))
-    }
-
     fn parse_native_response(response: NativeChatResponse) -> ProviderChatResponse {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -777,7 +735,7 @@ impl AnthropicProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::services::get_services()
+        crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts_and_headers(
                 "provider.anthropic",
@@ -1297,42 +1255,15 @@ impl Provider for AnthropicProvider {
                 None,
                 crate::providers::sanitize::ProviderKind::Anthropic,
             );
-        let (system_prompt, mut messages) = Self::convert_messages(&sanitized_messages);
-        if Self::should_cache_conversation(&sanitized_messages)
-            || Self::should_cache_last_attachment(&sanitized_messages)
-        {
-            Self::apply_cache_to_last_message(&mut messages);
-        }
 
         let tool_choice_override = crate::agent::loop_::TOOL_CHOICE_OVERRIDE
             .try_with(Clone::clone)
             .ok()
             .flatten();
-        let native_tools = Self::convert_tools(request.tools);
-        let tool_choice = if native_tools.is_some() {
-            tool_choice_override.map(|tc| serde_json::json!({ "type": tc }))
-        } else {
-            None
-        };
+        let request_tools: Option<Vec<ToolSpec>> = request.tools.map(<[ToolSpec]>::to_vec);
 
-        let system_prompt = if Self::is_setup_token(&credential) {
-            Self::apply_oauth_system_prompt(system_prompt)
-        } else {
-            system_prompt
-        };
-
-        let native_request = NativeChatRequest {
-            model: model.to_string(),
-            max_tokens: self.max_tokens,
-            system: system_prompt,
-            messages,
-            temperature,
-            tools: native_tools,
-            tool_choice,
-            stream: Some(true),
-        };
-
-        let body = Self::build_streaming_request(&native_request);
+        let model_owned = model.to_string();
+        let max_tokens = self.max_tokens;
         let client = self.http_client();
         let url = format!("{}/v1/messages", self.base_url);
         let is_oauth = Self::is_setup_token(&credential);
@@ -1340,6 +1271,57 @@ impl Provider for AnthropicProvider {
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(64);
 
         let _bg = crate::runtime::spawn_supervised("providers.anthropic.stream", async move {
+            let (system_prompt, messages) = match tokio::task::spawn_blocking(move || {
+                let (system_prompt, messages) = Self::convert_messages(&sanitized_messages);
+                let cache = Self::should_cache_conversation(&sanitized_messages)
+                    || Self::should_cache_last_attachment(&sanitized_messages);
+                (system_prompt, messages, cache)
+            })
+            .await
+            {
+                Ok((system_prompt, messages, cache)) => {
+                    let mut messages = messages;
+                    if cache {
+                        Self::apply_cache_to_last_message(&mut messages);
+                    }
+                    (system_prompt, messages)
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "anthropic convert_messages join error: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+
+            let native_tools = Self::convert_tools(request_tools.as_deref());
+            let tool_choice = if native_tools.is_some() {
+                tool_choice_override.map(|tc| serde_json::json!({ "type": tc }))
+            } else {
+                None
+            };
+
+            let system_prompt = if is_oauth {
+                Self::apply_oauth_system_prompt(system_prompt)
+            } else {
+                system_prompt
+            };
+
+            let native_request = NativeChatRequest {
+                model: model_owned,
+                max_tokens,
+                system: system_prompt,
+                messages,
+                temperature,
+                tools: native_tools,
+                tool_choice,
+                stream: Some(true),
+            };
+
+            let body = Self::build_streaming_request(&native_request);
+
             let mut req = client
                 .post(&url)
                 .header("anthropic-version", "2023-06-01")
