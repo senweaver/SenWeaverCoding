@@ -95,3 +95,27 @@ pub(crate) fn save_interactive_session_history(path: &Path, history: &[ChatMessa
     std::fs::write(path, payload)?;
     Ok(())
 }
+
+pub(crate) async fn load_interactive_session_history_async(
+    path: &Path,
+    system_prompt: &str,
+) -> Result<Vec<ChatMessage>> {
+    let path = path.to_path_buf();
+    let system_prompt = system_prompt.to_string();
+    tokio::task::spawn_blocking(move || {
+        load_interactive_session_history(&path, &system_prompt)
+    })
+    .await?
+}
+
+pub(crate) async fn save_interactive_session_history_async(
+    path: &Path,
+    history: &[ChatMessage],
+) -> Result<()> {
+    let path = path.to_path_buf();
+    let history = history.to_vec();
+    tokio::task::spawn_blocking(move || {
+        save_interactive_session_history(&path, &history)
+    })
+    .await?
+}

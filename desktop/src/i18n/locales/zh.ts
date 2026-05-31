@@ -2191,7 +2191,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.usage.tasksLiveSuffix': '正在运行',
   'settings.usage.tasksEmpty': '当前没有受监督的后台任务在运行。',
   'settings.usage.codingModeSection': '按编程模式',
-  'settings.usage.codingModeHint': '12 种编程工作流的请求级聚合',
+  'settings.usage.codingModeHint': '7 种可见编程工作流的请求级聚合',
   'settings.usage.codingModeKpiActive': '激活模式数',
   'settings.usage.codingModeKpiActiveHint': '至少有一次请求记录的模式数量',
   'settings.usage.codingModeKpiRequests': '模式请求数',

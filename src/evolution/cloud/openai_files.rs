@@ -42,9 +42,8 @@ impl CloudPushTarget for OpenaiFilesTarget {
             .part("file", part)
             .text("purpose", "fine-tune");
         let _ = export;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("evolution.openai_files", 120, 10);
         let resp = client
             .post(&endpoint)
             .bearer_auth(token)

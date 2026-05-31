@@ -223,37 +223,6 @@ impl DeviceRegistry {
     }
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct PairingStore {
-    pending: Mutex<Vec<PendingPairing>>,
-    max_pending: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PendingPairing {
-    code: String,
-    created_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    client_ip: Option<String>,
-    attempts: u32,
-}
-
-impl PairingStore {
-    pub fn new(max_pending: usize) -> Self {
-        Self {
-            pending: Mutex::new(Vec::new()),
-            max_pending,
-        }
-    }
-
-    pub fn pending_count(&self) -> usize {
-        let mut pending = self.pending.lock();
-        pending.retain(|p| p.expires_at > Utc::now());
-        pending.len()
-    }
-}
-
 fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)

@@ -140,7 +140,7 @@ fn process_normal_key(state: &mut VimState, key: char, buffer: &str) -> VimActio
         'P' => VimAction::PasteBefore,
 
         '0'..='9' => {
-            let digit = key.to_digit(10).unwrap();
+            let digit = key.to_digit(10).unwrap_or(0);
             let current = state.count.unwrap_or(0);
             state.count = Some(current * 10 + digit);
             VimAction::NoOp

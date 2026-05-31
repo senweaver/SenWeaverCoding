@@ -462,5 +462,14 @@ pub fn parse_severity(value: &str) -> String {
 pub fn render_envelope(family: &str, body: &str) -> String {
     let begin = format!("==={}_REPORT_BEGIN===", family.to_ascii_uppercase());
     let end = format!("==={}_REPORT_END===", family.to_ascii_uppercase());
+    let body = if crate::token_saver::is_enabled() {
+        crate::token_saver::compact_tool_output(
+            &format!("autoresearch_{family}"),
+            body,
+            &crate::token_saver::global(),
+        )
+    } else {
+        body.to_string()
+    };
     format!("{begin}\n{body}\n{end}")
 }

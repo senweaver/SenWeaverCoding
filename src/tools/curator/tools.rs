@@ -14,11 +14,39 @@ use crate::tools::web::fetch::WebFetchTool;
 use crate::tools::web::search::tool::WebSearchTool;
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use regex::Regex;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 pub type CuratorModeFlag = Arc<RwLock<bool>>;
+
+static SOURCE_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[S(\d+)\]").expect("source id regex"));
+
+static REF_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([SGL])(\d+)\]").expect("ref id regex"));
+
+static PATH_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)`?[A-Za-z0-9_./\\-]+\.(?:go|java|kt|py|rs|c|cpp|cc|h|hpp|cs|js|jsx|ts|tsx|swift|rb|php|scala|m|mm|dart|lua|hs|ex|exs|erl)`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?",
+    )
+    .expect("path:line regex")
+});
+
+static OSS_BRAND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:one[-\s]?api|new[-\s]?api|newswapi|litellm|openrouter|portkey|sen\s?api|vllm|fastchat|langchain|llama\.cpp|ollama|ray\s?serve|tritoninfere?nce|tgi|text-generation-inference)\b",
+    )
+    .expect("oss brand regex")
+});
+
+static FUNC_SIGNATURE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*(?:func\s+\w+\s*\(|def\s+\w+\s*\(|fn\s+\w+\s*\(|public\s+(?:static\s+)?\w[\w<>\[\]]*\s+\w+\s*\(|class\s+\w+\s*[\(:{])",
+    )
+    .expect("function signature regex")
+});
 
 pub struct EnterCuratorModeTool {
     flag: CuratorModeFlag,
@@ -1229,6 +1257,15 @@ impl Tool for ExitCuratorModeTool {
                 .map(|p| format!("docx_path: {}\n", p.display()))
                 .unwrap_or_default()
         );
+        let envelope = if crate::token_saver::is_enabled() {
+            crate::token_saver::compact_tool_output(
+                "curator_assemble",
+                &envelope,
+                &crate::token_saver::global(),
+            )
+        } else {
+            envelope
+        };
         Ok(ToolResult {
             success: true,
             output: envelope,
@@ -1475,10 +1512,7 @@ fn next_source_id(root: &Path) -> anyhow::Result<String> {
     let path = root.join("sources.md");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut max_id = 0usize;
-    for cap in regex::Regex::new(r"\[S(\d+)\]")
-        .expect("source id regex")
-        .captures_iter(&text)
-    {
+    for cap in SOURCE_ID_RE.captures_iter(&text) {
         if let Some(num) = cap.get(1).and_then(|m| m.as_str().parse::<usize>().ok()) {
             if num > max_id {
                 max_id = num;
@@ -1515,8 +1549,7 @@ fn curator_evidence_check(root: &Path) -> Result<(), String> {
         std::collections::HashSet::new();
     let mut local_ref_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    let re_all = regex::Regex::new(r"\[([SGL])(\d+)\]").expect("ref id regex");
-    for cap in re_all.captures_iter(&sources_text) {
+    for cap in REF_ID_RE.captures_iter(&sources_text) {
         let prefix = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         if let Some(full) = cap.get(0).map(|m| m.as_str().to_string()) {
             match prefix {
@@ -1643,22 +1676,11 @@ fn curator_content_style_check(final_md: &str) -> Result<(), String> {
         }
     }
 
-    let path_line_re = regex::Regex::new(
-        r"(?m)`?[A-Za-z0-9_./\\-]+\.(?:go|java|kt|py|rs|c|cpp|cc|h|hpp|cs|js|jsx|ts|tsx|swift|rb|php|scala|m|mm|dart|lua|hs|ex|exs|erl)`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?",
-    )
-    .expect("path:line regex");
-    let path_line_hits = path_line_re.find_iter(final_md).count();
+    let path_line_hits = PATH_LINE_RE.find_iter(final_md).count();
 
-    let oss_brand_re = regex::Regex::new(
-        r"(?i)\b(?:one[-\s]?api|new[-\s]?api|newswapi|litellm|openrouter|portkey|sen\s?api|vllm|fastchat|langchain|llama\.cpp|ollama|ray\s?serve|tritoninfere?nce|tgi|text-generation-inference)\b",
-    )
-    .expect("oss brand regex");
-    let oss_brand_hits = oss_brand_re.find_iter(final_md).count();
+    let oss_brand_hits = OSS_BRAND_RE.find_iter(final_md).count();
 
-    let func_signature_re = regex::Regex::new(
-        r"(?m)^\s*(?:func\s+\w+\s*\(|def\s+\w+\s*\(|fn\s+\w+\s*\(|public\s+(?:static\s+)?\w[\w<>\[\]]*\s+\w+\s*\(|class\s+\w+\s*[\(:{])",
-    )
-    .expect("function signature regex");
+    let func_signature_re = &*FUNC_SIGNATURE_RE;
     let func_hits_outside_blocks = {
         let mut count = 0usize;
         let mut inside = false;

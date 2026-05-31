@@ -464,7 +464,7 @@ impl Executor for CodeEditExecutor {
                 .await;
         }
 
-        let body = match std::fs::read_to_string(&abs_path) {
+        let body = match tokio::fs::read_to_string(&abs_path).await {
             Ok(s) => s,
             Err(e) => {
                 return Err(FlowError::Executor(format!(
@@ -599,7 +599,7 @@ impl Executor for CodeEditExecutor {
         match applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::observability::code_intel_metrics::incr_code_edit_diff_applied();
-                let new_body = std::fs::read_to_string(&abs_path).unwrap_or_default();
+                let new_body = tokio::fs::read_to_string(&abs_path).await.unwrap_or_default();
                 let mut artifact = Artifact::new(step.id.clone(), new_body)
                     .with_language(self.language.clone());
                 artifact

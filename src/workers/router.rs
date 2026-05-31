@@ -68,22 +68,29 @@ async fn handle_list(Query(q): Query<ListQuery>) -> impl IntoResponse {
         .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    let metas = {
+        let wr = workspace_root.clone();
+        tokio::task::spawn_blocking(move || list_meta(&wr))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    };
+
     if let Some(parent) = q.session_id.as_deref() {
         if let Some(sup) = supervisor.as_ref() {
             summaries = sup.list_by_parent(parent);
         }
         let known: std::collections::HashSet<String> =
             summaries.iter().map(|s| s.worker_id.clone()).collect();
-        if let Ok(metas) = list_meta(&workspace_root) {
-            for meta in metas {
-                if meta.parent_session_id != parent {
-                    continue;
-                }
-                if known.contains(&meta.worker_id) {
-                    continue;
-                }
-                summaries.push(meta.to_summary());
+        for meta in &metas {
+            if meta.parent_session_id != parent {
+                continue;
             }
+            if known.contains(&meta.worker_id) {
+                continue;
+            }
+            summaries.push(meta.to_summary());
         }
     } else {
         if let Some(sup) = supervisor.as_ref() {
@@ -91,13 +98,11 @@ async fn handle_list(Query(q): Query<ListQuery>) -> impl IntoResponse {
         }
         let known: std::collections::HashSet<String> =
             summaries.iter().map(|s| s.worker_id.clone()).collect();
-        if let Ok(metas) = list_meta(&workspace_root) {
-            for meta in metas {
-                if known.contains(&meta.worker_id) {
-                    continue;
-                }
-                summaries.push(meta.to_summary());
+        for meta in &metas {
+            if known.contains(&meta.worker_id) {
+                continue;
             }
+            summaries.push(meta.to_summary());
         }
     }
 
@@ -115,7 +120,15 @@ async fn handle_get(Path(id): Path<String>) -> impl IntoResponse {
 
     let summary = supervisor.as_ref().and_then(|s| s.summary_for(&id));
 
-    let meta = match read_meta(&workspace_root, &id) {
+    let read_result = {
+        let wr = workspace_root.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || read_meta(&wr, &id))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+    };
+
+    let meta = match read_result {
         Ok(Some(m)) => m,
         Ok(None) => {
             if let Some(s) = &summary {
@@ -186,8 +199,18 @@ async fn handle_events(Path(id): Path<String>) -> impl IntoResponse {
         .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    let log = match WorkerEventLog::open(&workspace_root, &id) {
-        Ok(l) => l,
+    let events = {
+        let wr = workspace_root.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            WorkerEventLog::open(&wr, &id).and_then(|log| log.replay())
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+    };
+
+    let events = match events {
+        Ok(evts) => evts,
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -196,8 +219,6 @@ async fn handle_events(Path(id): Path<String>) -> impl IntoResponse {
                 .into_response();
         }
     };
-
-    let events = log.replay().unwrap_or_default();
     (
         StatusCode::OK,
         Json(EventsResponse {

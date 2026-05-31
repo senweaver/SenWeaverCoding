@@ -45,10 +45,8 @@ impl CloudPushTarget for WebhookTarget {
             "x-evolution-format",
             HeaderValue::try_from(export.format.as_str()).unwrap_or(HeaderValue::from_static("unknown")),
         );
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .context("build reqwest client")?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("evolution.webhook", 60, 10);
         let resp = client
             .post(&target.endpoint)
             .headers(headers)

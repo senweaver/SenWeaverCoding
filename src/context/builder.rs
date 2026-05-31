@@ -13,7 +13,7 @@ use super::lsp_ctx::LspSnapshot;
 use super::memory_files::MemoryFileContext;
 use super::open_files::{NoOpenFilesSource, OpenFile, OpenFilesSource};
 use super::outline_ctx::OutlineNode;
-use super::rag_ctx::RagHit;
+use super::rag_ctx::SearchHit;
 use super::symbols_ctx::SymbolSnapshot;
 use super::system_prompt::SystemPromptParts;
 
@@ -29,7 +29,7 @@ pub trait LspContextSource: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait RagSource: Send + Sync {
-    async fn retrieve(&self, query: &str, top_k: usize) -> Vec<RagHit>;
+    async fn retrieve(&self, query: &str, top_k: usize) -> Vec<SearchHit>;
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,7 @@ pub struct QueryContext {
     pub symbols: Vec<SymbolSnapshot>,
     pub outline: Vec<OutlineNode>,
     pub lsp_info: Vec<LspSnapshot>,
-    pub rag_hits: Vec<RagHit>,
+    pub rag_hits: Vec<SearchHit>,
 }
 
 impl QueryContext {

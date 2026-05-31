@@ -199,12 +199,12 @@ impl IvfVectorIndex {
                     break;
                 }
             }
-            self.centroid_norms.push(compute_norm(&data[chosen]));
-            self.centroids.push(data[chosen].clone());
+            let new_c = data[chosen].clone();
+            self.centroid_norms.push(compute_norm(&new_c));
+            self.centroids.push(new_c.clone());
 
-            let new_c = self.centroids.last().unwrap();
             for (i, v) in data.iter().enumerate() {
-                let d2 = squared_euclidean(v, new_c);
+                let d2 = squared_euclidean(v, &new_c);
                 if d2 < min_dist_sq[i] {
                     min_dist_sq[i] = d2;
                 }

@@ -24,7 +24,7 @@ enum OutboundFrame {
     Pong(Vec<u8>),
 }
 
-type OutboundSender = tokio::sync::mpsc::UnboundedSender<OutboundFrame>;
+type OutboundSender = tokio::sync::mpsc::Sender<OutboundFrame>;
 
 pub async fn handle_ws_desktop(
     State(state): State<AppState>,
@@ -51,7 +51,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let (mut sink, mut receiver) = socket.split();
 
     let (outbound_tx, mut outbound_rx) =
-        tokio::sync::mpsc::unbounded_channel::<OutboundFrame>();
+        tokio::sync::mpsc::channel::<OutboundFrame>(1024);
 
     let writer_handle = tokio::spawn(async move {
         const COALESCE_WINDOW_MS: u64 = 24;
@@ -277,6 +277,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             .send(OutboundFrame::Text(
                                 r#"{"type":"pong"}"#.to_string(),
                             ))
+                            .await
                             .is_err()
                         {
                             break;
@@ -379,6 +380,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 Ok(Message::Ping(payload)) => {
                     if outbound_tx_reader
                         .send(OutboundFrame::Pong(payload.to_vec()))
+                        .await
                         .is_err()
                     {
                         break;
@@ -1560,7 +1562,7 @@ pub fn desktop_runtime_state() -> &'static DesktopRuntimeState {
 }
 
 async fn send_json(outbound: &OutboundSender, value: &serde_json::Value) {
-    let _ = outbound.send(OutboundFrame::Text(value.to_string()));
+    let _ = outbound.send(OutboundFrame::Text(value.to_string())).await;
 }
 
 async fn send_error(outbound: &OutboundSender, message: &str, code: &str) {

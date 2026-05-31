@@ -9,7 +9,7 @@ use crate::code_intel::search::{IncrementalIndex, heuristic::Search as Heuristic
 use crate::code_intel::symbol_graph::{EdgeKind, SymbolGraph, SymbolId};
 use crate::context::builder::{LspContextSource, RagSource, SymbolGraphLookup};
 use crate::context::lsp_ctx::LspSnapshot;
-use crate::context::rag_ctx::RagHit;
+use crate::context::rag_ctx::SearchHit;
 use crate::context::symbols_ctx::SymbolSnapshot;
 use crate::rag::vector_code_index::{SharedVectorCodeIndex, reciprocal_rank_fusion};
 
@@ -103,7 +103,7 @@ struct CodeRagSource {
 
 #[async_trait::async_trait]
 impl RagSource for CodeRagSource {
-    async fn retrieve(&self, query: &str, top_k: usize) -> Vec<RagHit> {
+    async fn retrieve(&self, query: &str, top_k: usize) -> Vec<SearchHit> {
         if query.trim().is_empty() {
             return Vec::new();
         }
@@ -148,7 +148,7 @@ impl RagSource for CodeRagSource {
             .map(|h| (h.path.clone(), h.start_line))
             .collect();
         let fused = reciprocal_rank_fusion(&[lexical_keys, dense_keys], 60);
-        let mut out: Vec<RagHit> = Vec::with_capacity(fused.len().min(limit));
+        let mut out: Vec<SearchHit> = Vec::with_capacity(fused.len().min(limit));
         for ((path, line), _score) in fused.into_iter().take(limit) {
             if let Some(hit) = lexical.iter().find(|h| h.path == path && h.line == line) {
                 out.push(hit.clone());
@@ -158,7 +158,7 @@ impl RagSource for CodeRagSource {
                 .iter()
                 .find(|d| d.path == path && d.start_line == line)
             {
-                out.push(RagHit {
+                out.push(SearchHit {
                     path: d.path.clone(),
                     line: d.start_line,
                     snippet: d.snippet.clone(),

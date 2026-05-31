@@ -53,10 +53,8 @@ impl DatasheetManager {
         let filename = format!("{}.pdf", device_name.to_lowercase().replace(' ', "_"));
         let dest = self.datasheet_dir.join(&filename);
 
-        let client = reqwest::Client::builder()
-            .user_agent("SenWeaverCoding/0.1 (datasheet downloader)")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("tool.datasheet", 30, 10);
 
         let response = client.get(url).send().await?;
         if !response.status().is_success() {

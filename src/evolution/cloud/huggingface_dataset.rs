@@ -39,9 +39,8 @@ impl CloudPushTarget for HuggingfaceTarget {
         } else {
             format!("{}/{}", target.endpoint, file_name)
         };
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("evolution.huggingface_dataset", 180, 10);
         let _ = export;
         let resp = client
             .put(&upload_url)

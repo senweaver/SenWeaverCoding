@@ -318,9 +318,8 @@ pub struct TelegramChannel {
     workspace_dir: Option<std::path::PathBuf>,
     ack_reactions: bool,
     tts_config: Option<crate::config::TtsConfig>,
-    voice_chats: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    pending_voice:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
+    voice_chats: Arc<Mutex<std::collections::HashSet<String>>>,
+    pending_voice: Arc<Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
 
     proxy_url: Option<String>,
 }
@@ -364,8 +363,8 @@ impl TelegramChannel {
             workspace_dir: None,
             ack_reactions: true,
             tts_config: None,
-            voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            voice_chats: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pending_voice: Arc::new(Mutex::new(std::collections::HashMap::new())),
             proxy_url: None,
         }
     }
@@ -1211,9 +1210,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             return None;
         }
 
-        if let Ok(mut vc) = self.voice_chats.lock() {
-            vc.insert(reply_target.clone());
-        }
+        self.voice_chats.lock().insert(reply_target.clone());
 
         {
             let mut cache = self.voice_transcriptions.lock();
@@ -1425,9 +1422,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             content
         };
 
-        if let Ok(mut vc) = self.voice_chats.lock() {
-            vc.remove(&reply_target);
-        }
+        self.voice_chats.lock().remove(&reply_target);
 
         Some(ChannelMessage {
             id: format!("telegram_{chat_id}_{message_id}"),
@@ -1538,7 +1533,10 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                     }
                 }
 
-                let ch = line[i..].chars().next().unwrap();
+                let ch = match line[i..].chars().next() {
+                    Some(c) => c,
+                    None => break,
+                };
                 match ch {
                     '<' => line_out.push_str("&lt;"),
                     '>' => line_out.push_str("&gt;"),
@@ -2512,11 +2510,7 @@ impl Channel for TelegramChannel {
             None => (message.recipient.as_str(), None),
         };
 
-        let is_voice_chat = self
-            .voice_chats
-            .lock()
-            .map(|vs| vs.contains(&message.recipient))
-            .unwrap_or(false);
+        let is_voice_chat = self.voice_chats.lock().contains(&message.recipient);
 
         if is_voice_chat && self.tts_config.is_some() {
 
@@ -2530,12 +2524,10 @@ impl Channel for TelegramChannel {
                 && !content.contains("wttr.in");
 
             if is_substantive {
-                if let Ok(mut pv) = self.pending_voice.lock() {
-                    pv.insert(
-                        message.recipient.clone(),
-                        (content.clone(), std::time::Instant::now()),
-                    );
-                }
+                self.pending_voice.lock().insert(
+                    message.recipient.clone(),
+                    (content.clone(), std::time::Instant::now()),
+                );
 
                 let pending = self.pending_voice.clone();
                 let voice_chats = self.voice_chats.clone();
@@ -2551,19 +2543,18 @@ impl Channel for TelegramChannel {
 
                             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-                            let to_voice = pending.lock().ok().and_then(|mut pv| {
-                                if let Some((_, ts)) = pv.get(&recipient) {
-                                    if ts.elapsed().as_secs() >= 8 {
-                                        return pv.remove(&recipient).map(|(text, _)| text);
+                            let to_voice = {
+                                let mut pv = pending.lock();
+                                match pv.get(&recipient) {
+                                    Some((_, ts)) if ts.elapsed().as_secs() >= 8 => {
+                                        pv.remove(&recipient).map(|(text, _)| text)
                                     }
+                                    _ => None,
                                 }
-                                None
-                            });
+                            };
 
                             if let Some(text) = to_voice {
-                                if let Ok(mut vc) = voice_chats.lock() {
-                                    vc.remove(&recipient);
-                                }
+                                voice_chats.lock().remove(&recipient);
                                 match Self::synthesize_and_send_voice(
                                     &api_base,
                                     &bot_token,

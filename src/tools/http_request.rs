@@ -251,7 +251,18 @@ impl Tool for HttpRequestTool {
                     .join(", ");
 
                 let response_text = match response.text().await {
-                    Ok(text) => self.truncate_response(&text),
+                    Ok(text) => {
+                        let truncated = self.truncate_response(&text);
+                        if crate::token_saver::is_enabled() {
+                            crate::token_saver::compact_tool_output(
+                                "http_request",
+                                &truncated,
+                                &crate::token_saver::global(),
+                            )
+                        } else {
+                            truncated
+                        }
+                    }
                     Err(e) => format!("[Failed to read response body: {e}]"),
                 };
 

@@ -84,7 +84,7 @@ pub(crate) use crate::agent::profile::pii_sanitize::{
 
 pub use crate::agent::history::compaction::estimate_history_tokens;
 pub(crate) use crate::agent::history::compaction::{
-    load_interactive_session_history, save_interactive_session_history,
+    load_interactive_session_history_async, save_interactive_session_history_async,
 };
 
 #[derive(Debug, Clone)]
@@ -4835,7 +4835,7 @@ pub async fn run(
         let _command_registry = crate::services::container::register_all_commands();
 
         let mut history = if let Some(path) = session_state_file.as_deref() {
-            load_interactive_session_history(path, &system_prompt)?
+            load_interactive_session_history_async(path, &system_prompt).await?
         } else {
             vec![ChatMessage::system(&system_prompt)]
         };
@@ -4909,7 +4909,7 @@ pub async fn run(
                         break;
                     }
                     Err(e) => {
-                        eprintln!("Read error: {e}");
+                        tracing::error!("Read error: {e}");
                         return Err(anyhow::anyhow!("{e}"));
                     }
                 }
@@ -5124,7 +5124,7 @@ pub async fn run(
             }
 
             if let Some(path) = session_state_file.as_deref() {
-                let _ = save_interactive_session_history(path, &history);
+                let _ = save_interactive_session_history_async(path, &history).await;
             }
         }
     }

@@ -282,11 +282,11 @@ pub struct App {
 
     pub chat_reconciler: chat::message_reconciler::ChatMessageReconciler,
 
-    pub inline_edit_outcome_tx: tokio::sync::mpsc::UnboundedSender<RunnerOutcomeMessage>,
-    pub inline_edit_outcome_rx: tokio::sync::mpsc::UnboundedReceiver<RunnerOutcomeMessage>,
+    pub inline_edit_outcome_tx: tokio::sync::mpsc::Sender<RunnerOutcomeMessage>,
+    pub inline_edit_outcome_rx: tokio::sync::mpsc::Receiver<RunnerOutcomeMessage>,
 
-    pub revert_hunk_outcome_tx: tokio::sync::mpsc::UnboundedSender<RevertHunkOutcome>,
-    pub revert_hunk_outcome_rx: tokio::sync::mpsc::UnboundedReceiver<RevertHunkOutcome>,
+    pub revert_hunk_outcome_tx: tokio::sync::mpsc::Sender<RevertHunkOutcome>,
+    pub revert_hunk_outcome_rx: tokio::sync::mpsc::Receiver<RevertHunkOutcome>,
 }
 
 #[derive(Debug)]
@@ -545,9 +545,9 @@ impl App {
             .clone()
             .unwrap_or_else(|| "none".into());
         let (inline_edit_outcome_tx, inline_edit_outcome_rx) =
-            tokio::sync::mpsc::unbounded_channel::<RunnerOutcomeMessage>();
+            tokio::sync::mpsc::channel::<RunnerOutcomeMessage>(256);
         let (revert_hunk_outcome_tx, revert_hunk_outcome_rx) =
-            tokio::sync::mpsc::unbounded_channel::<RevertHunkOutcome>();
+            tokio::sync::mpsc::channel::<RevertHunkOutcome>(256);
 
         Self {
             active_tab: Tab::Dashboard,
@@ -872,7 +872,7 @@ impl App {
                                 message: format!("hunk revert failed: {e}"),
                             },
                         };
-                        let _ = tx.send(msg);
+                        let _ = tx.send(msg).await;
                     });
                     self.diff_review_state.toast = Some("reverting hunk...".into());
                 }
@@ -934,7 +934,7 @@ impl App {
                                     error: err.to_string(),
                                 },
                             };
-                            let _ = tx.send(msg);
+                            let _ = tx.send(msg).await;
                         });
                         self.inline_edit_modal.status =
                             Some("running inline-edit runner...".into());

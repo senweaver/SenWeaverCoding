@@ -3,8 +3,13 @@
 // Licensed under the MIT License.
 
 use anyhow::{Context as _, Result};
+use regex::Regex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+static REF_ID_BY_PREFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([GL])(\d+)\]").expect("ref id regex compile"));
 
 pub const REFS_GIT_SUBDIR: &str = "refs/git";
 
@@ -230,11 +235,12 @@ pub fn next_ref_id(root: &Path, kind: RefKind) -> Result<String> {
     let path = root.join(SOURCE_FILE_NAME);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let prefix = kind.prefix_char();
-    let pattern = format!(r"\[{prefix}(\d+)\]");
-    let re = regex::Regex::new(&pattern).expect("ref id regex compile");
     let mut max_id = 0usize;
-    for cap in re.captures_iter(&text) {
-        if let Some(num) = cap.get(1).and_then(|m| m.as_str().parse::<usize>().ok()) {
+    for cap in REF_ID_BY_PREFIX_RE.captures_iter(&text) {
+        if cap.get(1).map(|m| m.as_str()) != Some(prefix.to_string().as_str()) {
+            continue;
+        }
+        if let Some(num) = cap.get(2).and_then(|m| m.as_str().parse::<usize>().ok()) {
             if num > max_id {
                 max_id = num;
             }

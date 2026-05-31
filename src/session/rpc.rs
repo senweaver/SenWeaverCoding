@@ -84,7 +84,7 @@ pub async fn spawn_rpc_listener(
                         match listener.accept().await {
                             Ok((mut stream, _peer)) => {
                                 let actor = actor.clone();
-                                tokio::spawn(async move {
+                                crate::runtime::spawn_supervised("session.rpc.conn", async move {
                                     let mut buf = Vec::new();
                                     if stream.read_to_end(&mut buf).await.is_ok() {
                                         match serde_json::from_slice::<RemoteDelta>(&buf) {

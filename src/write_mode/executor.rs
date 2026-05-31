@@ -258,11 +258,12 @@ impl WriteExecutor {
             match step {
                 WriteStep::ReadFile { path } => {
                     let abs = resolve_workspace_path(&ctx.workspace_root, path)?;
-                    let src =
-                        std::fs::read_to_string(&abs).map_err(|source| ExecuteError::ReadFile {
+                    let src = tokio::fs::read_to_string(&abs).await.map_err(|source| {
+                        ExecuteError::ReadFile {
                             path: abs.clone(),
                             source,
-                        })?;
+                        }
+                    })?;
                     outcomes.push(StepOutcome {
                         label: "read_file",
                         summary: format!("{} ({} bytes)", path.display(), src.len()),
@@ -311,11 +312,12 @@ impl WriteExecutor {
                         return Err(ExecuteError::ApplyDiffEmpty { path: path.clone() });
                     }
                     let abs = resolve_workspace_path(&ctx.workspace_root, path)?;
-                    let source =
-                        std::fs::read_to_string(&abs).map_err(|source| ExecuteError::ReadFile {
+                    let source = tokio::fs::read_to_string(&abs).await.map_err(|source| {
+                        ExecuteError::ReadFile {
                             path: abs.clone(),
                             source,
-                        })?;
+                        }
+                    })?;
                     let ops_applier = self.ops_applier_for(&ctx.workspace_root);
 
                     let fut =

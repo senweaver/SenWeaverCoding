@@ -680,8 +680,17 @@ impl Tool for DelegateParallelTool {
             merge_results_structured(&results, args.merge_strategy)
         };
 
+        let merged_text = if crate::token_saver::is_enabled() {
+            crate::token_saver::compact_tool_output(
+                "delegate_parallel",
+                &merged.merged,
+                &crate::token_saver::global(),
+            )
+        } else {
+            merged.merged.clone()
+        };
         let payload = serde_json::json!({
-            "merged": merged.merged,
+            "merged": merged_text,
             "metadata": {
                 "degraded": merged.degraded,
                 "reasons": merged.reasons,

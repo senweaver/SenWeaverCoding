@@ -39,9 +39,8 @@ impl CloudPushTarget for FireworksTarget {
         let form = Form::new()
             .part("file", part)
             .text("format", export.format.as_str());
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("evolution.fireworks", 180, 10);
         let mut req = client
             .post(&target.endpoint)
             .bearer_auth(token)

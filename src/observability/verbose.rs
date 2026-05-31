@@ -20,20 +20,22 @@ impl Observer for VerboseObserver {
                 model,
                 messages_count,
             } => {
-                eprintln!("> Thinking");
-                eprintln!(
+                tracing::info!("> Thinking");
+                tracing::info!(
                     "> Send (provider={}, model={}, messages={})",
-                    provider, model, messages_count
+                    provider,
+                    model,
+                    messages_count
                 );
             }
             ObserverEvent::LlmResponse {
                 duration, success, ..
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-                eprintln!("< Receive (success={success}, duration_ms={ms})");
+                tracing::info!("< Receive (success={success}, duration_ms={ms})");
             }
             ObserverEvent::ToolCallStart { tool, .. } => {
-                eprintln!("> Tool {tool}");
+                tracing::info!("> Tool {tool}");
             }
             ObserverEvent::ToolCall {
                 tool,
@@ -41,10 +43,10 @@ impl Observer for VerboseObserver {
                 success,
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-                eprintln!("< Tool {tool} (success={success}, duration_ms={ms})");
+                tracing::info!("< Tool {tool} (success={success}, duration_ms={ms})");
             }
             ObserverEvent::TurnComplete => {
-                eprintln!("< Complete");
+                tracing::info!("< Complete");
             }
             _ => {}
         }

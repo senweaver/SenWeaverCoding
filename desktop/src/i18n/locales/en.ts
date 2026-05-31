@@ -2239,7 +2239,7 @@ export const en = {
   'settings.usage.tasksLiveSuffix': 'live',
   'settings.usage.tasksEmpty': 'No supervised background tasks running.',
   'settings.usage.codingModeSection': 'By coding mode',
-  'settings.usage.codingModeHint': 'Twelve programming workflows tracked per request',
+  'settings.usage.codingModeHint': '7 visible programming workflows tracked per request',
   'settings.usage.codingModeKpiActive': 'Active modes',
   'settings.usage.codingModeKpiActiveHint': 'Modes that have recorded at least one request',
   'settings.usage.codingModeKpiRequests': 'Mode requests',

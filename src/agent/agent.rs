@@ -173,6 +173,7 @@ pub enum ConfigChange {
 pub struct Agent {
     provider: Box<dyn Provider>,
     tools: Vec<Box<dyn Tool>>,
+    tool_index: std::collections::HashMap<String, usize>,
 
     tool_specs: std::sync::Arc<Vec<ToolSpec>>,
     memory: Arc<dyn Memory>,
@@ -520,6 +521,11 @@ impl AgentBuilder {
         let tool_specs_vec: Vec<ToolSpec> = tools.iter().map(|tool| tool.spec()).collect();
         let tool_specs =
             std::sync::Arc::new(crate::tools::dedupe_tool_specs(&tool_specs_vec));
+        let tool_index: std::collections::HashMap<String, usize> = tools
+            .iter()
+            .enumerate()
+            .map(|(i, tool)| (tool.name().to_string(), i))
+            .collect();
 
         let baseline_max_iter = self
             .config
@@ -532,6 +538,7 @@ impl AgentBuilder {
                 .provider
                 .ok_or_else(|| anyhow::anyhow!("provider is required"))?,
             tools,
+            tool_index,
             tool_specs,
             memory: self
                 .memory
@@ -1004,6 +1011,7 @@ impl Agent {
             self.tools.iter().map(|t| t.spec()).collect()
         };
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
+        self.rebuild_tool_index();
         self.mode_filter_dirty = false;
     }
 
@@ -1262,6 +1270,7 @@ impl Agent {
         let specs: Vec<crate::tools::ToolSpec> =
             self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
+        self.rebuild_tool_index();
         self.mode_filter_dirty = true;
         self.skills = new_skills;
     }
@@ -1411,8 +1420,18 @@ impl Agent {
         let specs: Vec<crate::tools::ToolSpec> =
             self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
+        self.rebuild_tool_index();
         self.mode_filter_dirty = true;
         self.cached_tools_signature = signature;
+    }
+
+    fn rebuild_tool_index(&mut self) {
+        self.tool_index = self
+            .tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name().to_string(), i))
+            .collect();
     }
 
     async fn reload_mcp_tools_inner(&mut self, config: &crate::config::Config) {
@@ -1576,6 +1595,7 @@ impl Agent {
         }
         let specs: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
+        self.rebuild_tool_index();
     }
 
     pub fn seed_history(&mut self, messages: &[ChatMessage]) {
@@ -1686,8 +1706,10 @@ impl Agent {
             }
         }
         if !mcp_pending.is_empty() {
-            if let Some(tool_search_tool) =
-                self.tools.iter().find(|t| t.name() == "tool_search")
+            if let Some(tool_search_tool) = self
+                .tool_index
+                .get("tool_search")
+                .map(|&i| &self.tools[i])
             {
                 if let Some(any_ref) = tool_search_tool.as_any() {
                     if let Some(ts) =
@@ -2606,8 +2628,10 @@ impl Agent {
             "tool execution start"
         );
         let cancel_handle = self.cancel_signal.load_full().as_ref().clone();
-        let (output, success) = if let Some(tool) =
-            self.tools.iter().find(|t| t.name() == dispatch_call.name)
+        let (output, success) = if let Some(tool) = self
+            .tool_index
+            .get(dispatch_call.name.as_str())
+            .map(|&i| &self.tools[i])
         {
             tokio::select! {
                 biased;

@@ -655,11 +655,8 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn build_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .pool_idle_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .context("build reqwest client")
+    Ok(crate::services::proxy::runtime::ProxyRuntime::global()
+        .build_client_with_timeouts("lsp.installer", 120, 10))
 }
 
 pub fn managed_dir() -> Result<PathBuf> {

@@ -76,7 +76,7 @@ pub fn record_browser_action(
         success,
         recorded_at: timestamp_now(),
     };
-    tokio::spawn(async move {
+    crate::runtime::spawn_supervised("debug_test_report.browser_trace", async move {
         if let Err(err) = append_event(&run_id, &event).await {
             tracing::debug!(target: "debug_test_report.browser_trace", error = %err, "failed to append browser trace");
         }

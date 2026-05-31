@@ -72,24 +72,30 @@ pub struct StepResult {
 pub struct PipelineTool {
     config: PipelineConfig,
     tools: Vec<Arc<dyn Tool>>,
+    tool_index: std::collections::HashMap<String, usize>,
     allowed_set: HashSet<String>,
 }
 
 impl PipelineTool {
     pub fn new(config: PipelineConfig, tools: Vec<Arc<dyn Tool>>) -> Self {
         let allowed_set: HashSet<String> = config.allowed_tools.iter().cloned().collect();
+        let tool_index = tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name().to_string(), i))
+            .collect();
         Self {
             config,
             tools,
+            tool_index,
             allowed_set,
         }
     }
 
     fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools
-            .iter()
-            .find(|t| t.name() == name)
-            .map(|t| t.as_ref())
+        self.tool_index
+            .get(name)
+            .map(|&i| self.tools[i].as_ref())
     }
 
     fn validate(&self, request: &PipelineRequest) -> std::result::Result<(), PipelineError> {
@@ -158,21 +164,20 @@ impl PipelineTool {
         let mut join_set = JoinSet::new();
 
         for (i, step) in steps.iter().enumerate() {
-            let tool = self
-                .find_tool(&step.tool)
+            let idx = self
+                .tool_index
+                .get(&step.tool)
+                .copied()
                 .ok_or_else(|| PipelineError::UnknownTool(step.tool.clone()))?;
 
             let tool_name = step.tool.clone();
             let args = step.args.clone();
+            let tool_arc = Arc::clone(&self.tools[idx]);
 
-            let tool_arc = self.tools.iter().find(|t| t.name() == tool.name()).cloned();
-
-            if let Some(tool_arc) = tool_arc {
-                join_set.spawn(async move {
-                    let result = tool_arc.execute(args).await;
-                    (i, tool_name, result)
-                });
-            }
+            join_set.spawn(async move {
+                let result = tool_arc.execute(args).await;
+                (i, tool_name, result)
+            });
         }
 
         let mut results: Vec<StepResult> = Vec::with_capacity(steps.len());

@@ -423,7 +423,7 @@ impl EvolutionEngine {
         let (judge_tx, judge_rx) = mpsc::channel::<JudgeRequest>(judge::JUDGE_QUEUE_CAPACITY);
         *self.judge_tx.write() = Some(judge_tx);
         let engine_judge = Arc::clone(self);
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("evolution.judge_worker", async move {
             engine_judge.mark_judge_worker_running(true);
             judge::run_judge_worker(Arc::clone(&engine_judge), judge_rx).await;
             engine_judge.mark_judge_worker_running(false);
@@ -432,14 +432,14 @@ impl EvolutionEngine {
             mpsc::channel::<DistillRequest>(distiller::DISTILL_QUEUE_CAPACITY);
         *self.distill_tx.write() = Some(distill_tx);
         let engine_distill = Arc::clone(self);
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("evolution.distill_worker", async move {
             distiller::run_distill_worker(engine_distill, distill_rx).await;
         });
         let (reflection_tx, reflection_rx) =
             mpsc::channel::<ReflectionRequest>(reflection::REFLECTION_QUEUE_CAPACITY);
         *self.reflection_tx.write() = Some(reflection_tx);
         let engine_reflection = Arc::clone(self);
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("evolution.reflection_worker", async move {
             reflection::run_reflection_worker(engine_reflection, reflection_rx).await;
         });
     }
@@ -452,7 +452,7 @@ impl EvolutionEngine {
             return;
         }
         let engine = Arc::clone(self);
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("evolution.reflection_scheduler", async move {
             engine.mark_reflection_scheduler_running(true);
             run_reflection_scheduler(Arc::clone(&engine)).await;
             engine.mark_reflection_scheduler_running(false);

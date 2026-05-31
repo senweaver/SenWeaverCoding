@@ -27,9 +27,8 @@ impl CloudPushTarget for TinkerTarget {
         let bytes = tokio::fs::read(file_path)
             .await
             .with_context(|| format!("read export {}", file_path.display()))?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("evolution.tinker", 180, 10);
         let mut req = client
             .post(&target.endpoint)
             .header(CONTENT_TYPE, HeaderValue::from_static("application/x-ndjson"))

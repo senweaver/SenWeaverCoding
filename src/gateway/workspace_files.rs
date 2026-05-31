@@ -1795,6 +1795,7 @@ mod watch_impl {
     const RECENT_REMOVED_CAP: usize = 32;
 
     const CHANNEL_SIZE: usize = 64;
+    const RAW_WATCH_CHANNEL_SIZE: usize = 4096;
 
     const KEEP_ALIVE_SECS: u64 = 15;
 
@@ -1878,12 +1879,16 @@ mod watch_impl {
         git_status_cache: crate::gateway::git_routes::GitStatusCache,
     ) -> std::io::Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
         let (raw_tx, mut raw_rx) =
-            tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+            tokio::sync::mpsc::channel::<notify::Result<notify::Event>>(RAW_WATCH_CHANNEL_SIZE);
         let config = Config::default().with_poll_interval(Duration::from_millis(500));
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
-
-                let _ = raw_tx.send(res);
+                if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = raw_tx.try_send(res) {
+                    tracing::warn!(
+                        target: "workspace.watch",
+                        "file watch event buffer full; dropping event (client may need manual refresh)"
+                    );
+                }
             },
             config,
         )

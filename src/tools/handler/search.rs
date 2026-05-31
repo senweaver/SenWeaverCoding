@@ -123,7 +123,7 @@ impl ToolSearchTool {
             if workspace_key.is_empty() {
                 return;
             }
-            tokio::spawn(async move {
+            crate::runtime::spawn_supervised("tool_search.persist", async move {
                 if let Err(e) = store.add_many(&workspace_key, &collected).await {
                     tracing::warn!(
                         target: "tool_search.persist",

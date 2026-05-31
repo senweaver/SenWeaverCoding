@@ -196,6 +196,16 @@ impl Tool for PdfReadTool {
                 text
             };
 
+            let output = if crate::token_saver::is_enabled() {
+                crate::token_saver::compact_tool_output(
+                    "pdf_read",
+                    &output,
+                    &crate::token_saver::global(),
+                )
+            } else {
+                output
+            };
+
             return Ok(ToolResult {
                 success: true,
                 output,

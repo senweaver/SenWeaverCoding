@@ -34,10 +34,9 @@ impl ImageGenTool {
     }
 
     fn http_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_default()
+        crate::services::require_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("tool.image_generate", 120, 10)
     }
 
     fn read_api_key(env_var: &str) -> Result<String, String> {

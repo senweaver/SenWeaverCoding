@@ -6,7 +6,6 @@ use super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::Duration;
 
 const WTTR_BASE_URL: &str = "https://wttr.in";
 const WTTR_TIMEOUT_SECS: u64 = 15;
@@ -139,15 +138,13 @@ impl WeatherTool {
     async fn fetch(location: &str) -> anyhow::Result<WttrResponse> {
         let url = Self::build_url(location);
 
-        let builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(WTTR_TIMEOUT_SECS))
-            .connect_timeout(Duration::from_secs(WTTR_CONNECT_TIMEOUT_SECS))
-            .user_agent("sen-weather/1.0");
-
-        let builder = crate::services::require_services()
+        let client = crate::services::require_services()
             .proxy_runtime()
-            .apply_to_builder(builder, "tool.weather");
-        let client = builder.build()?;
+            .build_client_with_timeouts(
+                "tool.weather",
+                WTTR_TIMEOUT_SECS,
+                WTTR_CONNECT_TIMEOUT_SECS,
+            );
 
         let response = client.get(&url).send().await?;
         let status = response.status();

@@ -158,7 +158,7 @@ fn trigger_auto_push(engine: &Arc<EvolutionEngine>, record: &ExportRecord) {
         let engine_clone = Arc::clone(engine);
         let target_id = target.id.clone();
         let export_id = record.id.clone();
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("evolution.auto_push_export", async move {
             match super::push_export_to_target(&engine_clone, &target_id, &export_id).await {
                 Ok(receipt) => tracing::info!(
                     target_id = %target_id,

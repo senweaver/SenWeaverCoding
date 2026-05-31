@@ -41,10 +41,9 @@ pub struct WhatsAppWebChannel {
 
     tts_config: Option<crate::config::TtsConfig>,
 
-    pending_voice:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
+    pending_voice: Arc<Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
 
-    voice_chats: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    voice_chats: Arc<Mutex<std::collections::HashSet<String>>>,
 
     dm_mention_patterns: Arc<Vec<regex::Regex>>,
 
@@ -79,8 +78,8 @@ impl WhatsAppWebChannel {
             transcription: None,
             transcription_manager: None,
             tts_config: None,
-            pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            pending_voice: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            voice_chats: Arc::new(Mutex::new(std::collections::HashSet::new())),
             dm_mention_patterns: Arc::new(Vec::new()),
             group_mention_patterns: Arc::new(Vec::new()),
         }
@@ -436,11 +435,7 @@ impl Channel for WhatsAppWebChannel {
 
         let to = self.recipient_to_jid(&message.recipient)?;
 
-        let is_voice_chat = self
-            .voice_chats
-            .lock()
-            .map(|vs| vs.contains(&message.recipient))
-            .unwrap_or(false);
+        let is_voice_chat = self.voice_chats.lock().contains(&message.recipient);
 
         if is_voice_chat && self.tts_config.is_some() {
             let content = &message.content;
@@ -455,12 +450,10 @@ impl Channel for WhatsAppWebChannel {
                 && !content.contains("wttr.in");
 
             if is_substantive {
-                if let Ok(mut pv) = self.pending_voice.lock() {
-                    pv.insert(
-                        message.recipient.clone(),
-                        (content.clone(), std::time::Instant::now()),
-                    );
-                }
+                self.pending_voice.lock().insert(
+                    message.recipient.clone(),
+                    (content.clone(), std::time::Instant::now()),
+                );
 
                 let pending = self.pending_voice.clone();
                 let voice_chats = self.voice_chats.clone();
@@ -474,19 +467,18 @@ impl Channel for WhatsAppWebChannel {
 
                             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-                            let to_voice = pending.lock().ok().and_then(|mut pv| {
-                                if let Some((_, ts)) = pv.get(&recipient) {
-                                    if ts.elapsed().as_secs() >= 8 {
-                                        return pv.remove(&recipient).map(|(text, _)| text);
+                            let to_voice = {
+                                let mut pv = pending.lock();
+                                match pv.get(&recipient) {
+                                    Some((_, ts)) if ts.elapsed().as_secs() >= 8 => {
+                                        pv.remove(&recipient).map(|(text, _)| text)
                                     }
+                                    _ => None,
                                 }
-                                None
-                            });
+                            };
 
                             if let Some(text) = to_voice {
-                                if let Ok(mut vc) = voice_chats.lock() {
-                                    vc.remove(&recipient);
-                                }
+                                voice_chats.lock().remove(&recipient);
                                 match Box::pin(WhatsAppWebChannel::synthesize_voice_static(
                                     &client_clone,
                                     &to_clone,
@@ -739,14 +731,10 @@ impl Channel for WhatsAppWebChannel {
                                 };
 
                                 let content = if let Some(ref vt) = voice_text {
-                                    if let Ok(mut vs) = voice_chats.lock() {
-                                        vs.insert(chat.clone());
-                                    }
+                                    voice_chats.lock().insert(chat.clone());
                                     format!("[Voice] {vt}")
                                 } else {
-                                    if let Ok(mut vs) = voice_chats.lock() {
-                                        vs.remove(&chat);
-                                    }
+                                    voice_chats.lock().remove(&chat);
                                     let text = msg.text_content().unwrap_or("");
                                     text.trim().to_string()
                                 };
@@ -823,9 +811,7 @@ impl Channel for WhatsAppWebChannel {
                                 tracing::info!(
                                     "Link your phone by entering this code in WhatsApp > Linked Devices"
                                 );
-                                eprintln!();
-                                eprintln!("WhatsApp Web pair code: {code}");
-                                eprintln!();
+                                tracing::info!("WhatsApp Web pair code: {code}");
                             }
                             Event::PairingQrCode { code, .. } => {
                                 tracing::info!(
@@ -833,21 +819,16 @@ impl Channel for WhatsAppWebChannel {
                                 );
                                 match Self::render_pairing_qr(&code) {
                                     Ok(rendered) => {
-                                        eprintln!();
-                                        eprintln!(
-                                            "WhatsApp Web QR code (scan in WhatsApp > Linked Devices):"
+                                        tracing::info!(
+                                            "WhatsApp Web QR code (scan in WhatsApp > Linked Devices):\n{rendered}"
                                         );
-                                        eprintln!("{rendered}");
-                                        eprintln!();
                                     }
                                     Err(err) => {
                                         tracing::warn!(
                                             "WhatsApp Web: failed to render pairing QR in terminal: {}",
                                             err
                                         );
-                                        eprintln!();
-                                        eprintln!("WhatsApp Web QR payload: {code}");
-                                        eprintln!();
+                                        tracing::info!("WhatsApp Web QR payload: {code}");
                                     }
                                 }
                             }

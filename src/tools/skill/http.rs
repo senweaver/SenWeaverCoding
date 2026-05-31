@@ -5,8 +5,6 @@
 use super::super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::time::Duration;
-
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 
 const HTTP_TIMEOUT_SECS: u64 = 30;
@@ -91,10 +89,9 @@ impl Tool for SkillHttpTool {
             });
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {e}"))?;
+        let client = crate::services::require_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("tool.skill_http", HTTP_TIMEOUT_SECS, 10);
 
         let response = match client.get(&url).send().await {
             Ok(resp) => resp,

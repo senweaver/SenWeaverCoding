@@ -149,6 +149,14 @@ impl Tool for GitHubAdvancedSearchTool {
             std::path::PathBuf::new(),
             false,
         );
-        inner.execute(delegated).await
+        let mut result = inner.execute(delegated).await?;
+        if result.success && crate::token_saver::is_enabled() {
+            result.output = crate::token_saver::compact_tool_output(
+                "github_advanced_search",
+                &result.output,
+                &crate::token_saver::global(),
+            );
+        }
+        Ok(result)
     }
 }

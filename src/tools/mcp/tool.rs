@@ -57,11 +57,22 @@ impl Tool for McpToolWrapper {
             other => other,
         };
         match self.registry.call_tool(&self.prefixed_name, args).await {
-            Ok(output) => Ok(ToolResult {
-                success: true,
-                output,
-                error: None,
-            }),
+            Ok(output) => {
+                let output = if crate::token_saver::is_enabled() {
+                    crate::token_saver::compact_tool_output(
+                        &format!("mcp_{}", self.prefixed_name),
+                        &output,
+                        &crate::token_saver::global(),
+                    )
+                } else {
+                    output
+                };
+                Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                })
+            }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),

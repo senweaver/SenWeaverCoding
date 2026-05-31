@@ -215,7 +215,7 @@ pub async fn handle_create(
     };
     let workspace_for_task = workspace.clone();
     let py_version = body.python_version.clone();
-    tokio::spawn(async move {
+    crate::runtime::spawn_supervised("python_env.create_venv", async move {
         let _ = python_env::create_venv(&workspace_for_task, create_tool, py_version.as_deref())
             .await;
     });
@@ -261,7 +261,7 @@ pub async fn handle_install_requirements(
     };
     let file = body.file.clone();
     let workspace_for_task = workspace.clone();
-    tokio::spawn(async move {
+    crate::runtime::spawn_supervised("python_env.install_requirements", async move {
         let _ = python_env::manager::install_requirements(
             &workspace_for_task,
             file.as_deref(),
@@ -288,7 +288,7 @@ pub async fn handle_install_smart(
         return forbid_workspace();
     };
     let workspace_for_task = workspace.clone();
-    tokio::spawn(async move {
+    crate::runtime::spawn_supervised("python_env.install_smart", async move {
         let _ = python_env::manager::install_with_strategy(&workspace_for_task).await;
     });
     Json(json!({"accepted": true})).into_response()
@@ -352,7 +352,7 @@ pub async fn handle_events(
     let mut bus = python_env::subscribe_events();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(32);
     let workspace_filter = workspace.clone();
-    tokio::spawn(async move {
+    crate::runtime::spawn_supervised("python_env.events_stream", async move {
         if let Ok(payload) = serde_json::to_string(&json!({
             "kind": "snapshot",
             "state": state_to_json(&python_env::manager::status_for(&workspace_filter)),

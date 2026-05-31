@@ -291,8 +291,6 @@ pub struct AppState {
 
     pub device_registry: Option<Arc<api::pairing::DeviceRegistry>>,
 
-    pub pending_pairings: Option<Arc<api::pairing::PairingStore>>,
-
     pub rbac: Option<Arc<crate::security::rbac::RbacEngine>>,
 
     pub canvas_store: CanvasStore,
@@ -672,13 +670,15 @@ async fn run_gateway_inner(
     let model: Arc<parking_lot::RwLock<String>> =
         Arc::new(parking_lot::RwLock::new(model_string));
     let temperature = config.default_temperature;
-    let mem: Arc<dyn Memory> = match memory::create_memory_with_storage_and_routes(
-        &config.memory,
-        &config.embedding_routes,
-        Some(&config.storage.provider.config),
-        &config.workspace_dir,
-        config.api_key.as_deref(),
-    ) {
+    let mem: Arc<dyn Memory> = match memory::create_memory_with_storage_and_routes_async(
+        config.memory.clone(),
+        config.embedding_routes.clone(),
+        Some(config.storage.provider.config.clone()),
+        config.workspace_dir.clone(),
+        config.api_key.clone(),
+    )
+    .await
+    {
         Ok(m) => Arc::from(m),
         Err(err) => {
             tracing::warn!(
@@ -1223,14 +1223,6 @@ async fn run_gateway_inner(
     } else {
         None
     };
-    let pending_pairings = if config.gateway.require_pairing {
-        Some(Arc::new(api::pairing::PairingStore::new(
-            config.gateway.pairing_dashboard.max_pending_codes,
-        )))
-    } else {
-        None
-    };
-
     if config.evolution.enabled {
         match crate::evolution::init_global(
             config.workspace_dir.clone(),
@@ -1304,7 +1296,6 @@ async fn run_gateway_inner(
         node_registry,
         session_backend,
         device_registry,
-        pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         rbac: rbac_engine,
         canvas_store,

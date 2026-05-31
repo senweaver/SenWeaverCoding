@@ -494,12 +494,10 @@ impl CopilotProvider {
         let expires_in = response.expires_in.max(1);
         let expires_at = tokio::time::Instant::now() + Duration::from_secs(expires_in);
 
-        eprintln!(
-            "\nGitHub Copilot authentication is required.\n\
-             Visit: {}\n\
-             Code: {}\n\
-             Waiting for authorization...\n",
-            response.verification_uri, response.user_code
+        tracing::info!(
+            "GitHub Copilot authentication is required. Visit: {} | Code: {} | Waiting for authorization...",
+            response.verification_uri,
+            response.user_code
         );
 
         while tokio::time::Instant::now() < expires_at {
@@ -520,7 +518,7 @@ impl CopilotProvider {
                 .await?;
 
             if let Some(token) = token_response.access_token {
-                eprintln!("Authentication succeeded.\n");
+                tracing::info!("GitHub Copilot authentication succeeded.");
                 return Ok(token);
             }
 

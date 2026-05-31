@@ -325,11 +325,11 @@ fn extract_relevant_lines(lines: &[&str], symbol_ranges: &[(u32, u32)], max_fall
     ranges.sort();
     let mut merged: Vec<(usize, usize)> = vec![ranges[0]];
     for (s, e) in ranges.into_iter().skip(1) {
-        let last = merged.last_mut().unwrap();
-        if s <= last.1 + 1 {
-            last.1 = last.1.max(e);
-        } else {
-            merged.push((s, e));
+        match merged.last_mut() {
+            Some(last) if s <= last.1 + 1 => {
+                last.1 = last.1.max(e);
+            }
+            _ => merged.push((s, e)),
         }
     }
     let mut parts: Vec<String> = Vec::new();

@@ -35,6 +35,16 @@ const HEALTH_PROBE_HEADER: &str = "X-Sen-Ping";
 const HEALTH_PROBE_HEADER_VALUE: &str = "1";
 const BACKEND_STATE_EVENT: &str = "backend://state-change";
 
+fn adapters_restart_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 #[cfg(target_os = "windows")]
 fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
     use std::ptr;
@@ -360,11 +370,7 @@ async fn restart_adapters_sidecar(state: State<'_, ServerState>) -> Result<(), S
             .clone()
             .ok_or_else(|| EMBEDDED_GATEWAY_PENDING_MSG.to_string())?
     };
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
+    let resp = adapters_restart_client()
         .post(format!("{url}/api/channels/restart"))
         .header(HEALTH_PROBE_HEADER, HEALTH_PROBE_HEADER_VALUE)
         .send()
@@ -513,16 +519,13 @@ fn show_main_window_now(window: &tauri::WebviewWindow) {
 }
 
 fn schedule_main_window_show_fallback(window: tauri::WebviewWindow) {
-    thread::Builder::new()
-        .name("sen-window-show-fallback".into())
-        .spawn(move || {
-            thread::sleep(Duration::from_millis(MAIN_WINDOW_SHOW_FALLBACK_MS));
-            let win_for_closure = window.clone();
-            let _ = window.run_on_main_thread(move || {
-                show_main_window_now(&win_for_closure);
-            });
-        })
-        .ok();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(MAIN_WINDOW_SHOW_FALLBACK_MS)).await;
+        let win_for_closure = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            show_main_window_now(&win_for_closure);
+        });
+    });
 }
 
 #[tauri::command]

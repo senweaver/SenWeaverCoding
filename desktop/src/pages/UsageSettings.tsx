@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { useEffect, useMemo } from 'react'
-import { useTranslation } from '../i18n'
+import { useTranslation, useCodingModeText } from '../i18n'
 import type { TranslationKey } from '../i18n'
 import { Button } from '../components/shared/Button'
 import { useUsageStore } from '../stores/usageStore'
@@ -11,7 +11,11 @@ import { useSessionStore } from '../stores/sessionStore'
 import { useRuntimeStore } from '../stores/runtimeStore'
 import { resolveSessionTitle } from '../utils/sessionTitle'
 import type { SessionListItem } from '../types/session'
-import type { CodingModeId } from '../types/codingMode'
+import {
+  isVisibleCodingMode,
+  VISIBLE_CODING_MODES,
+  type CodingModeId,
+} from '../types/codingMode'
 import type {
   UsageCodingModeStats,
   UsageLifetimeStats,
@@ -34,22 +38,6 @@ const CODING_MODE_BACKEND_TO_ID: Record<string, CodingModeId> = {
   harness: 'harness',
   curator: 'curator',
 }
-
-const CODING_MODE_ORDER: CodingModeId[] = [
-  'agent',
-  'plan',
-  'ask',
-  'debug',
-  'architect',
-  'pair',
-  'context',
-  'mvai',
-  'harness',
-  'curator',
-  'spec',
-  'tdd',
-  'vibe',
-]
 
 const CODING_MODE_ICON: Record<CodingModeId, string> = {
   vibe: '∞',
@@ -187,10 +175,10 @@ export function UsageSettings() {
     if (summary) {
       for (const [key, raw] of Object.entries(summary.byCodingMode)) {
         const id = CODING_MODE_BACKEND_TO_ID[key.toLowerCase()] ?? null
-        if (id) byId[id] = raw
+        if (id && isVisibleCodingMode(id)) byId[id] = raw
       }
     }
-    return CODING_MODE_ORDER.map((id) => ({ id, stats: byId[id] ?? null }))
+    return VISIBLE_CODING_MODES.map((id) => ({ id, stats: byId[id] ?? null }))
   }, [summary])
 
   const codingModeTotals = useMemo(() => {
@@ -198,8 +186,11 @@ export function UsageSettings() {
       return { totalTokens: 0, requestCount: 0, costUsd: 0, activeModes: 0 }
     }
     const values = Object.entries(summary.byCodingMode)
-      .filter(([key]) => CODING_MODE_BACKEND_TO_ID[key.toLowerCase()] != null)
-      .map(([, raw]) => raw)
+      .map(([key, raw]) => {
+        const id = CODING_MODE_BACKEND_TO_ID[key.toLowerCase()] ?? null
+        return id && isVisibleCodingMode(id) ? raw : null
+      })
+      .filter((raw): raw is UsageCodingModeStats => raw != null)
     return {
       totalTokens: values.reduce((acc, r) => acc + r.totalTokens, 0),
       requestCount: values.reduce((acc, r) => acc + r.requestCount, 0),
@@ -869,6 +860,7 @@ function CodingModeSection({
   totals: { totalTokens: number; requestCount: number; costUsd: number; activeModes: number }
   t: (key: TranslationKey) => string
 }) {
+  const tCodingMode = useCodingModeText()
   const sortedRows = useMemo(() => {
     return [...rows].sort((a, b) => {
       const aTokens = a.stats?.totalTokens ?? 0
@@ -947,7 +939,7 @@ function CodingModeSection({
             </thead>
             <tbody>
               {sortedRows.map(({ id, stats }) => {
-                const label = t(`settings.usage.codingMode.${id}` as TranslationKey)
+                const label = tCodingMode(id, 'label', id)
                 const icon = CODING_MODE_ICON[id]
                 if (!stats) {
                   return (
@@ -1022,7 +1014,8 @@ function CodingModeKpi({
   maxTokens: number
   t: (key: TranslationKey) => string
 }) {
-  const label = t(`settings.usage.codingMode.${id}` as TranslationKey)
+  const tCodingMode = useCodingModeText()
+  const label = tCodingMode(id, 'label', id)
   const icon = CODING_MODE_ICON[id]
   const ratio =
     stats && maxTokens > 0 ? Math.min(1, stats.totalTokens / maxTokens) : 0

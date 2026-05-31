@@ -41,9 +41,8 @@ impl CloudPushTarget for RlDatasetServerTarget {
             .text("sample_count", export.sample_count.to_string())
             .text("content_digest", export.md5.clone())
             .text("digest_algorithm", "md5");
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()?;
+        let client = crate::services::proxy::runtime::ProxyRuntime::global()
+            .build_client_with_timeouts("evolution.rl_dataset_server", 180, 10);
         let mut req = client.post(&target.endpoint).multipart(form);
         if let Some(token) = secret {
             req = req.bearer_auth(token);

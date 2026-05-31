@@ -51,10 +51,17 @@ impl ParallelToolExec for JoinAllExec {
         tools: &[Arc<dyn Tool>],
         calls: Vec<ParallelToolCall>,
     ) -> Vec<ParallelToolOutcome> {
+        let index: std::collections::HashMap<&str, usize> = tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name(), i))
+            .collect();
         let futs: Vec<_> = calls
             .into_iter()
             .map(|call| {
-                let tool_opt = tools.iter().find(|t| t.name() == call.name).cloned();
+                let tool_opt = index
+                    .get(call.name.as_str())
+                    .map(|&i| Arc::clone(&tools[i]));
                 async move {
                     if let Some(delay) = call.simulated_latency {
                         tokio::time::sleep(delay).await;

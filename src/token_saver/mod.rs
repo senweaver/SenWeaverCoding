@@ -321,8 +321,85 @@ pub fn compact_dir_listing(entries: &[DirEntry], opts: &ListOpts) -> String {
     out
 }
 
+pub fn compact_tool_output(label: &str, content: &str, ctx: &CompactContext) -> String {
+    if is_disabled_by_env() {
+        return content.to_string();
+    }
+
+    let raw_total = content.len();
+    let stripped = pipeline::strip_ansi_only(&cap_raw(content, ctx.raw_byte_cap));
+
+    let budget = match ctx.level {
+        CompactLevel::Conservative => 16_384,
+        CompactLevel::Balanced => 8_192,
+        CompactLevel::Aggressive => 4_096,
+    };
+
+    if stripped.len() <= budget {
+        return stripped;
+    }
+
+    let tee_path = if ctx.tee_enabled {
+        tee::write_failure_log(label, content, "", &ctx.data_dir).ok()
+    } else {
+        None
+    };
+
+    let mut out = middle_out_trim(&stripped, budget);
+    if let Some(path) = tee_path.as_ref() {
+        out.push_str(&format!("\n[full output: {}]", path.display()));
+    }
+
+    let compacted_total = out.len();
+    let tokens_saved = estimate_tokens_saved(raw_total, compacted_total);
+    if ctx.tracking_enabled {
+        let _ = tracking::record(
+            label,
+            "tool_output",
+            raw_total,
+            compacted_total,
+            0,
+            &ctx.data_dir,
+        );
+    }
+    crate::observability::token_saver_metrics::record_compaction(
+        raw_total as u64,
+        compacted_total as u64,
+        tokens_saved,
+        false,
+        tee_path.is_some(),
+    );
+    out
+}
+
 pub fn estimate_tokens(text: &str) -> u64 {
     crate::agent::token::budget::TokenBudgetManager::estimate_tokens(text) as u64
+}
+
+fn middle_out_trim(text: &str, budget: usize) -> String {
+    let half = budget / 2;
+    let head = char_boundary_prefix(text, half);
+    let tail = char_boundary_suffix(text, half);
+    let omitted = text.len().saturating_sub(head.len() + tail.len());
+    format!(
+        "{head}\n... [{omitted} bytes trimmed by token_saver; see full output below] ...\n{tail}"
+    )
+}
+
+fn char_boundary_prefix(text: &str, max: usize) -> &str {
+    let mut b = max.min(text.len());
+    while b > 0 && !text.is_char_boundary(b) {
+        b -= 1;
+    }
+    &text[..b]
+}
+
+fn char_boundary_suffix(text: &str, max: usize) -> &str {
+    let mut b = text.len().saturating_sub(max);
+    while b < text.len() && !text.is_char_boundary(b) {
+        b += 1;
+    }
+    &text[b..]
 }
 
 fn estimate_tokens_saved(raw_bytes: usize, compacted_bytes: usize) -> u64 {
