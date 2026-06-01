@@ -2,7 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-#[cfg(feature = "whatsapp-web")]
+#![cfg(feature = "whatsapp-web")]
+
 use async_trait::async_trait;
 #[cfg(feature = "whatsapp-web")]
 use parking_lot::Mutex;
@@ -27,6 +28,8 @@ use wa_rs_core::store::Device as CoreDevice;
 use wa_rs_core::store::traits::DeviceInfo;
 #[cfg(feature = "whatsapp-web")]
 use wa_rs_core::store::traits::DeviceStore as DeviceStoreTrait;
+#[cfg(feature = "whatsapp-web")]
+use wa_rs_core::store::traits::TcTokenEntry;
 #[cfg(feature = "whatsapp-web")]
 use wa_rs_core::store::traits::*;
 

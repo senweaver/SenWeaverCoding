@@ -3,11 +3,9 @@
 // Licensed under the MIT License.
 
 pub mod core;
+pub mod web;
 #[cfg(feature = "whatsapp-web")]
 pub mod storage;
-#[cfg(feature = "whatsapp-web")]
-pub mod web;
 
 pub use core::WhatsAppChannel;
-#[cfg(feature = "whatsapp-web")]
 pub use web::WhatsAppWebChannel;

@@ -3,12 +3,22 @@
 // Licensed under the MIT License.
 
 use super::super::traits::{Channel, ChannelMessage, SendMessage};
-use super::storage::RusqliteStore;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+
+#[cfg(feature = "whatsapp-web")]
+use anyhow::anyhow;
 use async_trait::async_trait;
+
+#[cfg(feature = "whatsapp-web")]
 use parking_lot::Mutex;
+#[cfg(feature = "whatsapp-web")]
 use std::sync::Arc;
+
+#[cfg(feature = "whatsapp-web")]
+use super::storage::RusqliteStore;
+#[cfg(feature = "whatsapp-web")]
 use tokio::select;
+#[cfg(feature = "whatsapp-web")]
 use wa_rs_proto::whatsapp::device_props::PlatformType;
 
 #[cfg(feature = "whatsapp-web")]
@@ -50,9 +60,9 @@ pub struct WhatsAppWebChannel {
     group_mention_patterns: Arc<Vec<regex::Regex>>,
 }
 
+#[cfg(feature = "whatsapp-web")]
 impl WhatsAppWebChannel {
 
-    #[cfg(feature = "whatsapp-web")]
     pub fn new(
         session_path: String,
         pair_phone: Option<String>,

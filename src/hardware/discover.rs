@@ -2,7 +2,10 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-#![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#![cfg(all(
+    feature = "hardware",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 
 use super::registry;
 use anyhow::Result;

@@ -79,8 +79,7 @@ pub use wati::WatiChannel;
 pub use webhook::WebhookChannel;
 pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
-#[cfg(feature = "whatsapp-web")]
-pub use whatsapp::web::WhatsAppWebChannel;
+pub use whatsapp::WhatsAppWebChannel;
 
 use crate::approval::ApprovalManager;
 pub use crate::channels::bridge::agent::{AgentLoopCore, TurnEvent};

@@ -224,6 +224,14 @@ jobs:
         working-directory: desktop
         run: bun install --frozen-lockfile
 
+      - name: Verify feature gates (lib + desktop)
+        if: matrix.label == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --lib --no-default-features
+          cargo check -p sen-desktop
+
       # Build the `sen` CLI from the Rust workspace and inject it under
       # desktop/src-tauri/binaries/.  The per-platform Tauri config
       # overrides below are generated only on CI (they're gitignored)

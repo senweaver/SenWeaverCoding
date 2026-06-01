@@ -46,7 +46,6 @@ impl Tool for WasmTool {
         self.parameters_schema.clone()
     }
 
-    #[cfg(feature = "plugins-wasm")]
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let input = serde_json::to_vec(&args)?;
 
@@ -68,60 +67,6 @@ impl Tool for WasmTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!("WASM execution error: {e}")),
-            }),
-        }
-    }
-
-    #[cfg(not(feature = "plugins-wasm"))]
-    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let input = serde_json::to_string(&args)?;
-
-        match crate::util::hidden_sync_command("wasmtime")
-            .args(["run", "--invoke", &self.function_name, &self.plugin_name])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    use std::io::Write;
-                    let _ = stdin.write_all(input.as_bytes());
-                }
-                match child.wait_with_output() {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        if output.status.success() {
-                            Ok(ToolResult {
-                                success: true,
-                                output: stdout,
-                                error: None,
-                            })
-                        } else {
-                            Ok(ToolResult {
-                                success: false,
-                                output: stdout,
-                                error: Some(stderr),
-                            })
-                        }
-                    }
-                    Err(e) => Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("WASM process error: {e}")),
-                    }),
-                }
-            }
-            Err(_) => Ok(ToolResult {
-                success: false,
-                output: format!(
-                    "[plugin:{}/{}] Input: {input}",
-                    self.plugin_name, self.function_name
-                ),
-                error: Some(
-                    "WASM runtime not found. Install wasmtime or add extism dependency.".into(),
-                ),
             }),
         }
     }

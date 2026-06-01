@@ -39,6 +39,7 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
     "skill-creation",
     "code-intel",
     "channels-lite",
+    "whatsapp-web",
 ] }
 
 tauri = { version = "2.11", features = ["unstable"] }

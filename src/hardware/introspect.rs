@@ -2,6 +2,11 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+#![cfg(all(
+    feature = "hardware",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+
 use super::discover;
 use super::registry;
 use anyhow::Result;
