@@ -12255,6 +12255,8 @@ dependencies = [
  "wa-rs-binary",
  "wa-rs-core",
  "wa-rs-proto",
+ "wa-rs-tokio-transport",
+ "wa-rs-ureq-http",
 ]
 
 [[package]]

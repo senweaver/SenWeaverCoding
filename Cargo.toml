@@ -226,7 +226,7 @@ cpal = { version = "0.15", optional = true }
 
 qrcode = { version = "0.14", optional = true }
 
-wa-rs = { version = "0.2", optional = true, default-features = false }
+wa-rs = { version = "0.2", optional = true, default-features = false, features = ["tokio-transport", "ureq-client", "tokio-native"] }
 wa-rs-core = { version = "0.2", optional = true, default-features = false }
 wa-rs-binary = { version = "0.2", optional = true, default-features = false }
 wa-rs-proto = { version = "0.2", optional = true, default-features = false }

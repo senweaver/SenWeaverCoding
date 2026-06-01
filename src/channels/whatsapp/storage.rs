@@ -5,35 +5,22 @@
 #![cfg(feature = "whatsapp-web")]
 
 use async_trait::async_trait;
-#[cfg(feature = "whatsapp-web")]
 use parking_lot::Mutex;
-#[cfg(feature = "whatsapp-web")]
 use rusqlite::{Connection, params};
-#[cfg(feature = "whatsapp-web")]
 use std::path::Path;
-#[cfg(feature = "whatsapp-web")]
 use std::sync::Arc;
 
-#[cfg(feature = "whatsapp-web")]
 use prost::Message;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_binary::jid::Jid;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_core::appstate::hash::HashState;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_core::appstate::processor::AppStateMutationMAC;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_core::store::Device as CoreDevice;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_core::store::traits::DeviceInfo;
-#[cfg(feature = "whatsapp-web")]
+use wa_rs_core::store::traits::DeviceListRecord;
 use wa_rs_core::store::traits::DeviceStore as DeviceStoreTrait;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_core::store::traits::TcTokenEntry;
-#[cfg(feature = "whatsapp-web")]
 use wa_rs_core::store::traits::*;
 
-#[cfg(feature = "whatsapp-web")]
 #[derive(Clone)]
 pub struct RusqliteStore {
 
@@ -57,7 +44,6 @@ macro_rules! to_store_err {
     };
 }
 
-#[cfg(feature = "whatsapp-web")]
 impl RusqliteStore {
 
     pub fn new<P: AsRef<Path>>(db_path: P) -> anyhow::Result<Self> {
@@ -242,7 +228,6 @@ impl RusqliteStore {
     }
 }
 
-#[cfg(feature = "whatsapp-web")]
 #[async_trait]
 impl SignalStore for RusqliteStore {
 
@@ -470,7 +455,6 @@ impl SignalStore for RusqliteStore {
     }
 }
 
-#[cfg(feature = "whatsapp-web")]
 #[async_trait]
 impl AppSyncStore for RusqliteStore {
     async fn get_sync_key(
@@ -606,7 +590,6 @@ impl AppSyncStore for RusqliteStore {
     }
 }
 
-#[cfg(feature = "whatsapp-web")]
 #[async_trait]
 impl ProtocolStore for RusqliteStore {
 
@@ -1021,7 +1004,6 @@ impl ProtocolStore for RusqliteStore {
     }
 }
 
-#[cfg(feature = "whatsapp-web")]
 #[async_trait]
 impl DeviceStoreTrait for RusqliteStore {
     async fn save(&self, device: &CoreDevice) -> wa_rs_core::store::error::Result<()> {
