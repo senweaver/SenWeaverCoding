@@ -244,7 +244,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cargo build --release --target ${{ matrix.cli_target }} --bin sen
+          cargo build --release --target ${{ matrix.cli_target }} --bin sen --no-default-features --features channels-lite
           mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
           cp "${{ matrix.cli_src }}" "${{ matrix.cli_dst }}"
           ls -la "${{ matrix.cli_dst }}"
@@ -258,8 +258,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cargo build --release --target aarch64-apple-darwin --bin sen
-          cargo build --release --target x86_64-apple-darwin  --bin sen
+          cargo build --release --target aarch64-apple-darwin --bin sen --no-default-features --features channels-lite
+          cargo build --release --target x86_64-apple-darwin  --bin sen --no-default-features --features channels-lite
           mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
           lipo -create \
             -output "${{ matrix.cli_dst }}" \
