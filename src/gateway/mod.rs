@@ -2161,6 +2161,15 @@ async fn run_gateway_inner(
 
 async fn run_gateway_post_shutdown_cleanup() {
     let cleanup_started = std::time::Instant::now();
+
+    let persist_drained = crate::gateway::ws::desktop::wait_persist_drained(
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    if persist_drained {
+        tracing::info!("gateway shutdown: session persist queue drained");
+    }
+
     if let Some(svc) = crate::services::try_get_services() {
         let lsp = svc.lsp.clone();
         let lsp_done = tokio::time::timeout(

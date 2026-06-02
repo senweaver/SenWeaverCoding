@@ -2,7 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
 import { useProviderStore } from '../../stores/providerStore'
 import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
@@ -92,6 +93,13 @@ export function ModelSelector({
   )
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [dropdownPos, setDropdownPos] = useState<{
+    top: number
+    left: number
+    direction: 'up' | 'down'
+  } | null>(null)
   const requestedProvidersRef = useRef(false)
   const lastAutoSyncedRef = useRef<string | null>(null)
 
@@ -111,10 +119,30 @@ export function ModelSelector({
     void fetchProviders()
   }, [fetchProviders, isRuntimeScoped, providersLoading])
 
+  const MENU_WIDTH = 220
+
+  const updateDropdownPos = useCallback(() => {
+    if (!triggerRef.current) return
+    const rect = triggerRef.current.getBoundingClientRect()
+    const DROPDOWN_HEIGHT = 460
+    const spaceAbove = rect.top
+    const spaceBelow = window.innerHeight - rect.bottom
+    const direction = spaceBelow >= DROPDOWN_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
+    const left = Math.max(8, Math.min(rect.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8))
+    setDropdownPos({
+      top: direction === 'down' ? rect.bottom + 4 : rect.top - 4,
+      left,
+      direction,
+    })
+  }, [])
+
   useEffect(() => {
     if (!open) return
     const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      if (ref.current?.contains(target)) return
+      if (menuRef.current?.contains(target)) return
+      setOpen(false)
     }
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -126,6 +154,17 @@ export function ModelSelector({
       document.removeEventListener('keydown', handleEsc)
     }
   }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    updateDropdownPos()
+    window.addEventListener('scroll', updateDropdownPos, true)
+    window.addEventListener('resize', updateDropdownPos)
+    return () => {
+      window.removeEventListener('scroll', updateDropdownPos, true)
+      window.removeEventListener('resize', updateDropdownPos)
+    }
+  }, [open, updateDropdownPos])
 
   const providerChoices = useMemo(
     () => buildProviderChoices(providers, activeId),
@@ -227,6 +266,7 @@ export function ModelSelector({
   return (
     <div ref={ref} className="relative">
       <button
+        ref={triggerRef}
         onClick={() => !buttonDisabled && setOpen(!open)}
         disabled={buttonDisabled}
         title={noConfiguredModels ? t('model.unconfiguredPlaceholder') : undefined}
@@ -247,8 +287,20 @@ export function ModelSelector({
         <span className="material-symbols-outlined flex-shrink-0 text-[11px]">expand_more</span>
       </button>
 
-      {open && (
-        <div className="absolute right-0 bottom-full z-50 mb-2 w-[220px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]">
+      {open && dropdownPos && createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          className="w-[220px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+          style={{
+            position: 'fixed',
+            left: dropdownPos.left,
+            ...(dropdownPos.direction === 'down'
+              ? { top: dropdownPos.top }
+              : { bottom: window.innerHeight - dropdownPos.top }),
+            zIndex: 9999,
+          }}
+        >
           <div className="max-h-[420px] overflow-y-auto p-2">
             <div className="mb-1.5 px-1 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
               {t('model.configuration')}
@@ -419,7 +471,8 @@ export function ModelSelector({
               </div>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

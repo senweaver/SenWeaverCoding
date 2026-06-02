@@ -34,6 +34,7 @@ import { StatusBar } from './StatusBar'
 import { useTabStore } from '../../stores/tabStore'
 import { focusSession } from '../../lib/focusSession'
 import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
+import { useLspStore } from '../../stores/lspStore'
 import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
 import { WorkspaceFinder } from '../workspace/WorkspaceFinder'
@@ -129,6 +130,7 @@ export function AppShell() {
         await fetchSettingsWithRetry(fetchSettings, { signal: abort.signal })
         startBackgroundShellMirror()
         useSessionRunStateStore.getState().start()
+        void useLspStore.getState().fetch().catch(() => {})
 
         const RESTORE_MAX_ATTEMPTS = 6
         let restoreAttempts = 0

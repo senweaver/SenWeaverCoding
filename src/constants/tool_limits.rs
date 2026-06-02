@@ -26,6 +26,6 @@ pub const MCP_TOOL_TIMEOUT_MS: u64 = 60_000;
 
 pub const AGENT_TOOL_TIMEOUT_MS: u64 = 600_000;
 
-pub const MAX_TOOL_CALLS_PER_TURN: u32 = 32;
+pub const MAX_TOOL_CALLS_PER_TURN: u32 = 256;
 
 pub const TRUNCATION_MESSAGE: &str = "\n... [output truncated]";

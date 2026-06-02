@@ -130,9 +130,38 @@ fn install_panic_hook() {
                 *g = Some(serialized.clone());
             }
         }
+        write_crash_record(&serialized);
         tracing::error!("[sen-desktop] {serialized}");
         prev(info);
     }));
+}
+
+fn write_crash_record(serialized: &str) {
+    use std::io::Write;
+
+    let dir = LOG_PATH.get().cloned().unwrap_or_else(|| {
+        let mut fallback = std::env::temp_dir();
+        fallback.push("SenAgentOS");
+        fallback.push("logs");
+        fallback
+    });
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let record = format!("===== crash @ unix {timestamp} (pid {}) =====\n{serialized}\n\n", std::process::id());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("desktop-crash.log"))
+    {
+        let _ = file.write_all(record.as_bytes());
+        let _ = file.flush();
+        let _ = file.sync_all();
+    }
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {

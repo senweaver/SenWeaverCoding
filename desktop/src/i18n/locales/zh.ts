@@ -1448,16 +1448,17 @@ export const zh: Record<TranslationKey, string> = {
 
   'chat.planningNextMoves': 'Planning next moves',
 
-  'chat.retry.title': '上游服务繁忙（{label}），正在自动重试…',
-  'chat.retry.attempt': '第 {attempt}/{max} 次',
-  'chat.retry.engineOverloaded': '官方接口限速',
-  'chat.retry.accountRateLimited': '账户配额限流',
-  'chat.retry.transient': '网络瞬时错误',
-  'chat.retry.stopButton': '停止重试',
+  'chat.retry.title': '正在重连（{label}），稍候即可恢复…',
+  'chat.retry.attempt': '第 {attempt} 次',
+  'chat.retry.engineOverloaded': '官方接口繁忙',
+  'chat.retry.accountRateLimited': '账户配额恢复中',
+  'chat.retry.transient': '网络波动',
+  'chat.retry.stopButton': '停止',
 
 
   'tool.list.workspaceRoot': '工作区根目录',
   'tool.edit.multiFiles': '{count} 个文件',
+  'tool.edit.globPattern': '匹配模式',
   'tool.edit.executing': '正在编辑 {path}…',
   'tool.edit.executingGeneric': '正在执行编辑…',
   'tool.edit.showDiff': '展开 diff',

@@ -2,7 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -57,6 +58,13 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [dropdownPos, setDropdownPos] = useState<{
+    top: number
+    left: number
+    direction: 'up' | 'down'
+  } | null>(null)
 
   const isControlled = value !== undefined
   const currentMode: CodingModeId = isControlled ? value : storeMode
@@ -88,10 +96,27 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
 
   const currentLabel = items.find((i) => i.id === currentMode)?.label ?? currentMode
 
+  const updateDropdownPos = useCallback(() => {
+    if (!triggerRef.current) return
+    const rect = triggerRef.current.getBoundingClientRect()
+    const DROPDOWN_HEIGHT = 480
+    const spaceAbove = rect.top
+    const spaceBelow = window.innerHeight - rect.bottom
+    const direction = spaceBelow >= DROPDOWN_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
+    setDropdownPos({
+      top: direction === 'down' ? rect.bottom + 4 : rect.top - 4,
+      left: rect.left,
+      direction,
+    })
+  }, [])
+
   useEffect(() => {
     if (!open) return
     const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      if (ref.current?.contains(target)) return
+      if (menuRef.current?.contains(target)) return
+      setOpen(false)
     }
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -103,6 +128,17 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
       document.removeEventListener('keydown', handleEsc)
     }
   }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    updateDropdownPos()
+    window.addEventListener('scroll', updateDropdownPos, true)
+    window.addEventListener('resize', updateDropdownPos)
+    return () => {
+      window.removeEventListener('scroll', updateDropdownPos, true)
+      window.removeEventListener('resize', updateDropdownPos)
+    }
+  }, [open, updateDropdownPos])
 
   function applyMode(modeId: CodingModeId) {
     if (isControlled) {
@@ -129,6 +165,7 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   return (
     <div ref={ref} className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen(!open)}
         className={triggerClass}
         style={triggerStyle}
@@ -141,8 +178,20 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
         <span className="material-symbols-outlined text-[11px]">expand_more</span>
       </button>
 
-      {open && (
-        <div className="absolute left-0 bottom-full mb-2 w-[220px] max-h-[480px] overflow-y-auto rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] z-50 py-2">
+      {open && dropdownPos && createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          className="w-[220px] max-h-[480px] overflow-y-auto rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] py-2"
+          style={{
+            position: 'fixed',
+            left: dropdownPos.left,
+            ...(dropdownPos.direction === 'down'
+              ? { top: dropdownPos.top }
+              : { bottom: window.innerHeight - dropdownPos.top }),
+            zIndex: 9999,
+          }}
+        >
           <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
             {t('codingMode.title')}
           </div>
@@ -207,7 +256,8 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
               </button>
             )
           })}
-        </div>
+        </div>,
+        document.body,
       )}
 
     </div>

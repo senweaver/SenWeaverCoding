@@ -72,6 +72,9 @@ fn lcs_length(a: &[&str], b: &[&str]) -> usize {
     prev[m]
 }
 
+const DIFF_CONTEXT: usize = 3;
+const MAX_DIFF_CELLS: usize = 4_000_000;
+
 #[must_use]
 pub fn render_minimal_diff(rel_path: &Path, before: &str, after: &str) -> Option<String> {
     if before == after {
@@ -82,30 +85,154 @@ pub fn render_minimal_diff(rel_path: &Path, before: &str, after: &str) -> Option
         rel_path.display(),
         rel_path.display()
     );
+
+    let before_lines: Vec<&str> = before.split('\n').collect();
+    let after_lines: Vec<&str> = after.split('\n').collect();
+
+    let body = unified_diff_body(&before_lines, &after_lines)
+        .unwrap_or_else(|| fallback_diff_body(&before_lines, &after_lines));
+
     let mut payload = header;
-    let mut buf = String::new();
-    for line in before.split('\n') {
-        buf.push('-');
-        buf.push_str(line);
-        buf.push('\n');
-        if buf.len() > MAX_DIFF_PAYLOAD {
-            break;
-        }
-    }
-    for line in after.split('\n') {
-        buf.push('+');
-        buf.push_str(line);
-        buf.push('\n');
-        if buf.len() > MAX_DIFF_PAYLOAD {
-            break;
-        }
-    }
-    payload.push_str(&buf);
+    payload.push_str(&body);
     if payload.len() > MAX_DIFF_PAYLOAD {
         payload.truncate(MAX_DIFF_PAYLOAD);
         payload.push_str("\n... (diff truncated)\n");
     }
     Some(payload)
+}
+
+fn unified_diff_body(a: &[&str], b: &[&str]) -> Option<String> {
+    let n = a.len();
+    let m = b.len();
+    let cap = (n + 1).saturating_mul(m + 1);
+    if cap == 0 || cap > MAX_DIFF_CELLS {
+        return None;
+    }
+
+    let mut dp = vec![0u32; cap];
+    let idx = |i: usize, j: usize| i * (m + 1) + j;
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[idx(i, j)] = if a[i] == b[j] {
+                dp[idx(i + 1, j + 1)] + 1
+            } else {
+                dp[idx(i + 1, j)].max(dp[idx(i, j + 1)])
+            };
+        }
+    }
+
+    let mut ops: Vec<(char, usize, usize)> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            ops.push((' ', i, j));
+            i += 1;
+            j += 1;
+        } else if dp[idx(i + 1, j)] >= dp[idx(i, j + 1)] {
+            ops.push(('-', i, j));
+            i += 1;
+        } else {
+            ops.push(('+', i, j));
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push(('-', i, j));
+        i += 1;
+    }
+    while j < m {
+        ops.push(('+', i, j));
+        j += 1;
+    }
+
+    Some(render_hunks(a, b, &ops))
+}
+
+fn render_hunks(a: &[&str], b: &[&str], ops: &[(char, usize, usize)]) -> String {
+    let total = ops.len();
+    let mut include = vec![false; total];
+    for (k, op) in ops.iter().enumerate() {
+        if op.0 != ' ' {
+            let lo = k.saturating_sub(DIFF_CONTEXT);
+            let hi = (k + DIFF_CONTEXT + 1).min(total);
+            for slot in include.iter_mut().take(hi).skip(lo) {
+                *slot = true;
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let mut k = 0;
+    while k < total {
+        if !include[k] {
+            k += 1;
+            continue;
+        }
+        let start = k;
+        while k < total && include[k] {
+            k += 1;
+        }
+        let end = k;
+
+        let mut a_start: Option<usize> = None;
+        let mut b_start: Option<usize> = None;
+        let mut a_count = 0usize;
+        let mut b_count = 0usize;
+        for op in &ops[start..end] {
+            match op.0 {
+                ' ' => {
+                    a_start.get_or_insert(op.1);
+                    b_start.get_or_insert(op.2);
+                    a_count += 1;
+                    b_count += 1;
+                }
+                '-' => {
+                    a_start.get_or_insert(op.1);
+                    a_count += 1;
+                }
+                '+' => {
+                    b_start.get_or_insert(op.2);
+                    b_count += 1;
+                }
+                _ => {}
+            }
+        }
+        let a_s = a_start.map_or(0, |x| x + 1);
+        let b_s = b_start.map_or(0, |x| x + 1);
+        out.push_str(&format!("@@ -{a_s},{a_count} +{b_s},{b_count} @@\n"));
+        for op in &ops[start..end] {
+            let (tag, ai, bj) = *op;
+            let line = if tag == '+' { b[bj] } else { a[ai] };
+            out.push(tag);
+            out.push_str(line);
+            out.push('\n');
+            if out.len() > MAX_DIFF_PAYLOAD {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn fallback_diff_body(a: &[&str], b: &[&str]) -> String {
+    let mut out = format!("@@ -1,{} +1,{} @@\n", a.len(), b.len());
+    for line in a {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+        if out.len() > MAX_DIFF_PAYLOAD {
+            return out;
+        }
+    }
+    for line in b {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+        if out.len() > MAX_DIFF_PAYLOAD {
+            return out;
+        }
+    }
+    out
 }
 
 pub async fn emit_file_edit(

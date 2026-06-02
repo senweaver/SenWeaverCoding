@@ -382,7 +382,7 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+panic = "unwind"
 
 [profile.release-fast]
 inherits = "release"
@@ -399,7 +399,7 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+panic = "unwind"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }

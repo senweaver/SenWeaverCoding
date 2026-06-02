@@ -1463,16 +1463,17 @@ export const en = {
 
   'chat.planningNextMoves': 'Planning next moves',
 
-  'chat.retry.title': 'Upstream is busy ({label}); auto-retrying…',
-  'chat.retry.attempt': 'retry {attempt}/{max}',
-  'chat.retry.engineOverloaded': 'engine overloaded',
-  'chat.retry.accountRateLimited': 'account rate limited',
-  'chat.retry.transient': 'transient error',
-  'chat.retry.stopButton': 'Stop retry',
+  'chat.retry.title': 'Reconnecting ({label}); will resume shortly…',
+  'chat.retry.attempt': 'attempt {attempt}',
+  'chat.retry.engineOverloaded': 'provider busy',
+  'chat.retry.accountRateLimited': 'quota recovering',
+  'chat.retry.transient': 'network blip',
+  'chat.retry.stopButton': 'Stop',
 
 
   'tool.list.workspaceRoot': 'Workspace root',
   'tool.edit.multiFiles': '{count} files',
+  'tool.edit.globPattern': 'Pattern',
   'tool.edit.executing': 'Editing {path}…',
   'tool.edit.executingGeneric': 'Executing edit…',
   'tool.edit.showDiff': 'Show diff',

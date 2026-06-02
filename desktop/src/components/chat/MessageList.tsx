@@ -48,6 +48,8 @@ import {
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type ToolResult = Extract<UIMessage, { type: 'tool_result' }>
 
+const RETRY_BANNER_MIN_ATTEMPT = 3
+
 type RenderItem =
   | { kind: 'explored'; id: string; items: UIMessage[]; summary: ExploredSummary }
   | { kind: 'message'; message: UIMessage }
@@ -344,6 +346,8 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       ? s.sessions[resolvedSessionId]?.providerRetry ?? null
       : null,
   )
+  const showRetryBanner =
+    !!providerRetry && providerRetry.attempt >= RETRY_BANNER_MIN_ATTEMPT
   const pendingSendAfterRewind = useChatStore((s) =>
     resolvedSessionId
       ? s.sessions[resolvedSessionId]?.pendingSendAfterRewind ?? null
@@ -965,11 +969,11 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           <AssistantMessage content={streamingText} isStreaming={chatState === 'streaming'} />
         )}
 
-        {resolvedSessionId && providerRetry && (
+        {resolvedSessionId && showRetryBanner && (
           <ProviderRetryBanner sessionId={resolvedSessionId} />
         )}
 
-        {showPlanningIndicator && !providerRetry && (
+        {showPlanningIndicator && !showRetryBanner && (
           chatState === 'awaiting_workers' ? (
             <div className="mx-auto w-full max-w-[860px] px-8 py-2">
               <div className="inline-flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-[12px] text-[var(--color-text-secondary)]">

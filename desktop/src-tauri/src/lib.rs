@@ -100,7 +100,8 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
     use windows_sys::Win32::Graphics::Gdi::{
-        InvalidateRect, RedrawWindow, RDW_FRAME, RDW_INVALIDATE,
+        GetMonitorInfoW, InvalidateRect, MonitorFromWindow, RedrawWindow, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST, RDW_FRAME, RDW_INVALIDATE,
     };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -108,10 +109,11 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
         SetWindowPos, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT,
         HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SWP_FRAMECHANGED,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_ACTIVATEAPP,
-        WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_DWMNCRENDERINGCHANGED, WM_NCACTIVATE,
-        WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SHOWWINDOW,
-        WM_THEMECHANGED, WM_WINDOWPOSCHANGED, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MAXIMIZEBOX,
-        WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+        WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_DWMNCRENDERINGCHANGED, WM_GETMINMAXINFO,
+        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_SETFOCUS, WM_SETTINGCHANGE,
+        WM_SHOWWINDOW, WM_THEMECHANGED, WM_WINDOWPOSCHANGED, MINMAXINFO, NCCALCSIZE_PARAMS,
+        WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+        WS_THICKFRAME,
     };
 
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
@@ -128,7 +130,43 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
         _data: usize,
     ) -> LRESULT {
         match msg {
-            WM_NCCALCSIZE => 0,
+            WM_GETMINMAXINFO => {
+                unsafe {
+                    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    if !monitor.is_null() {
+                        let mut mi: MONITORINFO = std::mem::zeroed();
+                        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                        if GetMonitorInfoW(monitor, &mut mi) != 0 {
+                            let work = mi.rcWork;
+                            let mon = mi.rcMonitor;
+                            let mmi = &mut *(lparam as *mut MINMAXINFO);
+                            mmi.ptMaxPosition.x = work.left - mon.left;
+                            mmi.ptMaxPosition.y = work.top - mon.top;
+                            mmi.ptMaxSize.x = work.right - work.left;
+                            mmi.ptMaxSize.y = work.bottom - work.top;
+                            mmi.ptMaxTrackSize.x = work.right - work.left;
+                            mmi.ptMaxTrackSize.y = work.bottom - work.top;
+                        }
+                    }
+                }
+                0
+            }
+            WM_NCCALCSIZE => {
+                if wparam != 0 && unsafe { IsZoomed(hwnd) } != 0 {
+                    unsafe {
+                        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                        if !monitor.is_null() {
+                            let mut mi: MONITORINFO = std::mem::zeroed();
+                            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                            if GetMonitorInfoW(monitor, &mut mi) != 0 {
+                                let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
+                                params.rgrc[0] = mi.rcWork;
+                            }
+                        }
+                    }
+                }
+                0
+            }
             WM_NCPAINT => 0,
             WM_NCUAHDRAWCAPTION | WM_NCUAHDRAWFRAME => 0,
 

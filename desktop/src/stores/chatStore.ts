@@ -3024,7 +3024,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (TODO_TOOL_NAMES.has(toolName) && Array.isArray((input as any)?.todos)) {
           const incomingSessionId = (msg as { sessionId?: string }).sessionId
           if (!incomingSessionId || incomingSessionId === sessionId) {
-            void useCLITaskStore.getState().refreshTasks(sessionId)
+            useCLITaskStore
+              .getState()
+              .setTasksFromTodos((input as any).todos, sessionId)
           }
         } else if (TASK_TOOL_NAMES.has(toolName)) {
           const useId = toolUseId

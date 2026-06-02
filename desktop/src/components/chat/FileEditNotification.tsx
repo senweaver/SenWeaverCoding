@@ -97,14 +97,48 @@ export function FileEditNotification({
               className="rounded-md border border-[var(--color-outline-variant)]/40 px-2 py-0.5 text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
             />
           </div>
-          <pre
-            className="m-0 max-h-[260px] overflow-auto bg-[var(--color-code-bg)] px-3 py-2 font-[var(--font-mono)] text-[11px] leading-[1.4] text-[var(--color-code-fg)]"
-            style={{ whiteSpace: 'pre' }}
-          >
-            {diff}
-          </pre>
+          <DiffLines diff={diff!} />
         </div>
       )}
+    </div>
+  )
+}
+
+function DiffLines({ diff }: { diff: string }) {
+  const lines = diff.replace(/\n$/, '').split('\n')
+  return (
+    <div
+      className="m-0 max-h-[260px] overflow-auto bg-[var(--color-code-bg)] py-1 font-[var(--font-mono)] text-[11px] leading-[1.5]"
+      style={{ whiteSpace: 'pre' }}
+    >
+      {lines.map((line, index) => {
+        const first = line.charAt(0)
+        const isFileHeader = line.startsWith('---') || line.startsWith('+++')
+        const isHunk = line.startsWith('@@')
+        const isAdd = !isFileHeader && first === '+'
+        const isDel = !isFileHeader && first === '-'
+
+        let lineClass =
+          'px-3 text-[var(--color-code-fg)]'
+        if (isHunk) {
+          lineClass =
+            'px-3 text-[var(--color-text-tertiary)] bg-[var(--color-surface-container-high)]/40'
+        } else if (isFileHeader) {
+          lineClass = 'px-3 text-[var(--color-text-tertiary)]'
+        } else if (isAdd) {
+          lineClass =
+            'px-3 text-[var(--color-success)] bg-[var(--color-success-container)]/30'
+        } else if (isDel) {
+          lineClass =
+            'px-3 text-[var(--color-error)] bg-[var(--color-error-container)]/30'
+        }
+
+        return (
+          <div key={index} className={lineClass}>
+            {line.length > 0 ? line : '\u00a0'}
+          </div>
+        )
+      })}
     </div>
   )
 }

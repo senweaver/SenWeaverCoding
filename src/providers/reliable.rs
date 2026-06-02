@@ -497,9 +497,9 @@ fn push_failure(
     ));
 }
 
-pub const TRANSIENT_RETRY_FLOOR: u32 = 4;
+pub const TRANSIENT_RETRY_FLOOR: u32 = 12;
 
-pub const TRANSPORT_RETRY_CAP: u32 = 2;
+pub const TRANSPORT_RETRY_CAP: u32 = 12;
 
 const STREAM_BACKOFF_CEILING_MS: u64 = 10_000;
 

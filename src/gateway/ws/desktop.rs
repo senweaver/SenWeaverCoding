@@ -11,9 +11,9 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 const GW_SESSION_PREFIX: &str = "gw_";
@@ -1573,6 +1573,134 @@ async fn send_error(outbound: &OutboundSender, message: &str, code: &str) {
     .await;
 }
 
+struct PersistJob {
+    session_key: String,
+    rows: Vec<crate::providers::ChatMessage>,
+}
+
+static PERSIST_PENDING: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) async fn wait_persist_drained(deadline: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if PERSIST_PENDING.load(Ordering::SeqCst) == 0 {
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            tracing::warn!(
+                target: "ws_desktop_persist",
+                pending = PERSIST_PENDING.load(Ordering::SeqCst),
+                "session persist queue did not drain within shutdown deadline"
+            );
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn persist_sender(
+    backend: &std::sync::Arc<dyn crate::channels::session::backend::SessionBackend>,
+) -> &'static mpsc::UnboundedSender<PersistJob> {
+    static SENDER: std::sync::OnceLock<mpsc::UnboundedSender<PersistJob>> =
+        std::sync::OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PersistJob>();
+        let backend = std::sync::Arc::clone(backend);
+        tokio::spawn(async move {
+            let mut retry_queue: std::collections::VecDeque<PersistJob> =
+                std::collections::VecDeque::new();
+            loop {
+                let job = if let Some(job) = retry_queue.pop_front() {
+                    job
+                } else {
+                    match rx.recv().await {
+                        Some(job) => job,
+                        None => break,
+                    }
+                };
+
+                let backend_for_write = std::sync::Arc::clone(&backend);
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let PersistJob { session_key, rows } = job;
+                    for (idx, msg) in rows.iter().enumerate() {
+                        if let Err(e) = backend_for_write.append(&session_key, msg) {
+                            let leftover = rows[idx..].to_vec();
+                            return Some((
+                                PersistJob {
+                                    session_key,
+                                    rows: leftover,
+                                },
+                                e.to_string(),
+                            ));
+                        }
+                    }
+                    None
+                })
+                .await;
+
+                match outcome {
+                    Ok(None) => {
+                        PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    Ok(Some((leftover_job, err))) => {
+                        tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %err,
+                            session_key = %leftover_job.session_key,
+                            pending = leftover_job.rows.len(),
+                            "session persist append failed; retrying in background"
+                        );
+                        retry_queue.push_back(leftover_job);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(join_err) => {
+                        tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %join_err,
+                            "session persist worker join error; dropping batch"
+                        );
+                        PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        tx
+    })
+}
+
+fn describe_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+fn enqueue_persist(
+    state: &AppState,
+    session_key: &str,
+    rows: Vec<crate::providers::ChatMessage>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let Some(backend) = state.session_backend.as_ref() else {
+        return;
+    };
+    PERSIST_PENDING.fetch_add(1, Ordering::SeqCst);
+    if persist_sender(backend)
+        .send(PersistJob {
+            session_key: session_key.to_string(),
+            rows,
+        })
+        .is_err()
+    {
+        PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct DesktopSqlitePersist {
     thinking_buf: String,
@@ -1617,12 +1745,17 @@ impl DesktopSqlitePersist {
         self.text_buf.clear();
     }
 
+    const MAX_TEXT_BUF_BYTES: usize = 1024 * 1024;
+
     fn on_chunk(&mut self, delta: &str) {
         if !self.thinking_buf.is_empty() {
             self.absorb_pending_text();
             self.absorb_pending_thinking();
         }
         self.text_buf.push_str(delta);
+        if self.text_buf.len() > Self::MAX_TEXT_BUF_BYTES {
+            self.absorb_pending_text();
+        }
     }
 
     fn reset_stream(&mut self) {
@@ -1803,6 +1936,10 @@ impl DesktopSqlitePersist {
         if let Ok(s) = serde_json::to_string(&payload) {
             self.out.push(crate::providers::ChatMessage::tool(s));
         }
+    }
+
+    fn take_unflushed(&mut self) -> Vec<crate::providers::ChatMessage> {
+        std::mem::take(&mut self.out)
     }
 
     fn finish(mut self) -> Vec<crate::providers::ChatMessage> {
@@ -2092,32 +2229,6 @@ async fn run_turn(
                         }),
                     )
                     .await;
-                    if matches!(
-                        name.as_str(),
-                        "todo_write"
-                            | "TodoWrite"
-                            | "todowrite"
-                            | "tasks_write"
-                            | "TasksWrite"
-                    ) {
-                        let snapshot = if let Some(svc) = crate::services::try_get_services() {
-                            crate::tools::todo_write::session_todos(
-                                &svc.todo_store,
-                                session_id,
-                            )
-                        } else {
-                            Vec::new()
-                        };
-                        let _ = send_json(
-                            outbound,
-                            &serde_json::json!({
-                                "type": "todo_snapshot",
-                                "sessionId": session_id,
-                                "todos": snapshot,
-                            }),
-                        )
-                        .await;
-                    }
                 }
                 TurnEvent::ToolResult {
                     name,
@@ -2138,9 +2249,15 @@ async fn run_turn(
                     );
                     let safe_output =
                         crate::services::governance::credential_vault::redact_for_audit_optional(&output);
-                    if let Ok(mut pg) = sqlite_persist_forward.lock() {
-                        pg.on_tool_result(&id, safe_output.clone(), is_error);
-                    }
+                    let flush_rows = {
+                        if let Ok(mut pg) = sqlite_persist_forward.lock() {
+                            pg.on_tool_result(&id, safe_output.clone(), is_error);
+                            pg.take_unflushed()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    enqueue_persist(state, session_key, flush_rows);
                     let _ = send_json(
                         outbound,
                         &serde_json::json!({
@@ -2151,6 +2268,31 @@ async fn run_turn(
                         }),
                     )
                     .await;
+                    if !is_error
+                        && matches!(
+                            name.as_str(),
+                            "todo_write"
+                                | "TodoWrite"
+                                | "todowrite"
+                                | "tasks_write"
+                                | "TasksWrite"
+                        )
+                    {
+                        let snapshot = if let Some(svc) = crate::services::try_get_services() {
+                            crate::tools::todo_write::session_todos(&svc.todo_store, session_id)
+                        } else {
+                            Vec::new()
+                        };
+                        let _ = send_json(
+                            outbound,
+                            &serde_json::json!({
+                                "type": "todo_snapshot",
+                                "sessionId": session_id,
+                                "todos": snapshot,
+                            }),
+                        )
+                        .await;
+                    }
                 }
                 TurnEvent::PlanProgressCommitted {
                     plan_path,
@@ -2163,9 +2305,15 @@ async fn run_turn(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    if let Ok(mut pg) = sqlite_persist_forward.lock() {
-                        pg.on_plan_progress(&plan_path, &title, todos.clone(), timestamp_ms);
-                    }
+                    let flush_rows = {
+                        if let Ok(mut pg) = sqlite_persist_forward.lock() {
+                            pg.on_plan_progress(&plan_path, &title, todos.clone(), timestamp_ms);
+                            pg.take_unflushed()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    enqueue_persist(state, session_key, flush_rows);
                     let _ = send_json(
                         outbound,
                         &serde_json::json!({
@@ -2576,11 +2724,41 @@ async fn run_turn(
         }
     };
 
-    let (turn_result, _) = tokio::join!(turn_fut, forward_fut);
+    let (turn_caught, forward_caught) = tokio::join!(
+        std::panic::AssertUnwindSafe(turn_fut).catch_unwind(),
+        std::panic::AssertUnwindSafe(forward_fut).catch_unwind(),
+    );
+
+    let forward_panicked = forward_caught.is_err();
+    if let Err(panic) = &forward_caught {
+        tracing::error!(
+            target: "ws_desktop_turn",
+            session_id,
+            "event forwarding panicked (recovered): {}",
+            describe_panic(&**panic),
+        );
+    }
+
+    let turn_result: Result<String, String> = match turn_caught {
+        Ok(Ok(final_text)) if !forward_panicked => Ok(final_text),
+        Ok(Ok(_)) => Err(
+            "turn completed but event forwarding was interrupted by an internal error".to_string(),
+        ),
+        Ok(Err(err)) => Err(format!("{err}")),
+        Err(panic) => {
+            let detail = describe_panic(&*panic);
+            tracing::error!(
+                target: "ws_desktop_turn",
+                session_id,
+                "turn execution panicked (recovered): {detail}",
+            );
+            Err(format!("internal error recovered: {detail}"))
+        }
+    };
 
     match turn_result {
         Ok(final_text) => {
-            if let Some(ref backend) = state.session_backend {
+            if state.session_backend.is_some() {
                 let recorder = sqlite_persist
                     .lock()
                     .ok()
@@ -2590,14 +2768,7 @@ async fn run_turn(
                 if rows.is_empty() && !final_text.trim().is_empty() {
                     rows.push(crate::providers::ChatMessage::assistant(final_text.clone()));
                 }
-                let backend_arc = std::sync::Arc::clone(backend);
-                let session_key_owned = session_key.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    for msg in rows {
-                        let _ = backend_arc.append(&session_key_owned, &msg);
-                    }
-                })
-                .await;
+                enqueue_persist(state, session_key, rows);
             }
             let final_todos = if let Some(svc) = crate::services::try_get_services() {
                 crate::tools::todo_write::session_todos(&svc.todo_store, session_id)
@@ -2629,6 +2800,15 @@ async fn run_turn(
             .await;
         }
         Err(err) => {
+            if state.session_backend.is_some() {
+                let recorder = sqlite_persist
+                    .lock()
+                    .ok()
+                    .map(|mut g| std::mem::take(&mut *g))
+                    .unwrap_or_default();
+                let rows = recorder.finish();
+                enqueue_persist(state, session_key, rows);
+            }
             let msg = format!("{err}");
             let code = crate::agent::error_classify::classify_turn_error_code(&msg);
             send_error(outbound, &msg, code).await;

@@ -298,6 +298,41 @@ export function EditDetail({ toolName, input, result, isStreaming }: ToolViewPro
     }
   }
 
+  if (toolName === 'glob_edit') {
+    const text = result ? extractTextContent(result.content) : ''
+    return (
+      <div className="space-y-2">
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)]">
+          <div className="flex items-center gap-1.5 font-[var(--font-mono)]">
+            <span className="shrink-0 text-[var(--color-text-tertiary)]">
+              {t('tool.edit.globPattern')}
+            </span>
+            <span className="min-w-0 truncate text-[var(--color-text-primary)]" title={path}>
+              {path}
+            </span>
+          </div>
+          {(oldStr || newStr) && (
+            <div className="mt-1 space-y-0.5 font-[var(--font-mono)]">
+              <div
+                className="truncate text-[var(--color-error)]"
+                title={oldStr}
+              >
+                {`- ${oldStr}`}
+              </div>
+              <div
+                className="truncate text-[var(--color-success)]"
+                title={newStr}
+              >
+                {`+ ${newStr}`}
+              </div>
+            </div>
+          )}
+        </div>
+        {text && <CodeViewer code={text} language="plaintext" maxLines={14} />}
+      </div>
+    )
+  }
+
   if (EDIT_STYLE_NAMES.has(toolName) && (oldStr || newStr)) {
     return <DiffViewer filePath={path} oldString={oldStr} newString={newStr} />
   }
