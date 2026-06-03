@@ -25,6 +25,7 @@ import {
   type ServerStatusSnapshot,
 } from '../../lib/desktopRuntime'
 import { startAiWriteWatcher } from '../../lib/aiWriteWatcher'
+import { startTaskbarAlertWatcher } from '../../lib/taskbarAlert'
 import { TabBar } from './TabBar'
 import { TitleBar } from './TitleBar'
 import { ResizeHandleRight } from './ResizeHandleRight'
@@ -229,6 +230,11 @@ export function AppShell() {
 
   useEffect(() => {
     const dispose = startAiWriteWatcher()
+    return () => dispose()
+  }, [])
+
+  useEffect(() => {
+    const dispose = startTaskbarAlertWatcher()
     return () => dispose()
   }, [])
 

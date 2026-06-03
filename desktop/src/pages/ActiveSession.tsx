@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { useEffect, useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
@@ -23,8 +24,20 @@ export function ActiveSession() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessions = useSessionStore((s) => s.sessions)
   const connectToSession = useChatStore((s) => s.connectToSession)
-  const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
-  const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
+  const { chatState, totalTokens, hasMessages, hasStreamingText, pendingComputerUsePermission } =
+    useChatStore(
+      useShallow((s) => {
+        const st = activeTabId ? s.sessions[activeTabId] : undefined
+        const usage = st?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
+        return {
+          chatState: st?.chatState ?? 'idle',
+          totalTokens: usage.input_tokens + usage.output_tokens,
+          hasMessages: (st?.messages?.length ?? 0) > 0,
+          hasStreamingText: !!st?.streamingText,
+          pendingComputerUsePermission: st?.pendingComputerUsePermission ?? null,
+        }
+      }),
+    )
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
   const hasIncompleteTasks = useCLITaskStore((s) => {
     if (!activeTabId) return false
@@ -32,8 +45,6 @@ export function ActiveSession() {
     if (!tasks || tasks.length === 0) return false
     return tasks.some((task) => task.status !== 'completed')
   })
-  const chatState = sessionState?.chatState ?? 'idle'
-  const tokenUsage = sessionState?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
 
   const session = sessions.find((s) => s.id === activeTabId)
   const memberInfo = useTeamStore((s) => activeTabId ? s.getMemberBySessionId(activeTabId) : null)
@@ -72,12 +83,9 @@ export function ActiveSession() {
   ])
 
   const t = useTranslation()
-  const messages = sessionState?.messages ?? []
-  const streamingText = sessionState?.streamingText ?? ''
-  const isEmpty = messages.length === 0 && !streamingText
+  const isEmpty = !hasMessages && !hasStreamingText
 
   const isActive = chatState !== 'idle'
-  const totalTokens = tokenUsage.input_tokens + tokenUsage.output_tokens
 
   const lastUpdated = useMemo(() => {
     if (!session?.modifiedAt) return ''

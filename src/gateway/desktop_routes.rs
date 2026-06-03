@@ -524,11 +524,15 @@ fn mask_api_key(raw: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    if trimmed.len() <= 8 {
-        return "*".repeat(trimmed.len());
+    let char_count = trimmed.chars().count();
+    if char_count <= 8 {
+        return "*".repeat(char_count);
     }
-    let head = &trimmed[..4];
-    let tail = &trimmed[trimmed.len() - 4..];
+    let head: String = trimmed.chars().take(4).collect();
+    let tail: String = trimmed
+        .chars()
+        .skip(char_count.saturating_sub(4))
+        .collect();
     format!("{head}…{tail}")
 }
 

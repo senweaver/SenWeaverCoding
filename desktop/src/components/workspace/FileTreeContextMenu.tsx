@@ -28,6 +28,10 @@ type Props = {
   onCopyAsMarkdown?: (node: FileTreeNode) => void
   onReveal: (node: FileTreeNode) => void
   onOpenInTerminal: (node: FileTreeNode) => void
+  onCopyEntry: (node: FileTreeNode) => void
+  onCutEntry: (node: FileTreeNode) => void
+  onPasteInto: (targetDir: string) => void
+  canPaste: boolean
 }
 
 export function FileTreeContextMenu({
@@ -48,6 +52,10 @@ export function FileTreeContextMenu({
   onCopyAsMarkdown,
   onReveal,
   onOpenInTerminal,
+  onCopyEntry,
+  onCutEntry,
+  onPasteInto,
+  canPaste,
 }: Props) {
   const t = useTranslation()
   const ref = useRef<HTMLDivElement | null>(null)
@@ -106,6 +114,16 @@ export function FileTreeContextMenu({
               onClose()
             }}
           />
+          {canPaste && (
+            <MenuItem
+              label={t('workspace.paste')}
+              icon="content_paste"
+              onClick={() => {
+                onPasteInto(parent?.relPath ?? '')
+                onClose()
+              }}
+            />
+          )}
           {(target.kind === 'node' || target.kind === 'root') && (
             <Separator />
           )}
@@ -131,6 +149,22 @@ export function FileTreeContextMenu({
             }}
           />
           <Separator />
+          <MenuItem
+            label={t('workspace.cut')}
+            icon="content_cut"
+            onClick={() => {
+              onCutEntry(node)
+              onClose()
+            }}
+          />
+          <MenuItem
+            label={t('workspace.copy')}
+            icon="file_copy"
+            onClick={() => {
+              onCopyEntry(node)
+              onClose()
+            }}
+          />
           <MenuItem
             label={t('files.tree.copyPath')}
             icon="content_copy"

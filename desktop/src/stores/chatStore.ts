@@ -18,7 +18,7 @@ import { useWorkersStore } from './workersStore'
 import { useBrowserPanelStore } from './browserPanelStore'
 import { useLspStore } from './lspStore'
 import { useUIStore } from './uiStore'
-import { t } from '../i18n'
+import { t, type TranslationKey } from '../i18n'
 import type { LspBroadcastEvent } from '../types/lsp'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import {
@@ -1175,6 +1175,49 @@ function stripNoModelErrorMessages(messages: UIMessage[]): UIMessage[] {
 
 function emitNoModelWarning(): void {
   return
+}
+
+const ACTIONABLE_PROVIDER_ERROR_CODES = new Set<string>([
+  'INSUFFICIENT_BALANCE',
+  'AUTH_ERROR',
+  'MODEL_UNAVAILABLE',
+])
+
+let lastCriticalToastKey = ''
+let lastCriticalToastAt = 0
+
+function emitCriticalProviderErrorToast(
+  code: string | undefined,
+  rawMessage: string | undefined,
+): void {
+  if (!code || !ACTIONABLE_PROVIDER_ERROR_CODES.has(code)) return
+
+  const now = Date.now()
+  const dedupeKey = `${code}:${(rawMessage ?? '').trim()}`
+  if (dedupeKey === lastCriticalToastKey && now - lastCriticalToastAt < 4000) {
+    return
+  }
+  lastCriticalToastKey = dedupeKey
+  lastCriticalToastAt = now
+
+  const key = `error.${code}` as TranslationKey
+  const translated = t(key)
+  const friendly =
+    translated && translated !== key
+      ? translated
+      : (rawMessage ?? '').trim() || t('error.UNKNOWN_ERROR')
+
+  useUIStore.getState().addToast({
+    type: 'error',
+    message: friendly,
+    duration: 12000,
+    action: {
+      label: t('chat.noModel.openSettings'),
+      onClick: () => {
+        useUIStore.getState().openSettingsOverlay('providers')
+      },
+    },
+  })
 }
 
 const pendingDeltaBySession = new Map<string, string>()
@@ -3491,6 +3534,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           useTabStore.getState().updateTabStatus(sessionId, 'idle')
         } else {
           useTabStore.getState().updateTabStatus(sessionId, 'error')
+          emitCriticalProviderErrorToast(msg.code, msg.message)
         }
         {
           const session = get().sessions[sessionId]

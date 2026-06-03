@@ -299,7 +299,7 @@ impl Channel for BlueskyChannel {
         };
 
         let text = if message.content.len() > 300 {
-            format!("{}...", &message.content[..297])
+            format!("{}...", crate::util::truncate_str_bytes(&message.content, 297))
         } else {
             message.content.clone()
         };

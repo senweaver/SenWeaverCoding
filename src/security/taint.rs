@@ -201,7 +201,7 @@ impl TaintSink {
                 value_preview: if value.has_any_label(&[TaintLabel::Secret, TaintLabel::Pii]) {
                     "[REDACTED]".to_string()
                 } else if value.value.len() > 50 {
-                    format!("{}...", &value.value[..50])
+                    format!("{}...", crate::util::truncate_str_bytes(&value.value, 50))
                 } else {
                     value.value.clone()
                 },

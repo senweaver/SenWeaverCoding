@@ -35,7 +35,7 @@ pub fn split_message(text: &str, max_chars: usize, max_chunks: usize) -> Vec<Str
     }
 
     if chunks.is_empty() {
-        chunks.push(text[..max_chars.min(text.len())].to_string());
+        chunks.push(crate::util::truncate_str_bytes(text, max_chars).to_string());
     }
 
     chunks

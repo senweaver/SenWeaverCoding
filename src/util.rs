@@ -112,6 +112,32 @@ pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     }
 }
 
+#[inline]
+#[must_use]
+pub fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+#[inline]
+#[must_use]
+pub fn truncate_str_bytes(s: &str, max_bytes: usize) -> &str {
+    &s[..floor_char_boundary(s, max_bytes)]
+}
+
+pub fn truncate_string_bytes(s: &mut String, max_bytes: usize) {
+    if s.len() > max_bytes {
+        let boundary = floor_char_boundary(s, max_bytes);
+        s.truncate(boundary);
+    }
+}
+
 pub fn redact_secret(s: &str) -> String {
     if s.is_empty() {
         return "<empty>".to_string();

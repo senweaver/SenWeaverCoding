@@ -99,6 +99,7 @@ async fn run_shell_command(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     let stdout = child.stdout.take();

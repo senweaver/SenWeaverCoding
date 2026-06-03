@@ -150,7 +150,7 @@ impl Tool for McpResourcesReadTool {
                                 "text": c.text,
                                 "blob": c.blob.as_ref().map(|b| {
                                     if b.len() > 200 {
-                                        format!("{}... ({} chars, base64)", &b[..200], b.len())
+                                        format!("{}... ({} chars, base64)", crate::util::truncate_str_bytes(b, 200), b.len())
                                     } else {
                                         b.clone()
                                     }

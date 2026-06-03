@@ -139,9 +139,12 @@ impl Tool for SpawnWorkersTool {
             });
         }
 
-        let parent_session_id = current_session_context()
-            .map(|c| c.session_id)
+        let parent_ctx = current_session_context();
+        let parent_session_id = parent_ctx
+            .as_ref()
+            .map(|c| c.session_id.clone())
             .unwrap_or_default();
+        let parent_workspace_dir = parent_ctx.map(|c| c.workspace_dir);
         let parent_tool_use_id = current_tool_call_id().unwrap_or_default();
 
         let supervisor = match ensure_supervisor() {
@@ -160,6 +163,7 @@ impl Tool for SpawnWorkersTool {
         let run_ctx = WorkerRunContext {
             config: Arc::clone(&self.config),
             live_config: self.live_config.clone(),
+            parent_workspace_dir,
         };
 
         let mut handles = Vec::with_capacity(parsed.tasks.len());

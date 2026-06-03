@@ -56,12 +56,14 @@ type Props = {
   depth: number
   selectedRelPath: string | null
   focusedRelPath?: string | null
+  cutRelPath?: string | null
 
   renameTarget: RenameTargetState | null
 
   createTarget: CreateTargetState | null
   filter?: FilterState
   onSelect: (node: FileTreeNode) => void
+  onFocus?: (relPath: string) => void
   onContextMenu: (event: React.MouseEvent, node: FileTreeNode) => void
   onDrop: (event: React.DragEvent, target: FileTreeNode) => void
   onDragStart: (event: React.DragEvent, node: FileTreeNode) => void
@@ -128,10 +130,12 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   depth,
   selectedRelPath,
   focusedRelPath,
+  cutRelPath,
   renameTarget,
   createTarget,
   filter,
   onSelect,
+  onFocus,
   onContextMenu,
   onDrop,
   onDragStart,
@@ -200,6 +204,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
 
   const isSelected = !node.isDir && selectedRelPath === node.relPath
   const isFocused = focusedRelPath === node.relPath
+  const isCut = !!cutRelPath && cutRelPath === node.relPath
 
   const sizeLabel = useMemo(() => {
     if (node.isDir) return ''
@@ -227,12 +232,13 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   }, [node.isDir, node.modifiedAt, node.relPath, sizeLabel, t])
 
   const handleClick = useCallback(() => {
+    onFocus?.(node.relPath)
     if (node.isDir) {
       void toggleExpanded(node.relPath)
     } else {
       onSelect(node)
     }
-  }, [node, onSelect, toggleExpanded])
+  }, [node, onFocus, onSelect, toggleExpanded])
 
   const handleChevron = useCallback(
     (event: React.MouseEvent) => {
@@ -291,7 +297,9 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
           isSelected
             ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
             : 'hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
-        }${isFocused ? ' ring-1 ring-inset ring-[var(--color-accent)]/60' : ''}`}
+        }${isFocused ? ' ring-1 ring-inset ring-[var(--color-accent)]/60' : ''}${
+          isCut ? ' opacity-50' : ''
+        }`}
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
         title={tooltip}
       >
@@ -417,10 +425,12 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
                 depth={depth + 1}
                 selectedRelPath={selectedRelPath}
                 focusedRelPath={focusedRelPath}
+                cutRelPath={cutRelPath}
                 renameTarget={renameTarget}
                 createTarget={createTarget}
                 filter={filter}
                 onSelect={onSelect}
+                onFocus={onFocus}
                 onContextMenu={onContextMenu}
                 onDrop={onDrop}
                 onDragStart={onDragStart}

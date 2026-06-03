@@ -1604,6 +1604,8 @@ struct PersistJob {
 
 static PERSIST_PENDING: AtomicUsize = AtomicUsize::new(0);
 
+const MAX_PERSIST_RETRIES: u32 = 10;
+
 pub(crate) async fn wait_persist_drained(deadline: std::time::Duration) -> bool {
     let start = std::time::Instant::now();
     loop {
@@ -1631,14 +1633,14 @@ fn persist_sender(
         let (tx, mut rx) = mpsc::unbounded_channel::<PersistJob>();
         let backend = std::sync::Arc::clone(backend);
         tokio::spawn(async move {
-            let mut retry_queue: std::collections::VecDeque<PersistJob> =
+            let mut retry_queue: std::collections::VecDeque<(PersistJob, u32)> =
                 std::collections::VecDeque::new();
             loop {
-                let job = if let Some(job) = retry_queue.pop_front() {
-                    job
+                let (job, attempts) = if let Some(item) = retry_queue.pop_front() {
+                    item
                 } else {
                     match rx.recv().await {
-                        Some(job) => job,
+                        Some(job) => (job, 0u32),
                         None => break,
                     }
                 };
@@ -1667,15 +1669,29 @@ fn persist_sender(
                         PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
                     }
                     Ok(Some((leftover_job, err))) => {
-                        tracing::warn!(
-                            target: "ws_desktop_persist",
-                            error = %err,
-                            session_key = %leftover_job.session_key,
-                            pending = leftover_job.rows.len(),
-                            "session persist append failed; retrying in background"
-                        );
-                        retry_queue.push_back(leftover_job);
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let next_attempts = attempts + 1;
+                        if next_attempts >= MAX_PERSIST_RETRIES {
+                            tracing::error!(
+                                target: "ws_desktop_persist",
+                                error = %err,
+                                session_key = %leftover_job.session_key,
+                                dropped = leftover_job.rows.len(),
+                                attempts = next_attempts,
+                                "session persist append failed permanently; dropping batch after max retries"
+                            );
+                            PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+                        } else {
+                            tracing::warn!(
+                                target: "ws_desktop_persist",
+                                error = %err,
+                                session_key = %leftover_job.session_key,
+                                pending = leftover_job.rows.len(),
+                                attempt = next_attempts,
+                                "session persist append failed; retrying in background"
+                            );
+                            retry_queue.push_back((leftover_job, next_attempts));
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
                     }
                     Err(join_err) => {
                         tracing::warn!(
@@ -2125,6 +2141,7 @@ async fn run_turn(
         session_id: session_id.to_string(),
         workspace_key: workspace_key.clone(),
         title: session_title,
+        workspace_dir: agent.current_workspace_dir().to_string_lossy().into_owned(),
     };
     let turn_fut = async {
         let inner = async {

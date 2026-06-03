@@ -19,6 +19,7 @@ import { revealInExplorer } from '../../lib/revealInExplorer'
 import { joinWorkspaceAbsPath } from '../../lib/workspacePath'
 import { inferLanguageFromPath, languageToMarkdownLang } from '../../lib/extLanguage'
 import { workspaceFilesApi } from '../../api/workspaceFiles'
+import { DeleteConfirmModal } from './DeleteConfirmModal'
 import { FileTreeContextMenu, type ContextMenuTarget } from './FileTreeContextMenu'
 import { FileTreeNodeView, type FilterState } from './FileTreeNodeView'
 import { InlineNamePrompt } from './InlineNamePrompt'
@@ -55,6 +56,12 @@ export function FileTree({ workDir, onSelect }: Props) {
   const createFile = useWorkspaceFilesStore((s) => s.createFile)
   const createDir = useWorkspaceFilesStore((s) => s.createDir)
   const uploadFiles = useWorkspaceFilesStore((s) => s.uploadFiles)
+  const clipboard = useWorkspaceFilesStore((s) => s.clipboard)
+  const copyJob = useWorkspaceFilesStore((s) => s.copyJob)
+  const copyToClipboard = useWorkspaceFilesStore((s) => s.copyToClipboard)
+  const cutToClipboard = useWorkspaceFilesStore((s) => s.cutToClipboard)
+  const pasteInto = useWorkspaceFilesStore((s) => s.pasteInto)
+  const cancelCopy = useWorkspaceFilesStore((s) => s.cancelCopy)
   const addToast = useUIStore((s) => s.addToast)
 
   const collapseAll = useCallback(() => {
@@ -85,6 +92,7 @@ export function FileTree({ workDir, onSelect }: Props) {
   } | null>(null)
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
   const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<FileTreeNode | null>(null)
   const [isDraggingExternal, setIsDraggingExternal] = useState(false)
   const [filterText, setFilterText] = useState('')
   const [focusedRelPath, setFocusedRelPath] = useState<string | null>(null)
@@ -270,21 +278,29 @@ export function FileTree({ workDir, onSelect }: Props) {
     setRenameTarget({ relPath: node.relPath, initial: node.name })
   }, [])
 
-  const handleDelete = useCallback(
-    async (node: FileTreeNode) => {
-      const ok = window.confirm(t('files.deleteConfirm', { name: node.name }))
-      if (!ok) return
-      try {
-        await removeAction(node.relPath, node.isDir)
-      } catch (err) {
-        addToast({
-          type: 'error',
-          message: err instanceof Error ? err.message : String(err),
-        })
-      }
-    },
-    [addToast, removeAction, t],
-  )
+  const handleDelete = useCallback((node: FileTreeNode) => {
+    setDeleteTarget(node)
+  }, [])
+
+  const handleConfirmDelete = useCallback(async () => {
+    const node = deleteTarget
+    if (!node) return
+    try {
+      await removeAction(node.relPath, node.isDir)
+      setDeleteTarget(null)
+      addToast({
+        type: 'success',
+        message: t('files.deletedToTrash', { name: node.name }),
+        duration: 2400,
+      })
+    } catch (err) {
+      setDeleteTarget(null)
+      addToast({
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }, [addToast, deleteTarget, removeAction, t])
 
   const handleCreateSubmit = useCallback(
     async (value: string) => {
@@ -467,11 +483,68 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   const setExpanded = useWorkspaceFilesStore((s) => s.setExpanded)
 
+  const handleCopyNode = useCallback(
+    (node: FileTreeNode) => {
+      if (!node || node.relPath === '') return
+      copyToClipboard(node.relPath, node.isDir)
+    },
+    [copyToClipboard],
+  )
+
+  const handleCutNode = useCallback(
+    (node: FileTreeNode) => {
+      if (!node || node.relPath === '') return
+      cutToClipboard(node.relPath, node.isDir)
+    },
+    [cutToClipboard],
+  )
+
+  const handlePasteInto = useCallback(
+    (targetDir: string) => {
+      if (!clipboard) return
+      void pasteInto(targetDir)
+    },
+    [clipboard, pasteInto],
+  )
+
   const handleTreeKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (renameTarget || createTarget) return
+      if (renameTarget || createTarget || deleteTarget) return
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+        const activeRel = focusedRelPath ?? selectedRelPath
+        const activeNode = activeRel ? visibleByPath.get(activeRel) : undefined
+        if (activeNode && activeNode.relPath !== '') {
+          event.preventDefault()
+          handleCopyNode(activeNode)
+        }
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'x') {
+        const activeRel = focusedRelPath ?? selectedRelPath
+        const activeNode = activeRel ? visibleByPath.get(activeRel) : undefined
+        if (activeNode && activeNode.relPath !== '') {
+          event.preventDefault()
+          handleCutNode(activeNode)
+        }
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+        if (!clipboard) return
+        event.preventDefault()
+        const activeRel = focusedRelPath ?? selectedRelPath
+        const activeNode = activeRel ? visibleByPath.get(activeRel) : undefined
+        const targetDir = activeNode
+          ? activeNode.isDir
+            ? activeNode.relPath
+            : parentOf(activeNode.relPath)
+          : ''
+        handlePasteInto(targetDir)
+        return
+      }
+
       if (visibleNodes.length === 0) return
 
       const currentRel = focusedRelPath ?? selectedRelPath ?? visibleNodes[0]?.relPath ?? null
@@ -550,16 +623,22 @@ export function FileTree({ workDir, onSelect }: Props) {
       }
     },
     [
+      clipboard,
       createTarget,
+      deleteTarget,
       dirsForFlat,
       focusedRelPath,
+      handleCopyNode,
+      handleCutNode,
       handleDelete,
+      handlePasteInto,
       handleRename,
       handleSelect,
       renameTarget,
       root,
       selectedRelPath,
       setExpanded,
+      visibleByPath,
       visibleNodes,
     ],
   )
@@ -702,6 +781,55 @@ export function FileTree({ workDir, onSelect }: Props) {
         )}
       </div>
 
+      {copyJob && (
+        <div className="sticky top-14 z-[8] border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5">
+          <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[11px] text-[var(--color-text-secondary)]">
+                {t('workspace.copying', {
+                  name: copyJob.fromName,
+                  dir: copyJob.toDir,
+                  percent:
+                    copyJob.bytesTotal > 0
+                      ? Math.min(
+                          100,
+                          Math.round((copyJob.bytesDone / copyJob.bytesTotal) * 100),
+                        )
+                      : 0,
+                })}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                cancelCopy()
+              }}
+              aria-label={t('workspace.copyCancel')}
+              title={t('workspace.copyCancel')}
+              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-danger)]"
+            >
+              <span className="material-symbols-outlined text-[14px]">close</span>
+            </button>
+          </div>
+          <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-[var(--color-surface)]">
+            {copyJob.bytesTotal > 0 ? (
+              <div
+                className="h-full bg-[var(--color-text-accent)] transition-all duration-200"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.round((copyJob.bytesDone / copyJob.bytesTotal) * 100),
+                  )}%`,
+                }}
+              />
+            ) : (
+              <div className="h-full w-1/3 rounded-full bg-[var(--color-text-accent)]/75 animate-pulse" />
+            )}
+          </div>
+        </div>
+      )}
+
       {rootError && (
         <div className="px-3 py-2 text-[11px] text-[var(--color-danger)]">
           {t('files.errorLoadingTree', { message: rootError })}
@@ -733,10 +861,12 @@ export function FileTree({ workDir, onSelect }: Props) {
           depth={0}
           selectedRelPath={selectedRelPath}
           focusedRelPath={focusedRelPath}
+          cutRelPath={clipboard?.mode === 'cut' ? clipboard.relPath : null}
           renameTarget={renameTarget}
           createTarget={createTarget}
           filter={filterState}
           onSelect={handleSelect}
+          onFocus={setFocusedRelPath}
           onContextMenu={handleContextMenu}
           onDrop={handleDrop}
           onDragStart={handleDragStart}
@@ -784,6 +914,18 @@ export function FileTree({ workDir, onSelect }: Props) {
           onCopyAsMarkdown={handleCopyAsMarkdown}
           onReveal={handleReveal}
           onOpenInTerminal={handleOpenInTerminal}
+          onCopyEntry={handleCopyNode}
+          onCutEntry={handleCutNode}
+          onPasteInto={handlePasteInto}
+          canPaste={clipboard !== null}
+        />
+      )}
+
+      {deleteTarget && (
+        <DeleteConfirmModal
+          node={deleteTarget}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={handleConfirmDelete}
         />
       )}
     </div>

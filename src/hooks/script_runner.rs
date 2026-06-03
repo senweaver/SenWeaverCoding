@@ -328,7 +328,8 @@ impl ScriptHookRunner {
             .env("SEN_WORKSPACE_DIR", self.workspace_dir.as_os_str())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
         let spawn_result = command.spawn();
         let mut child = match spawn_result {

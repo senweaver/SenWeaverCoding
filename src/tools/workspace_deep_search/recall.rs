@@ -145,13 +145,23 @@ async fn rg_search(
     cmd.arg("-e").arg(pattern).arg(scope_path);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let Some(mut stdout) = child.stdout.take() else {
         anyhow::bail!("ripgrep spawn succeeded but stdout was not piped");
     };
     let mut buf = Vec::new();
-    let _ = stdout.read_to_end(&mut buf).await;
-    let _ = child.wait().await?;
+    let read_and_wait = async {
+        let _ = stdout.read_to_end(&mut buf).await;
+        let _ = child.wait().await;
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(20), read_and_wait)
+        .await
+        .is_err()
+    {
+        let _ = child.start_kill();
+        anyhow::bail!("ripgrep search timed out after 20s");
+    }
     let text = String::from_utf8_lossy(&buf);
     parse_rg_output(&text, workspace_root)
 }

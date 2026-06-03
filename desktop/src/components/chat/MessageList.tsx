@@ -333,7 +333,7 @@ function isWithinResumeRange(element: HTMLElement) {
   )
 }
 
-export function MessageList({ sessionId }: MessageListProps = {}) {
+export const MessageList = memo(function MessageList({ sessionId }: MessageListProps = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const resolvedSessionId = sessionId ?? activeTabId
   const messages = useChatStore(
@@ -1261,7 +1261,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     )}
     </div>
   )
-}
+})
 
 type ChatStateLite = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending' | 'awaiting_workers'
 

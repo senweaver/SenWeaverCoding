@@ -6,12 +6,13 @@ use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
 use anyhow::Context;
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecSection {
@@ -808,6 +809,77 @@ fn compare_spec_with_code(
     }
 }
 
+struct AnalysisCacheEntry {
+    workspace: String,
+    key: String,
+    inserted_at: Instant,
+    files: Arc<HashMap<String, String>>,
+    analysis: Arc<HashMap<String, AnalysisResult>>,
+}
+
+static ANALYSIS_CACHE: OnceLock<Mutex<Option<AnalysisCacheEntry>>> = OnceLock::new();
+const ANALYSIS_CACHE_TTL: Duration = Duration::from_secs(30);
+const ANALYSIS_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const ANALYSIS_CACHE_PATH_SEPARATOR: char = '\u{1f}';
+
+fn analysis_cache_slot() -> &'static Mutex<Option<AnalysisCacheEntry>> {
+    ANALYSIS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn build_cache_key(paths: &[String]) -> String {
+    let mut sorted: Vec<&str> = paths.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.join(&ANALYSIS_CACHE_PATH_SEPARATOR.to_string())
+}
+
+fn cache_lookup(
+    workspace: &str,
+    key: &str,
+) -> Option<(HashMap<String, String>, HashMap<String, AnalysisResult>)> {
+    let snapshot: (Arc<HashMap<String, String>>, Arc<HashMap<String, AnalysisResult>>) = {
+        let slot = analysis_cache_slot().lock();
+        let entry = slot.as_ref()?;
+        if entry.workspace != workspace || entry.key != key {
+            return None;
+        }
+        if entry.inserted_at.elapsed() >= ANALYSIS_CACHE_TTL {
+            return None;
+        }
+        (Arc::clone(&entry.files), Arc::clone(&entry.analysis))
+    };
+    Some(((*snapshot.0).clone(), (*snapshot.1).clone()))
+}
+
+fn cache_store(
+    workspace: String,
+    key: String,
+    files: &HashMap<String, String>,
+    analysis: &HashMap<String, AnalysisResult>,
+) {
+    let total_bytes: usize = files.values().map(|v| v.len()).sum();
+    if total_bytes > ANALYSIS_CACHE_MAX_BYTES {
+        let mut slot = analysis_cache_slot().lock();
+        if let Some(existing) = slot.as_ref() {
+            if existing.workspace == workspace && existing.key == key {
+                *slot = None;
+            }
+        }
+        return;
+    }
+    let files_arc = Arc::new(files.clone());
+    let analysis_arc = Arc::new(analysis.clone());
+    let mut slot = analysis_cache_slot().lock();
+    *slot = Some(AnalysisCacheEntry {
+        workspace,
+        key,
+        inserted_at: Instant::now(),
+        files: files_arc,
+        analysis: analysis_arc,
+    });
+}
+
+#[derive(Clone)]
 pub struct CodeToSpecTool {
     workspace_root: Arc<RwLock<std::path::PathBuf>>,
     security: Option<Arc<SecurityPolicy>>,
@@ -828,6 +900,36 @@ impl CodeToSpecTool {
 
     fn workspace_snapshot(&self) -> std::path::PathBuf {
         self.workspace_root.read().clone()
+    }
+
+    async fn gather_and_analyze_blocking(
+        &self,
+        paths: Vec<String>,
+    ) -> anyhow::Result<(HashMap<String, String>, HashMap<String, AnalysisResult>)> {
+        let workspace_string = self.workspace_snapshot().to_string_lossy().into_owned();
+        let cache_key = build_cache_key(&paths);
+
+        if let Some(hit) = cache_lookup(&workspace_string, &cache_key) {
+            return Ok(hit);
+        }
+
+        let this = self.clone();
+        let paths_for_task = paths;
+        let join_result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let files = this.gather_files(&paths_for_task)?;
+            let analysis = this.run_analysis(&files);
+            Ok((files, analysis))
+        })
+        .await;
+
+        match join_result {
+            Ok(Ok((files, analysis))) => {
+                cache_store(workspace_string, cache_key, &files, &analysis);
+                Ok((files, analysis))
+            }
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(anyhow::anyhow!("code_to_spec analysis task panicked: {e}")),
+        }
     }
 
     fn read_file(&self, rel_path: &str) -> anyhow::Result<String> {
@@ -1039,8 +1141,7 @@ impl Tool for CodeToSpecTool {
 
         match action {
             "analyze" => {
-                let files = self.gather_files(&paths)?;
-                let analysis = self.run_analysis(&files);
+                let (files, analysis) = self.gather_and_analyze_blocking(paths.clone()).await?;
 
                 let mut output_lines = Vec::new();
                 output_lines.push(format!("## Analysis Results ({} files)\n", files.len()));
@@ -1067,8 +1168,7 @@ impl Tool for CodeToSpecTool {
             }
 
             "summarize" => {
-                let files = self.gather_files(&paths)?;
-                let analysis = self.run_analysis(&files);
+                let (files, analysis) = self.gather_and_analyze_blocking(paths.clone()).await?;
                 let summary = self.summarize_state(&files, &analysis);
 
                 Ok(ToolResult {
@@ -1090,8 +1190,7 @@ impl Tool for CodeToSpecTool {
                     .unwrap_or("Auto-generated specification from code analysis.")
                     .to_string();
 
-                let files = self.gather_files(&paths)?;
-                let analysis = self.run_analysis(&files);
+                let (files, analysis) = self.gather_and_analyze_blocking(paths.clone()).await?;
                 let spec = build_spec_markdown(&files, &analysis, &title, &description);
 
                 let output_path = if paths.len() == 1 && paths[0] != "." {
@@ -1151,7 +1250,7 @@ impl Tool for CodeToSpecTool {
                         output_path,
                         files.len(),
                         analysis.values().map(|r| r.structures.len()).sum::<usize>(),
-                        &spec[..spec.len().min(2000)]
+                        crate::util::truncate_str_bytes(&spec, 2000)
                     ),
                     error: None,
                 })
@@ -1163,20 +1262,34 @@ impl Tool for CodeToSpecTool {
                     .and_then(|v| v.as_str())
                     .unwrap_or("SPEC.md");
 
-                let spec_content = self
-                    .read_file(spec_path)
-                    .unwrap_or_else(|_| format!("[SPEC.md not found at {}]", spec_path));
-                let files = self.gather_files(&paths)?;
-                let first_file = files.keys().next().map(|s| s.as_str()).unwrap_or("unknown");
-                let language = detect_language(Path::new(first_file));
-
-                let gaps = compare_spec_with_code(&spec_content, &files, &language);
+                let this = self.clone();
+                let paths_for_task = paths.clone();
+                let spec_path_owned = spec_path.to_string();
+                let joined = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, String)> {
+                    let spec_content = this
+                        .read_file(&spec_path_owned)
+                        .unwrap_or_else(|_| format!("[SPEC.md not found at {}]", spec_path_owned));
+                    let files = this.gather_files(&paths_for_task)?;
+                    let first_file =
+                        files.keys().next().map(|s| s.as_str()).unwrap_or("unknown");
+                    let language = detect_language(Path::new(first_file));
+                    let gaps = compare_spec_with_code(&spec_content, &files, &language);
+                    Ok((files.len(), gaps))
+                })
+                .await;
+                let (file_count, gaps) = match joined {
+                    Ok(Ok(values)) => values,
+                    Ok(Err(e)) => return Err(e),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("code_to_spec compare task panicked: {e}"))
+                    }
+                };
 
                 Ok(ToolResult {
                     success: true,
                     output: format!(
                         "## Spec vs Code Comparison\n\nComparing {} file(s) against `{}`:\n\n{}\n",
-                        files.len(),
+                        file_count,
                         spec_path,
                         gaps
                     ),

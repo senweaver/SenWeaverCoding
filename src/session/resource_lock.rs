@@ -555,6 +555,7 @@ pub struct SessionContext {
     pub session_id: String,
     pub workspace_key: String,
     pub title: String,
+    pub workspace_dir: String,
 }
 
 pub fn current_session_context() -> Option<SessionContext> {

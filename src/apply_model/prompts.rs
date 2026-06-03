@@ -131,7 +131,7 @@ fn surrounding_lines(source: &str, line: u32, radius: u32) -> String {
     let hi = (center + radius as usize + 1).min(lines.len());
     let mut out = String::from("Context:\n```\n");
     for (idx, l) in lines.iter().enumerate().take(hi).skip(lo) {
-        let trimmed: &str = if l.len() > 200 { &l[..200] } else { l };
+        let trimmed: &str = crate::util::truncate_str_bytes(l, 200);
         out.push_str(&format!("L{}: {}\n", idx + 1, trimmed.trim_end()));
     }
     out.push_str("```");

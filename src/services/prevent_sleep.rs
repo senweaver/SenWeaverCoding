@@ -12,7 +12,15 @@ enum PlatformGuard {
     Child(std::process::Child),
 }
 
-static PLATFORM_GUARD: Mutex<Option<PlatformGuard>> = Mutex::new(None);
+struct GuardState {
+    guard: Option<PlatformGuard>,
+    refs: usize,
+}
+
+static GUARD_STATE: Mutex<GuardState> = Mutex::new(GuardState {
+    guard: None,
+    refs: 0,
+});
 
 pub struct SleepInhibitor {
     active: AtomicBool,
@@ -54,8 +62,9 @@ impl Drop for SleepInhibitor {
 }
 
 fn acquire_platform_guard(reason: &str) -> bool {
-    let mut slot = PLATFORM_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.is_some() {
+    let mut state = GUARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.refs > 0 {
+        state.refs += 1;
         return true;
     }
 
@@ -72,7 +81,8 @@ fn acquire_platform_guard(reason: &str) -> bool {
             );
             return false;
         }
-        *slot = Some(PlatformGuard::ExecutionState(previous));
+        state.guard = Some(PlatformGuard::ExecutionState(previous));
+        state.refs = 1;
         return true;
     }
 
@@ -82,7 +92,8 @@ fn acquire_platform_guard(reason: &str) -> bool {
         cmd.arg("-i");
         match cmd.spawn() {
             Ok(child) => {
-                *slot = Some(PlatformGuard::Child(child));
+                state.guard = Some(PlatformGuard::Child(child));
+                state.refs = 1;
                 return true;
             }
             Err(err) => {
@@ -109,7 +120,8 @@ fn acquire_platform_guard(reason: &str) -> bool {
         ]);
         match cmd.spawn() {
             Ok(child) => {
-                *slot = Some(PlatformGuard::Child(child));
+                state.guard = Some(PlatformGuard::Child(child));
+                state.refs = 1;
                 return true;
             }
             Err(err) => {
@@ -135,8 +147,15 @@ fn acquire_platform_guard(reason: &str) -> bool {
 }
 
 fn release_platform_guard() {
-    let mut slot = PLATFORM_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(guard) = slot.take() else {
+    let mut state = GUARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.refs == 0 {
+        return;
+    }
+    state.refs -= 1;
+    if state.refs > 0 {
+        return;
+    }
+    let Some(guard) = state.guard.take() else {
         return;
     };
 

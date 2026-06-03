@@ -21,6 +21,8 @@ pub struct WorkerRunContext {
     pub config: Arc<Config>,
 
     pub live_config: Option<crate::config::live::LiveConfig>,
+
+    pub parent_workspace_dir: Option<String>,
 }
 
 pub async fn run_worker(
@@ -83,6 +85,12 @@ pub async fn run_worker(
     };
 
     agent.set_memory_session_id(Some(handle.worker_id.clone()));
+
+    if let Some(ref dir) = ctx.parent_workspace_dir {
+        if !dir.trim().is_empty() {
+            agent.set_session_workspace_dir(std::path::PathBuf::from(dir));
+        }
+    }
 
     handle.set_status(WorkerStatus::Running);
     emit_worker_lifecycle(

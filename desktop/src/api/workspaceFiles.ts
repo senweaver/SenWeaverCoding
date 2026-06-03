@@ -17,6 +17,18 @@ export type WorkspaceWatchEvent = {
   fromRelPath?: string
 }
 
+export type WorkspaceCopyEvent =
+  | {
+      type: 'progress'
+      bytesDone: number
+      bytesTotal: number
+      filesDone: number
+      filesTotal: number
+      currentRelPath: string
+    }
+  | { type: 'done'; toPath: string }
+  | { type: 'error'; message: string }
+
 function qs(params: Record<string, string | number | boolean | undefined>) {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -94,12 +106,71 @@ export const workspaceFilesApi = {
     )
   },
 
-  remove(opts: { root: string; path: string; recursive?: boolean }) {
+  async copyStream(
+    opts: { root: string; fromPath: string; toDir: string; signal?: AbortSignal },
+    onEvent: (event: WorkspaceCopyEvent) => void,
+  ): Promise<void> {
+    const res = await fetch(`${getBaseUrl()}/api/workspace/copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        root: opts.root,
+        fromPath: opts.fromPath,
+        toDir: opts.toDir,
+      }),
+      signal: opts.signal,
+    })
+    if (!res.ok) {
+      let message = `Copy failed (${res.status})`
+      try {
+        const body = (await res.json()) as { error?: string }
+        if (body && typeof body.error === 'string' && body.error.length > 0) {
+          message = body.error
+        }
+      } catch {
+      }
+      throw new Error(message)
+    }
+    if (!res.body) {
+      throw new Error('Copy response has no body')
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const flush = (chunk: string) => {
+      buffer += chunk
+      let sep = buffer.indexOf('\n\n')
+      while (sep !== -1) {
+        const block = buffer.slice(0, sep)
+        buffer = buffer.slice(sep + 2)
+        for (const line of block.split('\n')) {
+          const trimmed = line.trimStart()
+          if (!trimmed.startsWith('data:')) continue
+          const payload = trimmed.slice(5).trim()
+          if (!payload || payload === 'keep-alive') continue
+          try {
+            onEvent(JSON.parse(payload) as WorkspaceCopyEvent)
+          } catch {
+          }
+        }
+        sep = buffer.indexOf('\n\n')
+      }
+    }
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      flush(decoder.decode(value, { stream: true }))
+    }
+    flush(decoder.decode())
+  },
+
+  remove(opts: { root: string; path: string; recursive?: boolean; toTrash?: boolean }) {
     return api.delete<{ ok: boolean }>(
       `/api/workspace/entry${qs({
         root: opts.root,
         path: opts.path,
         recursive: opts.recursive,
+        toTrash: opts.toTrash,
       })}`,
     )
   },

@@ -200,7 +200,7 @@ impl ToolOutputCompressor {
 
         let max_tee_size = 1_048_576;
         let content = if full_output.len() > max_tee_size {
-            &full_output[..max_tee_size]
+            crate::util::truncate_str_bytes(full_output, max_tee_size)
         } else {
             full_output
         };

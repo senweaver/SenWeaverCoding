@@ -2153,6 +2153,60 @@ pub async fn handle_api_session_delete(
     }
 }
 
+pub async fn handle_api_sessions_delete_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SessionDeleteBatchBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let Some(ref backend) = state.session_backend else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session persistence is disabled"})),
+        )
+            .into_response();
+    };
+
+    let session_keys: Vec<String> = body
+        .ids
+        .iter()
+        .filter_map(|id| {
+            let trimmed = id.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("{GW_SESSION_PREFIX}{trimmed}"))
+            }
+        })
+        .collect();
+
+    if session_keys.is_empty() {
+        return Json(serde_json::json!({ "ok": true, "deleted": 0 })).into_response();
+    }
+
+    let result = {
+        let backend_arc = std::sync::Arc::clone(backend);
+        tokio::task::spawn_blocking(move || backend_arc.delete_sessions(&session_keys))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+    };
+
+    match result {
+        Ok(deleted) => Json(serde_json::json!({ "ok": true, "deleted": deleted })).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to batch-delete sessions: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to delete sessions"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn handle_api_session_rename(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2384,6 +2438,11 @@ pub struct SessionRewindIdBody {
 pub struct SessionRevertBatchesBody {
     #[serde(rename = "editBatchIds")]
     pub edit_batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionDeleteBatchBody {
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

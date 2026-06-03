@@ -77,6 +77,10 @@ export const sessionsApi = {
     return api.delete<{ ok: true }>(`/api/sessions/${sessionId}`)
   },
 
+  deleteBatch(ids: string[]) {
+    return api.post<{ ok: true; deleted: number }>('/api/sessions/delete-batch', { ids })
+  },
+
   rename(sessionId: string, title: string) {
     return api.patch<{ ok: true }>(`/api/sessions/${sessionId}`, { title })
   },

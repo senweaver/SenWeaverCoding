@@ -60,7 +60,7 @@ impl DiagnosticsTool {
         if joined.len() > 32_768 {
             Some(format!(
                 "{}\n\n... truncated ({} bytes total)",
-                &joined[..32_768],
+                crate::util::truncate_str_bytes(&joined, 32_768),
                 joined.len()
             ))
         } else {
@@ -140,7 +140,7 @@ impl DiagnosticsTool {
                 let trimmed = if combined.len() > 32_768 {
                     format!(
                         "{}\n\n... truncated ({} bytes total)",
-                        &combined[..32_768],
+                        crate::util::truncate_str_bytes(&combined, 32_768),
                         combined.len()
                     )
                 } else {

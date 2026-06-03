@@ -13,6 +13,8 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 const DEFAULT_TREE_DEPTH: u32 = 1;
 const MAX_TREE_DEPTH: u32 = 6;
@@ -1079,11 +1081,273 @@ pub async fn handle_workspace_move(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CopyBody {
+    pub root: String,
+    #[serde(rename = "fromPath")]
+    pub from_path: String,
+    #[serde(rename = "toDir")]
+    pub to_dir: String,
+}
+
+fn make_copy_name(name: &str, is_dir: bool, suffix: &str) -> String {
+    if is_dir {
+        return format!("{name}{suffix}");
+    }
+    match name.rfind('.') {
+        Some(idx) if idx > 0 => {
+            let (stem, ext) = name.split_at(idx);
+            format!("{stem}{suffix}{ext}")
+        }
+        _ => format!("{name}{suffix}"),
+    }
+}
+
+fn unique_dest(to_dir: &Path, name: &str, is_dir: bool) -> PathBuf {
+    let first = to_dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    for i in 1..=9999 {
+        let suffix = if i == 1 {
+            " copy".to_string()
+        } else {
+            format!(" copy {i}")
+        };
+        let candidate = to_dir.join(make_copy_name(name, is_dir, &suffix));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    to_dir.join(make_copy_name(name, is_dir, " copy"))
+}
+
+fn scan_totals(src: &Path, cancel: &AtomicBool) -> std::io::Result<(u64, u64)> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        return Ok((0, 0));
+    }
+    if meta.is_dir() {
+        let mut bytes = 0u64;
+        let mut files = 0u64;
+        for entry in std::fs::read_dir(src)? {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let entry = entry?;
+            let (b, f) = scan_totals(&entry.path(), cancel)?;
+            bytes = bytes.saturating_add(b);
+            files = files.saturating_add(f);
+        }
+        Ok((bytes, files))
+    } else {
+        Ok((meta.len(), 1))
+    }
+}
+
+struct CopyCtx<'a> {
+    bytes_done: u64,
+    files_done: u64,
+    total_bytes: u64,
+    total_files: u64,
+    last_emit: Instant,
+    cancel: &'a AtomicBool,
+    root: &'a Path,
+    emit: &'a mut dyn FnMut(serde_json::Value) -> bool,
+}
+
+impl CopyCtx<'_> {
+    fn maybe_emit(&mut self, current: &Path, force: bool) -> bool {
+        if !force && self.last_emit.elapsed() < Duration::from_millis(80) {
+            return true;
+        }
+        self.last_emit = Instant::now();
+        let payload = json!({
+            "type": "progress",
+            "bytesDone": self.bytes_done,
+            "bytesTotal": self.total_bytes,
+            "filesDone": self.files_done,
+            "filesTotal": self.total_files,
+            "currentRelPath": relative_path(self.root, current),
+        });
+        (self.emit)(payload)
+    }
+}
+
+fn copy_entry(src: &Path, dest: &Path, ctx: &mut CopyCtx) -> std::io::Result<()> {
+    if ctx.cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let meta = std::fs::symlink_metadata(src)?;
+    let file_type = meta.file_type();
+    if file_type.is_symlink() {
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(src)? {
+            if ctx.cancel.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dest = dest.join(entry.file_name());
+            copy_entry(&child_src, &child_dest, ctx)?;
+        }
+    } else {
+        std::fs::copy(src, dest)?;
+        ctx.bytes_done = ctx.bytes_done.saturating_add(meta.len());
+        ctx.files_done = ctx.files_done.saturating_add(1);
+        if !ctx.maybe_emit(src, false) {
+            ctx.cancel.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+struct CancelOnDrop<S> {
+    inner: S,
+    cancel: std::sync::Arc<AtomicBool>,
+}
+
+impl<S: tokio_stream::Stream + Unpin> tokio_stream::Stream for CancelOnDrop<S> {
+    type Item = S::Item;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        std::pin::Pin::new(&mut this.inner).poll_next(cx)
+    }
+}
+
+impl<S> Drop for CancelOnDrop<S> {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+pub async fn handle_workspace_copy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CopyBody>,
+) -> axum::response::Response {
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let root = match allowed_workspace_root(&state, &body.root).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let from = match resolve_within(&root, &body.from_path, true) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    let to_dir = match resolve_within(&root, &body.to_dir, true) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    if !to_dir.is_dir() {
+        return FsError::InvalidName.into_response();
+    }
+    if to_dir == from || to_dir.starts_with(&from) {
+        return FsError::InvalidName.into_response();
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(64);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_task = cancel.clone();
+    let root_for_rel = root.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let mut emit = |payload: serde_json::Value| -> bool {
+            tx.blocking_send(Ok(SseEvent::default().data(payload.to_string())))
+                .is_ok()
+        };
+        let is_dir = match std::fs::symlink_metadata(&from) {
+            Ok(m) => m.is_dir(),
+            Err(e) => {
+                emit(json!({"type": "error", "message": e.to_string()}));
+                return;
+            }
+        };
+        let name = from
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            emit(json!({"type": "error", "message": "Invalid source name"}));
+            return;
+        }
+        let dest = unique_dest(&to_dir, &name, is_dir);
+
+        let (total_bytes, total_files) = match scan_totals(&from, &cancel_task) {
+            Ok(v) => v,
+            Err(e) => {
+                emit(json!({"type": "error", "message": e.to_string()}));
+                return;
+            }
+        };
+
+        let mut ctx = CopyCtx {
+            bytes_done: 0,
+            files_done: 0,
+            total_bytes,
+            total_files,
+            last_emit: Instant::now()
+                .checked_sub(Duration::from_millis(200))
+                .unwrap_or_else(Instant::now),
+            cancel: &cancel_task,
+            root: &root_for_rel,
+            emit: &mut emit,
+        };
+        ctx.maybe_emit(&from, true);
+
+        match copy_entry(&from, &dest, &mut ctx) {
+            Ok(()) => {
+                if cancel_task.load(Ordering::Relaxed) {
+                    (ctx.emit)(json!({"type": "error", "message": "cancelled"}));
+                } else {
+                    ctx.maybe_emit(&dest, true);
+                    (ctx.emit)(json!({
+                        "type": "done",
+                        "toPath": relative_path(&root_for_rel, &dest),
+                    }));
+                }
+            }
+            Err(e) => {
+                (ctx.emit)(json!({"type": "error", "message": e.to_string()}));
+            }
+        }
+    });
+
+    let stream = CancelOnDrop {
+        inner: ReceiverStream::new(rx),
+        cancel,
+    };
+
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DeleteQuery {
     pub root: String,
     pub path: String,
     #[serde(default)]
     pub recursive: Option<bool>,
+    #[serde(rename = "toTrash", default)]
+    pub to_trash: Option<bool>,
 }
 
 pub async fn handle_workspace_delete(
@@ -1107,18 +1371,27 @@ pub async fn handle_workspace_delete(
     }
     let target_io = target.clone();
     let recursive = q.recursive.unwrap_or(false);
+    let use_trash = q.to_trash.unwrap_or(true);
     let io: Result<(), FsError> = tokio::task::spawn_blocking(move || {
-        let metadata = std::fs::metadata(&target_io).map_err(FsError::Io)?;
-        let result = if metadata.is_dir() {
-            if recursive {
-                std::fs::remove_dir_all(&target_io)
-            } else {
-                std::fs::remove_dir(&target_io)
-            }
+        if use_trash {
+            trash::delete(&target_io).map_err(|err| {
+                FsError::Io(std::io::Error::other(format!(
+                    "failed to move to trash: {err}"
+                )))
+            })
         } else {
-            std::fs::remove_file(&target_io)
-        };
-        result.map_err(FsError::Io)
+            let metadata = std::fs::metadata(&target_io).map_err(FsError::Io)?;
+            let result = if metadata.is_dir() {
+                if recursive {
+                    std::fs::remove_dir_all(&target_io)
+                } else {
+                    std::fs::remove_dir(&target_io)
+                }
+            } else {
+                std::fs::remove_file(&target_io)
+            };
+            result.map_err(FsError::Io)
+        }
     })
     .await
     .unwrap_or_else(|e| Err(FsError::Io(std::io::Error::other(e.to_string()))));

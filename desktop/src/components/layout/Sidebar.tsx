@@ -43,6 +43,7 @@ export function Sidebar() {
   const sessions = useSessionStore((s) => s.sessions)
   const runningSessions = useSessionRunStateStore((s) => s.running)
   const queueState = useWorkspaceQueueStore((s) => s.queues)
+  const cancelAllQueuedForSession = useWorkspaceQueueStore((s) => s.cancelAllForSession)
   const queuedCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const list of Object.values(queueState)) {
@@ -56,6 +57,8 @@ export function Sidebar() {
   const error = useSessionStore((s) => s.error)
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
   const deleteSession = useSessionStore((s) => s.deleteSession)
+  const deleteSessions = useSessionStore((s) => s.deleteSessions)
+  const clearWorkDirSelectionIfMatches = useSessionStore((s) => s.clearWorkDirSelectionIfMatches)
   const renameSession = useSessionStore((s) => s.renameSession)
   const addToast = useUIStore((s) => s.addToast)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
@@ -63,9 +66,12 @@ export function Sidebar() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const closeTab = useTabStore((s) => s.closeTab)
   const disconnectSession = useChatStore((s) => s.disconnectSession)
+  const stopGeneration = useChatStore((s) => s.stopGeneration)
   const [searchQuery, setSearchQuery] = useState('')
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
+  const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<WorkspaceGroup | null>(null)
+  const [workspaceDeleting, setWorkspaceDeleting] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
@@ -189,6 +195,73 @@ export function Sidebar() {
     closeTab(pendingDeleteSessionId)
     setPendingDeleteSessionId(null)
   }, [closeTab, deleteSession, disconnectSession, pendingDeleteSessionId])
+
+  const handleDeleteWorkspace = useCallback((ws: WorkspaceGroup) => {
+    setContextMenu(null)
+    setPendingDeleteWorkspace(ws)
+  }, [])
+
+  const pendingWorkspaceInfo = useMemo(() => {
+    if (!pendingDeleteWorkspace) return null
+    const ids = sessionIdsForWorkspaceKey(sessions, pendingDeleteWorkspace.workspaceKey)
+    const runningCount = ids.reduce(
+      (acc, id) => acc + (runningSessions.has(id) ? 1 : 0),
+      0,
+    )
+    return { ids, runningCount, label: pendingDeleteWorkspace.workspaceLabel }
+  }, [pendingDeleteWorkspace, runningSessions, sessions])
+
+  const confirmDeleteWorkspace = useCallback(async () => {
+    const ws = pendingDeleteWorkspace
+    if (!ws || workspaceDeleting) return
+    const ids = sessionIdsForWorkspaceKey(
+      useSessionStore.getState().sessions,
+      ws.workspaceKey,
+    )
+    if (ids.length === 0) {
+      setPendingDeleteWorkspace(null)
+      return
+    }
+    setWorkspaceDeleting(true)
+    try {
+      const running = useSessionRunStateStore.getState().running
+      const runningIds = ids.filter((id) => running.has(id))
+      for (const id of runningIds) {
+        stopGeneration(id)
+      }
+      if (runningIds.length > 0) {
+        await waitForSessionsIdle(runningIds, 2500)
+      }
+      await deleteSessions(ids)
+      for (const id of ids) {
+        cancelAllQueuedForSession(id)
+        disconnectSession(id)
+        closeTab(id)
+      }
+      if (ws.workspacePath) {
+        clearWorkDirSelectionIfMatches(ws.workspacePath)
+      }
+      setPendingDeleteWorkspace(null)
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: err instanceof Error ? err.message : t('sidebar.sessionListFailed'),
+      })
+    } finally {
+      setWorkspaceDeleting(false)
+    }
+  }, [
+    addToast,
+    cancelAllQueuedForSession,
+    clearWorkDirSelectionIfMatches,
+    closeTab,
+    deleteSessions,
+    disconnectSession,
+    pendingDeleteWorkspace,
+    stopGeneration,
+    t,
+    workspaceDeleting,
+  ])
 
   const handleStartRename = useCallback((id: string, currentTitle: string) => {
     setContextMenu(null)
@@ -445,29 +518,44 @@ export function Sidebar() {
                     const wsOpen = expandedWorkspaces.has(ws.workspaceKey)
                     return (
                       <div key={ws.workspaceKey} className="mb-1 mt-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleWorkspace(ws.workspaceKey)}
-                          aria-expanded={wsOpen}
-                          aria-label={wsOpen ? t('sidebar.collapseWorkspace') : t('sidebar.expandWorkspace')}
-                          title={ws.workspacePath || ws.workspaceLabel}
-                          className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1 text-left text-xs font-semibold tracking-wide text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
-                        >
-                          <ChevronRightIcon open={wsOpen} />
-                          <FolderIcon existing={ws.workspaceExists} />
-                          <span className="flex-1 truncate">{ws.workspaceLabel}</span>
-                          {!ws.workspaceExists && ws.workspaceKey !== WORKSPACE_UNKNOWN_KEY && (
-                            <span
-                              className="flex-shrink-0 text-xs font-normal text-[var(--color-warning)]"
-                              title={ws.workspacePath}
-                            >
-                              {t('sidebar.missingDir')}
+                        <div className="group/ws relative">
+                          <button
+                            type="button"
+                            onClick={() => toggleWorkspace(ws.workspaceKey)}
+                            aria-expanded={wsOpen}
+                            aria-label={wsOpen ? t('sidebar.collapseWorkspace') : t('sidebar.expandWorkspace')}
+                            title={ws.workspacePath || ws.workspaceLabel}
+                            className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1 pr-8 text-left text-xs font-semibold tracking-wide text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
+                          >
+                            <ChevronRightIcon open={wsOpen} />
+                            <FolderIcon existing={ws.workspaceExists} />
+                            <span className="flex-1 truncate">{ws.workspaceLabel}</span>
+                            {!ws.workspaceExists && ws.workspaceKey !== WORKSPACE_UNKNOWN_KEY && (
+                              <span
+                                className="flex-shrink-0 text-xs font-normal text-[var(--color-warning)]"
+                                title={ws.workspacePath}
+                              >
+                                {t('sidebar.missingDir')}
+                              </span>
+                            )}
+                            <span className="flex-shrink-0 text-xs font-normal tabular-nums text-[var(--color-text-tertiary)] transition-opacity duration-150 group-hover/ws:opacity-0">
+                              {ws.totalCount}
                             </span>
-                          )}
-                          <span className="flex-shrink-0 text-xs font-normal tabular-nums text-[var(--color-text-tertiary)]">
-                            {ws.totalCount}
-                          </span>
-                        </button>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDeleteWorkspace(ws)
+                            }}
+                            aria-label={t('sidebar.deleteWorkspaceAria')}
+                            title={t('sidebar.deleteWorkspaceAria')}
+                            data-testid={`sidebar-workspace-delete-${ws.workspaceKey}`}
+                            className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[var(--color-text-tertiary)] opacity-0 transition-opacity duration-150 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-error)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] group-hover/ws:opacity-100"
+                          >
+                            <TrashIcon />
+                          </button>
+                        </div>
                         {wsOpen && (
                           <div className="ml-3 mt-0.5">
                             {TIME_GROUP_ORDER.map((tg) => {
@@ -610,6 +698,34 @@ export function Sidebar() {
         cancelLabel={t('common.cancel')}
         confirmVariant="danger"
       />
+
+      <ConfirmDialog
+        open={pendingDeleteWorkspace !== null}
+        onClose={() => {
+          if (workspaceDeleting) return
+          setPendingDeleteWorkspace(null)
+        }}
+        onConfirm={confirmDeleteWorkspace}
+        title={t('sidebar.deleteWorkspaceTitle')}
+        body={
+          pendingWorkspaceInfo
+            ? pendingWorkspaceInfo.runningCount > 0
+              ? t('sidebar.confirmDeleteWorkspaceRunning', {
+                  dir: pendingWorkspaceInfo.label,
+                  count: pendingWorkspaceInfo.ids.length,
+                  running: pendingWorkspaceInfo.runningCount,
+                })
+              : t('sidebar.confirmDeleteWorkspace', {
+                  dir: pendingWorkspaceInfo.label,
+                  count: pendingWorkspaceInfo.ids.length,
+                })
+            : ''
+        }
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
+        confirmVariant="danger"
+        loading={workspaceDeleting}
+      />
     </aside>
   )
 }
@@ -688,6 +804,43 @@ function groupByWorkspaceAndTime(
 
   out.sort((a, b) => b.latestModifiedAt - a.latestModifiedAt)
   return out
+}
+
+function sessionWorkspaceKey(s: SessionListItem): string {
+  return (s.workDir?.trim() ?? '') || WORKSPACE_UNKNOWN_KEY
+}
+
+function sessionIdsForWorkspaceKey(
+  sessions: SessionListItem[],
+  workspaceKey: string,
+): string[] {
+  return sessions
+    .filter((s) => sessionWorkspaceKey(s) === workspaceKey)
+    .map((s) => s.id)
+}
+
+function waitForSessionsIdle(ids: string[], timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const allIdle = () =>
+      ids.every((id) => !useSessionRunStateStore.getState().running.has(id))
+    if (allIdle()) {
+      resolve()
+      return
+    }
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = useSessionRunStateStore.subscribe(() => {
+      if (!settled && allIdle()) finish()
+    })
+    const finish = () => {
+      if (settled) return
+      settled = true
+      unsubscribe()
+      if (timer) clearTimeout(timer)
+      resolve()
+    }
+    timer = setTimeout(finish, timeoutMs)
+  })
 }
 
 function ChevronRightIcon({ open, size = 'md' }: { open: boolean; size?: 'sm' | 'md' }) {

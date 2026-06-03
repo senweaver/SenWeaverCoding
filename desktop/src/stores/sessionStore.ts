@@ -11,6 +11,17 @@ import type { SessionListItem } from '../types/session'
 
 const PINNED_SESSION_WORK_DIR_KEY = 'sen-user-pinned-session-work-dir'
 
+const isWindowsPlatform =
+  typeof navigator !== 'undefined' && /Win/i.test(navigator.platform || '')
+
+function normalizeWorkDir(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim()
+  if (!trimmed) return null
+  const unified = trimmed.replace(/\\/g, '/').replace(/\/+$/, '')
+  const finalKey = unified.length > 0 ? unified : trimmed.replace(/\\/g, '/')
+  return isWindowsPlatform ? finalKey.toLowerCase() : finalKey
+}
+
 function readPinnedWorkDir(): string | null {
   try {
     const raw = localStorage.getItem(PINNED_SESSION_WORK_DIR_KEY)?.trim()
@@ -47,6 +58,8 @@ type SessionStore = {
   fetchSessions: (project?: string) => Promise<void>
   createSession: (workDir?: string) => Promise<string>
   deleteSession: (id: string) => Promise<void>
+  deleteSessions: (ids: string[]) => Promise<number>
+  clearWorkDirSelectionIfMatches: (workDir: string | null | undefined) => void
   renameSession: (id: string, title: string) => Promise<void>
   updateSessionTitle: (id: string, title: string) => void
   setActiveSession: (id: string | null) => void
@@ -122,6 +135,35 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       sessions: s.sessions.filter((session) => session.id !== id),
       activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
     }))
+  },
+
+  deleteSessions: async (ids: string[]) => {
+    const idSet = new Set(ids.filter((id) => id && id.length > 0))
+    if (idSet.size === 0) return 0
+    const targets = [...idSet]
+    const res = await sessionsApi.deleteBatch(targets)
+    const runtime = useSessionRuntimeStore.getState()
+    for (const id of targets) {
+      runtime.clearSelection(id)
+    }
+    set((s) => ({
+      sessions: s.sessions.filter((session) => !idSet.has(session.id)),
+      activeSessionId:
+        s.activeSessionId && idSet.has(s.activeSessionId) ? null : s.activeSessionId,
+    }))
+    return res.deleted
+  },
+
+  clearWorkDirSelectionIfMatches: (workDir) => {
+    const target = normalizeWorkDir(workDir)
+    if (!target) return
+    if (normalizeWorkDir(get().userPinnedSessionWorkDir) === target) {
+      persistPinnedWorkDir(null)
+      set({ userPinnedSessionWorkDir: null })
+    }
+    if (normalizeWorkDir(get().lastBrowsedSessionWorkDir) === target) {
+      set({ lastBrowsedSessionWorkDir: null })
+    }
   },
 
   renameSession: async (id: string, title: string) => {

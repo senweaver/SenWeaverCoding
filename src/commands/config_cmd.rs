@@ -117,7 +117,7 @@ pub async fn handle_config(ctx: CommandContext) -> CommandResult {
                             let preview = if s.len() > 500 {
                                 format!(
                                     "{}\n\n[... {} more chars  -  pass a path argument to save ...]",
-                                    &s[..500],
+                                    crate::util::truncate_str_bytes(&s, 500),
                                     s.len() - 500
                                 )
                             } else {

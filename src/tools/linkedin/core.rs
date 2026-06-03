@@ -236,11 +236,7 @@ impl Tool for LinkedInTool {
                         .unwrap_or_else(|| {
                             format!(
                                 "Professional, modern illustration for a LinkedIn post about: {}",
-                                if text.len() > 200 {
-                                    &text[..200]
-                                } else {
-                                    &text
-                                }
+                                crate::util::truncate_str_bytes(&text, 200)
                             )
                         });
 

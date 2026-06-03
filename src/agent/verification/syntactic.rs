@@ -124,7 +124,11 @@ fn context_snippet(source: &str, row: usize) -> String {
             buf.push_str(" \\n ");
         }
 
-        let trimmed = if line.len() > 120 { &line[..120] } else { line };
+        let trimmed = if line.len() > 120 {
+            crate::util::truncate_str_bytes(line, 120)
+        } else {
+            line
+        };
         buf.push_str(&format!("L{}: {}", idx + 1, trimmed.trim_end()));
     }
     buf

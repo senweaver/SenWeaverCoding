@@ -306,8 +306,6 @@ pub struct AppState {
 
     pub session_run_state: Arc<crate::session::SessionRunStateRegistry>,
 
-    pub workspace_run_state: Arc<crate::session::WorkspaceRunRegistry>,
-
     pub workspace_resources: Arc<crate::session::WorkspaceResourceManager>,
 
     pub git_status_cache: git_routes::GitStatusCache,
@@ -1303,7 +1301,6 @@ async fn run_gateway_inner(
         lsp: lsp_manager.clone(),
         lsp_events: lsp_broadcast.clone(),
         session_run_state: crate::session::SessionRunStateRegistry::new(),
-        workspace_run_state: crate::session::WorkspaceRunRegistry::new(),
         workspace_resources: {
             let mgr = crate::session::WorkspaceResourceManager::new();
             crate::session::install_global_workspace_resources(mgr.clone());
@@ -1417,6 +1414,10 @@ async fn run_gateway_inner(
         .route(
             "/api/sessions/recent-projects",
             get(api::handle_api_sessions_recent_projects),
+        )
+        .route(
+            "/api/sessions/delete-batch",
+            post(api::handle_api_sessions_delete_batch),
         )
         .route(
             "/api/sessions/{id}/messages",
@@ -1823,6 +1824,7 @@ async fn run_gateway_inner(
         .route("/api/workspace/file", get(workspace_files::handle_workspace_file_get))
         .route("/api/workspace/dir", post(workspace_files::handle_workspace_dir_post))
         .route("/api/workspace/move", post(workspace_files::handle_workspace_move))
+        .route("/api/workspace/copy", post(workspace_files::handle_workspace_copy))
         .route("/api/workspace/entry", delete(workspace_files::handle_workspace_delete))
         .route("/api/workspace/search", get(workspace_files::handle_workspace_search))
         .route("/api/workspace/watch", get(workspace_files::handle_workspace_watch))

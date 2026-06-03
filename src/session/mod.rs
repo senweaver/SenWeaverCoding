@@ -31,9 +31,7 @@ pub use resource_lock::{
     stale_file_error_message,
 };
 pub use run_state::{SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry};
-pub use workspace_run::{
-    WorkspaceRunGuard, WorkspaceRunRegistry, normalize_workspace_key, workspace_key_from_path,
-};
+pub use workspace_run::{normalize_workspace_key, workspace_key_from_path};
 pub use chat_view::{
     ChatEntry, ChatEntryKind, ChatViewSink, ChatViewSurface, SessionChatState,
     apply_session_event, apply_session_event_cli, apply_session_event_gui,

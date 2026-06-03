@@ -123,6 +123,10 @@ export function DiffViewer({ filePath, oldString, newString }: Props) {
   const deletions = oldLines.filter((l, i) => l !== (newLines[i] ?? null)).length
   const showCounts = additions > 0 || deletions > 0
 
+  const isLargeDiff =
+    oldString.length + newString.length > 20000 ||
+    oldLines.length + newLines.length > 600
+
   return (
     <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container-low)]">
       {}
@@ -155,8 +159,8 @@ export function DiffViewer({ filePath, oldString, newString }: Props) {
           oldValue={oldString}
           newValue={newString}
           splitView={false}
-          compareMethod={DiffMethod.WORDS}
-          renderContent={(str) => highlightSyntax(str, language)}
+          compareMethod={isLargeDiff ? DiffMethod.LINES : DiffMethod.WORDS}
+          renderContent={isLargeDiff ? undefined : (str) => highlightSyntax(str, language)}
           hideLineNumbers={false}
           styles={diffStyles}
           useDarkTheme={document.documentElement.getAttribute('data-theme') === 'dark'}

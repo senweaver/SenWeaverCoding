@@ -3,7 +3,11 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
-import { workspaceFilesApi, type WorkspaceWatchEvent } from '../api/workspaceFiles'
+import {
+  workspaceFilesApi,
+  type WorkspaceCopyEvent,
+  type WorkspaceWatchEvent,
+} from '../api/workspaceFiles'
 import type { FileTreeNode } from '../types/workspaceFile'
 import { useGitStatusStore } from './gitStatusStore'
 import { useLspStore } from './lspStore'
@@ -146,6 +150,21 @@ export type TabViewState = {
   } | null
 }
 
+export type ClipboardEntry = {
+  relPath: string
+  isDir: boolean
+  mode: 'copy' | 'cut'
+}
+
+export type CopyJob = {
+  fromName: string
+  toDir: string
+  bytesDone: number
+  bytesTotal: number
+  filesDone: number
+  filesTotal: number
+}
+
 export type WorkspaceFilesState = {
   root: string | null
   rootEntries: FileTreeNode[]
@@ -229,11 +248,24 @@ export type WorkspaceFilesState = {
   createFile: (parentRelPath: string, name: string) => Promise<void>
   createDir: (parentRelPath: string, name: string) => Promise<void>
   rename: (relPath: string, nextRelPath: string) => Promise<void>
-  remove: (relPath: string, isDir: boolean) => Promise<void>
+  remove: (relPath: string, isDir: boolean, toTrash?: boolean) => Promise<void>
   uploadFiles: (parentRelPath: string, files: File[]) => Promise<number>
+
+  clipboard: ClipboardEntry | null
+  copyJob: CopyJob | null
+  copyToClipboard: (relPath: string, isDir: boolean) => void
+  cutToClipboard: (relPath: string, isDir: boolean) => void
+  pasteInto: (targetDir: string) => Promise<void>
+  cancelCopy: () => void
 }
 
 let watcherDispose: (() => void) | null = null
+
+let copyAbortController: AbortController | null = null
+
+let copyJobClearTimer: ReturnType<typeof setTimeout> | null = null
+
+const COPY_JOB_CLEAR_DELAY_MS = 700
 
 function joinPath(parent: string, name: string): string {
   if (!parent || parent === '' || parent === '/') return name
@@ -380,6 +412,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   monacoModels: {},
   pendingNavigation: null,
   tabViewStates: {},
+  clipboard: null,
+  copyJob: null,
 
   setTabViewState: (relPath, state) => {
     if (!relPath) return
@@ -420,6 +454,14 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       aiRefreshFlushTimer = null
     }
     aiRefreshBatch.clear()
+    if (copyAbortController) {
+      copyAbortController.abort()
+      copyAbortController = null
+    }
+    if (copyJobClearTimer) {
+      clearTimeout(copyJobClearTimer)
+      copyJobClearTimer = null
+    }
     try {
       useLspStore.getState().clearDiagnostics()
     } catch (err) {
@@ -446,6 +488,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       monacoModels: {},
       pendingNavigation: null,
       tabViewStates: {},
+      clipboard: null,
+      copyJob: null,
     })
     if (root) {
       void get().refreshRoot()
@@ -1092,7 +1136,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     }
   },
 
-  remove: async (relPath: string, isDir: boolean) => {
+  remove: async (relPath: string, isDir: boolean, toTrash: boolean = true) => {
     const root = get().root
     if (!root) return
     get().registerSelfWrite(relPath)
@@ -1100,6 +1144,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       root,
       path: relPath,
       recursive: isDir,
+      toTrash,
     })
     get().registerSelfWrite(relPath)
     const key = k(root, relPath)
@@ -1153,6 +1198,209 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     }
     await refreshDir(get, set, parentRelPath)
     return uploaded
+  },
+
+  copyToClipboard: (relPath: string, isDir: boolean) => {
+    if (!relPath) return
+    set({ clipboard: { relPath, isDir, mode: 'copy' } })
+    try {
+      useUIStore.getState().addToast({
+        type: 'success',
+        message: t('workspace.copied', { name: nameOf(relPath) }),
+        duration: 2200,
+      })
+    } catch {
+    }
+  },
+
+  cutToClipboard: (relPath: string, isDir: boolean) => {
+    if (!relPath) return
+    set({ clipboard: { relPath, isDir, mode: 'cut' } })
+    try {
+      useUIStore.getState().addToast({
+        type: 'info',
+        message: t('workspace.cutMarked', { name: nameOf(relPath) }),
+        duration: 2600,
+      })
+    } catch {
+    }
+  },
+
+  pasteInto: async (targetDir: string) => {
+    const root = get().root
+    const clipboard = get().clipboard
+    if (!root || !clipboard) return
+
+    const normalizedTarget = targetDir ?? ''
+    const fromName = nameOf(clipboard.relPath)
+    const targetLabel = normalizedTarget === '' ? '/' : normalizedTarget
+
+    if (clipboard.mode === 'cut') {
+      const fromRel = clipboard.relPath
+      const fromIsDir = clipboard.isDir
+      const sameSpot =
+        fromRel === normalizedTarget ||
+        parentOf(fromRel) === normalizedTarget ||
+        (normalizedTarget !== '' &&
+          (normalizedTarget === fromRel ||
+            normalizedTarget.startsWith(`${fromRel}/`)))
+      if (sameSpot) {
+        try {
+          useUIStore.getState().addToast({
+            type: 'warning',
+            message: t('files.dropTargetInvalid'),
+            duration: 3200,
+          })
+        } catch {
+        }
+        return
+      }
+      const nextRel = joinPath(normalizedTarget, fromName)
+      set({ clipboard: null })
+      try {
+        await get().rename(fromRel, nextRel)
+        try {
+          useUIStore.getState().addToast({
+            type: 'success',
+            message: t('workspace.moved', { name: fromName, dir: targetLabel }),
+            duration: 2400,
+          })
+        } catch {
+        }
+      } catch (err) {
+        if (get().clipboard === null) {
+          set({ clipboard: { relPath: fromRel, isDir: fromIsDir, mode: 'cut' } })
+        }
+        try {
+          useUIStore.getState().addToast({
+            type: 'error',
+            message: t('workspace.moveFailed', {
+              message: err instanceof Error ? err.message : String(err),
+            }),
+            duration: 6000,
+          })
+        } catch {
+        }
+      }
+      return
+    }
+
+    if (get().copyJob) return
+
+    if (copyJobClearTimer) {
+      clearTimeout(copyJobClearTimer)
+      copyJobClearTimer = null
+    }
+    if (copyAbortController) {
+      copyAbortController.abort()
+    }
+    const controller = new AbortController()
+    copyAbortController = controller
+
+    set({
+      copyJob: {
+        fromName,
+        toDir: targetLabel,
+        bytesDone: 0,
+        bytesTotal: 0,
+        filesDone: 0,
+        filesTotal: 0,
+      },
+    })
+
+    const finishClear = () => {
+      copyJobClearTimer = setTimeout(() => {
+        copyJobClearTimer = null
+        set({ copyJob: null })
+      }, COPY_JOB_CLEAR_DELAY_MS)
+    }
+
+    try {
+      let errorMessage: string | null = null
+      let done = false
+      await workspaceFilesApi.copyStream(
+        {
+          root,
+          fromPath: clipboard.relPath,
+          toDir: normalizedTarget,
+          signal: controller.signal,
+        },
+        (event: WorkspaceCopyEvent) => {
+          if (copyAbortController !== controller) return
+          if (event.type === 'progress') {
+            set((s) =>
+              s.copyJob
+                ? {
+                    copyJob: {
+                      ...s.copyJob,
+                      bytesDone: event.bytesDone,
+                      bytesTotal: event.bytesTotal,
+                      filesDone: event.filesDone,
+                      filesTotal: event.filesTotal,
+                    },
+                  }
+                : {},
+            )
+          } else if (event.type === 'done') {
+            done = true
+          } else if (event.type === 'error') {
+            errorMessage = event.message
+          }
+        },
+      )
+      if (copyAbortController !== controller) return
+      copyAbortController = null
+      if (done && !errorMessage) {
+        await refreshDir(get, set, normalizedTarget)
+        finishClear()
+      } else if (errorMessage && errorMessage !== 'cancelled') {
+        try {
+          useUIStore.getState().addToast({
+            type: 'error',
+            message: t('workspace.copyFailed', { message: errorMessage }),
+            duration: 6000,
+          })
+        } catch {
+        }
+        set({ copyJob: null })
+      } else {
+        set({ copyJob: null })
+      }
+    } catch (err) {
+      if (copyAbortController !== controller) {
+        return
+      }
+      copyAbortController = null
+      const aborted =
+        err instanceof DOMException
+          ? err.name === 'AbortError'
+          : err instanceof Error && err.name === 'AbortError'
+      if (!aborted) {
+        try {
+          useUIStore.getState().addToast({
+            type: 'error',
+            message: t('workspace.copyFailed', {
+              message: err instanceof Error ? err.message : String(err),
+            }),
+            duration: 6000,
+          })
+        } catch {
+        }
+      }
+      set({ copyJob: null })
+    }
+  },
+
+  cancelCopy: () => {
+    if (copyAbortController) {
+      copyAbortController.abort()
+      copyAbortController = null
+    }
+    if (copyJobClearTimer) {
+      clearTimeout(copyJobClearTimer)
+      copyJobClearTimer = null
+    }
+    set({ copyJob: null })
   },
 }))
 

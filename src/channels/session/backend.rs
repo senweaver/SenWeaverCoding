@@ -98,6 +98,16 @@ pub trait SessionBackend: Send + Sync {
         Ok(false)
     }
 
+    fn delete_sessions(&self, session_keys: &[String]) -> std::io::Result<usize> {
+        let mut deleted = 0usize;
+        for key in session_keys {
+            if self.delete_session(key)? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
     fn set_session_name(&self, _session_key: &str, _name: &str) -> std::io::Result<()> {
         Ok(())
     }

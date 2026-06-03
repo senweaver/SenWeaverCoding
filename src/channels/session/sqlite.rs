@@ -239,6 +239,26 @@ impl SqliteSessionBackend {
 
         Ok(migrated)
     }
+
+    fn delete_session_rows(conn: &Connection, session_key: &str) -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM sessions WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        conn.execute(
+            "DELETE FROM session_metadata WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        conn.execute(
+            "DELETE FROM session_edit_batches WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        conn.execute(
+            "DELETE FROM session_rewind_stash WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        Ok(())
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
@@ -446,19 +466,36 @@ impl SessionBackend for SqliteSessionBackend {
             return Ok(false);
         }
 
-        conn.execute(
-            "DELETE FROM sessions WHERE session_key = ?1",
-            params![session_key],
-        )
-        .map_err(std::io::Error::other)?;
-
-        conn.execute(
-            "DELETE FROM session_metadata WHERE session_key = ?1",
-            params![session_key],
-        )
-        .map_err(std::io::Error::other)?;
+        let tx = conn.unchecked_transaction().map_err(std::io::Error::other)?;
+        Self::delete_session_rows(&tx, session_key).map_err(std::io::Error::other)?;
+        tx.commit().map_err(std::io::Error::other)?;
 
         Ok(true)
+    }
+
+    fn delete_sessions(&self, session_keys: &[String]) -> std::io::Result<usize> {
+        if session_keys.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock();
+        let tx = conn.unchecked_transaction().map_err(std::io::Error::other)?;
+        let mut deleted = 0usize;
+        for session_key in session_keys {
+            let exists: bool = tx
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM session_metadata WHERE session_key = ?1",
+                    params![session_key],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !exists {
+                continue;
+            }
+            Self::delete_session_rows(&tx, session_key).map_err(std::io::Error::other)?;
+            deleted += 1;
+        }
+        tx.commit().map_err(std::io::Error::other)?;
+        Ok(deleted)
     }
 
     fn set_session_name(&self, session_key: &str, name: &str) -> std::io::Result<()> {
