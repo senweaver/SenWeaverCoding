@@ -26,6 +26,7 @@ export type ClientMessage =
   | ({ type: 'set_runtime_config'; persist?: boolean } & RuntimeSelection)
   | { type: 'set_pii_config'; data: { enabled: boolean; disabledKinds: string[] } }
   | { type: 'stop_generation' }
+  | { type: 'cancel_tool'; sessionId?: string; toolUseId?: string }
 
   | {
       type: 'start_plan_execution'

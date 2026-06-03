@@ -293,6 +293,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             "stop_generation received: cancel signal fired (reader-side)"
                         );
 
+                        crate::tools::background_registry::kill_foreground(
+                            session_id_for_reader.as_str(),
+                        );
+
                         if let Some(sup) = crate::workers::supervisor::global_supervisor() {
                             let cancelled = sup.cancel_for_parent(&session_id_for_reader);
                             if cancelled > 0 {
@@ -304,6 +308,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 );
                             }
                         }
+                    }
+                    if msg_type.as_str() == "cancel_tool" {
+                        let target_session = parsed
+                            .get("sessionId")
+                            .or_else(|| parsed.get("session_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(session_id_for_reader.as_str());
+                        let killed = crate::tools::background_registry::kill_foreground(
+                            target_session,
+                        ) || (target_session != session_id_for_reader.as_str()
+                            && crate::tools::background_registry::kill_foreground(
+                                session_id_for_reader.as_str(),
+                            ));
+                        tracing::info!(
+                            target: "agent_cancel",
+                            session = %target_session,
+                            killed,
+                            "cancel_tool received: foreground shell kill requested"
+                        );
+                        continue;
                     }
                     match msg_type.as_str() {
 

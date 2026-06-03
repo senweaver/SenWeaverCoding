@@ -25,7 +25,7 @@ import {
   hasUsableModelForSession,
   isNoModelConfiguredError,
 } from '../utils/modelAvailability'
-import { ensureSessionRuntimeSynced } from '../utils/runtimeSync'
+import { ensureSessionRuntimeSynced, queueSessionRuntimeSync } from '../utils/runtimeSync'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { MessageEntry, PendingRewindSummary } from '../types/session'
 import type { PermissionMode } from '../types/settings'
@@ -291,6 +291,8 @@ type ChatStore = {
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void
   setSessionCodingMode: (sessionId: string, mode: CodingModeId) => void
   stopGeneration: (sessionId: string) => void
+  cancelTool: (sessionId: string, toolUseId?: string) => void
+  reconcileStuckSession: (sessionId: string) => void
   loadHistory: (sessionId: string) => Promise<void>
   reloadHistory: (sessionId: string) => Promise<void>
   queueComposerPrefill: (
@@ -1979,10 +1981,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
-    void ensureSessionRuntimeSynced(sessionId, { persist: false })
-      .finally(() => {
-        wsManager.send(sessionId, { type: 'user_message', content, attachments })
-      })
+    queueSessionRuntimeSync(sessionId, { persist: false })
+    wsManager.send(sessionId, { type: 'user_message', content, attachments })
   },
 
   respondToPermission: (sessionId, requestId, allowed, options) => {
@@ -2064,6 +2064,35 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       sessionCodingMode: { ...s.sessionCodingMode, [sessionId]: mode },
     }))
     wsManager.send(sessionId, { type: 'set_coding_mode', mode, scope: 'session' })
+  },
+
+  cancelTool: (sessionId, toolUseId) => {
+    wsManager.send(sessionId, { type: 'cancel_tool', sessionId, toolUseId })
+  },
+
+  reconcileStuckSession: (sessionId) => {
+    const session = get().sessions[sessionId]
+    if (!session) return
+    const isStuckActive =
+      session.chatState === 'thinking' ||
+      session.chatState === 'tool_executing' ||
+      session.chatState === 'streaming'
+    if (!isStuckActive) {
+      if (session.stopRequested) {
+        set((s) => ({
+          sessions: updateSessionIn(s.sessions, sessionId, () => ({
+            stopRequested: false,
+          })),
+        }))
+      }
+      return
+    }
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, () => ({
+        stopRequested: false,
+      })),
+    }))
+    void get().reloadHistory(sessionId)
   },
 
   stopGeneration: (sessionId) => {
@@ -2672,6 +2701,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             void useBrowserPanelStore.getState().openForTool(sessionId, {
               source: 'tool',
               url: null,
+              presentOnly: true,
             })
           }
         }
@@ -3039,6 +3069,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           void useBrowserPanelStore.getState().openForTool(sessionId, {
             source: 'tool',
             url: targetUrl,
+            presentOnly: true,
           })
         }
         if (isSubagentParentTool(toolName) && toolUseId) {

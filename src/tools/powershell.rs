@@ -129,15 +129,152 @@ impl Tool for PowerShellTool {
             cmd.env(k, v);
         }
         cmd.env_remove("PYTHONHOME");
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::null());
+        cmd.kill_on_drop(true);
 
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout), cmd.output()).await;
+        let mirror_id = format!(
+            "ps-{}",
+            uuid::Uuid::new_v4()
+                .as_simple()
+                .to_string()
+                .chars()
+                .take(8)
+                .collect::<String>(),
+        );
+        let mirror_session_id = crate::session::current_session_context().map(|c| c.session_id);
+        let mirror_started = std::time::Instant::now();
+        crate::tools::background_registry::publish(
+            crate::tools::background_registry::BackgroundShellSignal::Spawned {
+                id: mirror_id.clone(),
+                command: command.to_string(),
+                session_id: mirror_session_id.clone(),
+            },
+        );
 
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1);
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let error_text = format!("Failed to execute PowerShell: {e}");
+                crate::tools::shell::core::emit_mirror_chunks(
+                    &mirror_id,
+                    &format!("{error_text}\n"),
+                    crate::tools::background_registry::BgStream::Stderr,
+                    mirror_session_id.as_deref(),
+                );
+                crate::tools::background_registry::publish(
+                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                        id: mirror_id.clone(),
+                        elapsed_secs: mirror_started.elapsed().as_secs(),
+                        exit_code: None,
+                        session_id: mirror_session_id.clone(),
+                    },
+                );
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error_text),
+                });
+            }
+        };
+
+        let outcome = crate::tools::shell::foreground::run_foreground_streamed(
+            child,
+            &mirror_id,
+            mirror_session_id.as_deref(),
+            mirror_started,
+            std::time::Duration::from_secs(timeout),
+        )
+        .await;
+
+        use crate::tools::shell::foreground::ForegroundOutcome;
+
+        match outcome {
+            ForegroundOutcome::Cancelled(part_stdout, part_stderr) => {
+                crate::tools::background_registry::publish(
+                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                        id: mirror_id.clone(),
+                        elapsed_secs: mirror_started.elapsed().as_secs(),
+                        exit_code: None,
+                        session_id: mirror_session_id.clone(),
+                    },
+                );
+                Ok(ToolResult {
+                    success: true,
+                    output: crate::tools::shell::foreground::build_cancelled_output(
+                        &part_stdout,
+                        &part_stderr,
+                    ),
+                    error: None,
+                })
+            }
+            ForegroundOutcome::WaitError(e) => {
+                let error_text = format!("Failed to execute PowerShell: {e}");
+                crate::tools::background_registry::publish(
+                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                        id: mirror_id.clone(),
+                        elapsed_secs: mirror_started.elapsed().as_secs(),
+                        exit_code: None,
+                        session_id: mirror_session_id.clone(),
+                    },
+                );
+                Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error_text),
+                })
+            }
+            ForegroundOutcome::Timeout(part_stdout, part_stderr) => {
+                let banner = format!(
+                    "PowerShell command timed out after {timeout}s and was killed. \
+                     DO NOT retry the same command verbatim; pass a larger `timeout_secs` \
+                     or split the work into smaller steps."
+                );
+                crate::tools::background_registry::publish(
+                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                        id: mirror_id.clone(),
+                        elapsed_secs: mirror_started.elapsed().as_secs(),
+                        exit_code: None,
+                        session_id: mirror_session_id.clone(),
+                    },
+                );
+                let mut detail = String::new();
+                if !part_stdout.is_empty() {
+                    detail.push_str("--- partial stdout before timeout ---\n");
+                    detail.push_str(&part_stdout);
+                    if !detail.ends_with('\n') {
+                        detail.push('\n');
+                    }
+                }
+                if !part_stderr.is_empty() {
+                    detail.push_str("--- partial stderr before timeout ---\n");
+                    detail.push_str(&part_stderr);
+                    if !detail.ends_with('\n') {
+                        detail.push('\n');
+                    }
+                }
+                let error_text = if detail.is_empty() {
+                    banner
+                } else {
+                    format!("{banner}\n{detail}")
+                };
+                Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error_text),
+                })
+            }
+            ForegroundOutcome::Exited(status, stdout, stderr) => {
+                let exit_code = status.code().unwrap_or(-1);
+                crate::tools::background_registry::publish(
+                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                        id: mirror_id.clone(),
+                        elapsed_secs: mirror_started.elapsed().as_secs(),
+                        exit_code: Some(exit_code),
+                        session_id: mirror_session_id.clone(),
+                    },
+                );
 
                 let (compacted_stdout, compacted_stderr, tee_hint) =
                     if crate::token_saver::is_enabled() {
@@ -165,28 +302,15 @@ impl Tool for PowerShellTool {
                 }
 
                 Ok(ToolResult {
-                    success: output.status.success(),
+                    success: status.success(),
                     output: combined,
-                    error: if output.status.success() {
+                    error: if status.success() {
                         None
                     } else {
                         Some(format!("Exit code: {}", exit_code))
                     },
                 })
             }
-            Ok(Err(e)) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to execute PowerShell: {}", e)),
-            }),
-            Err(_) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "PowerShell command timed out after {} seconds",
-                    timeout
-                )),
-            }),
         }
     }
 }

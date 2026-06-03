@@ -158,11 +158,84 @@ pub fn normalize_chat_messages_for_provider(
 ) -> Vec<ChatMessage> {
     let mirrored = mirror_tool_ids_in_chat_messages(messages);
     let cleaned = clean_empty_assistant_tool_calls_in_chat_messages(mirrored);
+    let non_empty = drop_payloadless_assistant_messages(cleaned);
     let no_orphans = match kind {
-        ProviderKind::Anthropic => coerce_orphan_tool_messages_for_anthropic(cleaned),
-        _ => coerce_orphan_tool_messages_in_chat_messages(cleaned),
+        ProviderKind::Anthropic => coerce_orphan_tool_messages_for_anthropic(non_empty),
+        _ => coerce_orphan_tool_messages_in_chat_messages(non_empty),
     };
     repair_dangling_tool_pairs_for_provider(no_orphans, kind)
+}
+
+pub fn drop_payloadless_assistant_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let before = messages.len();
+    let out: Vec<ChatMessage> = messages
+        .into_iter()
+        .filter(|msg| !(msg.role == "assistant" && assistant_has_no_payload(&msg.content)))
+        .collect();
+    let dropped = before - out.len();
+    if dropped > 0 {
+        tracing::warn!(
+            target: "providers.sanitize",
+            dropped,
+            "dropped payload-less assistant messages (no content, no tool_calls) to satisfy provider message validation"
+        );
+    }
+    out
+}
+
+pub fn assistant_has_no_payload(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with('{') {
+        if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+            let is_envelope = obj.contains_key("tool_calls")
+                || obj.contains_key("content")
+                || obj.contains_key("reasoning_content");
+            if is_envelope {
+                let has_tool_calls = obj
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .map(|arr| !arr.is_empty())
+                    .unwrap_or(false);
+                let body_empty = obj
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true);
+                let reasoning_empty = obj
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true);
+                return !has_tool_calls && body_empty && reasoning_empty;
+            }
+        }
+    } else if trimmed.starts_with('[') {
+        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(trimmed) {
+            let is_block_envelope = !arr.is_empty()
+                && arr.iter().all(|item| {
+                    item.is_object() && item.get("type").and_then(Value::as_str).is_some()
+                });
+            if !is_block_envelope {
+                return false;
+            }
+            let has_payload = arr.iter().any(|item| {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => true,
+                    Some("text") | Some("reasoning") | Some("thinking") => item
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            });
+            return !has_payload;
+        }
+    }
+    false
 }
 
 pub fn mirror_tool_ids_in_chat_messages(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {

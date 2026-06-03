@@ -130,6 +130,8 @@ export function ToolCard({
   isStreaming = false,
   compact = false,
   defaultExpanded,
+  parentSessionId,
+  toolTimestamp,
   childCalls,
   childResults,
 }: Props) {
@@ -181,6 +183,8 @@ export function ToolCard({
     result: result ?? null,
     isStreaming,
     compact,
+    parentSessionId,
+    toolTimestamp,
     childCalls,
     childResults,
   }

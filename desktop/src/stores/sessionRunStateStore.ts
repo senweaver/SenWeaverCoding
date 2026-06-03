@@ -120,6 +120,7 @@ export const useSessionRunStateStore = create<SessionRunStateStore>((set, get) =
     for (const prev of previous) {
       if (!nextSet.has(prev)) {
         void scheduleQueueDrainForSession(prev)
+        scheduleStuckReconcile(prev)
       }
     }
   },
@@ -151,6 +152,7 @@ export const useSessionRunStateStore = create<SessionRunStateStore>((set, get) =
       next.delete(sessionId)
       set({ running: next })
       void scheduleQueueDrainForSession(sessionId)
+      scheduleStuckReconcile(sessionId)
     }
   },
   start: () => {
@@ -174,6 +176,24 @@ export const useSessionRunStateStore = create<SessionRunStateStore>((set, get) =
 
 export function useIsSessionRunning(sessionId: string | null | undefined): boolean {
   return useSessionRunStateStore((s) => (sessionId ? s.running.has(sessionId) : false))
+}
+
+const STUCK_RECONCILE_GRACE_MS = 2500
+const stuckReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleStuckReconcile(sessionId: string): void {
+  const existing = stuckReconcileTimers.get(sessionId)
+  if (existing) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    stuckReconcileTimers.delete(sessionId)
+    if (useSessionRunStateStore.getState().running.has(sessionId)) return
+    void import('./chatStore')
+      .then(({ useChatStore }) => {
+        useChatStore.getState().reconcileStuckSession(sessionId)
+      })
+      .catch(() => {})
+  }, STUCK_RECONCILE_GRACE_MS)
+  stuckReconcileTimers.set(sessionId, timer)
 }
 
 async function scheduleQueueDrainForSession(sessionId: string): Promise<void> {

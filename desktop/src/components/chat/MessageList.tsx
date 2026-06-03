@@ -54,6 +54,14 @@ type RenderItem =
   | { kind: 'explored'; id: string; items: UIMessage[]; summary: ExploredSummary }
   | { kind: 'message'; message: UIMessage }
 
+const TODO_LIST_TOOL_NAMES = new Set([
+  'todo_write',
+  'TodoWrite',
+  'todowrite',
+  'tasks_write',
+  'TasksWrite',
+])
+
 const USER_FACING_ERROR_CODES = new Set([
   'NO_MODEL_CONFIGURED',
   'CONFIG_ERROR',
@@ -275,6 +283,27 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
       const planItem = items[activePlanIdx]!
       items.splice(activePlanIdx, 1)
       items.push(planItem)
+    }
+  }
+
+  const todoItemIdxs: number[] = []
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]!
+    if (
+      it.kind === 'message' &&
+      it.message.type === 'tool_use' &&
+      TODO_LIST_TOOL_NAMES.has(it.message.toolName)
+    ) {
+      todoItemIdxs.push(i)
+    }
+  }
+  if (todoItemIdxs.length > 1) {
+    for (let k = 0; k < todoItemIdxs.length - 1; k++) {
+      const idx = todoItemIdxs[k]!
+      const it = items[idx]!
+      if (it.kind === 'message' && !it.message.superseded) {
+        items[idx] = { ...it, message: { ...it.message, superseded: true } }
+      }
     }
   }
 

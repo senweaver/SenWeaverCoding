@@ -68,3 +68,20 @@ export async function ensureSessionRuntimeSynced(
   await syncRuntimeSelectionToBackend(selection, sessionId, options?.persist ?? false)
   return selection
 }
+
+export function queueSessionRuntimeSync(
+  sessionId: string,
+  options?: { persist?: boolean },
+): RuntimeSelection | null {
+  if (!isPersistableSessionId(sessionId)) return null
+  const selection = resolveSessionRuntimeSelection(sessionId)
+  if (!selection?.providerId || !selection.modelId.trim()) return null
+  persistRuntimeSelection(sessionId, selection)
+  wsManager.send(sessionId, {
+    type: 'set_runtime_config',
+    persist: options?.persist ?? false,
+    providerId: selection.providerId,
+    modelId: selection.modelId,
+  })
+  return selection
+}

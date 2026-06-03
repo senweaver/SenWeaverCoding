@@ -1455,6 +1455,7 @@ export const en = {
   'modeBlocked.toolNotAllowed.body': '{tools} is not in the allowed-tools whitelist of the current coding mode. The call was refused. Switch to a mode that allows it, or pick a different tool to accomplish the task.',
 
   'execTool.openFullLog': 'View full log in terminal panel',
+  'execTool.stop': 'Stop this command',
 
   'thinking.wordThought': 'Thought',
   'thinking.wordThinking': 'Thinking',

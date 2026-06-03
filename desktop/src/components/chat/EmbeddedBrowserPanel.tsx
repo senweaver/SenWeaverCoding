@@ -18,7 +18,6 @@ import {
   clampRectToHost,
   dockFocusActive,
   dockHide,
-  dockOpen,
   dockPark,
   dockPresentSession,
   dockResync,
@@ -170,10 +169,10 @@ export function EmbeddedBrowserPanel() {
     }
     void (async () => {
       try {
+        await dockSetRect(rect)
         await dockPresentSession(sessionId)
-        await dockOpen(rect, null, sessionId)
       } catch (err) {
-        console.warn('[browserDock] dock present/open on session switch failed', err)
+        console.warn('[browserDock] dock present on session switch failed', err)
       }
     })()
   }, [sessionId])
@@ -574,10 +573,10 @@ export function EmbeddedBrowserPanel() {
     }
     void (async () => {
       try {
+        await dockSetRect(rect)
         await dockPresentSession(sessionId)
-        await dockOpen(rect, null, sessionId)
       } catch (err) {
-        console.warn('[browserDock] dock present/open on visibility change failed', err)
+        console.warn('[browserDock] dock present on visibility change failed', err)
       }
     })()
   }, [sessionId, visible, ownsDock, hasContent])

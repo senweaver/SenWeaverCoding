@@ -94,19 +94,25 @@ function parseSignal(raw: unknown): AgentMirrorEvent | null {
   if (typeof type !== 'string') return null
   const id = typeof obj.id === 'string' ? obj.id : ''
   if (!id) return null
+  const sessionId =
+    typeof obj.sessionId === 'string'
+      ? obj.sessionId
+      : typeof obj.session_id === 'string'
+        ? obj.session_id
+        : null
   switch (type) {
     case 'spawned': {
       const command = typeof obj.command === 'string' ? obj.command : ''
-      return { type: 'spawned', id, command }
+      return { type: 'spawned', id, command, sessionId }
     }
     case 'chunk': {
       const stream = obj.stream === 'stderr' ? 'stderr' : 'stdout'
       const line = typeof obj.line === 'string' ? obj.line : ''
-      return { type: 'chunk', id, stream, line }
+      return { type: 'chunk', id, stream, line, sessionId }
     }
     case 'heartbeat': {
       const elapsed = typeof obj.elapsedSecs === 'number' ? obj.elapsedSecs : 0
-      return { type: 'heartbeat', id, elapsedSecs: elapsed }
+      return { type: 'heartbeat', id, elapsedSecs: elapsed, sessionId }
     }
     case 'exited': {
       const elapsed = typeof obj.elapsedSecs === 'number' ? obj.elapsedSecs : 0
@@ -116,7 +122,7 @@ function parseSignal(raw: unknown): AgentMirrorEvent | null {
           : obj.exitCode === null
             ? null
             : null
-      return { type: 'exited', id, elapsedSecs: elapsed, exitCode }
+      return { type: 'exited', id, elapsedSecs: elapsed, exitCode, sessionId }
     }
     default:
       return null

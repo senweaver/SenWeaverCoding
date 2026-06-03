@@ -753,7 +753,7 @@ impl Agent {
 
         let gui_hooks: Arc<GuiHooksFromAgent> = Arc::new(GuiHooksFromAgent::from_agent(self));
 
-        let final_text = {
+        let loop_result = {
             let policy = crate::agent::loop_::policy::PolicyBundle::gui(
                 self.provider.as_ref(),
                 &self.tools,
@@ -783,20 +783,23 @@ impl Agent {
             .with_plan_mode_nudge_hook(Some(gui_hooks.clone()))
             .with_plan_execution_path(armed_plan_path.as_deref());
 
-            match crate::agent::loop_::unified::UnifiedLoop::new(policy)
+            crate::agent::loop_::unified::UnifiedLoop::new(policy)
                 .run(&mut history_chat)
                 .await
-            {
-                Ok(text) => text,
-                Err(err) => {
-                    let msg = err.to_string();
-                    let _ = event_tx
-                        .send(TurnEvent::Error {
-                            message: msg.clone(),
-                        })
-                        .await;
-                    return Err(AgentError::ToolDispatchFailed(msg));
-                }
+        };
+
+        let final_text = match loop_result {
+            Ok(text) => text,
+            Err(err) => {
+                let msg = err.to_string();
+                let _ = event_tx
+                    .send(TurnEvent::Error {
+                        message: msg.clone(),
+                    })
+                    .await;
+
+                crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+                return Err(AgentError::ToolDispatchFailed(msg));
             }
         };
 
@@ -897,6 +900,7 @@ impl Agent {
         if !tool_batch.is_empty() {
             out.push(ConversationMessage::ToolResults(tool_batch));
         }
+        crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut out);
         *history = out;
     }
 
@@ -1612,6 +1616,7 @@ impl Agent {
         let mut expanded =
             super::sqlite_gateway_hydrate::hydrate_gateway_sqlite_messages(&cleaned);
         Self::repair_orphan_tool_result_messages(&mut expanded);
+        crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut expanded);
         self.activate_deferred_tools_from_history(&expanded);
         self.history.extend(expanded);
     }
@@ -2703,10 +2708,16 @@ impl Agent {
         let date_str =
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
 
+        let current_request = format!(
+            "[CURRENT REQUEST - this is the user's latest message and the single \
+             authoritative task to act on right now. Do not resume or answer any earlier \
+             or interrupted request unless the user explicitly asks again.]\n{user_message}"
+        );
+
         if context.is_empty() {
-            format!("[CURRENT DATE & TIME: {date_str}]\n\n{user_message}")
+            format!("[CURRENT DATE & TIME: {date_str}]\n\n{current_request}")
         } else {
-            format!("[CURRENT DATE & TIME: {date_str}]\n\n{context}\n\n{user_message}")
+            format!("[CURRENT DATE & TIME: {date_str}]\n\n{context}\n\n{current_request}")
         }
     }
 
@@ -2890,6 +2901,9 @@ impl Agent {
                 )
                 .await;
         }
+
+        crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut self.history);
+        crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
 
         let mut enriched = Self::build_user_envelope(user_message, &context);
 

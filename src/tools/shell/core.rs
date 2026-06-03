@@ -232,7 +232,7 @@ fn is_valid_env_var_name(name: &str) -> bool {
 
 const MIRROR_MAX_LINES_PER_STREAM: usize = 2048;
 
-fn emit_mirror_chunks(
+pub(crate) fn emit_mirror_chunks(
     id: &str,
     body: &str,
     stream: super::super::background_registry::BgStream,
@@ -476,7 +476,7 @@ impl Tool for ShellTool {
                     Err(e) => Err(e),
                 }
             };
-        let (_job_guard, mut child): (Option<JobObjectGuard>, tokio::process::Child) =
+        let (_job_guard, child): (Option<JobObjectGuard>, tokio::process::Child) =
             match spawn_result {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -503,90 +503,49 @@ impl Tool for ShellTool {
             }
         };
 
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
+        let outcome = super::foreground::run_foreground_streamed(
+            child,
+            &mirror_id,
+            mirror_session_id.as_deref(),
+            mirror_started,
+            timeout_duration,
+        )
+        .await;
 
-        let (stdout_tx, stdout_rx) = tokio::sync::oneshot::channel();
-        crate::runtime::spawn_supervised("tools.shell.stdout", async move {
-            let mut buf = String::new();
-            if let Some(mut out) = stdout_pipe {
-                use tokio::io::AsyncReadExt;
-                let mut raw = Vec::new();
-                let _ = out.read_to_end(&mut raw).await;
-                buf = crate::util::decode_subprocess_bytes(&raw);
-            }
-            let _ = stdout_tx.send(buf);
-        });
-
-        let (stderr_tx, stderr_rx) = tokio::sync::oneshot::channel();
-        crate::runtime::spawn_supervised("tools.shell.stderr", async move {
-            let mut buf = String::new();
-            if let Some(mut err) = stderr_pipe {
-                use tokio::io::AsyncReadExt;
-                let mut raw = Vec::new();
-                let _ = err.read_to_end(&mut raw).await;
-                buf = crate::util::decode_subprocess_bytes(&raw);
-            }
-            let _ = stderr_tx.send(buf);
-        });
-
-        enum WaitOutcome {
-            Exited(std::process::ExitStatus),
-            WaitError(std::io::Error),
-            Timeout,
+        if let super::foreground::ForegroundOutcome::Cancelled(part_stdout, part_stderr) = &outcome {
+            super::super::background_registry::publish(
+                super::super::background_registry::BackgroundShellSignal::Exited {
+                    id: mirror_id.clone(),
+                    elapsed_secs: mirror_started.elapsed().as_secs(),
+                    exit_code: None,
+                    session_id: mirror_session_id.clone(),
+                },
+            );
+            return Ok(ToolResult {
+                success: true,
+                output: super::foreground::build_cancelled_output(part_stdout, part_stderr),
+                error: None,
+            });
         }
 
-        let wait_outcome = match tokio::time::timeout(timeout_duration, child.wait()).await {
-            Ok(Ok(status)) => WaitOutcome::Exited(status),
-            Ok(Err(e)) => WaitOutcome::WaitError(e),
-            Err(_) => {
-                let _ = child.start_kill();
-                if tokio::time::timeout(Duration::from_secs(3), child.wait())
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(
-                        command = %command,
-                        timeout_secs,
-                        "shell child did not exit within 3s after kill; treating as orphan"
-                    );
-                }
-                WaitOutcome::Timeout
-            }
-        };
-
-        let drained_stdout = tokio::time::timeout(Duration::from_millis(500), stdout_rx)
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
-        let drained_stderr = tokio::time::timeout(Duration::from_millis(500), stderr_rx)
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
-
         let result: Result<Result<(std::process::ExitStatus, String, String), anyhow::Error>, (String, String)> =
-            match wait_outcome {
-                WaitOutcome::Exited(status) => Ok(Ok((status, drained_stdout, drained_stderr))),
-                WaitOutcome::WaitError(e) => Ok(Err(anyhow::Error::from(e))),
-                WaitOutcome::Timeout => Err((drained_stdout, drained_stderr)),
+            match outcome {
+                super::foreground::ForegroundOutcome::Exited(status, stdout, stderr) => {
+                    Ok(Ok((status, stdout, stderr)))
+                }
+                super::foreground::ForegroundOutcome::WaitError(e) => {
+                    Ok(Err(anyhow::Error::from(e)))
+                }
+                super::foreground::ForegroundOutcome::Timeout(stdout, stderr) => {
+                    Err((stdout, stderr))
+                }
+                super::foreground::ForegroundOutcome::Cancelled(..) => {
+                    unreachable!("cancelled outcome returned earlier")
+                }
             };
 
         match result {
             Ok(Ok((status, mut stdout, mut stderr))) => {
-                emit_mirror_chunks(
-                    &mirror_id,
-                    &stdout,
-                    super::super::background_registry::BgStream::Stdout,
-                    mirror_session_id.as_deref(),
-                );
-                emit_mirror_chunks(
-                    &mirror_id,
-                    &stderr,
-                    super::super::background_registry::BgStream::Stderr,
-                    mirror_session_id.as_deref(),
-                );
                 super::super::background_registry::publish(
                     super::super::background_registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
@@ -725,13 +684,13 @@ impl Tool for ShellTool {
                      to the user via the ask tool instead of retrying."
                 );
                 let error_text = if detail.is_empty() {
-                    banner
+                    banner.clone()
                 } else {
                     format!("{banner}\n{detail}")
                 };
                 emit_mirror_chunks(
                     &mirror_id,
-                    &format!("{error_text}\n"),
+                    &format!("{banner}\n"),
                     super::super::background_registry::BgStream::Stderr,
                     mirror_session_id.as_deref(),
                 );

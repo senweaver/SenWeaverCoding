@@ -207,6 +207,30 @@ impl PromptSection for TaskPlanningSection {
              include a short reason in the `content` field if you can.\n\
              7. `merge: true` is the default for status updates; only use `merge: false` when the \
              overall plan structure changes fundamentally and the old list is no longer valid.\n\
+             8. **Plan first, then execute.** Register the full breakdown before you start doing \
+             the work, then walk the steps in order, flipping statuses as you go. Do not interleave \
+             planning a brand-new list with execution of the current one.\n\
+             9. **Never recreate a list that still has open items.** While ANY item in the current \
+             list is `pending` or `in_progress`, you MUST NOT call `todo_write` with `merge: false` \
+             to start a fresh list  -  that throws away unfinished work and confuses the UI \
+             (the user sees a half-done list suddenly replaced by a new 0/N list). To add, remove, \
+             or re-scope steps mid-flight, call `todo_write(merge: true, ...)` and update or append \
+             items on the existing list; mark dropped steps `cancelled` rather than deleting them. \
+             Only after every item is `completed` or `cancelled` may you start a brand-new list \
+             with `merge: false`, and only if a genuinely new multi-step effort is needed. \
+             (The runtime enforces this: a `merge: false` call while open items exist is \
+             automatically merged into the existing list instead of replacing it.)\n\
+             \n\
+             ### Choosing the right tracker: task vs plan vs worker\n\
+             - **Short task** (a handful of steps you can finish in this session): use `todo_write` \
+             (the task list described here).\n\
+             - **Medium task** (needs a written, reviewable plan before/while executing): use \
+             `update_plan` with a `.plan.md` document  -  that is the canonical tracker for plan \
+             work. When a plan list exists, do NOT also keep a `todo_write` task list; the plan \
+             already IS the to-do list, and two parallel lists desync the UI.\n\
+             - **Long task** (large or independent sub-jobs, especially parallelisable ones): \
+             decompose with `spawn_workers` (parallel worker sub-agents) or `delegate_parallel`, \
+             rather than cramming everything into one flat task list.\n\
              \n\
              ### Concrete example\n\
              User: \"Refactor user auth to use JWT.\"  -> first tool call MUST be:\n\

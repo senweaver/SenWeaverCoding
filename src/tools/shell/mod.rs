@@ -4,6 +4,7 @@
 
 pub mod core;
 pub mod coding_cli;
+pub mod foreground;
 
 pub use core::*;
 pub use coding_cli::*;

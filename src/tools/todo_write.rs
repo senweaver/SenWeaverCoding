@@ -251,7 +251,15 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
         let existing = guard.get(&session_id).cloned().unwrap_or_default();
         let old_count = existing.len();
 
-        let next = if merge {
+        let open_count = existing
+            .iter()
+            .filter(|t| matches!(t.status, TodoStatus::Pending | TodoStatus::InProgress))
+            .count();
+
+        let normalized = !merge && open_count > 0;
+        let effective_merge = merge || normalized;
+
+        let next = if effective_merge {
             let mut base = existing;
             for item in incoming {
                 if let Some(pos) = base.iter().position(|t| t.id == item.id) {
@@ -273,14 +281,25 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
         }
         drop(guard);
 
+        let mut payload = json!({
+            "old_count": old_count,
+            "new_count": new_count,
+            "session_id": session_id,
+        });
+        if normalized {
+            payload["normalized"] = json!(true);
+            payload["note"] = json!(format!(
+                "The current list still had {open_count} unfinished item(s), so this full-replace \
+                 was merged into the existing list instead of recreating it, preserving in-progress \
+                 work. To adjust the plan, call todo_write with merge:true to update or append \
+                 items; only start a brand-new list (merge:false) once every item is completed or \
+                 cancelled."
+            ));
+        }
+
         Ok(ToolResult {
             success: true,
-            output: json!({
-                "old_count": old_count,
-                "new_count": new_count,
-                "session_id": session_id,
-            })
-            .to_string(),
+            output: payload.to_string(),
             error: None,
         })
     }

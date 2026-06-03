@@ -1441,6 +1441,7 @@ export const zh: Record<TranslationKey, string> = {
   'modeBlocked.toolNotAllowed.body': '{tools} 不在当前编程模式的工具白名单内。请求已被拦截。请切换到包含该工具的模式，或选择其他工具完成任务。',
 
   'execTool.openFullLog': '在终端面板查看完整日志',
+  'execTool.stop': '停止该命令',
 
   'thinking.wordThought': '思考',
   'thinking.wordThinking': '思考中',

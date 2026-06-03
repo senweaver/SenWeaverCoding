@@ -51,6 +51,7 @@ struct ChildHandle {
 
 struct RegistryInner {
     children: Mutex<HashMap<String, ChildHandle>>,
+    foreground: Mutex<HashMap<String, oneshot::Sender<()>>>,
     tx: broadcast::Sender<BackgroundShellSignal>,
 }
 
@@ -61,6 +62,7 @@ fn registry() -> &'static RegistryInner {
         let (tx, _) = broadcast::channel(256);
         RegistryInner {
             children: Mutex::new(HashMap::new()),
+            foreground: Mutex::new(HashMap::new()),
             tx,
         }
     })
@@ -117,6 +119,37 @@ pub fn kill(id: &str) -> bool {
             let _ = tx.send(());
             return true;
         }
+    }
+    false
+}
+
+pub(crate) fn register_foreground(session_id: String, kill_tx: oneshot::Sender<()>) {
+    let mut guard = registry()
+        .foreground
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.insert(session_id, kill_tx);
+}
+
+pub(crate) fn unregister_foreground(session_id: &str) {
+    let mut guard = registry()
+        .foreground
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.remove(session_id);
+}
+
+pub fn kill_foreground(session_id: &str) -> bool {
+    let tx = {
+        let mut guard = registry()
+            .foreground
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.remove(session_id)
+    };
+    if let Some(tx) = tx {
+        let _ = tx.send(());
+        return true;
     }
     false
 }

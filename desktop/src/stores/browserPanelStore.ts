@@ -21,6 +21,7 @@ import {
   dockRequestState,
   dockReload,
   dockSetPickMode,
+  dockSetRect,
   dockSetZoom,
   type BrowserDockEvent,
   type BrowserDockRect,
@@ -175,6 +176,8 @@ export type BrowserPanelState = {
 type ToggleOptions = {
   source?: BrowserPanelSource
   url?: string | null
+
+  presentOnly?: boolean
 }
 
 type StoreState = {
@@ -627,14 +630,21 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     })
     const rect = get().panels[sessionId]?.anchorRect ?? null
     try {
-      await dockPresentSession(sessionId)
-      if (rect) {
-        await dockOpen(rect, seedUrl, sessionId)
+      if (opts?.presentOnly) {
+        if (rect) {
+          await dockSetRect(rect)
+        }
+        await dockPresentSession(sessionId)
       } else {
-        await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl, sessionId)
+        await dockPresentSession(sessionId)
+        if (rect) {
+          await dockOpen(rect, seedUrl, sessionId)
+        } else {
+          await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl, sessionId)
+        }
       }
     } catch (err) {
-      console.warn('[browserDock] openForTool dockOpen failed', err)
+      console.warn('[browserDock] openForTool present failed', err)
     }
     dockRequestState().catch((err) => {
       console.warn('[browserDock] dockRequestState failed', err)

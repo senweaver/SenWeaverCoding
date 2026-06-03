@@ -10,6 +10,63 @@ const SYNTHETIC_TOOL_REPLY: &str =
     "[Synthetic tool reply] No stored result exists for this tool_call_id in the transcript \
      (possible session interruption, context trim, or compaction). Ignore and continue.";
 
+const INTERRUPTED_TURN_NOTE: &str =
+    "[System note: the immediately preceding user request was interrupted \
+     (cancelled, errored, or the app restarted) and was never completed. \
+     Do NOT silently resume it. The next user message is the current, \
+     authoritative request - address that. Only revisit the earlier request \
+     if the user explicitly asks again.]";
+
+pub fn drop_payloadless_assistant_messages(history: &mut Vec<ConversationMessage>) {
+    let before = history.len();
+    history.retain(|msg| !is_payloadless_assistant(msg));
+    let dropped = before - history.len();
+    if dropped > 0 {
+        tracing::warn!(
+            target: "agent.dangling_tool_repair",
+            dropped,
+            "dropped payload-less assistant turns (no content, no tool_calls) from history so they are never seeded or sent to the model"
+        );
+    }
+}
+
+fn is_payloadless_assistant(msg: &ConversationMessage) -> bool {
+    match msg {
+        ConversationMessage::Chat(c) => {
+            c.role == "assistant" && crate::providers::sanitize::assistant_has_no_payload(&c.content)
+        }
+        ConversationMessage::AssistantToolCalls {
+            text,
+            tool_calls,
+            reasoning_content,
+        } => {
+            tool_calls.is_empty()
+                && text.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+                && reasoning_content
+                    .as_deref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+        }
+        ConversationMessage::ToolResults(_) => false,
+    }
+}
+
+pub fn close_orphan_user_turns(history: &mut Vec<ConversationMessage>) {
+    let ends_with_user = matches!(
+        history.last(),
+        Some(ConversationMessage::Chat(c)) if c.role == "user"
+    );
+    if ends_with_user {
+        tracing::warn!(
+            target: "agent.dangling_tool_repair",
+            "closing orphan user turn from an interrupted/crashed prior turn before new request"
+        );
+        history.push(ConversationMessage::Chat(
+            crate::providers::traits::ChatMessage::assistant(INTERRUPTED_TURN_NOTE),
+        ));
+    }
+}
+
 fn collect_followup_tool_call_ids(history: &[ConversationMessage], start: usize) -> HashSet<String> {
     let mut seen = HashSet::new();
     let mut j = start;
@@ -151,6 +208,7 @@ pub fn ensure_assistant_tool_replies_inplace(history: &mut Vec<ConversationMessa
 }
 
 pub fn repair_dangling_tool_calls(mut messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    drop_payloadless_assistant_messages(&mut messages);
     ensure_assistant_tool_replies_inplace(&mut messages);
     messages
 }

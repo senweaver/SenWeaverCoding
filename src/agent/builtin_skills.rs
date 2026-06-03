@@ -201,7 +201,20 @@ the orchestrator  -  decompose, execute, verify, and synthesize.
 2. **Decompose** the task into independent, verifiable subtasks. Each subtask should \
    have a clear input, output, and success criterion.
 3. **Plan via todo_write**: For any task touching 3+ files, register every subtask \
-   as a todo item. Include: affected files, expected changes, and verification command.
+   as a todo item. Include: affected files, expected changes, and verification command. \
+   Plan first, then execute: lay out the full breakdown up front, keep exactly ONE item \
+   `in_progress`, and flip statuses incrementally as you go.
+
+### Task list discipline (todo_write)
+- **Do not recreate a list that still has open items.** While any item is `pending` or \
+  `in_progress`, never call `todo_write(merge: false)` to start a fresh list  -  that \
+  discards unfinished work. Adjust the plan with `todo_write(merge: true, ...)` to update \
+  or append items (mark dropped ones `cancelled`). Only start a brand-new list once every \
+  item is `completed`/`cancelled`, and only if genuinely new multi-step work is needed.
+- **Pick the right tracker**: short multi-step work -> `todo_write`; medium work that needs \
+  a reviewable plan -> `update_plan` + `.plan.md` (when a plan exists, do not also keep a \
+  `todo_write` list); long or parallelisable independent sub-jobs -> `spawn_workers` / \
+  `delegate_parallel`.
 
 ### Execution
 4. **Execute** subtasks in dependency order. For each subtask: read context, \
