@@ -88,7 +88,7 @@ export function ProjectFilter({ variant = 'default' }: { variant?: 'default' | '
     }
 
     setLoading(true)
-    sessionsApi.getRecentProjects(200)
+    sessionsApi.getRecentProjects({ limit: 200 })
       .then(({ projects: nextProjects }) => {
         cachedProjects = nextProjects
         cacheTimestamp = Date.now()

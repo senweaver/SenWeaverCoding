@@ -176,6 +176,16 @@ OMIT:
 
 Output concise bullet points. Be thorough but brief.";
 
+#[derive(Debug, Clone, Copy)]
+pub struct CompressionProgress {
+    pub pass: usize,
+    pub max_passes: usize,
+    pub tokens_current: usize,
+    pub tokens_target: usize,
+}
+
+pub type CompressionProgressFn = dyn Fn(CompressionProgress) + Send + Sync;
+
 pub struct ContextCompressor {
     config: ContextCompressionConfig,
     context_window: usize,
@@ -210,6 +220,18 @@ impl ContextCompressor {
         model: &str,
         preserved_indices: &[usize],
     ) -> Result<CompressionResult> {
+        self.compress_if_needed_with_progress(history, provider, model, preserved_indices, None)
+            .await
+    }
+
+    pub async fn compress_if_needed_with_progress(
+        &self,
+        history: &mut Vec<ChatMessage>,
+        provider: &dyn Provider,
+        model: &str,
+        preserved_indices: &[usize],
+        progress: Option<&CompressionProgressFn>,
+    ) -> Result<CompressionResult> {
         if !self.config.enabled {
             let tokens = estimate_tokens(history);
             return Ok(CompressionResult {
@@ -243,7 +265,15 @@ impl ContextCompressor {
 
         let started_at = std::time::Instant::now();
         let mut passes_used = 0;
-        for _ in 0..self.config.max_passes {
+        for pass in 0..self.config.max_passes {
+            if let Some(cb) = progress {
+                cb(CompressionProgress {
+                    pass: (pass + 1) as usize,
+                    max_passes: self.config.max_passes as usize,
+                    tokens_current: estimate_tokens(history),
+                    tokens_target: threshold,
+                });
+            }
             let did_compress = self
                 .compress_once_with_preserved(history, provider, model, preserved_indices)
                 .await?;

@@ -125,14 +125,17 @@ impl PipelineTool {
 
             let interpolated_args = interpolate_args(&step.args, &results);
 
-            let tool_result =
-                tool.execute(interpolated_args)
-                    .await
-                    .map_err(|e| PipelineError::StepFailed {
-                        index: i,
-                        tool: step.tool.clone(),
-                        message: e.to_string(),
-                    })?;
+            let tool_result = crate::agent::loop_::execute_tool_panic_safe(
+                tool,
+                &step.tool,
+                interpolated_args,
+            )
+            .await
+            .map_err(|e| PipelineError::StepFailed {
+                index: i,
+                tool: step.tool.clone(),
+                message: e.to_string(),
+            })?;
 
             if !tool_result.success {
                 return Err(PipelineError::StepFailed {
@@ -175,7 +178,12 @@ impl PipelineTool {
             let tool_arc = Arc::clone(&self.tools[idx]);
 
             join_set.spawn(async move {
-                let result = tool_arc.execute(args).await;
+                let result = crate::agent::loop_::execute_tool_panic_safe(
+                    tool_arc.as_ref(),
+                    &tool_name,
+                    args,
+                )
+                .await;
                 (i, tool_name, result)
             });
         }

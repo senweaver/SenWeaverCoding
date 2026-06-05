@@ -31,7 +31,6 @@ function createMemberSessionState() {
     activeThinkingStartedAt: null,
     activeThinkingLastChunkAt: null,
     pendingPermission: null,
-    pendingComputerUsePermission: null,
     tokenUsage: { input_tokens: 0, output_tokens: 0 },
     cumulativeTokens: 0,
     elapsedSeconds: 0,

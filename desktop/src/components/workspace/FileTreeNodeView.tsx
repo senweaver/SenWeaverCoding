@@ -56,7 +56,6 @@ type Props = {
   depth: number
   selectedRelPath: string | null
   focusedRelPath?: string | null
-  cutRelPath?: string | null
 
   renameTarget: RenameTargetState | null
 
@@ -130,7 +129,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   depth,
   selectedRelPath,
   focusedRelPath,
-  cutRelPath,
   renameTarget,
   createTarget,
   filter,
@@ -156,6 +154,9 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     (s) => s.aiModifiedAt[node.relPath],
   )
   const workspaceRoot = useWorkspaceFilesStore((s) => s.root)
+  const isCut = useWorkspaceFilesStore(
+    (s) => s.clipboard?.mode === 'cut' && s.clipboard.relPath === node.relPath,
+  )
   const gitSeverity = useGitStatusStore((s): GitStatusSeverity => {
     if (!workspaceRoot) return 'unmodified'
     const bucket = s.byRoot[workspaceRoot]
@@ -204,7 +205,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
 
   const isSelected = !node.isDir && selectedRelPath === node.relPath
   const isFocused = focusedRelPath === node.relPath
-  const isCut = !!cutRelPath && cutRelPath === node.relPath
 
   const sizeLabel = useMemo(() => {
     if (node.isDir) return ''
@@ -425,7 +425,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
                 depth={depth + 1}
                 selectedRelPath={selectedRelPath}
                 focusedRelPath={focusedRelPath}
-                cutRelPath={cutRelPath}
                 renameTarget={renameTarget}
                 createTarget={createTarget}
                 filter={filter}

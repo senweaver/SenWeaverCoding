@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, oneshot};
 
 const EVENT_CHANNEL_CAP: usize = 512;
 const WAIT_ANNOUNCE_DELAY: Duration = Duration::from_millis(50);
-const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(300);
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SNAPSHOTS_PER_SESSION: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -177,7 +177,10 @@ impl WorkspaceResourceManager {
             });
         }
 
-        let rx = rx_opt.expect("waiter must have receiver when not acquired");
+        let Some(rx) = rx_opt else {
+            self.cancel_waiter(&effective_workspace, &kind, session_id);
+            return Err(AcquireError::Shutdown);
+        };
 
         let announced = Arc::new(AtomicBool::new(false));
         let announce_workspace = effective_workspace.clone();
@@ -281,9 +284,10 @@ impl WorkspaceResourceManager {
     ) -> Vec<WaiterSnapshot> {
         let inner = self.inner.lock();
         let mut out = Vec::new();
-        let session_prefix = format!("{}::session::", workspace_key);
+        let workspace_member_prefix = format!("{}::", workspace_key);
         for ((ws, kind), queue) in inner.waiters.iter() {
-            let matches_workspace = ws == workspace_key || ws.starts_with(&session_prefix);
+            let matches_workspace =
+                ws == workspace_key || ws.starts_with(&workspace_member_prefix);
             if !matches_workspace {
                 continue;
             }
@@ -514,9 +518,31 @@ fn fs_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
+fn normalize_lock_path(path: &Path) -> String {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    let s = out.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        s.to_ascii_lowercase()
+    } else {
+        s
+    }
+}
+
 fn scope_key_for(workspace_key: &str, kind: &ResourceKind, session_id: &str) -> String {
     match kind {
-        ResourceKind::FileWrite { .. } => workspace_key.to_string(),
+        ResourceKind::FileWrite { path } => {
+            format!("{}::file::{}", workspace_key, normalize_lock_path(path))
+        }
         ResourceKind::Browser | ResourceKind::Shell => {
             format!("{}::session::{}", workspace_key, session_id)
         }
@@ -556,10 +582,15 @@ pub struct SessionContext {
     pub workspace_key: String,
     pub title: String,
     pub workspace_dir: String,
+    pub connection_id: Option<String>,
 }
 
 pub fn current_session_context() -> Option<SessionContext> {
     SESSION_CONTEXT.try_with(|c| c.clone()).ok()
+}
+
+pub fn current_connection_id() -> Option<String> {
+    SESSION_CONTEXT.try_with(|c| c.connection_id.clone()).ok().flatten()
 }
 
 pub async fn scope_session_context<F, R>(ctx: SessionContext, fut: F) -> R
@@ -583,6 +614,34 @@ pub async fn acquire_file_write_for_current_session(
                 },
                 &ctx.session_id,
                 &ctx.title,
+            )
+            .await,
+    )
+}
+
+pub const NO_SESSION_WORKSPACE_KEY: &str = "__no_session__";
+
+pub async fn acquire_file_write_locked(
+    path: &Path,
+) -> Option<Result<ResourceGuard, AcquireError>> {
+    let manager = global_workspace_resources()?;
+    let (workspace_key, session_id, title) = match current_session_context() {
+        Some(ctx) => (ctx.workspace_key, ctx.session_id, ctx.title),
+        None => (
+            NO_SESSION_WORKSPACE_KEY.to_string(),
+            NO_SESSION_WORKSPACE_KEY.to_string(),
+            "no-session".to_string(),
+        ),
+    };
+    Some(
+        manager
+            .acquire(
+                &workspace_key,
+                ResourceKind::FileWrite {
+                    path: path.to_path_buf(),
+                },
+                &session_id,
+                &title,
             )
             .await,
     )

@@ -701,7 +701,7 @@ impl OpsApplier {
                 out.extend_from_slice(&bytes[..byte_range.start]);
                 out.extend_from_slice(new_text.as_bytes());
                 out.extend_from_slice(&bytes[byte_range.end..]);
-                std::fs::write(path, &out).map_err(|source| ApplyBatchError::Io {
+                atomic_write(path, &out).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
                     source,
@@ -720,7 +720,7 @@ impl OpsApplier {
                 out.extend_from_slice(&bytes[..*at_byte]);
                 out.extend_from_slice(text.as_bytes());
                 out.extend_from_slice(&bytes[*at_byte..]);
-                std::fs::write(path, &out).map_err(|source| ApplyBatchError::Io {
+                atomic_write(path, &out).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
                     source,
@@ -741,7 +741,7 @@ impl OpsApplier {
                     Vec::with_capacity(before - (byte_range.end - byte_range.start));
                 out.extend_from_slice(&bytes[..byte_range.start]);
                 out.extend_from_slice(&bytes[byte_range.end..]);
-                std::fs::write(path, &out).map_err(|source| ApplyBatchError::Io {
+                atomic_write(path, &out).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
                     source,
@@ -760,7 +760,7 @@ impl OpsApplier {
                         source,
                     })?;
                 }
-                std::fs::write(path, contents.as_bytes()).map_err(|source| {
+                atomic_write(path, contents.as_bytes()).map_err(|source| {
                     ApplyBatchError::Io {
                         op_index,
                         path: path.clone(),
@@ -848,7 +848,7 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-                std::fs::write(path, outcome.applied.as_bytes()).map_err(|source| {
+                atomic_write(path, outcome.applied.as_bytes()).map_err(|source| {
                     ApplyBatchError::Io {
                         op_index,
                         path: path.clone(),
@@ -884,7 +884,7 @@ impl OpsApplier {
                         path: path.clone(),
                         source: e,
                     })?;
-                std::fs::write(path, out.as_bytes()).map_err(|source| ApplyBatchError::Io {
+                atomic_write(path, out.as_bytes()).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
                     source,
@@ -1138,7 +1138,7 @@ impl OpsApplier {
                 );
                 buf.push('\n');
             }
-            std::fs::write(&path, buf.as_bytes()).map_err(ApplyBatchError::Journal)?;
+            atomic_write(&path, buf.as_bytes()).map_err(ApplyBatchError::Journal)?;
             Ok((Some(path), true))
         })
         .await;
@@ -1251,6 +1251,10 @@ fn scope_kind_from_str(kind: &str) -> crate::apply_model::edit_op::ScopeKind {
         "block" => ScopeKind::Block,
         _ => ScopeKind::Other,
     }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    crate::util::atomic_write(path, bytes)
 }
 
 fn validate_byte_range_for_apply(
@@ -1444,7 +1448,7 @@ fn append_footer_to_path(path: &Path, status: JournalStatus, degraded: bool) {
         if let Ok(mut existing) = std::fs::read_to_string(path) {
             existing.push_str(&line);
             existing.push('\n');
-            let _ = std::fs::write(path, existing.as_bytes());
+            let _ = atomic_write(path, existing.as_bytes());
         }
     }
 }
@@ -1463,7 +1467,7 @@ fn restore_one(pre: &PreImage) -> Result<(), std::io::Error> {
             if let Some(parent) = pre.path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&pre.path, bytes)
+            atomic_write(&pre.path, bytes)
         }
         None => match std::fs::remove_file(&pre.path) {
             Ok(()) => Ok(()),

@@ -25,7 +25,8 @@
         "transparent": true,
         "acceptFirstMouse": true,
         "visible": false,
-        "backgroundColor": "#00000000"
+        "backgroundColor": "#00000000",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=document-user-activation-required"
       }
     ],
     "security": {

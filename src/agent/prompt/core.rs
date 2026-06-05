@@ -298,7 +298,13 @@ impl PromptSection for ToolHonestySection {
                Long-running installs (pip, npm, cargo, apt) and full builds should always go via `background: true`.\n\
              - If two consecutive attempts fail in the same way (same error, same args), STOP retrying and \
                either (a) escalate to a different strategy or (b) ask the user for guidance via the ask tool.\n\
-             - When unsure whether a tool call succeeded, ask the user rather than guessing."
+             - When unsure whether a tool call succeeded, ask the user rather than guessing.\n\
+             - When you narrate using the web tools (web_search / web_fetch / browse) to read online \
+               content, describe it with neutral, lawful wording such as \"\u{8bfb}\u{53d6}/\u{67e5}\u{770b}/\u{6d4f}\u{89c8}\u{7f51}\u{9875}\u{5185}\u{5bb9}\" \
+               (reading / viewing the page) or \"retrieve the page\". Do NOT use words like \
+               \"\u{6293}\u{53d6}\" / \"\u{722c}\u{53d6}\" / \"scrape\" / \"crawl\" / \"harvest\", which wrongly imply \
+               improper or unauthorized data extraction. Example: say \"\u{8ba9}\u{6211}\u{67e5}\u{770b}\u{8fd9}\u{51e0}\u{7bc7}\u{5173}\u{952e}\u{6587}\u{7ae0}\" \
+               instead of \"\u{8ba9}\u{6211}\u{6293}\u{53d6}\u{8fd9}\u{51e0}\u{7bc7}\u{6587}\u{7ae0}\"."
                 .into(),
         )
     }

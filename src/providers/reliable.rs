@@ -8,7 +8,6 @@ use super::traits::{
 };
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -39,49 +38,6 @@ fn current_stream_cancel_token() -> Option<CancellationToken> {
         .try_with(|cell| cell.clone())
         .ok()
         .flatten()
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderFallbackInfo {
-
-    pub requested_provider: String,
-
-    pub requested_model: String,
-
-    pub actual_provider: String,
-
-    pub actual_model: String,
-}
-
-tokio::task_local! {
-    static PROVIDER_FALLBACK: RefCell<Option<ProviderFallbackInfo>>;
-}
-
-pub fn take_last_provider_fallback() -> Option<ProviderFallbackInfo> {
-    PROVIDER_FALLBACK
-        .try_with(|cell| cell.borrow_mut().take())
-        .ok()
-        .flatten()
-}
-
-pub async fn scope_provider_fallback<F: std::future::Future>(future: F) -> F::Output {
-    PROVIDER_FALLBACK.scope(RefCell::new(None), future).await
-}
-
-fn record_provider_fallback(
-    requested_provider: &str,
-    requested_model: &str,
-    actual_provider: &str,
-    actual_model: &str,
-) {
-    let _ = PROVIDER_FALLBACK.try_with(|cell| {
-        *cell.borrow_mut() = Some(ProviderFallbackInfo {
-            requested_provider: requested_provider.to_string(),
-            requested_model: requested_model.to_string(),
-            actual_provider: actual_provider.to_string(),
-            actual_model: actual_model.to_string(),
-        });
-    });
 }
 
 pub fn is_non_retryable(err: &anyhow::Error) -> bool {
@@ -909,17 +865,6 @@ impl Provider for ReliableProvider {
                                     original_model = model,
                                     "Provider recovered (failover/retry)"
                                 );
-                                let primary = self
-                                    .providers
-                                    .first()
-                                    .map(|(n, _)| n.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    current_model,
-                                );
                             }
                             return Ok(resp);
                         }
@@ -1035,17 +980,6 @@ impl Provider for ReliableProvider {
                                     original_model = model,
                                     context_truncated,
                                     "Provider recovered (failover/retry)"
-                                );
-                                let primary = self
-                                    .providers
-                                    .first()
-                                    .map(|(n, _)| n.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    current_model,
                                 );
                             }
                             return Ok(resp);
@@ -1186,17 +1120,6 @@ impl Provider for ReliableProvider {
                                     context_truncated,
                                     "Provider recovered (failover/retry)"
                                 );
-                                let primary = self
-                                    .providers
-                                    .first()
-                                    .map(|(n, _)| n.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    current_model,
-                                );
                             }
                             return Ok(resp);
                         }
@@ -1323,17 +1246,6 @@ impl Provider for ReliableProvider {
                                     context_truncated,
                                     "Provider recovered (failover/retry)"
                                 );
-                                let primary = self
-                                    .providers
-                                    .first()
-                                    .map(|(n, _)| n.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    current_model,
-                                );
                             }
                             return Ok(resp);
                         }
@@ -1439,24 +1351,36 @@ impl Provider for ReliableProvider {
     ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
         let needs_tool_events = request.tools.is_some_and(|tools| !tools.is_empty());
 
-        for (provider_name, provider) in &self.providers {
-            if !provider.supports_streaming() || !options.enabled {
-                continue;
+        let mut candidates: Vec<(String, Arc<dyn Provider>)> = Vec::new();
+        if options.enabled {
+            for (provider_name, provider) in &self.providers {
+                if !provider.supports_streaming() {
+                    continue;
+                }
+                if needs_tool_events && !provider.supports_streaming_tool_events() {
+                    continue;
+                }
+                candidates.push((provider_name.clone(), Arc::clone(provider)));
             }
+        }
 
-            if needs_tool_events && !provider.supports_streaming_tool_events() {
-                continue;
+        if !candidates.is_empty() {
+            let model_list: Vec<String> = {
+                let chain: Vec<String> =
+                    self.model_chain(model).iter().map(|m| m.to_string()).collect();
+                if chain.is_empty() {
+                    vec![model.to_string()]
+                } else {
+                    chain
+                }
+            };
+
+            let mut combos: Vec<(String, Arc<dyn Provider>, String)> = Vec::new();
+            for current_model in &model_list {
+                for (label, prov) in &candidates {
+                    combos.push((label.clone(), Arc::clone(prov), current_model.clone()));
+                }
             }
-
-            let provider_arc = Arc::clone(provider);
-            let provider_label = provider_name.clone();
-
-            let current_model = self
-                .model_chain(model)
-                .first()
-                .copied()
-                .unwrap_or(model)
-                .to_string();
 
             let messages_owned: Arc<Vec<ChatMessage>> = Arc::new(request.messages.to_vec());
             let tools_owned: Option<Arc<Vec<crate::tools::ToolSpec>>> =
@@ -1479,243 +1403,271 @@ impl Provider for ReliableProvider {
             let _bg = crate::runtime::spawn_supervised(
                 "providers.reliable.stream_chat_retry",
                 async move {
-                    let mut engine_overload_attempts: u32 = 0;
-                    let mut rate_limit_attempts: u32 = 0;
-                    let mut transient_attempts: u32 = 0;
-                    let mut transport_attempts: u32 = 0;
-                    let mut total_attempts: u32 = 0;
+                    let total_combos = combos.len();
+                    let mut last_failure: Option<String> = None;
 
-                    loop {
-                        if let Some(token) = cancel_token.as_ref() {
-                            if token.is_cancelled() {
-                                let _ = tx
-                                    .send(Err(StreamError::Provider(
-                                        "stream cancelled by user".to_string(),
-                                    )))
-                                    .await;
+                    for (combo_idx, (provider_label, provider_arc, current_model)) in
+                        combos.into_iter().enumerate()
+                    {
+                        let is_last_combo = combo_idx + 1 >= total_combos;
+
+                        let mut engine_overload_attempts: u32 = 0;
+                        let mut rate_limit_attempts: u32 = 0;
+                        let mut transient_attempts: u32 = 0;
+                        let mut transport_attempts: u32 = 0;
+                        let mut total_attempts: u32 = 0;
+
+                        let (summary, switch_class): (String, RetryClass) = 'retry: loop {
+                            if let Some(token) = cancel_token.as_ref() {
+                                if token.is_cancelled() {
+                                    let _ = tx
+                                        .send(Err(StreamError::Provider(
+                                            "stream cancelled by user".to_string(),
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
+
+                            let req = ChatRequest {
+                                messages: messages_owned.as_slice(),
+                                tools: tools_owned.as_deref().map(|v| v.as_slice()),
+                            };
+                            let mut stream = provider_arc.stream_chat(
+                                req,
+                                &current_model,
+                                temperature,
+                                options,
+                            );
+
+                            let mut made_progress = false;
+                            let mut last_err: Option<StreamError> = None;
+                            let mut stream_finished_cleanly = false;
+
+                            loop {
+                                let next = if let Some(token) = cancel_token.as_ref() {
+                                    tokio::select! {
+                                        biased;
+                                        () = token.cancelled() => {
+                                            let _ = tx
+                                                .send(Err(StreamError::Provider(
+                                                    "stream cancelled by user".to_string(),
+                                                )))
+                                                .await;
+                                            return;
+                                        }
+                                        item = stream.next() => item,
+                                    }
+                                } else {
+                                    stream.next().await
+                                };
+
+                                let Some(event) = next else {
+                                    stream_finished_cleanly = true;
+                                    break;
+                                };
+
+                                match event {
+                                    Ok(ev) => {
+                                        if matches!(
+                                            ev,
+                                            StreamEvent::TextDelta(_)
+                                                | StreamEvent::ToolCall(_)
+                                                | StreamEvent::PreExecutedToolCall { .. }
+                                                | StreamEvent::PreExecutedToolResult { .. }
+                                                | StreamEvent::Usage(_)
+                                        ) {
+                                            made_progress = true;
+                                        }
+                                        let is_final = matches!(ev, StreamEvent::Final);
+                                        if tx.send(Ok(ev)).await.is_err() {
+                                            return;
+                                        }
+                                        if is_final {
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        last_err = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let Some(err) = last_err else {
+                                if stream_finished_cleanly && !made_progress {
+                                    break 'retry (
+                                        "Upstream stream produced no events".to_string(),
+                                        RetryClass::Transient,
+                                    );
+                                }
+                                let _ = tx.send(Ok(StreamEvent::Final)).await;
+                                return;
+                            };
+
+                            let err_string = err.to_string();
+                            let anyhow_err = anyhow::anyhow!("{}", err_string);
+                            let class = FailureClass::from_error(&anyhow_err);
+
+                            let (class_attempts, cap_for_class, retry_class) = match class {
+                                FailureClass::EngineOverloaded => {
+                                    engine_overload_attempts += 1;
+                                    (
+                                        engine_overload_attempts,
+                                        engine_cap,
+                                        RetryClass::EngineOverloaded,
+                                    )
+                                }
+                                FailureClass::AccountRateLimited => {
+                                    rate_limit_attempts += 1;
+                                    (
+                                        rate_limit_attempts,
+                                        account_cap,
+                                        RetryClass::AccountRateLimited,
+                                    )
+                                }
+                                FailureClass::Transient => {
+                                    transient_attempts += 1;
+                                    if is_transport_level_error(&anyhow_err) {
+                                        transport_attempts += 1;
+                                        if transport_attempts >= TRANSPORT_RETRY_CAP {
+                                            let summary = format!(
+                                                "Transport-level streaming failure on {provider_label}/{current_model} \
+                                                 reached cap={TRANSPORT_RETRY_CAP} (e.g. connect/send/decoding errors). \
+                                                 Stopping retries against this provider/model so an outer fallback can \
+                                                 pick a different one. Last error: {err_string}"
+                                            );
+                                            break 'retry (summary, RetryClass::Transient);
+                                        }
+                                    }
+                                    (transient_attempts, transient_cap, RetryClass::Transient)
+                                }
+                                FailureClass::NonRetryable => {
+                                    break 'retry (err_string, RetryClass::Transient);
+                                }
+                            };
+
+                            if class_attempts > cap_for_class {
+                                let summary = match class {
+                                    FailureClass::EngineOverloaded => format!(
+                                        "Upstream engine overloaded (HTTP 429 engine_overloaded_error or equivalent) after {class_attempts} streaming attempts; cap={cap_for_class}. \
+                                         This is a temporary server-side issue, not a client-side rate limit. Try again in 1-2 minutes, or switch to a fallback model \
+                                         via reliability.fallback_providers / model_fallbacks. Last error: {err_string}"
+                                    ),
+                                    FailureClass::AccountRateLimited => format!(
+                                        "Account-level rate limit (HTTP 429 rate_limit_exceeded / TPM / RPM) after {class_attempts} streaming attempts; cap={cap_for_class}. \
+                                         Check your account quota or wait for the window to reset. Last error: {err_string}"
+                                    ),
+                                    FailureClass::Transient => format!(
+                                        "Transient streaming error persisted after {class_attempts} attempts; cap={cap_for_class}. Last error: {err_string}"
+                                    ),
+                                    FailureClass::NonRetryable => err_string.clone(),
+                                };
+                                break 'retry (summary, retry_class);
+                            }
+
+                            let wait_ms_raw = if let Some(ms) = parse_retry_after_ms(&anyhow_err) {
+                                ms.min(60_000)
+                            } else if let Some(ms) =
+                                class_backoff_ms(total_attempts, class)
+                            {
+                                ms
+                            } else {
+                                crate::providers::core::retry::exp_backoff(
+                                    total_attempts,
+                                    base_backoff,
+                                    30_000,
+                                    0.25,
+                                )
+                                .as_millis() as u64
+                            };
+                            let wait_ms = if matches!(class, FailureClass::Transient) {
+                                wait_ms_raw.min(STREAM_BACKOFF_CEILING_MS)
+                            } else {
+                                wait_ms_raw
+                            };
+
+                            let last_error_summary = compact_error_detail(&anyhow_err);
+
+                            tracing::warn!(
+                                target: "providers.reliable.retry",
+                                session_id = %session_label,
+                                provider = %provider_label,
+                                model = %current_model,
+                                attempt = class_attempts,
+                                cap = cap_for_class,
+                                wait_ms,
+                                failure_class = ?class,
+                                error = %last_error_summary,
+                                "stream provider returned retryable failure; emitting RetryNotice and scheduling re-attempt"
+                            );
+
+                            let notice = RetryNotice {
+                                attempt: class_attempts,
+                                max_attempts: cap_for_class,
+                                wait_ms,
+                                failure_class: retry_class,
+                                provider: provider_label.clone(),
+                                model: current_model.clone(),
+                                last_error_summary,
+                            };
+
+                            if tx.send(Ok(StreamEvent::Retry(notice))).await.is_err() {
                                 return;
                             }
-                        }
 
-                        let req = ChatRequest {
-                            messages: messages_owned.as_slice(),
-                            tools: tools_owned.as_deref().map(|v| v.as_slice()),
-                        };
-                        let mut stream = provider_arc.stream_chat(
-                            req,
-                            &current_model,
-                            temperature,
-                            options,
-                        );
-
-                        let mut made_progress = false;
-                        let mut last_err: Option<StreamError> = None;
-                        let mut stream_finished_cleanly = false;
-
-                        loop {
-                            let next = if let Some(token) = cancel_token.as_ref() {
+                            let sleep_dur = Duration::from_millis(wait_ms);
+                            if let Some(token) = cancel_token.as_ref() {
                                 tokio::select! {
                                     biased;
                                     () = token.cancelled() => {
                                         let _ = tx
                                             .send(Err(StreamError::Provider(
-                                                "stream cancelled by user".to_string(),
+                                                "stream cancelled by user during retry wait".to_string(),
                                             )))
                                             .await;
                                         return;
                                     }
-                                    item = stream.next() => item,
+                                    () = tokio::time::sleep(sleep_dur) => {}
                                 }
                             } else {
-                                stream.next().await
-                            };
-
-                            let Some(event) = next else {
-                                stream_finished_cleanly = true;
-                                break;
-                            };
-
-                            match event {
-                                Ok(ev) => {
-                                    if matches!(
-                                        ev,
-                                        StreamEvent::TextDelta(_)
-                                            | StreamEvent::ToolCall(_)
-                                            | StreamEvent::PreExecutedToolCall { .. }
-                                            | StreamEvent::PreExecutedToolResult { .. }
-                                            | StreamEvent::Usage(_)
-                                    ) {
-                                        made_progress = true;
-                                    }
-                                    let is_final = matches!(ev, StreamEvent::Final);
-                                    if tx.send(Ok(ev)).await.is_err() {
-                                        return;
-                                    }
-                                    if is_final {
-                                        return;
-                                    }
-                                }
-                                Err(e) => {
-                                    last_err = Some(e);
-                                    break;
-                                }
+                                tokio::time::sleep(sleep_dur).await;
                             }
-                        }
 
-                        let Some(err) = last_err else {
-                            if stream_finished_cleanly && !made_progress {
-                                let _ = tx
-                                    .send(Err(StreamError::Provider(
-                                        "Upstream stream produced no events".to_string(),
-                                    )))
-                                    .await;
-                            } else {
-                                let _ = tx.send(Ok(StreamEvent::Final)).await;
-                            }
-                            return;
+                            total_attempts = total_attempts.saturating_add(1);
                         };
 
-                        if made_progress {
-                            let _ = tx.send(Err(err)).await;
-                            return;
-                        }
-
-                        let err_string = err.to_string();
-                        let anyhow_err = anyhow::anyhow!("{}", err_string);
-                        let class = FailureClass::from_error(&anyhow_err);
-
-                        let (class_attempts, cap_for_class, retry_class) = match class {
-                            FailureClass::EngineOverloaded => {
-                                engine_overload_attempts += 1;
-                                (
-                                    engine_overload_attempts,
-                                    engine_cap,
-                                    RetryClass::EngineOverloaded,
-                                )
-                            }
-                            FailureClass::AccountRateLimited => {
-                                rate_limit_attempts += 1;
-                                (
-                                    rate_limit_attempts,
-                                    account_cap,
-                                    RetryClass::AccountRateLimited,
-                                )
-                            }
-                            FailureClass::Transient => {
-                                transient_attempts += 1;
-                                if is_transport_level_error(&anyhow_err) {
-                                    transport_attempts += 1;
-                                    if transport_attempts >= TRANSPORT_RETRY_CAP {
-                                        let summary = format!(
-                                            "Transport-level streaming failure on {provider_label}/{current_model} \
-                                             reached cap={TRANSPORT_RETRY_CAP} (e.g. connect/send/decoding errors). \
-                                             Stopping retries against this provider/model so an outer fallback can \
-                                             pick a different one. Last error: {err_string}"
-                                        );
-                                        let _ = tx
-                                            .send(Err(StreamError::Provider(summary)))
-                                            .await;
-                                        return;
-                                    }
-                                }
-                                (transient_attempts, transient_cap, RetryClass::Transient)
-                            }
-                            FailureClass::NonRetryable => {
-                                let _ = tx.send(Err(err)).await;
-                                return;
-                            }
-                        };
-
-                        if class_attempts > cap_for_class {
-                            let summary = match class {
-                                FailureClass::EngineOverloaded => format!(
-                                    "Upstream engine overloaded (HTTP 429 engine_overloaded_error or equivalent) after {class_attempts} streaming attempts; cap={cap_for_class}. \
-                                     This is a temporary server-side issue, not a client-side rate limit. Try again in 1-2 minutes, or switch to a fallback model \
-                                     via reliability.fallback_providers / model_fallbacks. Last error: {err_string}"
-                                ),
-                                FailureClass::AccountRateLimited => format!(
-                                    "Account-level rate limit (HTTP 429 rate_limit_exceeded / TPM / RPM) after {class_attempts} streaming attempts; cap={cap_for_class}. \
-                                     Check your account quota or wait for the window to reset. Last error: {err_string}"
-                                ),
-                                FailureClass::Transient => format!(
-                                    "Transient streaming error persisted after {class_attempts} attempts; cap={cap_for_class}. Last error: {err_string}"
-                                ),
-                                FailureClass::NonRetryable => err_string.clone(),
-                            };
+                        last_failure = Some(summary.clone());
+                        if is_last_combo {
                             let _ = tx.send(Err(StreamError::Provider(summary))).await;
                             return;
                         }
-
-                        let wait_ms_raw = if let Some(ms) = parse_retry_after_ms(&anyhow_err) {
-                            ms.min(60_000)
-                        } else if let Some(ms) =
-                            class_backoff_ms(total_attempts, class)
-                        {
-                            ms
-                        } else {
-                            crate::providers::core::retry::exp_backoff(
-                                total_attempts,
-                                base_backoff,
-                                30_000,
-                                0.25,
-                            )
-                            .as_millis() as u64
-                        };
-                        let wait_ms = if matches!(class, FailureClass::Transient) {
-                            wait_ms_raw.min(STREAM_BACKOFF_CEILING_MS)
-                        } else {
-                            wait_ms_raw
-                        };
-
-                        let last_error_summary = compact_error_detail(&anyhow_err);
-
                         tracing::warn!(
                             target: "providers.reliable.retry",
                             session_id = %session_label,
                             provider = %provider_label,
                             model = %current_model,
-                            attempt = class_attempts,
-                            cap = cap_for_class,
-                            wait_ms,
-                            failure_class = ?class,
-                            error = %last_error_summary,
-                            "stream provider returned retryable failure; emitting RetryNotice and scheduling re-attempt"
+                            "streaming provider/model exhausted; failing over to next streaming candidate"
                         );
-
                         let notice = RetryNotice {
-                            attempt: class_attempts,
-                            max_attempts: cap_for_class,
-                            wait_ms,
-                            failure_class: retry_class,
+                            attempt: 1,
+                            max_attempts: 1,
+                            wait_ms: 0,
+                            failure_class: switch_class,
                             provider: provider_label.clone(),
                             model: current_model.clone(),
-                            last_error_summary,
+                            last_error_summary: summary,
                         };
-
                         if tx.send(Ok(StreamEvent::Retry(notice))).await.is_err() {
                             return;
                         }
-
-                        let sleep_dur = Duration::from_millis(wait_ms);
-                        if let Some(token) = cancel_token.as_ref() {
-                            tokio::select! {
-                                biased;
-                                () = token.cancelled() => {
-                                    let _ = tx
-                                        .send(Err(StreamError::Provider(
-                                            "stream cancelled by user during retry wait".to_string(),
-                                        )))
-                                        .await;
-                                    return;
-                                }
-                                () = tokio::time::sleep(sleep_dur) => {}
-                            }
-                        } else {
-                            tokio::time::sleep(sleep_dur).await;
-                        }
-
-                        total_attempts = total_attempts.saturating_add(1);
                     }
+
+                    let _ = tx
+                        .send(Err(StreamError::Provider(last_failure.unwrap_or_else(
+                            || "all streaming providers/models failed".to_string(),
+                        ))))
+                        .await;
                 },
             );
 

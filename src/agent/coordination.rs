@@ -515,7 +515,9 @@ impl LockManager {
                 hit
             };
 
-            let blocker = conflict_entry.expect("conflict was Some above");
+            let Some(blocker) = conflict_entry else {
+                continue;
+            };
 
             if opts.deadlock_detect {
 
@@ -623,7 +625,9 @@ impl LockManager {
                 hit
             };
 
-            let blocker = conflict_entry.expect("conflict was Some above");
+            let Some(blocker) = conflict_entry else {
+                continue;
+            };
 
             if opts.deadlock_detect {
                 self.add_wait_edge(agent_id, &blocker.holder);

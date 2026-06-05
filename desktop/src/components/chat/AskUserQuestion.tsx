@@ -100,8 +100,6 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
   const [hasSubmitted, setHasSubmitted] = useState(false)
   const composingRef = useRef(false)
 
-  if (questions.length === 0) return null
-
   const resultAnswers = useMemo(() => {
     if (!result || typeof result !== 'object') return {}
     const answers = (result as { answers?: unknown }).answers
@@ -121,6 +119,54 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
     return freeText.trim() || Object.values(selections).join(', ')
   }, [freeText, questions, resultAnswers, selections])
   const submitted = Object.keys(resultAnswers).length > 0 || hasSubmitted
+
+  if (questions.length === 0) {
+    const rawInput =
+      typeof input === 'string' ? input : JSON.stringify(input, null, 2)
+    return (
+      <div className="mb-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-warning)]/40 bg-[var(--color-surface-container-low)]">
+        <div className="flex items-center gap-2 px-4 py-3">
+          <span className="material-symbols-outlined text-[18px] text-[var(--color-warning)]">
+            help
+          </span>
+          <span className="text-sm font-semibold text-[var(--color-text-primary)]">
+            {t('question.unparsableTitle')}
+          </span>
+        </div>
+        <div className="border-t border-[var(--color-outline-variant)]/20 px-4 py-3">
+          <pre className="max-h-[220px] overflow-auto rounded-[var(--radius-md)] bg-[var(--color-terminal-bg)] px-3 py-2.5 font-[var(--font-mono)] text-[11px] leading-[1.3] text-[var(--color-terminal-fg)] whitespace-pre-wrap break-words">
+            {rawInput}
+          </pre>
+        </div>
+        {pendingRequest && (
+          <div className="flex items-center gap-2 border-t border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)] px-4 py-3">
+            {isCrossSession ? (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => ownerSessionId && focusSession(ownerSessionId)}
+                icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
+              >
+                {t('permission.switchToSession')}
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() =>
+                  ownerSessionId &&
+                  respondToPermission(ownerSessionId, pendingRequest.requestId, true)
+                }
+                icon={<span className="material-symbols-outlined text-[14px]">check</span>}
+              >
+                {t('plan.continue')}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   const handleSelect = (qIndex: number, label: string) => {
     if (submitted) return
@@ -159,12 +205,13 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
     }, {})
 
     setHasSubmitted(true)
-    respondToPermission(ownerSessionId, pendingRequest.requestId, true, {
+    const ok = respondToPermission(ownerSessionId, pendingRequest.requestId, true, {
       updatedInput: {
         ...inputObject,
         answers,
       },
     })
+    if (!ok) setHasSubmitted(false)
   }
 
   const allAnswered = freeText.trim().length > 0 || questions.every((_, i) => selections[i] !== undefined)
@@ -334,7 +381,7 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
               onClick={() => ownerSessionId && focusSession(ownerSessionId)}
               icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
             >
-              切换到该会话处理
+              {t('permission.switchToSession')}
             </Button>
           ) : (
             <Button

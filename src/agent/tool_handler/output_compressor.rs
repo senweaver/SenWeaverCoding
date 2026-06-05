@@ -504,7 +504,14 @@ fn is_code_tool(tool_name: &str) -> bool {
 fn is_verbose_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "shell" | "delegate" | "llm_task" | "swarm" | "coding_session_cli" | "inline_coding_cli"
+        "shell"
+            | "delegate"
+            | "llm_task"
+            | "swarm"
+            | "claude_code"
+            | "claude_code_runner"
+            | "codex_cli"
+            | "gemini_cli"
     )
 }
 

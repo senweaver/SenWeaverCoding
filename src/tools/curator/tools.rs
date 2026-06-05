@@ -19,7 +19,39 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-pub type CuratorModeFlag = Arc<RwLock<bool>>;
+pub type CuratorModeFlag = Arc<CuratorModeRegistry>;
+
+#[derive(Default)]
+pub struct CuratorModeRegistry {
+    active: RwLock<std::collections::HashSet<String>>,
+}
+
+impl CuratorModeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn session_key() -> String {
+        crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub fn set_active(&self, active: bool) {
+        let key = Self::session_key();
+        let mut guard = self.active.write();
+        if active {
+            guard.insert(key);
+        } else {
+            guard.remove(&key);
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        let key = Self::session_key();
+        self.active.read().contains(&key)
+    }
+}
 
 static SOURCE_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[S(\d+)\]").expect("source id regex"));
@@ -145,7 +177,7 @@ impl Tool for EnterCuratorModeTool {
             crate::agent::file_edit_emitter::emit_file_create(p, bytes, None).await;
         }
 
-        *self.flag.write() = true;
+        self.flag.set_active(true);
         *self.state.write() = Some(CuratorActive {
             slug: slug.clone(),
             intent: intent.clone(),
@@ -578,7 +610,13 @@ impl Tool for CuratorDeepCollectTool {
                 "fetching"
             );
             let fetch_args = json!({ "url": hit.url });
-            let fetch_result = match self.web_fetch.execute(fetch_args).await {
+            let fetch_result = match crate::agent::loop_::execute_tool_panic_safe(
+                self.web_fetch.as_ref(),
+                "web_fetch",
+                fetch_args,
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(e) => ToolResult {
                     success: false,
@@ -1205,7 +1243,7 @@ impl Tool for ExitCuratorModeTool {
             None
         };
 
-        *self.flag.write() = false;
+        self.flag.set_active(false);
         *self.plan_flag.write() = false;
 
         let payload = PendingCuratorPayload {

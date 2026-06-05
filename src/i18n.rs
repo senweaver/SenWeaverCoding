@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 #[derive(Debug, Clone)]
@@ -22,9 +24,54 @@ struct DescriptionFile {
     tools: HashMap<String, String>,
 }
 
+struct DescCacheEntry {
+    descs: ToolDescriptions,
+    cached_at: Instant,
+}
+
+const DESC_CACHE_TTL: Duration = Duration::from_secs(60);
+const DESC_CACHE_MAX_ENTRIES: usize = 32;
+
+fn desc_cache() -> &'static Mutex<HashMap<String, DescCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, DescCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl ToolDescriptions {
 
     pub fn load(locale: &str, search_dirs: &[PathBuf]) -> Self {
+        let key = {
+            let mut k = String::from(locale);
+            for dir in search_dirs {
+                k.push('\u{1f}');
+                k.push_str(&dir.display().to_string());
+            }
+            k
+        };
+        if let Ok(guard) = desc_cache().lock() {
+            if let Some(entry) = guard.get(&key) {
+                if entry.cached_at.elapsed() < DESC_CACHE_TTL {
+                    return entry.descs.clone();
+                }
+            }
+        }
+        let built = Self::load_uncached(locale, search_dirs);
+        if let Ok(mut guard) = desc_cache().lock() {
+            if guard.len() >= DESC_CACHE_MAX_ENTRIES {
+                guard.clear();
+            }
+            guard.insert(
+                key,
+                DescCacheEntry {
+                    descs: built.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+        built
+    }
+
+    fn load_uncached(locale: &str, search_dirs: &[PathBuf]) -> Self {
         let mut locale_descriptions = load_locale_file(locale, search_dirs);
 
         let mut english_fallback = if locale == "en" {

@@ -76,11 +76,30 @@ impl Tool for TaskUpdateTool {
             .and_then(|v| v.as_str())
             .map(std::string::ToString::to_string);
 
+        let status_label = state.as_ref().map(|s| match s {
+            TaskState::Pending => "pending",
+            TaskState::Running => "running",
+            TaskState::Completed => "completed",
+            TaskState::Failed => "failed",
+            TaskState::Stopped => "stopped",
+        });
+
         let ok = self
             .manager
             .write()
-            .update_task(task_id, state, output, error);
+            .update_task(task_id, state, output.clone(), error.clone());
         if ok {
+            if let Some(status_label) = status_label {
+                if let Some(ctx) = crate::session::current_session_context() {
+                    let progress = output.as_deref().or(error.as_deref());
+                    crate::gateway::emit_session_task_update(
+                        &ctx.session_id,
+                        task_id,
+                        status_label,
+                        progress,
+                    );
+                }
+            }
             Ok(ToolResult {
                 success: true,
                 output: json!({ "updated": true, "task_id": task_id }).to_string(),

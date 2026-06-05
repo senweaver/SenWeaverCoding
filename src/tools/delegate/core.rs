@@ -593,6 +593,10 @@ impl DelegateTool {
         let started_at = chrono::Utc::now().to_rfc3339();
         let agent_name_owned = agent_name.to_string();
 
+        let notify_session_id = crate::session::resource_lock::current_session_context()
+            .map(|c| c.session_id);
+        let notify_tool_use_id = crate::agent::loop_::current_tool_call_id();
+
         let initial_result = BackgroundDelegateResult {
             task_id: task_id.clone(),
             agent: agent_name_owned.clone(),
@@ -690,6 +694,37 @@ impl DelegateTool {
                 let result_path = results_dir.join(format!("{}.json", task_id_clone));
                 if let Ok(bytes) = serde_json::to_vec_pretty(&final_result) {
                     let _ = tokio::fs::write(&result_path, &bytes).await;
+                }
+
+                if let (Some(tool_use_id), Some(session_id)) =
+                    (notify_tool_use_id, notify_session_id)
+                {
+                    let (status_str, summary) = match final_result.status {
+                        BackgroundTaskStatus::Completed => (
+                            "completed",
+                            final_result.output.clone().unwrap_or_default(),
+                        ),
+                        BackgroundTaskStatus::Cancelled => (
+                            "stopped",
+                            final_result.error.clone().unwrap_or_default(),
+                        ),
+                        _ => (
+                            "failed",
+                            final_result.error.clone().unwrap_or_default(),
+                        ),
+                    };
+                    let summary_trimmed =
+                        crate::util::truncate_with_ellipsis(summary.trim(), 600);
+                    crate::gateway::emit_session_task_notification(
+                        &session_id,
+                        serde_json::json!({
+                            "tool_use_id": tool_use_id,
+                            "task_id": task_id_clone,
+                            "status": status_str,
+                            "summary": summary_trimmed,
+                            "output_file": result_path.to_string_lossy(),
+                        }),
+                    );
                 }
             },
         );

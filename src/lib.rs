@@ -127,7 +127,6 @@ pub mod memdir;
 pub mod memory;
 pub mod migration;
 pub mod multimodal;
-pub mod nodes;
 pub mod observability;
 pub mod onboard;
 pub mod peripherals;
@@ -156,7 +155,6 @@ pub mod event_bus;
 pub mod workflows;
 
 pub mod bootstrap;
-pub mod bridge;
 pub mod buddy;
 pub mod constants;
 pub mod context;
@@ -172,7 +170,6 @@ pub mod proxy;
 pub mod query;
 pub mod remote;
 pub mod schemas;
-pub mod tasks;
 pub mod workers;
 
 pub mod vim_mode;

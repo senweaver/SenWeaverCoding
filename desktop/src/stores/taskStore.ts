@@ -8,7 +8,6 @@ import type { CronTask, CreateTaskInput, TaskRun } from '../types/task'
 
 type TaskStore = {
   tasks: CronTask[]
-  recentRuns: TaskRun[]
   isLoading: boolean
   error: string | null
 
@@ -17,13 +16,11 @@ type TaskStore = {
   updateTask: (id: string, updates: Partial<CronTask>) => Promise<void>
   deleteTask: (id: string) => Promise<void>
   runTask: (taskId: string) => Promise<void>
-  fetchRecentRuns: () => Promise<void>
   fetchTaskRuns: (taskId: string) => Promise<TaskRun[]>
 }
 
 export const useTaskStore = create<TaskStore>((set) => ({
   tasks: [],
-  recentRuns: [],
   isLoading: false,
   error: null,
 
@@ -54,15 +51,6 @@ export const useTaskStore = create<TaskStore>((set) => ({
 
   runTask: async (taskId) => {
     await tasksApi.runTask(taskId)
-  },
-
-  fetchRecentRuns: async () => {
-    try {
-      const { runs } = await tasksApi.getRecentRuns()
-      set({ recentRuns: runs })
-    } catch {
-
-    }
   },
 
   fetchTaskRuns: async (taskId) => {

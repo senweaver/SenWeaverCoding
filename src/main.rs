@@ -702,6 +702,41 @@ Examples:
     },
 
     #[command(long_about = "\
+Run a benchmark evaluation suite by driving the agent on each problem.
+
+Available suites: humaneval, mbpp, swebench. The agent runs once per problem \
+and the suite judges each output; a JSON report with pass@1 is printed.
+
+Exit codes:
+  0  all problems ran without executor errors
+  1  one or more problems errored (e.g. timeout / agent failure)
+
+Examples:
+  sen evals --suite humaneval
+  sen evals --suite mbpp --concurrency 2 --model <model-id>
+  sen evals --suite swebench --output ./report.json")]
+    Evals {
+
+        #[arg(long, default_value = "humaneval")]
+        suite: String,
+
+        #[arg(long, default_value = "1")]
+        concurrency: usize,
+
+        #[arg(long)]
+        model: Option<String>,
+
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        #[arg(long, default_value = "600")]
+        timeout: u64,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    #[command(long_about = "\
 Compare two files and display a unified diff.
 
 Shows the differences between two files in unified diff format, \
@@ -1038,6 +1073,15 @@ enum DoctorCommands {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+
+    Bench {
+
+        #[arg(long, default_value = "target/criterion")]
+        path: PathBuf,
+
+        #[arg(long, default_value_t = 0.05)]
+        threshold: f64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1079,9 +1123,18 @@ enum TokensFiltersCommands {
     List,
 }
 
-#[tokio::main]
+const AGENT_WORKER_STACK_SIZE: usize = 32 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(AGENT_WORKER_STACK_SIZE)
+        .build()?;
+    runtime.block_on(async_main())
+}
+
 #[allow(clippy::too_many_lines)]
-async fn main() -> Result<()> {
+async fn async_main() -> Result<()> {
     crate::runtime::task_manager::ensure_process_start_recorded();
 
     if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
@@ -1929,13 +1982,21 @@ async fn main() -> Result<()> {
                 event,
                 contains,
                 limit,
-            }) => doctor::run_traces(
+            }            ) => doctor::run_traces(
                 &config,
                 id.as_deref(),
                 event.as_deref(),
                 contains.as_deref(),
                 limit,
             ),
+            Some(DoctorCommands::Bench { path, threshold }) => {
+                let report = senweavercoding::bench_diff::load_estimates(&path)?;
+                println!(
+                    "{}",
+                    senweavercoding::bench_diff::format_regression_table(&report, threshold)
+                );
+                Ok(())
+            }
             None => doctor::run(&config),
         },
 
@@ -2339,6 +2400,54 @@ async fn main() -> Result<()> {
             }
 
             std::process::exit(exit_code);
+        }
+
+        Commands::Evals {
+            suite,
+            concurrency,
+            model,
+            provider,
+            timeout,
+            output,
+        } => {
+            let temperature = config.default_temperature;
+            let executor = senweavercoding::evals::AgentEvalExecutor {
+                config: config.clone(),
+                provider,
+                model,
+                temperature,
+                timeout_secs: timeout,
+            };
+
+            let report =
+                senweavercoding::evals::run_agent_suite(&suite, executor, concurrency).await?;
+            let report_json = serde_json::to_string_pretty(&report)?;
+
+            if let Some(out) = output {
+                if let Some(parent) = out.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(&out, &report_json)?;
+                eprintln!("Eval report written to {}", out.display());
+            } else {
+                println!("{report_json}");
+            }
+
+            eprintln!(
+                "[evals] suite={} total={} passed={} failed={} errored={} pass@1={:.3} \
+                 avg_latency_ms={:.1}",
+                report.suite,
+                report.total,
+                report.passed,
+                report.failed,
+                report.errored,
+                report.pass_at_1,
+                report.avg_latency_ms
+            );
+
+            std::process::exit(if report.errored > 0 { 1 } else { 0 });
         }
 
         Commands::Diff { old, new, context } => {

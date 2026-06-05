@@ -185,6 +185,7 @@ mod dock {
 
 #[derive(Clone)]
 pub struct ComputerUseConfig {
+    pub enabled: bool,
     pub endpoint: String,
     pub api_key: Option<String>,
     pub timeout_ms: u64,
@@ -197,6 +198,7 @@ pub struct ComputerUseConfig {
 impl std::fmt::Debug for ComputerUseConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComputerUseConfig")
+            .field("enabled", &self.enabled)
             .field("endpoint", &self.endpoint)
             .field("timeout_ms", &self.timeout_ms)
             .field("allow_remote_endpoint", &self.allow_remote_endpoint)
@@ -210,6 +212,7 @@ impl std::fmt::Debug for ComputerUseConfig {
 impl Default for ComputerUseConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             endpoint: "http://127.0.0.1:8787/v1/actions".into(),
             api_key: None,
             timeout_ms: 15_000,
@@ -628,6 +631,11 @@ impl BrowserTool {
                 Ok(ResolvedBackend::RustNative)
             }
             BrowserBackendKind::ComputerUse => {
+                if !self.computer_use.enabled {
+                    anyhow::bail!(
+                        "browser.backend='computer_use' but Computer Use is disabled. Enable it in Settings → Computer Use"
+                    );
+                }
                 if !self.computer_use_available()? {
                     anyhow::bail!(
                         "browser.backend='computer_use' but sidecar endpoint is unreachable. Check browser.computer_use.endpoint and sidecar status"
@@ -646,10 +654,14 @@ impl BrowserTool {
                     return Ok(ResolvedBackend::AgentBrowser);
                 }
 
-                let computer_use_err = match self.computer_use_available() {
-                    Ok(true) => return Ok(ResolvedBackend::ComputerUse),
-                    Ok(false) => None,
-                    Err(err) => Some(err.to_string()),
+                let computer_use_err = if !self.computer_use.enabled {
+                    None
+                } else {
+                    match self.computer_use_available() {
+                        Ok(true) => return Ok(ResolvedBackend::ComputerUse),
+                        Ok(false) => None,
+                        Err(err) => Some(err.to_string()),
+                    }
                 };
 
                 if Self::rust_native_compiled() {
@@ -854,8 +866,19 @@ impl BrowserTool {
 
             BrowserAction::Screenshot { path, full_page } => {
                 let mut args = vec!["screenshot"];
+                let abs_holder;
                 if let Some(ref p) = path {
-                    args.push(p);
+                    let anchor = self.security.safe_artifact_anchor();
+                    let (abs_path, _relative_path) = resolve_screenshot_path(p, &anchor)?;
+                    if let Some(parent) = abs_path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            tokio::fs::create_dir_all(parent).await.with_context(|| {
+                                format!("failed to create screenshot dir {}", parent.display())
+                            })?;
+                        }
+                    }
+                    abs_holder = abs_path.to_string_lossy().to_string();
+                    args.push(&abs_holder);
                 }
                 if full_page {
                     args.push("--full");
@@ -1424,7 +1447,8 @@ impl BrowserTool {
                 .await
                 .with_context(|| "tauri_dock screenshot failed")?;
             if let Some(target) = path.as_ref() {
-                let (abs_path, relative_path) = resolve_screenshot_path(target)?;
+                let anchor = self.security.safe_artifact_anchor();
+                let (abs_path, relative_path) = resolve_screenshot_path(target, &anchor)?;
                 if let Some(parent) = abs_path.parent() {
                     if !parent.as_os_str().is_empty() {
                         tokio::fs::create_dir_all(parent).await.with_context(|| {
@@ -1951,14 +1975,10 @@ fn sanitize_browser_output(input: &str) -> String {
     if !sanitizer.enabled() {
         return input.to_string();
     }
-    let in_debug = crate::services::try_get_services()
-        .map(|svc| {
-            matches!(
-                *svc.coding_mode.read(),
-                crate::agent::coding_mode::CodingMode::Debug
-            )
-        })
-        .unwrap_or(false);
+    let in_debug = matches!(
+        crate::agent::coding_mode::active_coding_mode(),
+        crate::agent::coding_mode::CodingMode::Debug
+    );
     if !in_debug {
         return input.to_string();
     }
@@ -2467,10 +2487,24 @@ mod native_backend {
                     });
 
                     if let Some(path_str) = path {
-                        tokio::fs::write(&path_str, &png)
-                            .await
-                            .with_context(|| format!("Failed to write screenshot to {path_str}"))?;
-                        payload["path"] = Value::String(path_str);
+                        let anchor = self.security.safe_artifact_anchor();
+                        let (abs_path, relative_path) =
+                            resolve_screenshot_path(&path_str, &anchor)?;
+                        if let Some(parent) = abs_path.parent() {
+                            if !parent.as_os_str().is_empty() {
+                                tokio::fs::create_dir_all(parent).await.with_context(|| {
+                                    format!(
+                                        "failed to create screenshot dir {}",
+                                        parent.display()
+                                    )
+                                })?;
+                            }
+                        }
+                        tokio::fs::write(&abs_path, &png).await.with_context(|| {
+                            format!("failed to write screenshot to {}", abs_path.display())
+                        })?;
+                        payload["path"] = Value::String(relative_path);
+                        payload["saved_to"] = Value::String(abs_path.to_string_lossy().to_string());
                     } else {
                         payload["png_base64"] =
                             Value::String(base64::engine::general_purpose::STANDARD.encode(&png));
@@ -3570,11 +3604,10 @@ fn host_matches_allowlist(host: &str, allowed: &[String]) -> bool {
     })
 }
 
-fn workspace_anchor() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-}
-
-fn resolve_screenshot_path(target: &str) -> anyhow::Result<(std::path::PathBuf, String)> {
+fn resolve_screenshot_path(
+    target: &str,
+    anchor: &std::path::Path,
+) -> anyhow::Result<(std::path::PathBuf, String)> {
     if let Some(rest) = target.strip_prefix("auto://") {
         let mut parts = rest.splitn(2, '/');
         let run_id = parts
@@ -3596,7 +3629,6 @@ fn resolve_screenshot_path(target: &str) -> anyhow::Result<(std::path::PathBuf, 
             .split('/')
             .map(sanitize_path_segment)
             .collect();
-        let anchor = workspace_anchor();
         let relative = std::path::PathBuf::from(".senagentos")
             .join("debug-reports")
             .join(&safe_run_id)
@@ -3607,11 +3639,20 @@ fn resolve_screenshot_path(target: &str) -> anyhow::Result<(std::path::PathBuf, 
         return Ok((absolute, rel_str));
     }
     let path = std::path::PathBuf::from(target);
-    let abs = if path.is_absolute() {
-        path.clone()
-    } else {
-        workspace_anchor().join(&path)
-    };
+    if path.is_absolute() {
+        if crate::security::is_system_path(&path) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "screenshot.png".to_string());
+            let safe_name = sanitize_path_segment(&name);
+            let abs = anchor.join(&safe_name);
+            return Ok((abs, safe_name));
+        }
+        return Ok((path.clone(), target.to_string()));
+    }
+    let abs = anchor.join(&path);
     Ok((abs, target.to_string()))
 }
 

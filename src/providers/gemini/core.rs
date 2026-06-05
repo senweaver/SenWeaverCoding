@@ -717,37 +717,48 @@ impl GeminiProvider {
     async fn get_valid_oauth_token(
         state: &Arc<tokio::sync::Mutex<OAuthTokenState>>,
     ) -> anyhow::Result<String> {
-        let mut guard = state.lock().await;
-
         let now_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .unwrap_or(i64::MAX);
 
-        let needs_refresh = guard
-            .expiry_millis
-            .map_or(true, |exp| exp <= now_millis.saturating_add(60_000));
+        let (needs_refresh, refresh_token, client_id, client_secret, current_token) = {
+            let guard = state.lock().await;
+            let needs_refresh = guard
+                .expiry_millis
+                .map_or(true, |exp| exp <= now_millis.saturating_add(60_000));
+            (
+                needs_refresh,
+                guard.refresh_token.clone(),
+                guard.client_id.clone(),
+                guard.client_secret.clone(),
+                guard.access_token.clone(),
+            )
+        };
 
-        if needs_refresh {
-            if let Some(ref refresh_token) = guard.refresh_token {
-                let refreshed = refresh_gemini_cli_token_async(
-                    refresh_token,
-                    guard.client_id.as_deref(),
-                    guard.client_secret.as_deref(),
-                )
-                .await?;
-                tracing::info!("Gemini CLI OAuth token refreshed successfully (runtime)");
-                guard.access_token = refreshed.access_token;
-                guard.expiry_millis = refreshed.expiry_millis;
-            } else {
-                anyhow::bail!(
-                    "Gemini CLI OAuth token expired and no refresh_token available  - re-run `gemini` to authenticate"
-                );
-            }
+        if !needs_refresh {
+            return Ok(current_token);
         }
 
-        Ok(guard.access_token.clone())
+        let Some(refresh_token) = refresh_token else {
+            anyhow::bail!(
+                "Gemini CLI OAuth token expired and no refresh_token available  - re-run `gemini` to authenticate"
+            );
+        };
+
+        let refreshed = refresh_gemini_cli_token_async(
+            &refresh_token,
+            client_id.as_deref(),
+            client_secret.as_deref(),
+        )
+        .await?;
+        tracing::info!("Gemini CLI OAuth token refreshed successfully (runtime)");
+
+        let mut guard = state.lock().await;
+        guard.access_token = refreshed.access_token.clone();
+        guard.expiry_millis = refreshed.expiry_millis;
+        Ok(refreshed.access_token)
     }
 
     async fn rotate_oauth_credential(

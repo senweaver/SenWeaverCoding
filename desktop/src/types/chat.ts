@@ -16,13 +16,8 @@ export type ClientMessage =
       rule?: string
       updatedInput?: Record<string, unknown>
     }
-  | {
-      type: 'computer_use_permission_response'
-      requestId: string
-      response: ComputerUsePermissionResponse
-    }
   | { type: 'set_permission_mode'; mode: PermissionMode }
-  | { type: 'set_coding_mode'; mode: CodingModeId; scope?: 'session' | 'global' }
+  | { type: 'set_coding_mode'; mode: CodingModeId; scope?: 'session' | 'global'; confirmed?: boolean }
   | ({ type: 'set_runtime_config'; persist?: boolean } & RuntimeSelection)
   | { type: 'set_pii_config'; data: { enabled: boolean; disabledKinds: string[] } }
   | { type: 'stop_generation' }
@@ -71,11 +66,6 @@ export type ServerMessage =
       input: unknown
       description?: string
     }
-  | {
-      type: 'computer_use_permission_request'
-      requestId: string
-      request: ComputerUsePermissionRequest
-    }
   | { type: 'message_complete'; usage: TokenUsage }
   | { type: 'thinking'; text: string }
   | { type: 'status'; state: ChatState; verb?: string; elapsed?: number; tokens?: number }
@@ -121,6 +111,17 @@ export type ServerMessage =
       counts?: Record<string, number>
     }
   | { type: 'pong' }
+  | { type: 'context_compressed'; tokens_before?: number; tokens_after?: number }
+  | {
+      type: 'buddy_event'
+      sessionId?: string
+      event:
+        | { type: 'mood_changed'; mood: string }
+        | { type: 'notification'; message: string }
+        | { type: 'tip'; tip: string }
+      greeting?: string
+      showNotifications?: boolean
+    }
   | { type: 'task_update'; taskId: string; status: string; progress?: string }
   | {
       type: 'todo_snapshot'
@@ -239,56 +240,6 @@ export type TeamMemberStatus = {
   role: string
   status: 'running' | 'idle' | 'completed' | 'error'
   currentTask?: string
-}
-
-export type ComputerUseGrantFlags = {
-  clipboardRead: boolean
-  clipboardWrite: boolean
-  systemKeyCombos: boolean
-}
-
-export type ComputerUseResolvedApp = {
-  bundleId: string
-  displayName: string
-  path?: string
-  iconDataUrl?: string
-}
-
-export type ComputerUseResolvedAppRequest = {
-  requestedName: string
-  resolved?: ComputerUseResolvedApp
-  isSentinel: boolean
-  alreadyGranted: boolean
-  proposedTier: 'read' | 'click' | 'full'
-}
-
-export type ComputerUsePermissionRequest = {
-  requestId: string
-  reason: string
-  apps: ComputerUseResolvedAppRequest[]
-  requestedFlags: Partial<ComputerUseGrantFlags>
-  screenshotFiltering: 'native' | 'none'
-  tccState?: {
-    accessibility: boolean
-    screenRecording: boolean
-  }
-  willHide?: Array<{ bundleId: string; displayName: string }>
-  autoUnhideEnabled?: boolean
-}
-
-export type ComputerUsePermissionResponse = {
-  granted: Array<{
-    bundleId: string
-    displayName: string
-    grantedAt: number
-    tier?: 'read' | 'click' | 'full'
-  }>
-  denied: Array<{
-    bundleId: string
-    reason: 'user_denied' | 'not_installed'
-  }>
-  flags: ComputerUseGrantFlags
-  userConsented?: boolean
 }
 
 export type AgentTaskNotification = {

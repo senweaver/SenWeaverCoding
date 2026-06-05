@@ -23,20 +23,6 @@ export function startBackgroundShellMirror(): void {
   }
 }
 
-export function stopBackgroundShellMirror(): void {
-  if (retryTimer != null) {
-    clearTimeout(retryTimer)
-    retryTimer = null
-  }
-  if (activeSource) {
-    try {
-      activeSource.close()
-    } catch {
-    }
-    activeSource = null
-  }
-}
-
 function connect() {
   const url = `${getBaseUrl()}/api/background-shell/stream`
   let source: EventSource

@@ -810,20 +810,20 @@ fn compare_spec_with_code(
 }
 
 struct AnalysisCacheEntry {
-    workspace: String,
-    key: String,
     inserted_at: Instant,
+    bytes: usize,
     files: Arc<HashMap<String, String>>,
     analysis: Arc<HashMap<String, AnalysisResult>>,
 }
 
-static ANALYSIS_CACHE: OnceLock<Mutex<Option<AnalysisCacheEntry>>> = OnceLock::new();
+static ANALYSIS_CACHE: OnceLock<Mutex<HashMap<String, AnalysisCacheEntry>>> = OnceLock::new();
 const ANALYSIS_CACHE_TTL: Duration = Duration::from_secs(30);
 const ANALYSIS_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const ANALYSIS_CACHE_MAX_ENTRIES: usize = 16;
 const ANALYSIS_CACHE_PATH_SEPARATOR: char = '\u{1f}';
 
-fn analysis_cache_slot() -> &'static Mutex<Option<AnalysisCacheEntry>> {
-    ANALYSIS_CACHE.get_or_init(|| Mutex::new(None))
+fn analysis_cache_map() -> &'static Mutex<HashMap<String, AnalysisCacheEntry>> {
+    ANALYSIS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn build_cache_key(paths: &[String]) -> String {
@@ -833,17 +833,20 @@ fn build_cache_key(paths: &[String]) -> String {
     sorted.join(&ANALYSIS_CACHE_PATH_SEPARATOR.to_string())
 }
 
+fn cache_slot_key(workspace: &str, key: &str) -> String {
+    format!("{workspace}{ANALYSIS_CACHE_PATH_SEPARATOR}{key}")
+}
+
 fn cache_lookup(
     workspace: &str,
     key: &str,
 ) -> Option<(HashMap<String, String>, HashMap<String, AnalysisResult>)> {
+    let slot_key = cache_slot_key(workspace, key);
     let snapshot: (Arc<HashMap<String, String>>, Arc<HashMap<String, AnalysisResult>>) = {
-        let slot = analysis_cache_slot().lock();
-        let entry = slot.as_ref()?;
-        if entry.workspace != workspace || entry.key != key {
-            return None;
-        }
+        let mut map = analysis_cache_map().lock();
+        let entry = map.get(&slot_key)?;
         if entry.inserted_at.elapsed() >= ANALYSIS_CACHE_TTL {
+            map.remove(&slot_key);
             return None;
         }
         (Arc::clone(&entry.files), Arc::clone(&entry.analysis))
@@ -858,25 +861,55 @@ fn cache_store(
     analysis: &HashMap<String, AnalysisResult>,
 ) {
     let total_bytes: usize = files.values().map(|v| v.len()).sum();
+    let slot_key = cache_slot_key(&workspace, &key);
+    let mut map = analysis_cache_map().lock();
     if total_bytes > ANALYSIS_CACHE_MAX_BYTES {
-        let mut slot = analysis_cache_slot().lock();
-        if let Some(existing) = slot.as_ref() {
-            if existing.workspace == workspace && existing.key == key {
-                *slot = None;
-            }
-        }
+        map.remove(&slot_key);
         return;
     }
-    let files_arc = Arc::new(files.clone());
-    let analysis_arc = Arc::new(analysis.clone());
-    let mut slot = analysis_cache_slot().lock();
-    *slot = Some(AnalysisCacheEntry {
-        workspace,
-        key,
-        inserted_at: Instant::now(),
-        files: files_arc,
-        analysis: analysis_arc,
-    });
+    map.insert(
+        slot_key,
+        AnalysisCacheEntry {
+            inserted_at: Instant::now(),
+            bytes: total_bytes,
+            files: Arc::new(files.clone()),
+            analysis: Arc::new(analysis.clone()),
+        },
+    );
+    evict_analysis_cache(&mut map);
+}
+
+fn evict_analysis_cache(map: &mut HashMap<String, AnalysisCacheEntry>) {
+    let now = Instant::now();
+    map.retain(|_, e| now.duration_since(e.inserted_at) < ANALYSIS_CACHE_TTL);
+
+    let oldest_first = |map: &HashMap<String, AnalysisCacheEntry>| -> Vec<String> {
+        let mut keys: Vec<(String, Instant)> = map
+            .iter()
+            .map(|(k, e)| (k.clone(), e.inserted_at))
+            .collect();
+        keys.sort_by_key(|(_, t)| *t);
+        keys.into_iter().map(|(k, _)| k).collect()
+    };
+
+    while map.len() > ANALYSIS_CACHE_MAX_ENTRIES {
+        let order = oldest_first(map);
+        let Some(victim) = order.first() else { break };
+        map.remove(victim);
+    }
+
+    let mut total: usize = map.values().map(|e| e.bytes).sum();
+    if total <= ANALYSIS_CACHE_MAX_BYTES {
+        return;
+    }
+    for victim in oldest_first(map) {
+        if total <= ANALYSIS_CACHE_MAX_BYTES {
+            break;
+        }
+        if let Some(removed) = map.remove(&victim) {
+            total = total.saturating_sub(removed.bytes);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -948,8 +981,21 @@ impl CodeToSpecTool {
     }
 
     fn list_files_recursive(&self, dir: &Path, extensions: &[&str]) -> Vec<String> {
-        let workspace_dir = self.workspace_snapshot();
+        self.list_files_recursive_depth(dir, extensions, 0)
+    }
+
+    fn list_files_recursive_depth(
+        &self,
+        dir: &Path,
+        extensions: &[&str],
+        depth: usize,
+    ) -> Vec<String> {
+        const MAX_SCAN_DEPTH: usize = 32;
         let mut files = Vec::new();
+        if depth >= MAX_SCAN_DEPTH {
+            return files;
+        }
+        let workspace_dir = self.workspace_snapshot();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -961,7 +1007,9 @@ impl CodeToSpecTool {
                             && name != "node_modules"
                             && name != "__pycache__"
                         {
-                            files.extend(self.list_files_recursive(&path, extensions));
+                            files.extend(
+                                self.list_files_recursive_depth(&path, extensions, depth + 1),
+                            );
                         }
                     }
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1239,8 +1287,13 @@ impl Tool for CodeToSpecTool {
                     }
                 }
 
-                std::fs::write(&full_path, &spec)
-                    .with_context(|| format!("Failed to write SPEC.md to {}", output_path))?;
+                {
+                    let write_path = full_path.clone();
+                    let write_data = spec.clone();
+                    crate::util::atomic_write_async(write_path, write_data.into_bytes())
+                        .await
+                        .with_context(|| format!("Failed to write SPEC.md to {}", output_path))?;
+                }
 
                 Ok(ToolResult {
                     success: true,
@@ -1310,24 +1363,52 @@ impl Tool for CodeToSpecTool {
 
 impl CodeToSpecTool {
     fn gather_files(&self, paths: &[String]) -> anyhow::Result<HashMap<String, String>> {
+        const MAX_FILES: usize = 20_000;
+        const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+        const MAX_TOTAL_BYTES: usize = 512 * 1024 * 1024;
+
         let mut files = HashMap::new();
+        let mut total_bytes: usize = 0;
 
         let code_extensions = [
             "rs", "ts", "tsx", "js", "jsx", "mjs", "py", "go", "java", "md", "toml", "yaml", "yml",
             "json",
         ];
 
+        let within_limits = |files: &HashMap<String, String>, total_bytes: usize| {
+            files.len() < MAX_FILES && total_bytes < MAX_TOTAL_BYTES
+        };
+        let oversized = |path: &Path| -> bool {
+            std::fs::metadata(path)
+                .map(|m| m.len() > MAX_FILE_BYTES)
+                .unwrap_or(true)
+        };
+
         for path in paths {
+            if !within_limits(&files, total_bytes) {
+                break;
+            }
             let resolved = self.resolve_path(path);
             if resolved.is_file() {
+                if oversized(&resolved) {
+                    continue;
+                }
                 if let Ok(content) = std::fs::read_to_string(&resolved) {
                     if let Ok(rel) = resolved.strip_prefix(self.workspace_snapshot()) {
+                        total_bytes = total_bytes.saturating_add(content.len());
                         files.insert(rel.to_string_lossy().to_string(), content);
                     }
                 }
             } else if resolved.is_dir() {
                 for file in self.list_files_recursive(&resolved, &code_extensions) {
+                    if !within_limits(&files, total_bytes) {
+                        break;
+                    }
+                    if oversized(&self.resolve_path(&file)) {
+                        continue;
+                    }
                     if let Ok(content) = self.read_file(&file) {
+                        total_bytes = total_bytes.saturating_add(content.len());
                         files.insert(file, content);
                     }
                 }

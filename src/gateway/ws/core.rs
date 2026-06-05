@@ -258,9 +258,19 @@ async fn handle_socket(
     if let Some(backend) = state.session_backend.clone() {
         let session_key_load = session_key.clone();
         let backend_load = backend.clone();
-        let messages = tokio::task::spawn_blocking(move || backend_load.load(&session_key_load))
+        let messages = match tokio::task::spawn_blocking(move || backend_load.load(&session_key_load))
             .await
-            .unwrap_or_default();
+        {
+            Ok(messages) => messages,
+            Err(e) => {
+                tracing::warn!(
+                    target: "ws_persist",
+                    error = %e,
+                    "session history load task panicked; starting with empty history"
+                );
+                Vec::new()
+            }
+        };
         if !messages.is_empty() {
             message_count = messages.len();
             agent.seed_history(&messages);
@@ -272,10 +282,23 @@ async fn handle_socket(
                 let session_key_set = session_key.clone();
                 let backend_set = backend.clone();
                 let name_owned = name.clone();
-                let _ = tokio::task::spawn_blocking(move || {
+                match tokio::task::spawn_blocking(move || {
                     backend_set.set_session_name(&session_key_set, &name_owned)
                 })
-                .await;
+                .await
+                {
+                    Ok(Err(e)) => tracing::warn!(
+                        target: "ws_persist",
+                        error = %e,
+                        "failed to persist session name on resume"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "ws_persist",
+                        error = %e,
+                        "session name persist task panicked on resume"
+                    ),
+                    Ok(Ok(())) => {}
+                }
                 effective_name = Some(name.clone());
             }
         }
@@ -306,6 +329,7 @@ async fn handle_socket(
         .await;
 
     let mut first_msg_fallback: Option<String> = None;
+    let mut pending_inbound: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     if let Some(first) = receiver.next().await {
         match first {
@@ -350,13 +374,35 @@ async fn handle_socket(
                     if let Some(backend) = state.session_backend.clone() {
                         let user_msg = crate::providers::ChatMessage::user(&content);
                         let session_key_owned = session_key.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
+                        match tokio::task::spawn_blocking(move || {
                             backend.append(&session_key_owned, &user_msg)
                         })
-                        .await;
+                        .await
+                        {
+                            Ok(Err(e)) => tracing::warn!(
+                                target: "ws_persist",
+                                error = %e,
+                                "failed to persist user message to session backend"
+                            ),
+                            Err(e) => tracing::warn!(
+                                target: "ws_persist",
+                                error = %e,
+                                "session backend append task panicked for user message"
+                            ),
+                            Ok(Ok(())) => {}
+                        }
                     }
-                    process_chat_message(&state, &mut agent, &mut sender, &content, &session_key)
-                        .await;
+                    agent.reset_cancel();
+                    process_chat_message(
+                        &state,
+                        &mut agent,
+                        &mut sender,
+                        &mut receiver,
+                        &mut pending_inbound,
+                        &content,
+                        &session_key,
+                    )
+                    .await;
                 }
             } else {
                 let unknown_type = parsed["type"].as_str().unwrap_or("unknown");
@@ -377,11 +423,15 @@ async fn handle_socket(
         }
     }
 
-    while let Some(msg) = receiver.next().await {
-        let msg = match msg {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => continue,
+    loop {
+        let msg = if let Some(buffered) = pending_inbound.pop_front() {
+            buffered
+        } else {
+            match receiver.next().await {
+                Some(Ok(Message::Text(text))) => text.to_string(),
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => continue,
+            }
         };
 
         let parsed: serde_json::Value = match serde_json::from_str(&msg) {
@@ -424,13 +474,36 @@ async fn handle_socket(
         if let Some(backend) = state.session_backend.clone() {
             let user_msg = crate::providers::ChatMessage::user(&content);
             let session_key_owned = session_key.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 backend.append(&session_key_owned, &user_msg)
             })
-            .await;
+            .await
+            {
+                Ok(Err(e)) => tracing::warn!(
+                    target: "ws_persist",
+                    error = %e,
+                    "failed to persist user message to session backend"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "ws_persist",
+                    error = %e,
+                    "session backend append task panicked for user message"
+                ),
+                Ok(Ok(())) => {}
+            }
         }
 
-        process_chat_message(&state, &mut agent, &mut sender, &content, &session_key).await;
+        agent.reset_cancel();
+        process_chat_message(
+            &state,
+            &mut agent,
+            &mut sender,
+            &mut receiver,
+            &mut pending_inbound,
+            &content,
+            &session_key,
+        )
+        .await;
     }
 }
 
@@ -438,6 +511,8 @@ async fn process_chat_message(
     state: &AppState,
     agent: &mut crate::agent::Agent,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+    pending_inbound: &mut std::collections::VecDeque<String>,
     content: &str,
     session_key: &str,
 ) {
@@ -458,13 +533,21 @@ async fn process_chat_message(
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
 
+    let cancel_signal_handle = agent.cancel_signal_handle();
+    let cancelled_atomic = agent.cancel_token();
+
     let content_owned = content.to_string();
     let turn_fut = async { agent.turn_streamed(&content_owned, event_tx).await };
 
     let forward_fut = async {
+        let mut accumulated_text = String::new();
         while let Some(event) = event_rx.recv().await {
             let ws_msg = match event {
                 TurnEvent::Chunk { delta } => {
+                    const MAX_ACCUMULATED_TEXT_BYTES: usize = 2 * 1024 * 1024;
+                    if accumulated_text.len() + delta.len() <= MAX_ACCUMULATED_TEXT_BYTES {
+                        accumulated_text.push_str(&delta);
+                    }
                     serde_json::json!({ "type": "chunk", "content": delta })
                 }
                 TurnEvent::StreamReset => {
@@ -669,9 +752,68 @@ async fn process_chat_message(
             };
             let _ = sender.send(Message::Text(ws_msg.to_string().into())).await;
         }
+        accumulated_text
     };
 
-    let (result, ()) = tokio::join!(turn_fut, forward_fut);
+    use futures_util::FutureExt as _;
+    let (turn_caught, forwarded_text) = {
+        let joined = async {
+            tokio::join!(
+                std::panic::AssertUnwindSafe(turn_fut).catch_unwind(),
+                forward_fut,
+            )
+        };
+        tokio::pin!(joined);
+
+        let disconnect_watch = async {
+            loop {
+                match receiver.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        pending_inbound.push_back(text.to_string());
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        };
+        tokio::pin!(disconnect_watch);
+
+        tokio::select! {
+        joined_out = &mut joined => (joined_out.0, joined_out.1),
+        _ = &mut disconnect_watch => {
+            cancelled_atomic.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_signal_handle.load_full().cancel();
+            tracing::info!(
+                target: "agent_cancel",
+                session_key,
+                "websocket disconnected mid-turn: firing cancel to stop orphaned turn"
+            );
+            joined.await
+        }
+        }
+    };
+    let result: Result<String, String> = match turn_caught {
+        Ok(inner) => inner.map_err(|e| e.to_string()),
+        Err(panic) => {
+            let detail = crate::util::describe_panic(&*panic);
+            tracing::error!(
+                target: "ws_core_turn",
+                session_key,
+                "turn execution panicked (recovered): {detail}"
+            );
+            if forwarded_text.trim().is_empty() {
+                Err(format!("internal error recovered: {detail}"))
+            } else {
+                tracing::warn!(
+                    target: "ws_core_turn",
+                    session_key,
+                    "salvaging partially streamed content after panic ({} bytes)",
+                    forwarded_text.len()
+                );
+                Ok(forwarded_text)
+            }
+        }
+    };
 
     match result {
         Ok(response) => {
@@ -679,10 +821,23 @@ async fn process_chat_message(
             if let Some(backend) = state.session_backend.clone() {
                 let assistant_msg = crate::providers::ChatMessage::assistant(&response);
                 let session_key_owned = session_key.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
+                match tokio::task::spawn_blocking(move || {
                     backend.append(&session_key_owned, &assistant_msg)
                 })
-                .await;
+                .await
+                {
+                    Ok(Err(e)) => tracing::warn!(
+                        target: "ws_persist",
+                        error = %e,
+                        "failed to persist assistant message to session backend"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "ws_persist",
+                        error = %e,
+                        "session backend append task panicked for assistant message"
+                    ),
+                    Ok(Ok(())) => {}
+                }
             }
 
             let reset = serde_json::json!({ "type": "chunk_reset" });
@@ -726,17 +881,38 @@ async fn process_chat_message(
                             let session_key_set = session_key.to_string();
                             let backend_set = backend.clone();
                             let title_for_set = title.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
+                            let title_persisted = match tokio::task::spawn_blocking(move || {
                                 backend_set.set_session_name(&session_key_set, &title_for_set)
                             })
-                            .await;
-                            let title_msg = serde_json::json!({
-                                "type": "session_title",
-                                "title": title,
-                            });
-                            let _ = sender
-                                .send(Message::Text(title_msg.to_string().into()))
-                                .await;
+                            .await
+                            {
+                                Ok(Ok(())) => true,
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        target: "ws_persist",
+                                        error = %e,
+                                        "failed to persist auto-generated session title"
+                                    );
+                                    false
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "ws_persist",
+                                        error = %e,
+                                        "session title persist task panicked"
+                                    );
+                                    false
+                                }
+                            };
+                            if title_persisted {
+                                let title_msg = serde_json::json!({
+                                    "type": "session_title",
+                                    "title": title,
+                                });
+                                let _ = sender
+                                    .send(Message::Text(title_msg.to_string().into()))
+                                    .await;
+                            }
                         }
                     }
                 }

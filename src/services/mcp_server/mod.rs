@@ -151,7 +151,7 @@ impl McpServer {
             ));
         }
 
-        match tool.execute(arguments).await {
+        match crate::agent::loop_::execute_tool_panic_safe(tool.as_ref(), name, arguments).await {
             Ok(result) => Ok(json!({
                 "content": [
                     { "type": "text", "text": result.output }

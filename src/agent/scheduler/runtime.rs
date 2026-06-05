@@ -95,22 +95,25 @@ impl TaskSchedulerRuntime {
             let cancellation = self.cancellation.clone();
             let executor = executor.clone();
             let ctx = ctx.clone();
-            let handle = tokio::spawn(async move {
-                worker_loop(
-                    worker_idx,
-                    scheduler,
-                    semaphore,
-                    cancellation,
-                    executor,
-                    ctx,
-                )
-                .await
-            });
+            let handle = crate::runtime::spawn_supervised(
+                format!("agent.scheduler.worker.{worker_idx}"),
+                async move {
+                    worker_loop(
+                        worker_idx,
+                        scheduler,
+                        semaphore,
+                        cancellation,
+                        executor,
+                        ctx,
+                    )
+                    .await
+                },
+            );
             handles.push(handle);
         }
 
         for h in handles {
-            let _ = h.await;
+            let _ = h.into_inner().await;
         }
 
         self.scheduler.lock().outcomes()

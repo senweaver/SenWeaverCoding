@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 const GW_SESSION_PREFIX: &str = "gw_";
+const DESKTOP_INBOUND_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
 enum OutboundFrame {
@@ -53,7 +54,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let (outbound_tx, mut outbound_rx) =
         tokio::sync::mpsc::channel::<OutboundFrame>(1024);
 
-    let writer_handle = tokio::spawn(async move {
+    let writer_handle = crate::runtime::spawn_supervised("ws_desktop.writer", async move {
         const COALESCE_WINDOW_MS: u64 = 24;
         const COALESCE_MAX_FRAMES: usize = 64;
         let mut delta_buf = String::new();
@@ -128,9 +129,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             }
         }
         let _ = sink.close().await;
-    });
+    })
+    .into_inner();
 
     let session_key = format!("{GW_SESSION_PREFIX}{session_id}");
+    let connection_id = uuid::Uuid::new_v4().to_string();
 
     let _ = send_json(
         &outbound_tx,
@@ -158,15 +161,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         .await;
     }
 
-    let config = {
+    let (config, config_sanitized) = {
         let mut cfg = state.config.lock();
-        if super::super::desktop_routes::sanitize_active_profile_in_place(&mut cfg) {
+        let changed = super::super::desktop_routes::sanitize_active_profile_in_place(&mut cfg);
+        if changed {
             tracing::info!(
                 "ws_desktop: sanitized stale default_provider/default_model in persisted config"
             );
         }
-        cfg.clone()
+        (cfg.clone(), changed)
     };
+    if config_sanitized {
+        if let Err(e) = config.save().await {
+            tracing::warn!(
+                target: "ws_desktop_persist",
+                error = %e,
+                "failed to persist sanitized config on ws connect"
+            );
+        }
+    }
     state.live_config.store(config.clone());
     let mut agent = match crate::agent::Agent::from_config(
         &config,
@@ -224,16 +237,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     if let Some(ref backend) = state.session_backend {
         let backend_arc = std::sync::Arc::clone(backend);
         let session_key_owned = session_key.clone();
-        let messages = tokio::task::spawn_blocking(move || backend_arc.load(&session_key_owned))
+        let messages = match tokio::task::spawn_blocking(move || backend_arc.load(&session_key_owned))
             .await
-            .unwrap_or_default();
+        {
+            Ok(messages) => messages,
+            Err(e) => {
+                tracing::warn!(
+                    target: "ws_desktop_persist",
+                    error = %e,
+                    "session history load task panicked; starting with empty history"
+                );
+                Vec::new()
+            }
+        };
         if !messages.is_empty() {
             agent.seed_history(&messages);
         }
     }
 
     let (inbound_tx, mut inbound_rx) =
-        tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        tokio::sync::mpsc::channel::<serde_json::Value>(DESKTOP_INBOUND_CAPACITY);
 
     let inbound_tx_lsp = inbound_tx.clone();
     let inbound_tx_replay = inbound_tx.clone();
@@ -246,8 +269,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let cancelled_atomic_for_reader = std::sync::Arc::clone(&cancelled_atomic);
     let outbound_tx_reader = outbound_tx.clone();
     let session_id_for_reader = session_id.clone();
+    let connection_id_for_reader = connection_id.clone();
 
-    let reader_handle = tokio::spawn(async move {
+    let reader_handle = crate::runtime::spawn_supervised("ws_desktop.reader", async move {
         while let Some(frame) = receiver.next().await {
             match frame {
                 Ok(Message::Text(text)) => {
@@ -260,7 +284,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 "type": "__invalid_json__",
                                 "raw": text_str.to_string(),
                             });
-                            if inbound_tx.send(v).is_err() {
+                            if inbound_tx.send(v).await.is_err() {
                                 break;
                             }
                             continue;
@@ -295,35 +319,52 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
                         crate::tools::background_registry::kill_foreground(
                             session_id_for_reader.as_str(),
+                            Some(connection_id_for_reader.as_str()),
                         );
 
-                        if let Some(sup) = crate::workers::supervisor::global_supervisor() {
-                            let cancelled = sup.cancel_for_parent(&session_id_for_reader);
-                            if cancelled > 0 {
-                                tracing::info!(
-                                    target: "agent_cancel",
-                                    parent_session = %session_id_for_reader,
-                                    cancelled,
-                                    "cascading stop_generation to child workers"
-                                );
+                        let cascade_to_workers = parsed
+                            .get("cascade")
+                            .or_else(|| parsed.get("stopWorkers"))
+                            .or_else(|| parsed.get("stop_workers"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if cascade_to_workers {
+                            if let Some(sup) = crate::workers::supervisor::global_supervisor() {
+                                let cancelled = sup.cancel_for_parent(&session_id_for_reader);
+                                if cancelled > 0 {
+                                    tracing::info!(
+                                        target: "agent_cancel",
+                                        parent_session = %session_id_for_reader,
+                                        cancelled,
+                                        "cascading stop_generation to child workers (cascade requested)"
+                                    );
+                                }
                             }
                         }
                     }
                     if msg_type.as_str() == "cancel_tool" {
-                        let target_session = parsed
+                        let requested_session = parsed
                             .get("sessionId")
                             .or_else(|| parsed.get("session_id"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(session_id_for_reader.as_str());
+                            .and_then(|v| v.as_str());
+                        if let Some(req) = requested_session {
+                            if req != session_id_for_reader.as_str() {
+                                tracing::warn!(
+                                    target: "agent_cancel",
+                                    requested = %req,
+                                    connection_session = %session_id_for_reader,
+                                    "cancel_tool rejected: sessionId does not belong to this connection"
+                                );
+                                continue;
+                            }
+                        }
                         let killed = crate::tools::background_registry::kill_foreground(
-                            target_session,
-                        ) || (target_session != session_id_for_reader.as_str()
-                            && crate::tools::background_registry::kill_foreground(
-                                session_id_for_reader.as_str(),
-                            ));
+                            session_id_for_reader.as_str(),
+                            Some(connection_id_for_reader.as_str()),
+                        );
                         tracing::info!(
                             target: "agent_cancel",
-                            session = %target_session,
+                            session = %session_id_for_reader,
                             killed,
                             "cancel_tool received: foreground shell kill requested"
                         );
@@ -331,7 +372,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     }
                     match msg_type.as_str() {
 
-                        "permission_response" | "computer_use_permission_response" => {
+                        "permission_response" => {
                             if let Some(request_id) =
                                 parsed.get("requestId").and_then(|v| v.as_str())
                             {
@@ -380,7 +421,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                             "source": "ask_response",
                                             "requestId": request_id,
                                         });
-                                        if inbound_tx.send(synthetic).is_err() {
+                                        if inbound_tx.send(synthetic).await.is_err() {
                                             break;
                                         }
                                     }
@@ -397,7 +438,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         }
                         _ => {}
                     }
-                    if inbound_tx.send(parsed).is_err() {
+                    if inbound_tx.send(parsed).await.is_err() {
                         break;
                     }
                 }
@@ -414,12 +455,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 _ => {}
             }
         }
+
+        cancelled_atomic_for_reader.store(true, std::sync::atomic::Ordering::Relaxed);
+        cancel_signal_for_reader.load_full().cancel();
+        tracing::info!(
+            target: "agent_cancel",
+            session = %session_id_for_reader,
+            "websocket disconnected: firing cancel to stop any orphaned in-flight turn"
+        );
     });
 
     let lsp_forwarder = {
         let mut rx = state.lsp_events.subscribe();
         let tx = inbound_tx_lsp;
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("ws_desktop.lsp_forwarder", async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -428,8 +477,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 "type": "__lsp_forward__",
                                 "payload": payload,
                             });
-                            if tx.send(wrapped).is_err() {
-                                break;
+                            match tx.try_send(wrapped) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    tracing::warn!(
+                                        target: "ws_desktop",
+                                        "inbound channel full; dropping lsp forward frame"
+                                    );
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                             }
                         }
                     }
@@ -443,26 +499,47 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let gateway_event_forwarder = {
         let mut rx = state.event_tx.subscribe();
         let tx = inbound_tx_gateway;
-        tokio::spawn(async move {
+        let session_id_for_gateway = session_id.clone();
+        crate::runtime::spawn_supervised("ws_desktop.gateway_forwarder", async move {
             loop {
                 match rx.recv().await {
                     Ok(payload) => {
-                        let is_forwardable = payload
+                        let payload_type = payload
                             .get("type")
                             .and_then(|v| v.as_str())
-                            .map(|t| {
-                                t == "system_notification" || t == "usage_updated"
-                            })
-                            .unwrap_or(false);
+                            .unwrap_or("");
+                        let is_forwardable = matches!(
+                            payload_type,
+                            "system_notification" | "usage_updated" | "task_update"
+                        );
                         if !is_forwardable {
                             continue;
+                        }
+                        let session_scoped = payload_type == "task_update"
+                            || payload.get("subtype").and_then(|v| v.as_str())
+                                == Some("task_notification");
+                        if session_scoped {
+                            let target = payload
+                                .get("sessionId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !target.is_empty() && target != session_id_for_gateway {
+                                continue;
+                            }
                         }
                         let wrapped = serde_json::json!({
                             "type": "__gateway_event__",
                             "payload": payload,
                         });
-                        if tx.send(wrapped).is_err() {
-                            break;
+                        match tx.try_send(wrapped) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    target: "ws_desktop",
+                                    "inbound channel full; dropping gateway event frame"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -476,7 +553,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         let mut rx = state.workspace_resources.subscribe();
         let tx = inbound_tx_resource.clone();
         let session_id_for_resource = session_id.clone();
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("ws_desktop.resource_forwarder", async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -487,8 +564,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             "type": "__gateway_event__",
                             "payload": payload,
                         });
-                        if tx.send(wrapped).is_err() {
-                            break;
+                        match tx.try_send(wrapped) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    target: "ws_desktop",
+                                    "inbound channel full; dropping resource event frame"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -522,7 +606,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 "type": "__gateway_event__",
                 "payload": payload,
             });
-            let _ = inbound_tx_resource.send(wrapped);
+            let _ = inbound_tx_resource.try_send(wrapped);
         }
     }
 
@@ -537,7 +621,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             "type": "__gateway_event__",
             "payload": payload,
         });
-        let _ = inbound_tx_resource.send(wrapped);
+        let _ = inbound_tx_resource.try_send(wrapped);
     }
 
     {
@@ -589,7 +673,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     "type": "__lsp_forward__",
                     "payload": payload,
                 });
-                let _ = inbound_tx_replay.send(wrapped);
+                let _ = inbound_tx_replay.try_send(wrapped);
             }
             sent += 1;
             if sent.is_multiple_of(REPLAY_BATCH) {
@@ -664,7 +748,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .get("mode")
                     .and_then(|v| v.as_str())
                     .unwrap_or("ask");
-                desktop_runtime_state().set_permission_mode(mode);
+                desktop_runtime_state().set_session_permission_mode(&session_key, mode);
                 let _ = send_json(
                     &outbound_tx,
                     &serde_json::json!({
@@ -697,29 +781,31 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         .unwrap_or_else(|| std::sync::Arc::new(state.config.lock().clone()));
                     let whitelist: &[String] =
                         cfg_for_gate.autonomy.auto_approve_mode_transitions.as_slice();
-                    let needs_confirm = !confirmed
-                        && previous_mode != parsed_mode
-                        && !mode_transition_auto_approved(
-                            whitelist,
-                            previous_mode,
-                            parsed_mode,
-                        );
+
+                    let auto_approved = crate::agent::mode::transition::is_auto_approved(
+                        whitelist,
+                        previous_mode,
+                        parsed_mode,
+                    );
+                    let needs_confirm =
+                        !confirmed && previous_mode != parsed_mode && !auto_approved;
                     if needs_confirm {
                         let _ = send_json(
                             &outbound_tx,
                             &serde_json::json!({
                                 "type": "system_notification",
-                                "subtype": "coding_mode_transition_confirmation_required",
+                                "subtype": "coding_mode_confirm_required",
                                 "message": format!(
                                     "Switching coding mode {} -> {} requires confirmation",
                                     previous_mode.display_name(),
                                     parsed_mode.display_name(),
                                 ),
                                 "data": {
-                                    "from": previous_mode.display_name(),
-                                    "to": parsed_mode.display_name(),
+                                    "mode": parsed_mode.display_name(),
+                                    "label": parsed_mode.label(),
                                     "scope": scope,
-                                    "whitelist": whitelist,
+                                    "from": previous_mode.display_name(),
+                                    "sessionId": session_id.as_str(),
                                 },
                             }),
                         )
@@ -735,7 +821,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     }
                     agent.set_coding_mode(parsed_mode);
                     let derived = super::super::desktop_routes::derive_permission_from_coding(&parsed_mode);
-                    desktop_runtime_state().set_permission_mode(derived);
+                    desktop_runtime_state().set_session_permission_mode(&session_key, derived);
                     let _ = send_json(
                         &outbound_tx,
                         &serde_json::json!({
@@ -875,7 +961,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 )
                 .await;
             }
-            "permission_response" | "computer_use_permission_response" => {
+            "permission_response" => {
 
                 if let Some(request_id) = parsed.get("requestId").and_then(|v| v.as_str()) {
                     let allowed = parsed
@@ -1026,10 +1112,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     let backend_arc = std::sync::Arc::clone(backend);
                     let session_key_owned = session_key.clone();
                     let user_msg = crate::providers::ChatMessage::user(&content);
-                    let _ = tokio::task::spawn_blocking(move || {
+                    match tokio::task::spawn_blocking(move || {
                         backend_arc.append(&session_key_owned, &user_msg)
                     })
-                    .await;
+                    .await
+                    {
+                        Ok(Err(e)) => tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "failed to persist user message to session backend"
+                        ),
+                        Err(e) => tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "session backend append task panicked for user message"
+                        ),
+                        Ok(Ok(())) => {}
+                    }
                 }
 
                 if let Some(svc) = crate::services::try_get_services() {
@@ -1046,7 +1145,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 }
 
                 agent.reset_cancel();
-                run_turn(&state, &mut agent, &outbound_tx, &session_id, &session_key, &content).await;
+                run_turn(&state, &mut agent, &outbound_tx, &session_id, &session_key, &connection_id, &content).await;
             }
             "start_plan_execution" => {
 
@@ -1078,13 +1177,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 let agent_mode = crate::agent::coding_mode::CodingMode::Agent;
                 if let Some(svc) = crate::services::try_get_services() {
                     svc.set_session_coding_mode(&session_key, agent_mode);
-
-                    *svc.coding_mode.write() = agent_mode;
                 }
                 agent.set_coding_mode(agent_mode);
                 let derived =
                     super::super::desktop_routes::derive_permission_from_coding(&agent_mode);
-                desktop_runtime_state().set_permission_mode(derived);
+                desktop_runtime_state().set_session_permission_mode(&session_key, derived);
                 let _ = send_json(
                     &outbound_tx,
                     &serde_json::json!({
@@ -1376,10 +1473,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     let session_key_owned = session_key.clone();
                     let trigger_msg =
                         crate::providers::ChatMessage::user(&trigger_content);
-                    let _ = tokio::task::spawn_blocking(move || {
+                    match tokio::task::spawn_blocking(move || {
                         backend_arc.append_hidden(&session_key_owned, &trigger_msg)
                     })
-                    .await;
+                    .await
+                    {
+                        Ok(Err(e)) => tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "failed to persist plan handoff trigger message to session backend"
+                        ),
+                        Err(e) => tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "session backend append task panicked for plan handoff trigger"
+                        ),
+                        Ok(Ok(())) => {}
+                    }
                 }
 
                 if let Some(ref backend) = state.session_backend {
@@ -1403,10 +1513,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .to_string();
                     let marker_msg =
                         crate::providers::ChatMessage::assistant(marker_payload);
-                    let _ = tokio::task::spawn_blocking(move || {
+                    match tokio::task::spawn_blocking(move || {
                         backend_arc.append(&session_key_owned, &marker_msg)
                     })
-                    .await;
+                    .await
+                    {
+                        Ok(Err(e)) => tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "failed to persist plan handoff marker to session backend"
+                        ),
+                        Err(e) => tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "session backend append task panicked for plan handoff marker"
+                        ),
+                        Ok(Ok(())) => {}
+                    }
                 }
 
                 {
@@ -1423,6 +1546,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     &outbound_tx,
                     &session_id,
                     &session_key,
+                    &connection_id,
                     &trigger_content,
                 )
                 .await;
@@ -1448,6 +1572,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     if let Some(svc) = crate::services::try_get_services() {
         svc.clear_session_coding_mode(&session_key);
     }
+    desktop_runtime_state().clear_session_permission_mode(&session_key);
 
     let _ = crate::services::governance::credential_vault::purge_session_ephemeral(&session_key);
     if let Some(ctl) = crate::tools::browser::dock_controller() {
@@ -1486,6 +1611,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
 pub struct DesktopRuntimeState {
     permission_mode: parking_lot::RwLock<String>,
+    session_permission_modes:
+        parking_lot::RwLock<std::collections::HashMap<String, String>>,
     settings_path: parking_lot::RwLock<Option<std::path::PathBuf>>,
     hydrated: std::sync::atomic::AtomicBool,
 }
@@ -1495,6 +1622,9 @@ impl DesktopRuntimeState {
         Self {
 
             permission_mode: parking_lot::RwLock::new("default".to_string()),
+            session_permission_modes: parking_lot::RwLock::new(
+                std::collections::HashMap::new(),
+            ),
             settings_path: parking_lot::RwLock::new(None),
             hydrated: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1527,6 +1657,23 @@ impl DesktopRuntimeState {
     pub fn permission_mode(&self) -> String {
         self.hydrate_if_needed();
         self.permission_mode.read().clone()
+    }
+
+    pub fn permission_mode_for(&self, session_key: &str) -> String {
+        if let Some(mode) = self.session_permission_modes.read().get(session_key) {
+            return mode.clone();
+        }
+        self.permission_mode()
+    }
+
+    pub fn set_session_permission_mode(&self, session_key: &str, mode: &str) {
+        self.session_permission_modes
+            .write()
+            .insert(session_key.to_string(), mode.to_string());
+    }
+
+    pub fn clear_session_permission_mode(&self, session_key: &str) {
+        self.session_permission_modes.write().remove(session_key);
     }
 
     pub fn set_permission_mode(&self, mode: &str) {
@@ -1577,12 +1724,35 @@ fn persist_permission_mode_to_disk(
     }
     let serialized =
         serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string());
-    std::fs::write(path, serialized)
+    crate::util::atomic_write(path, serialized.as_bytes())
 }
 
 pub fn desktop_runtime_state() -> &'static DesktopRuntimeState {
     static STATE: std::sync::OnceLock<DesktopRuntimeState> = std::sync::OnceLock::new();
     STATE.get_or_init(DesktopRuntimeState::new)
+}
+
+tokio::task_local! {
+    static SCOPED_PERMISSION_MODE: String;
+}
+
+pub async fn scope_permission_mode<F>(mode: String, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    SCOPED_PERMISSION_MODE.scope(mode, fut).await
+}
+
+pub fn active_permission_mode() -> String {
+    SCOPED_PERMISSION_MODE.try_with(|m| m.clone()).unwrap_or_else(|_| {
+        let fallback = desktop_runtime_state().permission_mode();
+        tracing::warn!(
+            target: "isolation",
+            fallback = %fallback,
+            "active_permission_mode() called without session scope; falling back to global default",
+        );
+        fallback
+    })
 }
 
 async fn send_json(outbound: &OutboundSender, value: &serde_json::Value) {
@@ -1603,8 +1773,6 @@ struct PersistJob {
 }
 
 static PERSIST_PENDING: AtomicUsize = AtomicUsize::new(0);
-
-const MAX_PERSIST_RETRIES: u32 = 10;
 
 pub(crate) async fn wait_persist_drained(deadline: std::time::Duration) -> bool {
     let start = std::time::Instant::now();
@@ -1632,15 +1800,15 @@ fn persist_sender(
     SENDER.get_or_init(|| {
         let (tx, mut rx) = mpsc::unbounded_channel::<PersistJob>();
         let backend = std::sync::Arc::clone(backend);
-        tokio::spawn(async move {
-            let mut retry_queue: std::collections::VecDeque<(PersistJob, u32)> =
+        crate::runtime::spawn_supervised("ws_desktop.persist_worker", async move {
+            let mut retry_queue: std::collections::VecDeque<PersistJob> =
                 std::collections::VecDeque::new();
             loop {
-                let (job, attempts) = if let Some(item) = retry_queue.pop_front() {
-                    item
+                let job = if let Some(job) = retry_queue.pop_front() {
+                    job
                 } else {
                     match rx.recv().await {
-                        Some(job) => (job, 0u32),
+                        Some(job) => job,
                         None => break,
                     }
                 };
@@ -1669,29 +1837,15 @@ fn persist_sender(
                         PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
                     }
                     Ok(Some((leftover_job, err))) => {
-                        let next_attempts = attempts + 1;
-                        if next_attempts >= MAX_PERSIST_RETRIES {
-                            tracing::error!(
-                                target: "ws_desktop_persist",
-                                error = %err,
-                                session_key = %leftover_job.session_key,
-                                dropped = leftover_job.rows.len(),
-                                attempts = next_attempts,
-                                "session persist append failed permanently; dropping batch after max retries"
-                            );
-                            PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
-                        } else {
-                            tracing::warn!(
-                                target: "ws_desktop_persist",
-                                error = %err,
-                                session_key = %leftover_job.session_key,
-                                pending = leftover_job.rows.len(),
-                                attempt = next_attempts,
-                                "session persist append failed; retrying in background"
-                            );
-                            retry_queue.push_back((leftover_job, next_attempts));
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        }
+                        tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %err,
+                            session_key = %leftover_job.session_key,
+                            pending = leftover_job.rows.len(),
+                            "session persist append failed; retrying in background"
+                        );
+                        retry_queue.push_back(leftover_job);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(join_err) => {
                         tracing::warn!(
@@ -1708,15 +1862,9 @@ fn persist_sender(
     })
 }
 
-fn describe_panic(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_string()
-    }
-}
+const MAX_PERSIST_PENDING: usize = 8192;
+
+use crate::util::describe_panic;
 
 fn enqueue_persist(
     state: &AppState,
@@ -1729,6 +1877,16 @@ fn enqueue_persist(
     let Some(backend) = state.session_backend.as_ref() else {
         return;
     };
+    if PERSIST_PENDING.load(Ordering::SeqCst) >= MAX_PERSIST_PENDING {
+        tracing::warn!(
+            target: "ws_desktop_persist",
+            pending = PERSIST_PENDING.load(Ordering::SeqCst),
+            limit = MAX_PERSIST_PENDING,
+            session_key,
+            "session persist backlog at capacity; dropping batch to avoid unbounded growth"
+        );
+        return;
+    }
     PERSIST_PENDING.fetch_add(1, Ordering::SeqCst);
     if persist_sender(backend)
         .send(PersistJob {
@@ -1738,6 +1896,11 @@ fn enqueue_persist(
         .is_err()
     {
         PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+        tracing::warn!(
+            target: "ws_desktop_persist",
+            session_key,
+            "session persist worker channel closed; batch dropped"
+        );
     }
 }
 
@@ -2002,6 +2165,7 @@ async fn run_turn(
     outbound: &OutboundSender,
     session_id: &str,
     session_key: &str,
+    connection_id: &str,
     content: &str,
 ) {
     use crate::agent::TurnEvent;
@@ -2040,7 +2204,7 @@ async fn run_turn(
     )
     .await;
 
-    let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(256);
+    let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(1024);
     let content_owned = content.to_string();
     let mut text_block_open = false;
     let mut current_tool_use_id: Option<String> = None;
@@ -2052,7 +2216,7 @@ async fn run_turn(
     let user_message_index: i64 = if let Some(ref backend) = state.session_backend {
         let backend_arc = std::sync::Arc::clone(backend);
         let session_key_owned = session_key.to_string();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             let rows = backend_arc.load_with_tombstones(&session_key_owned);
             let total = rows.iter().filter(|m| m.message.role == "user").count();
             #[allow(clippy::cast_possible_wrap)]
@@ -2061,7 +2225,17 @@ async fn run_turn(
             }
         })
         .await
-        .unwrap_or(0)
+        {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!(
+                    target: "ws_desktop_persist",
+                    error = %e,
+                    "failed to compute user_message_index from tombstone load; defaulting to 0"
+                );
+                0
+            }
+        }
     } else {
         0
     };
@@ -2071,21 +2245,12 @@ async fn run_turn(
     let sqlite_persist = std::sync::Arc::new(std::sync::Mutex::new(DesktopSqlitePersist::default()));
     let sqlite_persist_forward = std::sync::Arc::clone(&sqlite_persist);
 
-    let coding_mode_label = agent
-        .current_coding_mode()
-        .map(|m| m.display_name().to_string())
-        .or_else(|| {
-            crate::services::try_get_services()
-                .map(|svc| svc.coding_mode.read().display_name().to_string())
-        });
-    if let (Some(svc), Some(label)) = (
-        crate::services::try_get_services(),
-        coding_mode_label.as_ref(),
-    ) {
-        if let Some(parsed) = crate::agent::coding_mode::CodingMode::from_str_loose(label) {
-            *svc.coding_mode.write() = parsed;
-        }
-    }
+    let turn_coding_mode = agent.current_coding_mode().unwrap_or_else(|| {
+        crate::services::try_get_services()
+            .map(|svc| svc.resolve_coding_mode_for(Some(&session_key)))
+            .unwrap_or_default()
+    });
+    let coding_mode_label = Some(turn_coding_mode.display_name().to_string());
 
     let cost_tracking_ctx = state.cost_tracker.as_ref().map(|tracker| {
         let prices = {
@@ -2142,6 +2307,7 @@ async fn run_turn(
         workspace_key: workspace_key.clone(),
         title: session_title,
         workspace_dir: agent.current_workspace_dir().to_string_lossy().into_owned(),
+        connection_id: Some(connection_id.to_string()),
     };
     let turn_fut = async {
         let inner = async {
@@ -2153,8 +2319,14 @@ async fn run_turn(
         };
         let scoped =
             crate::evolution::scope_evolution_ctx(evolution_ctx.clone(), inner);
+        let mode_scoped =
+            crate::agent::coding_mode::scope_coding_mode(turn_coding_mode, scoped);
+        let perm_scoped = crate::gateway::ws::desktop::scope_permission_mode(
+            desktop_runtime_state().permission_mode_for(&session_key),
+            mode_scoped,
+        );
         let result =
-            crate::session::scope_session_context(session_ctx, scoped).await;
+            crate::session::scope_session_context(session_ctx, perm_scoped).await;
         if let Some(ref ctx) = evolution_ctx {
             let aborted = match &result {
                 Ok(_) => None,
@@ -2505,10 +2677,18 @@ async fn run_turn(
                     .await;
                 }
                 TurnEvent::ContextCompressed {
-                    tokens_before: _,
-                    tokens_after: _,
+                    tokens_before,
+                    tokens_after,
                 } => {
-
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "context_compressed",
+                            "tokens_before": tokens_before,
+                            "tokens_after": tokens_after,
+                        }),
+                    )
+                    .await;
                 }
                 TurnEvent::PermissionRequest {
                     request_id,
@@ -2765,6 +2945,21 @@ async fn run_turn(
         }
     };
 
+    let buddy_cfg = state.config.lock().buddy.clone();
+    if let Some((event, greeting)) = crate::buddy::lifecycle_event(&buddy_cfg, "working") {
+        let _ = send_json(
+            outbound,
+            &serde_json::json!({
+                "type": "buddy_event",
+                "sessionId": session_id,
+                "event": event,
+                "greeting": greeting,
+                "showNotifications": buddy_cfg.show_notifications,
+            }),
+        )
+        .await;
+    }
+
     let (turn_caught, forward_caught) = tokio::join!(
         std::panic::AssertUnwindSafe(turn_fut).catch_unwind(),
         std::panic::AssertUnwindSafe(forward_fut).catch_unwind(),
@@ -2781,10 +2976,16 @@ async fn run_turn(
     }
 
     let turn_result: Result<String, String> = match turn_caught {
-        Ok(Ok(final_text)) if !forward_panicked => Ok(final_text),
-        Ok(Ok(_)) => Err(
-            "turn completed but event forwarding was interrupted by an internal error".to_string(),
-        ),
+        Ok(Ok(final_text)) => {
+            if forward_panicked {
+                tracing::warn!(
+                    target: "ws_desktop_turn",
+                    session_id,
+                    "turn succeeded but event forwarding panicked; delivering final result anyway"
+                );
+            }
+            Ok(final_text)
+        }
         Ok(Err(err)) => Err(format!("{err}")),
         Err(panic) => {
             let detail = describe_panic(&*panic);
@@ -2793,7 +2994,17 @@ async fn run_turn(
                 session_id,
                 "turn execution panicked (recovered): {detail}",
             );
-            Err(format!("internal error recovered: {detail}"))
+            if !accumulated_text.trim().is_empty() {
+                tracing::warn!(
+                    target: "ws_desktop_turn",
+                    session_id,
+                    delivered_bytes = accumulated_text.len(),
+                    "turn panicked after partially streaming content; finalizing with already-delivered text instead of failing the whole turn"
+                );
+                Ok(accumulated_text.clone())
+            } else {
+                Err(format!("internal error recovered: {detail}"))
+            }
         }
     };
 
@@ -2839,6 +3050,19 @@ async fn run_turn(
                 }),
             )
             .await;
+            if let Some((event, greeting)) = crate::buddy::lifecycle_event(&buddy_cfg, "completed") {
+                let _ = send_json(
+                    outbound,
+                    &serde_json::json!({
+                        "type": "buddy_event",
+                        "sessionId": session_id,
+                        "event": event,
+                        "greeting": greeting,
+                        "showNotifications": buddy_cfg.show_notifications,
+                    }),
+                )
+                .await;
+            }
         }
         Err(err) => {
             if state.session_backend.is_some() {
@@ -2853,6 +3077,19 @@ async fn run_turn(
             let msg = format!("{err}");
             let code = crate::agent::error_classify::classify_turn_error_code(&msg);
             send_error(outbound, &msg, code).await;
+            if let Some((event, greeting)) = crate::buddy::lifecycle_event(&buddy_cfg, "error") {
+                let _ = send_json(
+                    outbound,
+                    &serde_json::json!({
+                        "type": "buddy_event",
+                        "sessionId": session_id,
+                        "event": event,
+                        "greeting": greeting,
+                        "showNotifications": buddy_cfg.show_notifications,
+                    }),
+                )
+                .await;
+            }
             let final_todos = if let Some(svc) = crate::services::try_get_services() {
                 crate::tools::todo_write::session_todos(&svc.todo_store, session_id)
             } else {
@@ -2898,19 +3135,40 @@ async fn run_turn(
                 let session_key_set = session_key.to_string();
                 let backend_set = backend.clone();
                 let summary_for_set = summary.clone();
-                let _ = tokio::task::spawn_blocking(move || {
+                let persisted = match tokio::task::spawn_blocking(move || {
                     backend_set.set_session_name(&session_key_set, &summary_for_set)
                 })
-                .await;
-                let _ = send_json(
-                    outbound,
-                    &serde_json::json!({
-                        "type": "session_title_updated",
-                        "sessionId": session_id,
-                        "title": summary,
-                    }),
-                )
-                .await;
+                .await
+                {
+                    Ok(Ok(())) => true,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "failed to persist auto-generated session title"
+                        );
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %e,
+                            "session title persist task panicked"
+                        );
+                        false
+                    }
+                };
+                if persisted {
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "session_title_updated",
+                            "sessionId": session_id,
+                            "title": summary,
+                        }),
+                    )
+                    .await;
+                }
             }
         }
     }

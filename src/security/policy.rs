@@ -246,6 +246,40 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+#[must_use]
+pub fn is_system_path(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let lower = path.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+        for var in ["windir", "SystemRoot"] {
+            if let Ok(root) = std::env::var(var) {
+                let root = root.to_ascii_lowercase().replace('/', "\\");
+                if !root.is_empty() && lower.starts_with(&root) {
+                    return true;
+                }
+            }
+        }
+        lower.starts_with("c:\\windows")
+            || lower.contains("\\system32")
+            || lower.contains("\\syswow64")
+            || lower.starts_with("c:\\program files")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let s = path.to_string_lossy();
+        s == "/"
+            || s.starts_with("/bin")
+            || s.starts_with("/sbin")
+            || s.starts_with("/usr")
+            || s.starts_with("/etc")
+            || s.starts_with("/boot")
+            || s.starts_with("/proc")
+            || s.starts_with("/sys")
+            || s.starts_with("/System/")
+            || s.starts_with("/Library/")
+    }
+}
+
 fn lexically_normalise(path: &Path) -> PathBuf {
     use std::path::Component;
 
@@ -657,6 +691,21 @@ impl SecurityPolicy {
     #[must_use]
     pub fn workspace_dir(&self) -> PathBuf {
         self.workspace_root.read().clone()
+    }
+
+    #[must_use]
+    pub fn safe_artifact_anchor(&self) -> PathBuf {
+        let ws = self.workspace_dir();
+        if ws.is_absolute() && !is_system_path(&ws) {
+            return ws;
+        }
+        if let Some(home) = home_dir() {
+            return home.join(".senweavercoding").join("runtime");
+        }
+        let mut tmp = std::env::temp_dir();
+        tmp.push("SenAgentOS");
+        tmp.push("runtime");
+        tmp
     }
 
     #[must_use]

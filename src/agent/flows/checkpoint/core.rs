@@ -101,7 +101,7 @@ impl CheckpointStore {
                 return;
             };
             let cp_owned = cp;
-            tokio::spawn(async move {
+            crate::runtime::spawn_supervised("checkpoint.persist", async move {
                 match backend.save(&session_id, &cp_owned).await {
                     Ok(()) => crate::observability::session_write_mode_metrics::incr_checkpoint_persisted(),
                     Err(err) => {

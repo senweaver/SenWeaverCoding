@@ -34,11 +34,10 @@ pub fn check_rbac(
 }
 
 pub fn check_tool_guardrails(tool_name: &str) -> Option<String> {
-    let coding_label = crate::services::try_get_services()
-        .map(|svc| svc.coding_mode.read().label().to_string());
+    let coding_label =
+        Some(crate::agent::coding_mode::active_coding_mode().label().to_string());
     let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
-    let perm_mode_lc =
-        crate::gateway::ws::desktop::desktop_runtime_state().permission_mode();
+    let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
     let tool_lc = tool_name.to_ascii_lowercase();
     let ctx = crate::guardrails::GuardrailContext {
         coding_mode: coding_label_lc.as_deref(),

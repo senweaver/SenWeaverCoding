@@ -21,9 +21,7 @@ use crate::memory::{self, Memory, MemoryCategory, decay};
 use crate::multimodal;
 use crate::observability::{self, Observer, ObserverEvent, runtime_trace};
 use crate::providers::traits::StreamEvent;
-use crate::providers::{
-    self, ChatMessage, ChatRequest, Provider, ProviderCapabilityError, ToolCall,
-};
+use crate::providers::{self, ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::runtime;
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use crate::tools::{self, Tool, ToolRegistry};
@@ -49,6 +47,8 @@ pub(crate) use crate::agent::reward::cost_tracking::{
 const STREAM_CHUNK_MIN_CHARS: usize = 80;
 
 const STREAM_TOOL_MARKER_WINDOW_CHARS: usize = 512;
+
+const MAX_STREAM_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 2000;
 
@@ -338,10 +338,16 @@ async fn code_intel_injection_block(user_msg: &str) -> Option<String> {
     {
         builder = builder.with_symbol_graph(graph);
     }
-    if !query.is_empty()
-        && let Some(rag) = loop_services::rag_source(&cwd)
-    {
-        builder = builder.with_rag(rag, query.to_string());
+    if !query.is_empty() {
+        let rag_cwd = cwd.clone();
+        if let Some(rag) =
+            tokio::task::spawn_blocking(move || loop_services::rag_source(&rag_cwd))
+                .await
+                .ok()
+                .flatten()
+        {
+            builder = builder.with_rag(rag, query.to_string());
+        }
     }
     match builder.build().await {
         Ok(qc) => {
@@ -389,7 +395,53 @@ fn build_hardware_context(
     context
 }
 
+fn canonical_tool_alias(name: &str) -> Option<&'static str> {
+    let mapped = match name.to_ascii_lowercase().as_str() {
+        "grep" | "ripgrep" | "rg" | "code_search" | "codesearch" | "search_files"
+        | "searchfiles" | "search_code" => "content_search",
+        "read" | "readfile" | "read_file" | "cat" | "view" | "viewfile" => "file_read",
+        "write" | "writefile" | "create_file" | "createfile" => "file_write",
+        "edit" | "str_replace" | "str_replace_editor" | "apply_patch" | "applypatch"
+        | "edit_file" | "editfile" => "file_edit",
+        "bash" | "sh" | "exec" | "command" | "cmd" | "terminal" | "run_command"
+        | "runcommand" | "shell_command" => "shell",
+        "ls" | "list_files" | "listfiles" | "list_dir" | "listdir" | "dir" => "file_list",
+        "askquestion" => "ask_question",
+        "askuser" => "ask_user",
+        "memory_search" | "memorysearch" | "memrecall" | "memory_query" => "memory_recall",
+        "lsp_symbols" | "lspsymbols" | "symbols" | "lsp_hover" | "lsphover"
+        | "lsp_definition" => "lsp",
+        "websearch" => "web_search",
+        _ => return None,
+    };
+    Some(mapped)
+}
+
 fn find_tool<'a>(
+    tools: &'a [Box<dyn Tool>],
+    name: &str,
+    tool_registry: Option<&ToolRegistry>,
+) -> Option<crate::tools::handle::ToolHandle<'a>> {
+    if let Some(handle) = lookup_tool_exact(tools, name, tool_registry) {
+        return Some(handle);
+    }
+    if let Some(canonical) = canonical_tool_alias(name) {
+        if canonical != name {
+            if let Some(handle) = lookup_tool_exact(tools, canonical, tool_registry) {
+                tracing::debug!(
+                    target: "agent.tool",
+                    requested = %name,
+                    resolved = %canonical,
+                    "resolved tool name via alias normalization"
+                );
+                return Some(handle);
+            }
+        }
+    }
+    None
+}
+
+fn lookup_tool_exact<'a>(
     tools: &'a [Box<dyn Tool>],
     name: &str,
     tool_registry: Option<&ToolRegistry>,
@@ -405,7 +457,7 @@ fn find_tool<'a>(
         .map(|t| crate::tools::handle::ToolHandle::Borrowed(t.as_ref()))
 }
 
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -415,13 +467,36 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+pub(crate) async fn execute_tool_panic_safe(
+    tool: &dyn Tool,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> anyhow::Result<tools::ToolResult> {
+    let fut = std::panic::AssertUnwindSafe(tool.execute(args)).catch_unwind();
+    match fut.await {
+        Ok(inner) => inner,
+        Err(panic) => {
+            let detail = panic_payload_message(panic.as_ref());
+            tracing::error!(
+                target: "agent.tool",
+                tool = %tool_name,
+                panic = %detail,
+                "tool execution panicked; recovered as a tool error so the caller keeps running"
+            );
+            Err(anyhow::anyhow!(
+                "Tool '{tool_name}' crashed internally ({detail}). The underlying file/state was \
+                 left unchanged."
+            ))
+        }
+    }
+}
+
 async fn auto_finalize_incomplete_plan_steps(
     tools_registry: &[Box<dyn Tool>],
     tool_registry: Option<&ToolRegistry>,
     on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
     history: &mut Vec<ChatMessage>,
-    recent_assistant_text: &str,
-    history_for_intent: &[ChatMessage],
+    intent_window: &str,
 ) -> usize {
     let Some(handle) = find_tool(tools_registry, "update_plan", tool_registry) else {
         return 0;
@@ -429,7 +504,7 @@ async fn auto_finalize_incomplete_plan_steps(
     let tool = handle.as_tool();
 
     let get_args = serde_json::json!({ "action": "get" });
-    let snapshot = match tool.execute(get_args).await {
+    let snapshot = match execute_tool_panic_safe(tool, "update_plan", get_args).await {
         Ok(r) if r.success => r,
         _ => return 0,
     };
@@ -467,9 +542,8 @@ async fn auto_finalize_incomplete_plan_steps(
         return 0;
     }
 
-    let aggregate_text = build_intent_text_window(recent_assistant_text, history_for_intent);
     let intent = crate::agent::plan_mode::execution_enforcement::classify_auto_finalize_intent(
-        &aggregate_text,
+        intent_window,
     );
     let assume_completed = matches!(
         intent,
@@ -498,7 +572,7 @@ async fn auto_finalize_incomplete_plan_steps(
         let (status, note) = decide_auto_finalize_status(
             assume_completed,
             was_in_progress,
-            &aggregate_text,
+            intent_window,
         );
         let args = serde_json::json!({
             "action": "update",
@@ -519,10 +593,11 @@ async fn auto_finalize_incomplete_plan_steps(
                 .await;
         }
 
-        let (output, success) = match tool.execute(args.clone()).await {
-            Ok(r) => (r.output, r.success),
-            Err(e) => (format!("Auto-finalize update failed: {e}"), false),
-        };
+        let (output, success) =
+            match execute_tool_panic_safe(tool, "update_plan", args.clone()).await {
+                Ok(r) => (r.output, r.success),
+                Err(e) => (format!("Auto-finalize update failed: {e}"), false),
+            };
 
         if let Some(tx) = on_delta {
             let _ = tx
@@ -598,7 +673,7 @@ async fn emit_plan_progress_completion_card(
     };
     let tool = handle.as_tool();
     let get_args = serde_json::json!({ "action": "get" });
-    let snapshot = match tool.execute(get_args).await {
+    let snapshot = match execute_tool_panic_safe(tool, "update_plan", get_args).await {
         Ok(r) if r.success => r,
         _ => return,
     };
@@ -924,6 +999,15 @@ struct StreamedChatOutcome {
 
     usage: Option<crate::providers::traits::TokenUsage>,
     forwarded_live_deltas: bool,
+
+    pre_executed: Vec<PreExecutedToolRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct PreExecutedToolRecord {
+    name: String,
+    args: String,
+    output: Option<String>,
 }
 
 fn looks_like_streamed_tool_payload(window: &str) -> bool {
@@ -948,6 +1032,40 @@ fn retry_friendly_message(notice: &crate::providers::traits::RetryNotice) -> Str
             "{provider} 网络瞬时错误，正在自动重试…"
         ),
     }
+}
+
+const LLM_RESILIENCE_MAX_RETRIES: u32 = 600;
+const LLM_RESILIENCE_BACKOFF_BASE_MS: u64 = 1_000;
+const LLM_RESILIENCE_BACKOFF_CAP_MS: u64 = 15_000;
+
+fn llm_resilience_backoff_ms(attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(20);
+    let raw = LLM_RESILIENCE_BACKOFF_BASE_MS.saturating_mul(1u64 << shift);
+    let capped = raw.min(LLM_RESILIENCE_BACKOFF_CAP_MS);
+    let jitter_seed = attempt.wrapping_mul(2_654_435_761);
+    let jitter_ratio = 1.0 + ((jitter_seed as f64 / u32::MAX as f64) - 0.5) * 0.4;
+    ((capped as f64 * jitter_ratio).max(0.0) as u64).min(LLM_RESILIENCE_BACKOFF_CAP_MS)
+}
+
+fn llm_error_is_terminal(err: &anyhow::Error) -> bool {
+    if crate::providers::reliable::is_non_retryable(err) {
+        return true;
+    }
+    if crate::providers::reliable::is_context_window_exceeded(err) {
+        return true;
+    }
+    let lower = err.to_string().to_lowercase();
+    const TERMINAL_HINTS: &[&str] = &[
+        "non-retryable",
+        "non_retryable",
+        "verify provider credentials",
+        "request exceeds model context window",
+        "exceeds the context window",
+        "no provider supports streaming",
+        "no_model_configured",
+        "no model configured",
+    ];
+    TERMINAL_HINTS.iter().any(|h| lower.contains(h))
 }
 
 async fn call_provider_chat(
@@ -1056,8 +1174,57 @@ async fn consume_provider_streaming_response(
                     outcome.forwarded_live_deltas = false;
                 }
             }
-            StreamEvent::PreExecutedToolCall { .. } | StreamEvent::PreExecutedToolResult { .. } => {
-
+            StreamEvent::PreExecutedToolCall { name, args } => {
+                let parsed_args = serde_json::from_str::<serde_json::Value>(&args)
+                    .unwrap_or_else(|_| serde_json::Value::String(args.clone()));
+                if let Some(tx) = delta_sender {
+                    if tx
+                        .send(DraftEvent::ToolCall {
+                            name: name.clone(),
+                            args: parsed_args,
+                            tool_call_id: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        delta_sender = None;
+                    }
+                }
+                outcome.pre_executed.push(PreExecutedToolRecord {
+                    name,
+                    args,
+                    output: None,
+                });
+            }
+            StreamEvent::PreExecutedToolResult { name, output } => {
+                if let Some(tx) = delta_sender {
+                    if tx
+                        .send(DraftEvent::ToolResult {
+                            name: name.clone(),
+                            output: output.clone(),
+                            success: true,
+                            tool_call_id: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        delta_sender = None;
+                    }
+                }
+                if let Some(rec) = outcome
+                    .pre_executed
+                    .iter_mut()
+                    .rev()
+                    .find(|r| r.name == name && r.output.is_none())
+                {
+                    rec.output = Some(output);
+                } else {
+                    outcome.pre_executed.push(PreExecutedToolRecord {
+                        name,
+                        args: String::new(),
+                        output: Some(output),
+                    });
+                }
             }
             StreamEvent::Usage(usage) => {
 
@@ -1104,11 +1271,28 @@ async fn consume_provider_streaming_response(
                 }
                 outcome.response_text.clear();
                 outcome.reasoning_content.clear();
+                outcome.tool_calls.clear();
+                outcome.pre_executed.clear();
                 marker_window.clear();
                 suppress_forwarding = false;
                 think_splitter = crate::agent::think_extractor::ThinkTagSplitter::new();
             }
             StreamEvent::TextDelta(chunk) => {
+
+                if outcome.response_text.len() + outcome.reasoning_content.len()
+                    > MAX_STREAM_RESPONSE_BYTES
+                {
+                    tracing::warn!(
+                        bytes = outcome.response_text.len() + outcome.reasoning_content.len(),
+                        max = MAX_STREAM_RESPONSE_BYTES,
+                        "LLM stream exceeded max response size; aborting turn to avoid presenting truncated output as complete"
+                    );
+                    return Err(anyhow::Error::new(
+                        crate::error::AgentError::StreamInterrupted(format!(
+                            "LLM stream exceeded max response size ({MAX_STREAM_RESPONSE_BYTES} bytes); aborting to avoid silently truncated output"
+                        )),
+                    ));
+                }
 
                 if let Some(rc) = &chunk.reasoning {
                     if !rc.is_empty() {
@@ -1266,8 +1450,8 @@ fn maybe_inject_channel_delivery_defaults(
         None => {
             args.insert("delivery".to_string(), default_delivery());
         }
-        Some(serde_json::Value::Null) => {
-            *args.get_mut("delivery").expect("delivery key exists") = default_delivery();
+        Some(slot @ serde_json::Value::Null) => {
+            *slot = default_delivery();
         }
         Some(serde_json::Value::Object(delivery)) => {
             if delivery
@@ -1381,11 +1565,9 @@ async fn execute_one_tool(
         }
     }
 
-    let coding_label = crate::services::try_get_services()
-        .map(|svc| svc.coding_mode.read().label().to_string());
+    let coding_label = Some(crate::agent::coding_mode::active_coding_mode().label().to_string());
     let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
-    let perm_mode_lc =
-        crate::gateway::ws::desktop::desktop_runtime_state().permission_mode();
+    let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
     let tool_lc = call_name.to_ascii_lowercase();
     let guardrail_ctx = crate::guardrails::GuardrailContext {
         coding_mode: coding_label_lc.as_deref(),
@@ -1479,15 +1661,64 @@ async fn execute_one_tool(
         None
     };
 
+    let tool_timeout = crate::services::try_get_services()
+        .and_then(|svc| svc.config().pacing.tool_timeout_secs)
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs);
+
     let tool_future =
         std::panic::AssertUnwindSafe(tool.execute(call_arguments)).catch_unwind();
+
+    let run_with_optional_timeout = async {
+        match tool_timeout {
+            Some(limit) => match tokio::time::timeout(limit, tool_future).await {
+                Ok(result) => Some(result),
+                Err(_) => None,
+            },
+            None => Some(tool_future.await),
+        }
+    };
+
     let caught = if let Some(token) = cancellation_token {
         tokio::select! {
             () = token.cancelled() => return Err(tool_loop_cancelled()),
-            result = tool_future => result,
+            result = run_with_optional_timeout => result,
         }
     } else {
-        tool_future.await
+        run_with_optional_timeout.await
+    };
+
+    let Some(caught) = caught else {
+        let duration = start.elapsed();
+        let limit_secs = tool_timeout.map(|d| d.as_secs()).unwrap_or(0);
+        let reason = format!(
+            "Tool '{call_name}' timed out after {limit_secs}s (pacing.tool_timeout_secs). \
+             The operation was aborted. Retry with a smaller/faster scope, or split it into steps."
+        );
+        tracing::warn!(
+            target: "agent.tool",
+            tool = %call_name,
+            timeout_secs = limit_secs,
+            "tool execution timed out; recovering as a tool error so the turn keeps running"
+        );
+        observer.record_event(&ObserverEvent::ToolCall {
+            tool: call_name.to_string(),
+            duration,
+            success: false,
+        });
+        if let Some(svc) = crate::services::try_get_services() {
+            crate::observability::agent_metrics::inc_tool_call(
+                &svc.agent_metrics,
+                call_name,
+                "timeout",
+            );
+        }
+        return Ok(ToolExecutionOutcome {
+            output: reason.clone(),
+            success: false,
+            error_reason: Some(reason),
+            duration,
+        });
     };
     let tool_result = match caught {
         Ok(inner) => inner,
@@ -1785,7 +2016,31 @@ async fn execute_tools_parallel(
         .collect();
 
     let results = futures_util::future::join_all(futures).await;
-    results.into_iter().collect()
+
+    if cancellation_token.is_some_and(|t| t.is_cancelled()) {
+        return Err(tool_loop_cancelled());
+    }
+
+    let mut outcomes = Vec::with_capacity(results.len());
+    for (call, res) in tool_calls.iter().zip(results) {
+        match res {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(e) => {
+                tracing::warn!(
+                    target: "agent.tool",
+                    tool = %call.name,
+                    "tool failed unexpectedly; preserving batch and recording failure: {e}"
+                );
+                outcomes.push(ToolExecutionOutcome {
+                    output: format!("tool '{}' failed: {e}", call.name),
+                    success: false,
+                    error_reason: Some(e.to_string()),
+                    duration: Duration::ZERO,
+                });
+            }
+        }
+    }
+    Ok(outcomes)
 }
 
 async fn execute_tools_sequential(
@@ -1801,24 +2056,41 @@ async fn execute_tools_sequential(
     let mut outcomes = Vec::with_capacity(tool_calls.len());
 
     for call in tool_calls {
-        outcomes.push(
-            CURRENT_TOOL_CALL_ID
-                .scope(call.tool_call_id.clone(), async {
-                    execute_one_tool(
-                        &call.name,
-                        call.arguments.clone(),
-                        tools_registry,
-                        tool_registry,
-                        activated_tools,
-                        observer,
-                        cancellation_token,
-                        rbac_engine,
-                        rbac_identity,
-                    )
-                    .await
-                })
-                .await?,
-        );
+        let res = CURRENT_TOOL_CALL_ID
+            .scope(call.tool_call_id.clone(), async {
+                execute_one_tool(
+                    &call.name,
+                    call.arguments.clone(),
+                    tools_registry,
+                    tool_registry,
+                    activated_tools,
+                    observer,
+                    cancellation_token,
+                    rbac_engine,
+                    rbac_identity,
+                )
+                .await
+            })
+            .await;
+        match res {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(e) => {
+                if cancellation_token.is_some_and(|t| t.is_cancelled()) {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    target: "agent.tool",
+                    tool = %call.name,
+                    "tool failed unexpectedly; preserving batch and recording failure: {e}"
+                );
+                outcomes.push(ToolExecutionOutcome {
+                    output: format!("tool '{}' failed: {e}", call.name),
+                    success: false,
+                    error_reason: Some(e.to_string()),
+                    duration: Duration::ZERO,
+                });
+            }
+        }
     }
 
     Ok(outcomes)
@@ -1853,6 +2125,35 @@ async fn fire_post_turn_hooks(
     if let Some(hook) = memory_session_hook {
         hook.on_turn_end(final_text, tools_used).await;
     }
+    if !tool_results.is_empty() {
+        let records: Vec<crate::services::agent_summary::ToolUsageRecord> = tool_results
+            .iter()
+            .map(|(name, success)| crate::services::agent_summary::ToolUsageRecord {
+                tool_name: name.clone(),
+                description: String::new(),
+                duration_ms: 0,
+                success: *success,
+                is_write_operation: !crate::security::permissions::is_read_only_tool(name),
+            })
+            .collect();
+        let session_id = crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .unwrap_or_default();
+        let summary = crate::services::agent_summary::AgentSummaryService::summarize(
+            &session_id,
+            &records,
+            &[],
+            crate::services::agent_summary::SummaryGranularity::Standard,
+        );
+        tracing::info!(
+            target: "agent.turn_summary",
+            session_id = %summary.session_id,
+            tasks_completed = summary.tasks_completed,
+            tasks_pending = summary.tasks_pending,
+            "{}",
+            summary.summary_text
+        );
+    }
 }
 
 pub(crate) async fn run_unified_loop_impl(
@@ -1860,6 +2161,7 @@ pub(crate) async fn run_unified_loop_impl(
     history: &mut Vec<ChatMessage>,
 ) -> Result<String> {
     let _sleep_guard = crate::services::prevent_sleep::SleepInhibitor::acquire("agent turn");
+    let _activity_guard = crate::agent::activity::begin_turn();
     let crate::agent::loop_::policy::PolicyBundle {
         origin: _,
         provider,
@@ -1946,12 +2248,7 @@ pub(crate) async fn run_unified_loop_impl(
         }
     }
 
-    let mode_max = if let Some(svc) = crate::services::try_get_services() {
-        let mode = *svc.coding_mode.read();
-        mode.max_iterations_override()
-    } else {
-        0
-    };
+    let mode_max = crate::agent::coding_mode::active_coding_mode().max_iterations_override();
     let max_iterations = if mode_max > 0 {
         mode_max
     } else if max_tool_iterations == 0 {
@@ -2016,7 +2313,7 @@ pub(crate) async fn run_unified_loop_impl(
     let mut awaiting_user_input = false;
 
     if let Some(svc) = crate::services::try_get_services() {
-        let mode = *svc.coding_mode.read();
+        let mode = crate::agent::coding_mode::active_coding_mode();
         if let Some(reminder) = crate::agent::mode::effects::pre_turn_reminder(mode) {
             crate::agent::mode::effects::replace_or_push_system_reminder(
                 history,
@@ -2060,6 +2357,12 @@ pub(crate) async fn run_unified_loop_impl(
         }
     }
 
+    let mut loop_recovery_used = 0usize;
+    const MAX_LOOP_RECOVERY: usize = 2;
+
+    let mut parse_issue_nudges_used = 0usize;
+    const MAX_PARSE_ISSUE_NUDGES: usize = 2;
+
     for iteration in 0..max_iterations {
         if let Err(budget_exceeded) = _pacing_gov.tick() {
             tracing::warn!(
@@ -2087,6 +2390,30 @@ pub(crate) async fn run_unified_loop_impl(
             .is_some_and(CancellationToken::is_cancelled)
         {
             return Err(tool_loop_cancelled());
+        }
+
+        if on_delta.as_ref().is_some_and(|tx| tx.is_closed()) {
+            let user_cancelled = cancellation_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled);
+            if user_cancelled {
+                tracing::info!(
+                    target: "agent.loop",
+                    turn_id = %turn_id,
+                    "event receiver dropped after user cancellation; ending turn"
+                );
+                return Err(tool_loop_cancelled());
+            }
+            tracing::info!(
+                target: "agent.loop",
+                turn_id = %turn_id,
+                "event receiver dropped without user cancellation; ending turn to avoid orphaned background execution"
+            );
+            return Err(anyhow::Error::new(
+                crate::error::AgentError::StreamInterrupted(
+                    "event consumer disconnected before the turn completed".to_string(),
+                ),
+            ));
         }
 
         if let Some(hook) = &iteration_context_budget_hook {
@@ -2134,7 +2461,7 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         if let Some(svc) = crate::services::try_get_services() {
-            let mode = *svc.coding_mode.read();
+            let mode = crate::agent::coding_mode::active_coding_mode();
             let max_ctx = svc.get_max_context_tokens();
             if let Some(budget_msg) =
                 crate::agent::mode::effects::build_context_budget_message(mode, history, max_ctx)
@@ -2147,12 +2474,7 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         let coding_mode_allowlist: Option<HashSet<&str>> =
-            if let Some(svc) = crate::services::try_get_services() {
-                let mode = *svc.coding_mode.read();
-                mode.allowed_tools()
-            } else {
-                None
-            };
+            crate::agent::coding_mode::active_coding_mode().allowed_tools();
         let plan_mode_active = plan_mode_flag.map_or(false, |f| *f.read());
 
         let mode_hash = {
@@ -2169,7 +2491,7 @@ pub(crate) async fn run_unified_loop_impl(
         let deferred_builtin_names: Option<HashSet<String>> =
             if coding_mode_allowlist.is_none() && !plan_mode_active {
                 crate::services::try_get_services()
-                    .map(|svc| svc.deferred_builtin_names.read().clone())
+                    .map(|svc| svc.deferred_builtin_names_snapshot())
                     .filter(|s| !s.is_empty())
             } else {
                 None
@@ -2237,30 +2559,65 @@ pub(crate) async fn run_unified_loop_impl(
         let vision_provider_box: Option<Box<dyn Provider>> = if image_marker_count > 0
             && !provider.supports_vision()
         {
-            if let Some(ref vp) = multimodal_config.vision_provider {
-                let vp_instance = providers::create_provider_async(vp.clone(), None)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("failed to create vision provider '{vp}': {e}"))?;
-                if !vp_instance.supports_vision() {
-                    return Err(ProviderCapabilityError {
-                        provider: vp.clone(),
-                        capability: "vision".to_string(),
-                        message: format!(
-                            "configured vision_provider '{vp}' does not support vision input"
-                        ),
+            let configured_vp = multimodal_config.vision_provider.clone();
+            let usable_vp: Option<Box<dyn Provider>> = match configured_vp {
+                Some(ref vp) => match providers::create_provider_async(vp.clone(), None).await {
+                    Ok(instance) if instance.supports_vision() => Some(instance),
+                    Ok(_) => {
+                        tracing::warn!(
+                            target: "agent.loop.vision",
+                            turn_id = %turn_id,
+                            vision_provider = %vp,
+                            "configured vision_provider does not support vision input; degrading images to text instead of failing the turn"
+                        );
+                        None
                     }
-                    .into());
-                }
-                Some(vp_instance)
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "agent.loop.vision",
+                            turn_id = %turn_id,
+                            vision_provider = %vp,
+                            error = %e,
+                            "failed to create configured vision_provider; degrading images to text instead of failing the turn"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            if usable_vp.is_some() {
+                usable_vp
             } else {
-                return Err(ProviderCapabilityError {
-                        provider: provider_name.to_string(),
-                        capability: "vision".to_string(),
-                        message: format!(
-                            "received {image_marker_count} image marker(s), but this provider does not support vision input"
-                        ),
+                if configured_vp.is_none() {
+                    tracing::warn!(
+                        target: "agent.loop.vision",
+                        turn_id = %turn_id,
+                        provider = provider_name,
+                        model = model,
+                        image_markers = image_marker_count,
+                        "provider lacks vision support and no vision_provider configured; degrading images to text placeholders instead of failing the turn"
+                    );
+                }
+                for msg in history.iter_mut() {
+                    if msg.role != "user" {
+                        continue;
                     }
-                    .into());
+                    let (cleaned, refs) = multimodal::parse_image_markers(&msg.content);
+                    if refs.is_empty() {
+                        continue;
+                    }
+                    let note = format!(
+                        "[{} image(s) omitted: model '{model}' has no usable vision support]",
+                        refs.len()
+                    );
+                    msg.content = if cleaned.is_empty() {
+                        note
+                    } else {
+                        format!("{cleaned}\n\n{note}")
+                    };
+                }
+                None
             }
         } else {
             None
@@ -2292,19 +2649,58 @@ pub(crate) async fn run_unified_loop_impl(
                 );
                 let preserved_user_indices: Vec<usize> = history
                     .iter()
-                    .rposition(|m| m.role == "user")
+                    .rposition(|m| m.role == "user" && m.content.contains("[CURRENT REQUEST"))
+                    .or_else(|| history.iter().rposition(|m| m.role == "user"))
                     .map(|idx| vec![idx])
                     .unwrap_or_default();
-                match compressor
-                    .compress_if_needed_with_preserved(
+                if let Some(ref tx) = on_delta {
+                    let _ = tx
+                        .send(DraftEvent::Progress(
+                            "正在压缩对话上下文以适配模型窗口…".to_string(),
+                        ))
+                        .await;
+                }
+                let progress_cb: Option<
+                    Box<crate::agent::context::compressor::CompressionProgressFn>,
+                > = on_delta.as_ref().map(|tx| {
+                    let tx = tx.clone();
+                    Box::new(
+                        move |p: crate::agent::context::compressor::CompressionProgress| {
+                            let _ = tx.try_send(DraftEvent::Progress(format!(
+                                "正在压缩对话上下文（第 {}/{} 轮，约 {} → 目标 {} tokens）…",
+                                p.pass, p.max_passes, p.tokens_current, p.tokens_target,
+                            )));
+                        },
+                    )
+                        as Box<crate::agent::context::compressor::CompressionProgressFn>
+                });
+                let compress_outcome = {
+                    let compress_fut = compressor.compress_if_needed_with_progress(
                         history,
                         provider,
                         model,
                         &preserved_user_indices,
-                    )
-                    .await
-                {
-                    Ok(result) if result.compressed => {
+                        progress_cb.as_deref(),
+                    );
+                    if let Some(token) = cancellation_token.as_ref() {
+                        tokio::select! {
+                            () = token.cancelled() => None,
+                            r = compress_fut => Some(r),
+                        }
+                    } else {
+                        Some(compress_fut.await)
+                    }
+                };
+                match compress_outcome {
+                    None => {
+                        tracing::info!(
+                            target: "agent.context.compress",
+                            turn_id = %turn_id,
+                            "context compression cancelled by user; aborting turn"
+                        );
+                        return Err(tool_loop_cancelled());
+                    }
+                    Some(Ok(result)) if result.compressed => {
                         if let Some(ref tx) = on_delta {
                             let _ = tx
                                 .send(DraftEvent::ContextCompressed {
@@ -2321,8 +2717,8 @@ pub(crate) async fn run_unified_loop_impl(
                             "history compressed before LLM call"
                         );
                     }
-                    Ok(_) => {}
-                    Err(err) => {
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => {
                         tracing::warn!(
                             target: "agent.context.compress",
                             error = %err,
@@ -2336,11 +2732,9 @@ pub(crate) async fn run_unified_loop_impl(
         let mut prepared_messages =
             multimodal::prepare_messages_for_provider(history, multimodal_config).await?;
 
-        let active_coding_mode = crate::services::try_get_services()
-            .map(|svc| *svc.coding_mode.read())
-            .unwrap_or(crate::agent::coding_mode::CodingMode::Debug);
+        let active_mode = crate::agent::coding_mode::active_coding_mode();
         let sanitization_report = apply_outgoing_pii_sanitization(
-            Some(active_coding_mode),
+            Some(active_mode),
             &mut prepared_messages.messages,
         );
         if !sanitization_report.is_empty() {
@@ -2406,12 +2800,16 @@ pub(crate) async fn run_unified_loop_impl(
             period,
         }) = check_tool_loop_budget(None)
         {
-            return Err(anyhow::Error::new(crate::error::AgentError::CostBudgetExceeded(
-                format!(
-                    "Budget exceeded: ${:.4} of ${:.2} {:?} limit. Cannot make further API calls until the budget resets.",
-                    current_usd, limit_usd, period
-                ),
-            )));
+            let budget_text = format!(
+                "\u{1f4b0} 已达成本预算上限（${:.4} / ${:.2} {:?}）。本轮在此安全停止，预算重置后可继续对话。",
+                current_usd, limit_usd, period
+            );
+            _turn_metrics.mark_ok();
+            history.push(ChatMessage::assistant(budget_text.clone()));
+            if let Some(ref tx) = on_delta {
+                let _ = tx.send(DraftEvent::Content(budget_text.clone())).await;
+            }
+            return Ok(budget_text);
         }
 
         if let Some(svc) = crate::services::try_get_services() {
@@ -2448,12 +2846,14 @@ pub(crate) async fn run_unified_loop_impl(
         );
         let mut streamed_live_deltas = false;
 
-        let chat_result = if should_consume_provider_stream {
+        let mut llm_resilience_attempt: u32 = 0;
+        let chat_result = 'llm_attempt: loop {
+        let attempt_result = if should_consume_provider_stream {
             let stream_idle_timeout = pacing
                 .stream_idle_timeout_secs
                 .filter(|s| *s > 0)
                 .map(Duration::from_secs);
-            match consume_provider_streaming_response(
+            let stream_fut = consume_provider_streaming_response(
                 active_provider,
                 &prepared_messages.messages,
                 request_tools,
@@ -2462,11 +2862,37 @@ pub(crate) async fn run_unified_loop_impl(
                 cancellation_token.as_ref(),
                 on_delta.as_ref(),
                 stream_idle_timeout,
-            )
-            .await
+            );
+            let consume_result = match pacing.step_timeout_secs {
+                Some(step_secs) if step_secs > 0 => {
+                    match tokio::time::timeout(Duration::from_secs(step_secs), stream_fut).await {
+                        Ok(inner) => inner,
+                        Err(_) => Err(anyhow::anyhow!(
+                            "LLM streaming step timed out after {step_secs}s (step_timeout_secs)"
+                        )),
+                    }
+                }
+                _ => stream_fut.await,
+            };
+            match consume_result
             {
                 Ok(streamed) => {
                     streamed_live_deltas = streamed.forwarded_live_deltas;
+
+                    for rec in &streamed.pre_executed {
+                        let call_line = if rec.args.is_empty() {
+                            format!("[proxy executed tool: {}]", rec.name)
+                        } else {
+                            format!("[proxy executed tool: {} with arguments {}]", rec.name, rec.args)
+                        };
+                        history.push(ChatMessage::assistant(call_line));
+                        if let Some(output) = &rec.output {
+                            history.push(ChatMessage::tool(format!(
+                                "[tool {} result]\n{}",
+                                rec.name, output
+                            )));
+                        }
+                    }
 
                     let reasoning_content = if !streamed.reasoning_content.is_empty() {
                         Some(streamed.reasoning_content)
@@ -2539,18 +2965,18 @@ pub(crate) async fn run_unified_loop_impl(
                             result = tokio::time::timeout(step_timeout, chat_future) => {
                                 match result {
                                     Ok(inner) => inner,
-                                    Err(_) => anyhow::bail!(
+                                    Err(_) => Err(anyhow::anyhow!(
                                         "LLM inference step timed out after {step_secs}s (step_timeout_secs)"
-                                    ),
+                                    )),
                                 }
                             },
                         }
                     } else {
                         match tokio::time::timeout(step_timeout, chat_future).await {
                             Ok(inner) => inner,
-                            Err(_) => anyhow::bail!(
+                            Err(_) => Err(anyhow::anyhow!(
                                 "LLM inference step timed out after {step_secs}s (step_timeout_secs)"
-                            ),
+                            )),
                         }
                     }
                 }
@@ -2563,6 +2989,66 @@ pub(crate) async fn run_unified_loop_impl(
                     } else {
                         chat_future.await
                     }
+                }
+            }
+        };
+
+            match attempt_result {
+                Ok(resp) => break 'llm_attempt Ok(resp),
+                Err(e) => {
+                    if cancellation_token
+                        .as_ref()
+                        .is_some_and(|t| t.is_cancelled())
+                    {
+                        break 'llm_attempt Err(tool_loop_cancelled());
+                    }
+                    if llm_error_is_terminal(&e) {
+                        break 'llm_attempt Err(e);
+                    }
+                    llm_resilience_attempt += 1;
+                    if llm_resilience_attempt > LLM_RESILIENCE_MAX_RETRIES {
+                        break 'llm_attempt Err(e);
+                    }
+                    let backoff_ms = llm_resilience_backoff_ms(llm_resilience_attempt);
+                    let err_summary = crate::providers::sanitize_api_error(&e.to_string());
+                    tracing::warn!(
+                        target: "agent.loop.resilience",
+                        turn_id = %turn_id,
+                        provider = active_provider_name,
+                        model = active_model,
+                        attempt = llm_resilience_attempt,
+                        max_attempts = LLM_RESILIENCE_MAX_RETRIES,
+                        backoff_ms,
+                        error = %err_summary,
+                        "LLM call failed with a recoverable error; keeping turn alive and retrying instead of aborting"
+                    );
+                    if let Some(ref tx) = on_delta {
+                        let _ = tx.send(DraftEvent::Clear).await;
+                        let _ = tx
+                            .send(DraftEvent::ProviderRetry {
+                                attempt: llm_resilience_attempt,
+                                max_attempts: LLM_RESILIENCE_MAX_RETRIES,
+                                wait_ms: backoff_ms,
+                                class: "transient".to_string(),
+                                provider: active_provider_name.to_string(),
+                                model: active_model.to_string(),
+                                message: format!(
+                                    "{active_provider_name} 连接异常，正在自动恢复并重试（第 {llm_resilience_attempt} 次）…"
+                                ),
+                            })
+                            .await;
+                    }
+                    let sleep_dur = Duration::from_millis(backoff_ms);
+                    if let Some(token) = cancellation_token.as_ref() {
+                        tokio::select! {
+                            biased;
+                            () = token.cancelled() => break 'llm_attempt Err(tool_loop_cancelled()),
+                            () = tokio::time::sleep(sleep_dur) => {}
+                        }
+                    } else {
+                        tokio::time::sleep(sleep_dur).await;
+                    }
+                    continue 'llm_attempt;
                 }
             }
         };
@@ -2768,6 +3254,30 @@ pub(crate) async fn run_unified_loop_impl(
 
         if tool_calls.is_empty() {
 
+            if _parse_issue_detected
+                && parse_issue_nudges_used < MAX_PARSE_ISSUE_NUDGES
+            {
+                parse_issue_nudges_used += 1;
+                tracing::info!(
+                    target: "agent.loop",
+                    turn_id = %turn_id,
+                    nudge = parse_issue_nudges_used,
+                    max = MAX_PARSE_ISSUE_NUDGES,
+                    "response looked like a tool call but parsed empty; injecting nudge and continuing instead of ending the turn"
+                );
+                if !response_text.trim().is_empty() {
+                    history.push(ChatMessage::assistant(&response_text));
+                }
+                history.push(ChatMessage::system(
+                    "Your previous message looked like it was trying to call a tool, but the tool call could not be parsed. \
+                     Re-issue the tool call using the exact required format: a single JSON object wrapped in <tool_call></tool_call> tags, \
+                     for example <tool_call>{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}</tool_call>. \
+                     If you did not intend to call a tool, reply with your final answer as plain text without any <tool_call> tags."
+                        .to_string(),
+                ));
+                continue;
+            }
+
             let in_plan_mode =
                 crate::agent::plan_mode::enforcement::detect_plan_mode_active(
                     plan_mode_flag,
@@ -2919,14 +3429,13 @@ pub(crate) async fn run_unified_loop_impl(
                     if crate::agent::plan_mode::execution_enforcement::should_auto_finalize_on_exit(
                         &plan_exec_nudge_state,
                     ) {
-                        let history_for_intent_snapshot = history.clone();
+                        let intent_window = build_intent_text_window(&display_text, history);
                         let finalized = auto_finalize_incomplete_plan_steps(
                             tools_registry,
                             tool_registry,
                             on_delta.as_ref(),
                             history,
-                            &display_text,
-                            &history_for_intent_snapshot,
+                            &intent_window,
                         )
                         .await;
                         plan_exec_nudge_state.terminal_count = plan_exec_nudge_state
@@ -2985,14 +3494,13 @@ pub(crate) async fn run_unified_loop_impl(
             if crate::agent::plan_mode::execution_enforcement::should_auto_finalize_on_exit(
                 &plan_exec_nudge_state,
             ) {
-                let history_for_intent_snapshot = history.clone();
+                let intent_window = build_intent_text_window(&display_text, history);
                 let finalized = auto_finalize_incomplete_plan_steps(
                     tools_registry,
                     tool_registry,
                     on_delta.as_ref(),
                     history,
-                    &display_text,
-                    &history_for_intent_snapshot,
+                    &intent_window,
                 )
                 .await;
                 plan_exec_nudge_state.terminal_count = plan_exec_nudge_state
@@ -3167,11 +3675,11 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_reply_target,
             );
 
-            let intercept = crate::services::try_get_services().and_then(|svc| {
-                let mode = *svc.coding_mode.read();
+            let intercept = {
+                let mode = crate::agent::coding_mode::active_coding_mode();
                 crate::agent::mode::effects::mode_blocks_tool(mode, &tool_name)
                     .map(|reason| (mode, reason))
-            });
+            };
             if let Some((intercepted_mode, reason)) = intercept {
                 crate::agent::mode::effects::record_mode_intercept(
                     crate::agent::mode::effects::ModeInterceptReason::ReadOnlyPolicy,
@@ -3209,9 +3717,9 @@ pub(crate) async fn run_unified_loop_impl(
                 continue;
             }
 
-            let mode_auto_approved = crate::services::try_get_services()
-                .map(|svc| crate::agent::mode::effects::mode_auto_approves(*svc.coding_mode.read()))
-                .unwrap_or(false);
+            let mode_auto_approved = crate::agent::mode::effects::mode_auto_approves(
+                crate::agent::coding_mode::active_coding_mode(),
+            );
 
             if let Some(mgr) = approval {
                 if !mode_auto_approved && mgr.needs_approval(&tool_name) {
@@ -3321,13 +3829,22 @@ pub(crate) async fn run_unified_loop_impl(
                         true,
                     );
                     if consecutive_failures >= 4 {
-                        return Err(anyhow::Error::new(crate::error::AgentError::LoopAborted(
-                            format!(
-                                "tool '{}' refused after {} identical failures",
-                                tool_name,
-                                consecutive_failures + 1
-                            ),
-                        )));
+                        let abort_msg = format!(
+                            "tool '{}' refused after {} identical failures",
+                            tool_name,
+                            consecutive_failures + 1
+                        );
+                        if loop_recovery_used >= MAX_LOOP_RECOVERY {
+                            _turn_metrics.mark_status("aborted");
+                            return Ok(finalize_loop_recovery(
+                                &abort_msg,
+                                history,
+                                on_delta.as_ref(),
+                            )
+                            .await);
+                        }
+                        loop_recovery_used += 1;
+                        history.push(ChatMessage::system(loop_recovery_nudge(&abort_msg)));
                     }
                     continue;
                 }
@@ -3535,8 +4052,8 @@ pub(crate) async fn run_unified_loop_impl(
             if outcome.success
                 && crate::agent::mode::effects::is_file_mutation_tool(call.name.as_str())
             {
-                if let Some(svc) = crate::services::try_get_services() {
-                    let mode = *svc.coding_mode.read();
+                {
+                    let mode = crate::agent::coding_mode::active_coding_mode();
                     if let Some(nudge) =
                         crate::agent::mode::effects::file_mod_auto_verify_nudge(mode)
                     {
@@ -3658,9 +4175,17 @@ pub(crate) async fn run_unified_loop_impl(
                                 "tool": tool_name,
                             }),
                         );
-                        return Err(anyhow::Error::new(crate::error::AgentError::LoopAborted(
-                            msg.to_string(),
-                        )));
+                        if loop_recovery_used >= MAX_LOOP_RECOVERY {
+                            _turn_metrics.mark_status("aborted");
+                            return Ok(finalize_loop_recovery(
+                                &msg,
+                                history,
+                                on_delta.as_ref(),
+                            )
+                            .await);
+                        }
+                        loop_recovery_used += 1;
+                        deferred_system_after_tool_batch.push(loop_recovery_nudge(&msg));
                     }
                 }
             }
@@ -3865,9 +4390,19 @@ pub(crate) async fn run_unified_loop_impl(
                         "threshold": loop_state.identical_output_threshold(),
                     }),
                 );
-                return Err(anyhow::Error::new(crate::error::AgentError::LoopAborted(
-                    abort_msg.to_string(),
-                )));
+                let abort_text = abort_msg.to_string();
+                if loop_recovery_used >= MAX_LOOP_RECOVERY {
+                    _turn_metrics.mark_status("aborted");
+                    return Ok(finalize_loop_recovery(
+                        &abort_text,
+                        history,
+                        on_delta.as_ref(),
+                    )
+                    .await);
+                }
+                loop_recovery_used += 1;
+                history.push(ChatMessage::system(loop_recovery_nudge(&abort_text)));
+                continue;
             }
         }
 
@@ -3905,17 +4440,17 @@ pub(crate) async fn run_unified_loop_impl(
             history.push(ChatMessage::system(body));
         }
 
-        if let Some(svc) = crate::services::try_get_services() {
-            let mode = *svc.coding_mode.read();
+        {
+            let mode = crate::agent::coding_mode::active_coding_mode();
             if let Some(msg) = crate::agent::mode::effects::post_tool_batch_message(mode) {
                 history.push(ChatMessage::system(msg));
             }
         }
 
-        let pair_break_mode = crate::services::try_get_services().and_then(|svc| {
-            let mode = *svc.coding_mode.read();
+        let pair_break_mode = {
+            let mode = crate::agent::coding_mode::active_coding_mode();
             mode.breaks_turn_after_tool_batch().then_some(mode)
-        });
+        };
         if let Some(intercepted_mode) = pair_break_mode {
             let pair_text = "_Pair Checkpoint: tool batch complete. Pausing for your \
                 input  -  type to continue or redirect, or press the input box to send \
@@ -3978,14 +4513,13 @@ pub(crate) async fn run_unified_loop_impl(
     if crate::agent::plan_mode::execution_enforcement::should_auto_finalize_on_exit(
         &plan_exec_nudge_state,
     ) {
-        let history_for_intent_snapshot = history.clone();
+        let intent_window = build_intent_text_window("", history);
         let _ = auto_finalize_incomplete_plan_steps(
             tools_registry,
             tool_registry,
             on_delta.as_ref(),
             history,
-            "",
-            &history_for_intent_snapshot,
+            &intent_window,
         )
         .await;
     }
@@ -3996,18 +4530,47 @@ pub(crate) async fn run_unified_loop_impl(
         &plan_exec_nudge_state,
     )
     .await;
-    Err(anyhow::Error::new(
-        crate::error::AgentError::LoopOverflow(max_iterations),
-    ))
+    let overflow_text = format!(
+        "已达到本轮最大迭代步数（{max_iterations}），为避免无限循环在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+    );
+    _turn_metrics.mark_ok();
+    history.push(ChatMessage::assistant(overflow_text.clone()));
+    if let Some(ref tx) = on_delta {
+        let _ = tx.send(DraftEvent::Content(overflow_text.clone())).await;
+    }
+    Ok(overflow_text)
+}
+
+fn loop_recovery_nudge(reason: &str) -> String {
+    format!(
+        "[Loop Recovery] {reason}\n\nYou are repeating the same unproductive action. Do NOT repeat \
+         it verbatim. Take a fundamentally different approach; if you genuinely cannot make \
+         progress, stop and clearly summarize what you have done and what is blocking you, then \
+         wait for the user instead of looping."
+    )
+}
+
+async fn finalize_loop_recovery(
+    reason: &str,
+    history: &mut Vec<ChatMessage>,
+    on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
+) -> String {
+    let text = format!(
+        "\u{26a0}\u{fe0f} 已自动停止重复的无效操作：{reason}。\n\n为避免空转，我没有继续强行重复同一动作。\
+         请调整需求、补充信息或换一个方向，我会继续。"
+    );
+    history.push(ChatMessage::assistant(text.clone()));
+    if let Some(tx) = on_delta {
+        let _ = tx.send(DraftEvent::Content(text.clone())).await;
+    }
+    text
 }
 
 pub(crate) fn build_tool_instructions(
     tools_registry: &[Box<dyn Tool>],
     tool_descriptions: Option<&ToolDescriptions>,
 ) -> String {
-    let allowed = crate::services::try_get_services()
-        .map(|svc| *svc.coding_mode.read())
-        .and_then(|m| m.allowed_tools());
+    let allowed = crate::agent::coding_mode::active_coding_mode().allowed_tools();
     build_tool_instructions_filtered(tools_registry, tool_descriptions, allowed.as_ref())
 }
 
@@ -4112,7 +4675,12 @@ pub async fn run(
         svc.set_max_context_tokens(config.agent.max_context_tokens);
     }
 
-    crate::event_bus::integration::init_global_bus();
+    crate::event_bus::integration::init_global_bus(
+        config
+            .config_path
+            .parent()
+            .map(|p| p.join("event_audit.jsonl")),
+    );
 
     let mem: Arc<dyn Memory> = crate::agent::cli_runtime::build_memory(&config)?;
     tracing::info!(backend = mem.name(), "Memory initialized");
@@ -4317,11 +4885,12 @@ pub async fn run(
         crate::tools::DeferredBuiltinToolSet::new()
     };
     if let Some(svc) = crate::services::try_get_services() {
-        let mut guard = svc.deferred_builtin_names.write();
-        guard.clear();
-        for stub in &deferred_builtin_set.stubs {
-            guard.insert(stub.name.clone());
-        }
+        let names = deferred_builtin_set
+            .stubs
+            .iter()
+            .map(|stub| stub.name.clone())
+            .collect();
+        svc.set_deferred_builtin_names(names);
     }
     if let (Some(handle), Some(svc)) = (
         activated_handle.as_ref(),
@@ -4379,6 +4948,14 @@ pub async fn run(
 
     let _model_switch_callback = get_model_switch_state();
 
+    crate::agent::flows::set_global_agent_handle(std::sync::Arc::new(
+        crate::agent::flows::ProviderAgentHandle::new(
+            std::sync::Arc::clone(&provider),
+            model_name.clone(),
+            config.default_temperature,
+        ),
+    ));
+
     observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.to_string(),
         model: model_name.to_string(),
@@ -4396,14 +4973,24 @@ pub async fn run(
         let _ = crate::agent::multi_agent_runtime::init_global_runtime();
     }
 
-    let hardware_rag: Option<crate::rag::HardwareRag> = config
+    let hardware_rag: Option<crate::rag::HardwareRag> = if let Some(dir) = config
         .peripherals
         .datasheet_dir
         .as_ref()
         .filter(|d| !d.trim().is_empty())
-        .map(|dir| crate::rag::HardwareRag::load(&config.workspace_dir, dir.trim()))
+    {
+        let workspace_dir = config.workspace_dir.clone();
+        let datasheet_dir = dir.trim().to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::rag::HardwareRag::load(&workspace_dir, &datasheet_dir)
+        })
+        .await
+        .ok()
         .and_then(Result::ok)
-        .filter(|r: &crate::rag::HardwareRag| !r.is_empty());
+        .filter(|r: &crate::rag::HardwareRag| !r.is_empty())
+    } else {
+        None
+    };
     if let Some(ref rag) = hardware_rag {
         tracing::info!(chunks = rag.len(), "Hardware RAG loaded");
     }
@@ -4424,7 +5011,13 @@ pub async fn run(
     let i18n_search_dirs = crate::i18n::default_search_dirs(&config.workspace_dir);
     let i18n_descs = crate::i18n::ToolDescriptions::load(&i18n_locale, &i18n_search_dirs);
 
-    let skills = crate::skills::load_skills_with_config(&config.workspace_dir, &config);
+    let skills = {
+        let wd = config.workspace_dir.clone();
+        let cfg = config.clone();
+        tokio::task::spawn_blocking(move || crate::skills::load_skills_with_config(&wd, &cfg))
+            .await
+            .unwrap_or_default()
+    };
 
     tools::register_skill_tools(&mut tools_registry, &skills, security.clone());
 
@@ -4555,8 +5148,8 @@ pub async fn run(
         None
     };
     let native_tools = provider.supports_native_tools();
-    let coding_mode_label_owned = crate::services::try_get_services()
-        .map(|svc| svc.coding_mode.read().label().to_string());
+    let coding_mode_label_owned =
+        Some(crate::agent::coding_mode::active_coding_mode().label().to_string());
     let mut system_prompt = crate::channels::build_system_prompt_with_mode_and_autonomy(
         &config.workspace_dir,
         &model_name,
@@ -4590,8 +5183,8 @@ pub async fn run(
         }
     }
 
-    if let Some(svc) = crate::services::try_get_services() {
-        let mode = *svc.coding_mode.read();
+    {
+        let mode = crate::agent::coding_mode::active_coding_mode();
         let mode_prompt = mode.system_prompt_injection();
         system_prompt.push_str(&mode_prompt);
     }
@@ -4864,15 +5457,13 @@ pub async fn run(
                     let remaining_k = remaining / 1000;
                     format!(" \x1b[2m{remaining_k}k\x1b[0m")
                 };
-                let mode_badge = if let Some(svc) = crate::services::try_get_services() {
-                    let mode = *svc.coding_mode.read();
+                let mode_badge = {
+                    let mode = crate::agent::coding_mode::active_coding_mode();
                     if mode != crate::agent::coding_mode::CodingMode::Vibe {
                         format!(" \x1b[1;33m[{}]\x1b[0m", mode.display_name())
                     } else {
                         String::new()
                     }
-                } else {
-                    String::new()
                 };
                 let vim_badge = if crate::commands::vim::is_vim_enabled() {
                     " \x1b[1;35m[VIM]\x1b[0m"
@@ -4893,27 +5484,41 @@ pub async fn run(
             print!("{prompt_prefix}");
             let _ = std::io::stdout().flush();
 
-            let mut full_input = String::new();
-            loop {
-                let mut raw = Vec::new();
-                match std::io::BufRead::read_until(&mut std::io::stdin().lock(), b'\n', &mut raw) {
-                    Ok(0) => return Ok(final_output),
-                    Ok(_) => {
-                        let line = String::from_utf8_lossy(&raw);
-                        if full_input.is_empty() && line.trim_end().ends_with('\\') {
-                            full_input.push_str(line.trim_end().trim_end_matches('\\'));
-                            full_input.push('\n');
-                            continue;
+            let read_result = tokio::task::spawn_blocking(|| {
+                use std::io::BufRead;
+                let mut full_input = String::new();
+                loop {
+                    let mut raw = Vec::new();
+                    match std::io::stdin().lock().read_until(b'\n', &mut raw) {
+                        Ok(0) => return Ok(None),
+                        Ok(_) => {
+                            let line = String::from_utf8_lossy(&raw);
+                            if full_input.is_empty() && line.trim_end().ends_with('\\') {
+                                full_input.push_str(line.trim_end().trim_end_matches('\\'));
+                                full_input.push('\n');
+                                continue;
+                            }
+                            full_input.push_str(&line);
+                            return Ok(Some(full_input));
                         }
-                        full_input.push_str(&line);
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!("Read error: {e}");
-                        return Err(anyhow::anyhow!("{e}"));
+                        Err(e) => return Err(e),
                     }
                 }
-            }
+            })
+            .await;
+
+            let full_input = match read_result {
+                Ok(Ok(Some(input))) => input,
+                Ok(Ok(None)) => return Ok(final_output),
+                Ok(Err(e)) => {
+                    tracing::error!("Read error: {e}");
+                    return Err(anyhow::anyhow!("{e}"));
+                }
+                Err(join_err) => {
+                    tracing::error!("stdin read task failed: {join_err}");
+                    return Err(anyhow::anyhow!("{join_err}"));
+                }
+            };
 
             let effective_input = full_input.trim().to_string();
             if effective_input.is_empty() {
@@ -5306,11 +5911,12 @@ pub async fn process_message(
         crate::tools::DeferredBuiltinToolSet::new()
     };
     if let Some(svc) = crate::services::try_get_services() {
-        let mut guard = svc.deferred_builtin_names.write();
-        guard.clear();
-        for stub in &deferred_builtin_set_pm.stubs {
-            guard.insert(stub.name.clone());
-        }
+        let names = deferred_builtin_set_pm
+            .stubs
+            .iter()
+            .map(|stub| stub.name.clone())
+            .collect();
+        svc.set_deferred_builtin_names(names);
     }
     if let (Some(handle), Some(svc)) = (
         activated_handle_pm.as_ref(),
@@ -5353,14 +5959,24 @@ pub async fn process_message(
         .await?,
     );
 
-    let hardware_rag: Option<crate::rag::HardwareRag> = config
+    let hardware_rag: Option<crate::rag::HardwareRag> = if let Some(dir) = config
         .peripherals
         .datasheet_dir
         .as_ref()
         .filter(|d| !d.trim().is_empty())
-        .map(|dir| crate::rag::HardwareRag::load(&config.workspace_dir, dir.trim()))
+    {
+        let workspace_dir = config.workspace_dir.clone();
+        let datasheet_dir = dir.trim().to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::rag::HardwareRag::load(&workspace_dir, &datasheet_dir)
+        })
+        .await
+        .ok()
         .and_then(Result::ok)
-        .filter(|r: &crate::rag::HardwareRag| !r.is_empty());
+        .filter(|r: &crate::rag::HardwareRag| !r.is_empty())
+    } else {
+        None
+    };
     let board_names: Vec<String> = config
         .peripherals
         .boards
@@ -5377,7 +5993,13 @@ pub async fn process_message(
     let i18n_search_dirs = crate::i18n::default_search_dirs(&config.workspace_dir);
     let i18n_descs = crate::i18n::ToolDescriptions::load(&i18n_locale, &i18n_search_dirs);
 
-    let skills = crate::skills::load_skills_with_config(&config.workspace_dir, &config);
+    let skills = {
+        let wd = config.workspace_dir.clone();
+        let cfg = config.clone();
+        tokio::task::spawn_blocking(move || crate::skills::load_skills_with_config(&wd, &cfg))
+            .await
+            .unwrap_or_default()
+    };
 
     tools::register_skill_tools(&mut tools_registry, &skills, security.clone());
 
@@ -5455,8 +6077,8 @@ pub async fn process_message(
         None
     };
     let native_tools = provider.supports_native_tools();
-    let coding_mode_label_owned = crate::services::try_get_services()
-        .map(|svc| svc.coding_mode.read().label().to_string());
+    let coding_mode_label_owned =
+        Some(crate::agent::coding_mode::active_coding_mode().label().to_string());
     let mut system_prompt = crate::channels::build_system_prompt_with_mode_and_autonomy(
         &config.workspace_dir,
         &model_name,

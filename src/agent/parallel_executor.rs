@@ -386,7 +386,7 @@ impl ParallelExecutor {
                 metrics: metrics.clone(),
                 shutdown: shutdown.clone(),
             };
-            tokio::spawn(worker_loop(ctx));
+            crate::runtime::spawn_supervised("agent.parallel_executor.worker", worker_loop(ctx));
         }
 
         executor
@@ -682,7 +682,7 @@ async fn worker_loop(ctx: WorkerLoopContext) {
                 let metrics_clone = metrics.clone();
                 let worker_idx = idx;
 
-                tokio::spawn(async move {
+                crate::runtime::spawn_supervised("agent.parallel_executor.task", async move {
                     let start = busy_start;
                     let mut guard = RunningGuard::new(
                         running_clone,

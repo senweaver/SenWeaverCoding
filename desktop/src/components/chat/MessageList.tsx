@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useRef, useEffect, useMemo, memo, useState, useCallback } from 'react'
+import { useRef, useEffect, useLayoutEffect, useMemo, memo, useState, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionRewindResponse } from '../../api/sessions'
@@ -27,6 +27,7 @@ import { SubagentChunkBlock } from './SubagentChunkBlock'
 import { AskUserQuestion } from './AskUserQuestion'
 import { StreamingIndicator } from './StreamingIndicator'
 import { ProviderRetryBanner } from './ProviderRetryBanner'
+import { AgentTaskNotifications } from './AgentTaskNotifications'
 import { InlineTaskSummary } from './InlineTaskSummary'
 import { AnswersCard } from './AnswersCard'
 import { PlanCard } from './PlanCard'
@@ -194,6 +195,9 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
       if (isAskQuestionToolName(msg.toolName)) {
 
         flush()
+        if (toolResultMap.has(msg.toolUseId)) {
+          items.push({ kind: 'message', message: msg })
+        }
         emittedToolUseIds.add(msg.toolUseId)
         continue
       }
@@ -316,6 +320,9 @@ type MessageListProps = {
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 96
 const AUTO_SCROLL_RESUME_THRESHOLD_PX = 220
+const RENDER_WINDOW_INITIAL = 250
+const RENDER_WINDOW_STEP = 250
+const RENDER_WINDOW_TOP_THRESHOLD_PX = 240
 
 const EMPTY_MESSAGES: UIMessage[] = []
 
@@ -333,7 +340,7 @@ function isWithinResumeRange(element: HTMLElement) {
   )
 }
 
-export const MessageList = memo(function MessageList({ sessionId }: MessageListProps = {}) {
+export function MessageList({ sessionId }: MessageListProps = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const resolvedSessionId = sessionId ?? activeTabId
   const messages = useChatStore(
@@ -360,11 +367,6 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
   const pendingPermission = useChatStore((s) =>
     resolvedSessionId
       ? s.sessions[resolvedSessionId]?.pendingPermission ?? null
-      : null,
-  )
-  const pendingComputerUsePermission = useChatStore((s) =>
-    resolvedSessionId
-      ? s.sessions[resolvedSessionId]?.pendingComputerUsePermission ?? null
       : null,
   )
   const pendingRewind = useChatStore((s) =>
@@ -433,15 +435,43 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
 
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
 
+  const [renderCap, setRenderCap] = useState(RENDER_WINDOW_INITIAL)
+  const hasOlderRef = useRef(false)
+  const prependAnchorRef = useRef<{ prevHeight: number; prevTop: number } | null>(null)
+
   const updateAutoScrollState = useCallback(() => {
     const container = scrollContainerRef.current
     if (!container) return
+    if (
+      container.scrollTop < RENDER_WINDOW_TOP_THRESHOLD_PX &&
+      hasOlderRef.current &&
+      prependAnchorRef.current === null
+    ) {
+      prependAnchorRef.current = {
+        prevHeight: container.scrollHeight,
+        prevTop: container.scrollTop,
+      }
+      setRenderCap((c) => c + RENDER_WINDOW_STEP)
+    }
     const near = isNearScrollBottom(container)
     const withinResume = isWithinResumeRange(container)
     shouldAutoScrollRef.current = near || (shouldAutoScrollRef.current && withinResume)
     const showBtn = !shouldAutoScrollRef.current
     setShowScrollToBottom((prev) => (prev !== showBtn ? showBtn : prev))
   }, [])
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current
+    if (!anchor) return
+    const container = scrollContainerRef.current
+    if (!container) {
+      prependAnchorRef.current = null
+      return
+    }
+    const delta = container.scrollHeight - anchor.prevHeight
+    if (delta > 0) container.scrollTop = anchor.prevTop + delta
+    prependAnchorRef.current = null
+  }, [renderCap])
 
   const scheduleAutoScroll = useCallback(() => {
     if (!shouldAutoScrollRef.current) return
@@ -480,6 +510,8 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
       shouldAutoScrollRef.current = true
       lastSessionIdRef.current = resolvedSessionId
       setShowScrollToBottom(false)
+      prependAnchorRef.current = null
+      setRenderCap(RENDER_WINDOW_INITIAL)
     } else {
       const container = scrollContainerRef.current
       if (container && !shouldAutoScrollRef.current && isWithinResumeRange(container)) {
@@ -670,20 +702,25 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
     return next
   }, [childToolCallsByParent, toolResultMap])
 
-  const visibleRenderItems = useMemo(() => {
-    if (chatState !== 'idle') return renderItems
-    if (streamingText.trim().length > 0) return renderItems
+  const { visibleRenderItems, hasOlderItems } = useMemo(() => {
     let end = renderItems.length
-    while (end > 0) {
-      const item = renderItems[end - 1]!
-      if (item.kind === 'message' && item.message.type === 'thinking') {
-        end -= 1
-      } else {
-        break
+    if (chatState === 'idle' && streamingText.trim().length === 0) {
+      while (end > 0) {
+        const item = renderItems[end - 1]!
+        if (item.kind === 'message' && item.message.type === 'thinking') {
+          end -= 1
+        } else {
+          break
+        }
       }
     }
-    return end === renderItems.length ? renderItems : renderItems.slice(0, end)
-  }, [renderItems, chatState, streamingText])
+    const start = Math.max(0, end - renderCap)
+    const sliced =
+      start === 0 && end === renderItems.length ? renderItems : renderItems.slice(start, end)
+    return { visibleRenderItems: sliced, hasOlderItems: start > 0 }
+  }, [renderItems, chatState, streamingText, renderCap])
+
+  hasOlderRef.current = hasOlderItems
 
   const assistantTurnCopyByMsgId = useMemo(
     () => buildAssistantTurnCopyMap(messages),
@@ -714,7 +751,6 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
     chatState !== 'idle' &&
     chatState !== 'permission_pending' &&
     !pendingPermission &&
-    !pendingComputerUsePermission &&
     !isTailRendering
 
   const closeRewindModal = useCallback(() => {
@@ -1002,6 +1038,10 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
           <ProviderRetryBanner sessionId={resolvedSessionId} />
         )}
 
+        {resolvedSessionId && (
+          <AgentTaskNotifications sessionId={resolvedSessionId} />
+        )}
+
         {showPlanningIndicator && !showRetryBanner && (
           chatState === 'awaiting_workers' ? (
             <div className="mx-auto w-full max-w-[860px] px-8 py-2">
@@ -1261,7 +1301,7 @@ export const MessageList = memo(function MessageList({ sessionId }: MessageListP
     )}
     </div>
   )
-})
+}
 
 type ChatStateLite = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending' | 'awaiting_workers'
 

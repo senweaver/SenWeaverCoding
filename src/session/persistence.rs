@@ -18,6 +18,8 @@ pub const SNAPSHOT_EVERY: u64 = 100;
 const EVENTS_FILE: &str = "events.jsonl";
 const SNAPSHOT_FILE: &str = "snapshot.json";
 
+const WRITE_QUEUE_CAPACITY: usize = 16384;
+
 enum SessionLogMsg {
     Append(SessionEvent),
     Snapshot(Box<SessionState>),
@@ -26,7 +28,7 @@ enum SessionLogMsg {
 pub struct SessionEventLog {
     root: PathBuf,
     id: SessionId,
-    writer: Mutex<Option<mpsc::Sender<SessionLogMsg>>>,
+    writer: Mutex<Option<mpsc::SyncSender<SessionLogMsg>>>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 
     since_snapshot: AtomicU64,
@@ -61,18 +63,17 @@ impl SessionEventLog {
             start_seq = reader.lines().map_while(Result::ok).count() as u64;
         }
 
-        let (tx, rx) = mpsc::channel::<SessionLogMsg>();
+        let (tx, rx) = mpsc::sync_channel::<SessionLogMsg>(WRITE_QUEUE_CAPACITY);
         let writer_root = dir.clone();
         let handle = std::thread::Builder::new()
             .name("session-event-log".to_string())
-            .spawn(move || session_writer_loop(writer_root, file, rx))
-            .ok();
+            .spawn(move || session_writer_loop(writer_root, file, rx))?;
 
         Ok(Self {
             root: dir,
             id: id.to_string(),
             writer: Mutex::new(Some(tx)),
-            handle: Mutex::new(handle),
+            handle: Mutex::new(Some(handle)),
             since_snapshot: AtomicU64::new(0),
             seq: AtomicU64::new(start_seq),
             snapshot_every: SNAPSHOT_EVERY,
@@ -94,14 +95,26 @@ impl SessionEventLog {
     }
 
     pub fn append(&self, evt: &SessionEvent) -> std::io::Result<u64> {
-        if let Some(tx) = self
-            .writer
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_ref()
-        {
-            if tx.send(SessionLogMsg::Append(evt.clone())).is_err() {
-                tracing::warn!("session event log writer thread is gone; append dropped");
+        let guard = self.writer.lock().unwrap_or_else(|poison| poison.into_inner());
+        let tx = guard.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session event log writer is closed",
+            )
+        })?;
+        match tx.try_send(SessionLogMsg::Append(evt.clone())) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "session event log write queue is full (writer falling behind)",
+                ));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session event log writer thread is gone",
+                ));
             }
         }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -114,16 +127,27 @@ impl SessionEventLog {
     }
 
     pub fn write_snapshot(&self, state: &SessionState) -> std::io::Result<()> {
-        if let Some(tx) = self
-            .writer
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_ref()
-        {
-            let _ = tx.send(SessionLogMsg::Snapshot(Box::new(state.clone())));
+        let guard = self.writer.lock().unwrap_or_else(|poison| poison.into_inner());
+        let tx = guard.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session event log writer is closed",
+            )
+        })?;
+        match tx.try_send(SessionLogMsg::Snapshot(Box::new(state.clone()))) {
+            Ok(()) => {
+                self.since_snapshot.store(0, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Full(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "session event log write queue is full; snapshot deferred",
+            )),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session event log writer thread is gone",
+            )),
         }
-        self.since_snapshot.store(0, Ordering::SeqCst);
-        Ok(())
     }
 
     pub fn replay(&self, id: &str) -> std::io::Result<Option<SessionState>> {
@@ -232,7 +256,13 @@ fn write_snapshot_to_disk(
     let active = root.join(EVENTS_FILE);
     writer.flush()?;
     if active.exists() {
-        let _ = std::fs::rename(&active, &rotated);
+        if let Err(e) = std::fs::rename(&active, &rotated) {
+            tracing::warn!(
+                error = %e,
+                active = %active.display(),
+                "failed to rotate session event log after snapshot; continuing on existing log"
+            );
+        }
     }
     let new_file = OpenOptions::new()
         .create(true)

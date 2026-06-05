@@ -16,8 +16,10 @@ type Props = {
 type DirEntry = { name: string; path: string; isDirectory: boolean }
 
 let cachedProjects: RecentProject[] | null = null
+let cachedTotal = 0
 let cacheTimestamp = 0
 const CACHE_TTL = 30_000
+const PAGE_SIZE = 10
 
 function isTauriRuntime() {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
@@ -28,6 +30,8 @@ export function DirectoryPicker({ value, onChange }: Props) {
   const [isOpen, setIsOpen] = useState(false)
   const [mode, setMode] = useState<'recent' | 'browse'>('recent')
   const [projects, setProjects] = useState<RecentProject[]>([])
+  const [total, setTotal] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [browseEntries, setBrowseEntries] = useState<DirEntry[]>([])
   const [browsePath, setBrowsePath] = useState('')
   const [browseParent, setBrowseParent] = useState('')
@@ -80,18 +84,49 @@ export function DirectoryPicker({ value, onChange }: Props) {
 
     if (cachedProjects && Date.now() - cacheTimestamp < CACHE_TTL) {
       setProjects(cachedProjects)
+      setTotal(cachedTotal)
       return
     }
     setLoading(true)
-    sessionsApi.getRecentProjects()
-      .then(({ projects: p }) => {
+    sessionsApi.getRecentProjects({ limit: PAGE_SIZE, offset: 0 })
+      .then(({ projects: p, total: t }) => {
         cachedProjects = p
+        cachedTotal = t
         cacheTimestamp = Date.now()
         setProjects(p)
+        setTotal(t)
       })
-      .catch(() => setProjects([]))
+      .catch(() => { setProjects([]); setTotal(0) })
       .finally(() => setLoading(false))
   }, [isOpen, mode])
+
+  const loadMore = async () => {
+    if (loadingMore) return
+    setLoadingMore(true)
+    try {
+      const { projects: more, total: t } = await sessionsApi.getRecentProjects({
+        limit: PAGE_SIZE,
+        offset: projects.length,
+      })
+      const merged = [...projects]
+      const seen = new Set(merged.map((p) => p.realPath))
+      for (const p of more) {
+        if (!seen.has(p.realPath)) {
+          merged.push(p)
+          seen.add(p.realPath)
+        }
+      }
+      cachedProjects = merged
+      cachedTotal = t
+      cacheTimestamp = Date.now()
+      setProjects(merged)
+      setTotal(t)
+    } catch {
+      /* keep current list on failure */
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const loadBrowseDir = async (path?: string) => {
     setLoading(true)
@@ -237,6 +272,15 @@ export function DirectoryPicker({ value, onChange }: Props) {
                       </button>
                     )
                   })
+                )}
+                {!loading && projects.length > 0 && projects.length < total && (
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    className="w-full px-4 py-2.5 text-center text-xs font-medium text-[var(--color-text-accent)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+                  >
+                    {loadingMore ? t('common.loading') : t('dirPicker.more')}
+                  </button>
                 )}
               </div>
 

@@ -162,7 +162,7 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| ToolError::UnknownTool(name.to_string()))?;
 
-        tool.execute(args)
+        crate::agent::loop_::execute_tool_panic_safe(tool.as_ref(), name, args)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
     }

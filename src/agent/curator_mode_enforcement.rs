@@ -2,9 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use parking_lot::RwLock;
-use std::sync::Arc;
-
 pub const MAX_CURATOR_NUDGES: usize = 4;
 
 pub const CURATOR_MODE_NUDGE_MESSAGE: &str =
@@ -47,19 +44,17 @@ impl CuratorModeNudgeState {
     }
 }
 
-pub fn detect_curator_mode_active(curator_mode_flag: Option<&Arc<RwLock<bool>>>) -> bool {
-    let from_flag = curator_mode_flag.map(|f| *f.read()).unwrap_or(false);
+pub fn detect_curator_mode_active(
+    curator_mode_flag: Option<&crate::tools::curator::tools::CuratorModeFlag>,
+) -> bool {
+    let from_flag = curator_mode_flag.map(|f| f.is_active()).unwrap_or(false);
     if from_flag {
         return true;
     }
-    crate::services::try_get_services()
-        .map(|s| {
-            matches!(
-                *s.coding_mode.read(),
-                crate::agent::coding_mode::CodingMode::Curator
-            )
-        })
-        .unwrap_or(false)
+    matches!(
+        crate::agent::coding_mode::active_coding_mode(),
+        crate::agent::coding_mode::CodingMode::Curator
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

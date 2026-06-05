@@ -1346,8 +1346,6 @@ pub struct DeleteQuery {
     pub path: String,
     #[serde(default)]
     pub recursive: Option<bool>,
-    #[serde(rename = "toTrash", default)]
-    pub to_trash: Option<bool>,
 }
 
 pub async fn handle_workspace_delete(
@@ -1371,27 +1369,18 @@ pub async fn handle_workspace_delete(
     }
     let target_io = target.clone();
     let recursive = q.recursive.unwrap_or(false);
-    let use_trash = q.to_trash.unwrap_or(true);
     let io: Result<(), FsError> = tokio::task::spawn_blocking(move || {
-        if use_trash {
-            trash::delete(&target_io).map_err(|err| {
-                FsError::Io(std::io::Error::other(format!(
-                    "failed to move to trash: {err}"
-                )))
-            })
-        } else {
-            let metadata = std::fs::metadata(&target_io).map_err(FsError::Io)?;
-            let result = if metadata.is_dir() {
-                if recursive {
-                    std::fs::remove_dir_all(&target_io)
-                } else {
-                    std::fs::remove_dir(&target_io)
-                }
+        let metadata = std::fs::metadata(&target_io).map_err(FsError::Io)?;
+        let result = if metadata.is_dir() {
+            if recursive {
+                std::fs::remove_dir_all(&target_io)
             } else {
-                std::fs::remove_file(&target_io)
-            };
-            result.map_err(FsError::Io)
-        }
+                std::fs::remove_dir(&target_io)
+            }
+        } else {
+            std::fs::remove_file(&target_io)
+        };
+        result.map_err(FsError::Io)
     })
     .await
     .unwrap_or_else(|e| Err(FsError::Io(std::io::Error::other(e.to_string()))));
@@ -2173,7 +2162,7 @@ mod watch_impl {
         let (out_tx, out_rx) =
             tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(CHANNEL_SIZE);
 
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("workspace.file_watch", async move {
 
             let _watcher_guard = watcher;
             let mut pending: HashMap<String, PendingEvent> = HashMap::new();

@@ -66,14 +66,10 @@ pub fn detect_plan_mode_active(plan_mode_flag: Option<&Arc<RwLock<bool>>>) -> bo
     if from_flag {
         return true;
     }
-    crate::services::try_get_services()
-        .map(|s| {
-            matches!(
-                *s.coding_mode.read(),
-                crate::agent::coding_mode::CodingMode::Plan
-            )
-        })
-        .unwrap_or(false)
+    matches!(
+        crate::agent::coding_mode::active_coding_mode(),
+        crate::agent::coding_mode::CodingMode::Plan
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

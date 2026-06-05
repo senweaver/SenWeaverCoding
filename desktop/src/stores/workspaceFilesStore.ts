@@ -248,7 +248,7 @@ export type WorkspaceFilesState = {
   createFile: (parentRelPath: string, name: string) => Promise<void>
   createDir: (parentRelPath: string, name: string) => Promise<void>
   rename: (relPath: string, nextRelPath: string) => Promise<void>
-  remove: (relPath: string, isDir: boolean, toTrash?: boolean) => Promise<void>
+  remove: (relPath: string, isDir: boolean) => Promise<void>
   uploadFiles: (parentRelPath: string, files: File[]) => Promise<number>
 
   clipboard: ClipboardEntry | null
@@ -1136,7 +1136,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     }
   },
 
-  remove: async (relPath: string, isDir: boolean, toTrash: boolean = true) => {
+  remove: async (relPath: string, isDir: boolean) => {
     const root = get().root
     if (!root) return
     get().registerSelfWrite(relPath)
@@ -1144,7 +1144,6 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       root,
       path: relPath,
       recursive: isDir,
-      toTrash,
     })
     get().registerSelfWrite(relPath)
     const key = k(root, relPath)
@@ -1218,9 +1217,9 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     set({ clipboard: { relPath, isDir, mode: 'cut' } })
     try {
       useUIStore.getState().addToast({
-        type: 'info',
-        message: t('workspace.cutMarked', { name: nameOf(relPath) }),
-        duration: 2600,
+        type: 'success',
+        message: t('workspace.cutToast', { name: nameOf(relPath) }),
+        duration: 2200,
       })
     } catch {
     }
@@ -1230,47 +1229,47 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     const root = get().root
     const clipboard = get().clipboard
     if (!root || !clipboard) return
+    if (get().copyJob) return
 
     const normalizedTarget = targetDir ?? ''
     const fromName = nameOf(clipboard.relPath)
     const targetLabel = normalizedTarget === '' ? '/' : normalizedTarget
 
     if (clipboard.mode === 'cut') {
-      const fromRel = clipboard.relPath
-      const fromIsDir = clipboard.isDir
-      const sameSpot =
-        fromRel === normalizedTarget ||
-        parentOf(fromRel) === normalizedTarget ||
-        (normalizedTarget !== '' &&
-          (normalizedTarget === fromRel ||
-            normalizedTarget.startsWith(`${fromRel}/`)))
-      if (sameSpot) {
+      const toPath = normalizedTarget === '' ? fromName : `${normalizedTarget}/${fromName}`
+      const sourceParent =
+        clipboard.relPath.lastIndexOf('/') >= 0
+          ? clipboard.relPath.slice(0, clipboard.relPath.lastIndexOf('/'))
+          : ''
+      if (toPath === clipboard.relPath) {
+        set({ clipboard: null })
+        return
+      }
+      if (
+        clipboard.isDir &&
+        (normalizedTarget === clipboard.relPath ||
+          normalizedTarget.startsWith(`${clipboard.relPath}/`))
+      ) {
         try {
           useUIStore.getState().addToast({
-            type: 'warning',
-            message: t('files.dropTargetInvalid'),
-            duration: 3200,
+            type: 'error',
+            message: t('workspace.moveIntoSelf'),
+            duration: 4000,
           })
         } catch {
         }
         return
       }
-      const nextRel = joinPath(normalizedTarget, fromName)
-      set({ clipboard: null })
       try {
-        await get().rename(fromRel, nextRel)
-        try {
-          useUIStore.getState().addToast({
-            type: 'success',
-            message: t('workspace.moved', { name: fromName, dir: targetLabel }),
-            duration: 2400,
-          })
-        } catch {
-        }
+        get().registerSelfWrite(clipboard.relPath)
+        get().registerSelfWrite(toPath)
+        await workspaceFilesApi.move({ root, fromPath: clipboard.relPath, toPath })
+        get().registerSelfWrite(clipboard.relPath)
+        get().registerSelfWrite(toPath)
+        set({ clipboard: null })
+        await refreshDir(get, set, sourceParent)
+        await refreshDir(get, set, normalizedTarget)
       } catch (err) {
-        if (get().clipboard === null) {
-          set({ clipboard: { relPath: fromRel, isDir: fromIsDir, mode: 'cut' } })
-        }
         try {
           useUIStore.getState().addToast({
             type: 'error',
@@ -1284,8 +1283,6 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       }
       return
     }
-
-    if (get().copyJob) return
 
     if (copyJobClearTimer) {
       clearTimeout(copyJobClearTimer)

@@ -135,52 +135,22 @@ impl CliEntrypoint {
             .unwrap_or_else(|| cwd.join(".senweavercoding"));
         let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
             data_dir: svc_data_dir,
+            team_sync_enabled: config.teams.sync_enabled,
             ..Default::default()
         });
-        let _ = crate::event_bus::integration::init_global_bus();
+        let _ = crate::event_bus::integration::init_global_bus(
+            config
+                .config_path
+                .parent()
+                .map(|p| p.join("event_audit.jsonl")),
+        );
 
         {
             crate::workers::init_global_supervisor(cwd.clone());
             crate::workers::scan_and_recover_at(&cwd);
         }
         let multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
-        {
-            use crate::agent::registry::{AgentCapability, AgentInfo};
-            let mut primary = AgentInfo::new("primary", "Primary Agent", "coder");
-            primary.capabilities.push(AgentCapability {
-                name: "coding".into(),
-                description: "Default single-agent session".into(),
-                proficiency: 1.0,
-            });
-            primary.capabilities.push(AgentCapability {
-                name: "general".into(),
-                description: "General purpose assistant".into(),
-                proficiency: 0.9,
-            });
-            let _ = multi_agent_rt.supervisor.register_agent(primary);
-        }
-
-        {
-            use crate::agent::registry::{AgentCapability, AgentInfo};
-            for (swarm_name, swarm_cfg) in &config.swarms {
-                for agent_name in &swarm_cfg.agents {
-                    let id = format!("{swarm_name}/{agent_name}");
-                    let mut info = AgentInfo::new(&id, agent_name.as_str(), swarm_name.as_str());
-
-                    info.capabilities.push(AgentCapability {
-                        name: agent_name.clone(),
-                        description: format!("Swarm member of '{swarm_name}'"),
-                        proficiency: 0.9,
-                    });
-                    info.capabilities.push(AgentCapability {
-                        name: "general".into(),
-                        description: "General fallback capability".into(),
-                        proficiency: 0.6,
-                    });
-                    let _ = multi_agent_rt.supervisor.register_agent(info);
-                }
-            }
-        }
+        crate::agent::multi_agent_runtime::register_configured_agents(&multi_agent_rt, &config);
 
         {
             let metrics = crate::services::try_get_services().map(|s| s.agent_metrics.clone());

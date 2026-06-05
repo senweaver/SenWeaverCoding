@@ -31,14 +31,6 @@ impl ExitPlanModeTool {
         }
     }
 
-    pub fn new_with_pending_plan(flag: PlanModeFlag, pending_plan: PendingPlan) -> Self {
-        Self {
-            flag,
-            pending_plan,
-            workspace_root: Arc::new(RwLock::new(PathBuf::new())),
-        }
-    }
-
     pub fn with_workspace_root(mut self, workspace_root: Arc<RwLock<PathBuf>>) -> Self {
         self.workspace_root = workspace_root;
         self
@@ -125,7 +117,11 @@ impl Tool for ExitPlanModeTool {
 
         *self.flag.write() = false;
 
-        *self.pending_plan.write() = Some(plan_text.to_string());
+        if let Some(svc) = crate::services::try_get_services() {
+            svc.set_pending_plan(plan_text.to_string());
+        } else {
+            *self.pending_plan.write() = Some(plan_text.to_string());
+        }
 
         let workspace = self.resolve_workspace();
         let plan_text_owned = plan_text.to_string();
@@ -210,7 +206,7 @@ fn write_plan_file_under(
         wrap_with_frontmatter(&title, plan_text)
     };
 
-    std::fs::write(&path, &body)?;
+    crate::util::atomic_write(&path, body.as_bytes())?;
     Ok((path, body))
 }
 

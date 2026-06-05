@@ -1753,12 +1753,16 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         runner.register(Box::new(
             crate::hooks::builtin::command_logger::CommandLoggerHook::new(),
         ));
-        runner.register(Box::new(
-            crate::hooks::builtin::webhook_audit::WebhookAuditHook::new(
-                crate::config::schema::WebhookAuditConfig::default(),
-            )
-            .expect("default WebhookAuditConfig has empty URL and must construct successfully"),
-        ));
+        match crate::hooks::builtin::webhook_audit::WebhookAuditHook::new(
+            crate::config::schema::WebhookAuditConfig::default(),
+        ) {
+            Ok(hook) => runner.register(Box::new(hook)),
+            Err(e) => tracing::warn!(
+                target: "channels",
+                error = %e,
+                "skipping webhook audit hook: failed to construct from default config"
+            ),
+        }
         Some(Arc::new(runner))
     } else {
         None
@@ -2232,6 +2236,12 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                     }
                 }
 
+                crate::routines::dispatch_event(
+                    &msg_clone.channel,
+                    &msg_clone.content,
+                    Some(msg_clone.content.clone()),
+                );
+
                 let new_session = take_pending_new_session(&ctx_clone, &sender_key_clone);
 
                 let mut history = {
@@ -2262,10 +2272,22 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                     Some(&sender_key_clone),
                 )
                 .await;
+                let enriched_content = {
+                    let link_cfg = &ctx_clone.prompt_config.link_enricher;
+                    crate::channels::pipeline::link_enricher::enrich_message(
+                        &msg_clone.content,
+                        &crate::channels::pipeline::link_enricher::LinkEnricherConfig {
+                            enabled: link_cfg.enabled,
+                            max_links: link_cfg.max_links,
+                            timeout_secs: link_cfg.timeout_secs,
+                        },
+                    )
+                    .await
+                };
                 let user_content = if memory_ctx.is_empty() {
-                    msg_clone.content.clone()
+                    enriched_content
                 } else {
-                    format!("{memory_ctx}{}", msg_clone.content)
+                    format!("{memory_ctx}{enriched_content}")
                 };
 
                 let user_turn = ChatMessage::user(user_content.clone());
@@ -2301,10 +2323,36 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                     .with_rbac(ctx_clone.rbac_engine.as_ref(), None)
                     .with_cancellation(Some(cancel_token.clone()));
 
-                    let run_future = crate::agent::loop_::unified::UnifiedLoop::new(
-                        channel_policy,
-                    )
-                    .run(&mut history);
+                    let session_ctx = crate::session::SessionContext {
+                        session_id: sender_key_clone.clone(),
+                        workspace_key: crate::session::workspace_key_from_path(
+                            ctx_clone.workspace_dir.as_path(),
+                            &sender_key_clone,
+                        ),
+                        title: sender_key_clone.clone(),
+                        workspace_dir: ctx_clone
+                            .workspace_dir
+                            .to_string_lossy()
+                            .into_owned(),
+                        connection_id: None,
+                    };
+                    let channel_coding_mode = crate::services::try_get_services()
+                        .map(|svc| svc.resolve_coding_mode_for(Some(&sender_key_clone)))
+                        .unwrap_or_default();
+                    let channel_permission_mode =
+                        crate::gateway::ws::desktop::desktop_runtime_state()
+                            .permission_mode_for(&sender_key_clone);
+                    let mode_scoped = crate::agent::coding_mode::scope_coding_mode(
+                        channel_coding_mode,
+                        crate::agent::loop_::unified::UnifiedLoop::new(channel_policy)
+                            .run(&mut history),
+                    );
+                    let permission_scoped = crate::gateway::ws::desktop::scope_permission_mode(
+                        channel_permission_mode,
+                        mode_scoped,
+                    );
+                    let run_future =
+                        crate::session::scope_session_context(session_ctx, permission_scoped);
                     let timed = tokio::time::timeout(
                         std::time::Duration::from_secs(timeout_budget),
                         run_future,
@@ -2743,10 +2791,9 @@ pub async fn handle_command(
             channel_id,
             recipient,
         } => channel_send(config, &channel_id, &recipient, &message).await,
-        crate::ChannelCommands::Start | crate::ChannelCommands::Doctor => {
-
-            unreachable!("invariant: ChannelCommands::Start/Doctor are dispatched in main.rs before reaching channel sub-router")
-        }
+        crate::ChannelCommands::Start | crate::ChannelCommands::Doctor => Err(anyhow::anyhow!(
+            "ChannelCommands::Start/Doctor must be dispatched before reaching the channel sub-router"
+        )),
     }
 }
 
@@ -2857,7 +2904,7 @@ async fn channel_add(
             .await
             .with_context(|| format!("Failed to create dir {}", parent.display()))?;
     }
-    tokio::fs::write(config_path, serialized)
+    crate::util::atomic_write_async(config_path.clone(), serialized.into_bytes())
         .await
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
 
@@ -2895,7 +2942,7 @@ async fn channel_remove(config: &Config, name: &str) -> anyhow::Result<()> {
             if tbl.remove(name).is_some() {
                 let serialized = toml::to_string_pretty(&doc)
                     .context("Failed to serialize updated config")?;
-                tokio::fs::write(config_path, serialized)
+                crate::util::atomic_write_async(config_path.clone(), serialized.into_bytes())
                     .await
                     .with_context(|| {
                         format!("Failed to write {}", config_path.display())
@@ -2967,7 +3014,7 @@ async fn channel_bind_telegram(config: &Config, identity: &str) -> anyhow::Resul
 
     let serialized =
         toml::to_string_pretty(&doc).context("Failed to serialize updated config")?;
-    tokio::fs::write(config_path, serialized)
+    crate::util::atomic_write_async(config_path.clone(), serialized.into_bytes())
         .await
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
 

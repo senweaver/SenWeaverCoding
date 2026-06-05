@@ -6,10 +6,15 @@ import { create } from 'zustand'
 import { settingsApi } from '../api/settings'
 import { modelsApi } from '../api/models'
 import { codingModesApi } from '../api/codingModes'
+import { ApiError } from '../api/client'
 import { wsManager } from '../api/websocket'
 import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode } from '../types/settings'
 import type { CodingModeId, CodingModeInfo } from '../types/codingMode'
-import { DEFAULT_CODING_MODE, isVisibleCodingMode } from '../types/codingMode'
+import {
+  DEFAULT_CODING_MODE,
+  isVisibleCodingMode,
+  VISIBLE_CODING_MODES,
+} from '../types/codingMode'
 import type { Locale } from '../i18n'
 import { useUIStore } from './uiStore'
 type PendingCodingModeTransition = {
@@ -101,11 +106,41 @@ function storePiiSettings(settings: PiiSanitizerSettings): void {
   }
 }
 
+const CODING_MODE_ORDER_STORAGE_KEY = 'sen-coding-mode-order'
+
+function getStoredCodingModeOrder(): CodingModeId[] {
+  try {
+    const raw = localStorage.getItem(CODING_MODE_ORDER_STORAGE_KEY)
+    if (!raw) return [...VISIBLE_CODING_MODES]
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return [...VISIBLE_CODING_MODES]
+    const cleaned = parsed.filter(
+      (id): id is CodingModeId => typeof id === 'string' && isVisibleCodingMode(id),
+    )
+    const merged = [...cleaned]
+    for (const id of VISIBLE_CODING_MODES) {
+      if (!merged.includes(id)) merged.push(id)
+    }
+    return merged
+  } catch {
+    return [...VISIBLE_CODING_MODES]
+  }
+}
+
+function storeCodingModeOrder(order: CodingModeId[]): void {
+  try {
+    localStorage.setItem(CODING_MODE_ORDER_STORAGE_KEY, JSON.stringify(order))
+  } catch {
+  }
+}
+
 type SettingsStore = {
 
   codingMode: CodingModeId
 
   codingModes: CodingModeInfo[]
+
+  codingModeOrder: CodingModeId[]
 
   permissionMode: PermissionMode
   currentModel: ModelInfo | null
@@ -122,6 +157,7 @@ type SettingsStore = {
   pendingCodingModeTransition: PendingCodingModeTransition | null
 
   fetchAll: () => Promise<void>
+  setCodingModeOrder: (order: CodingModeId[]) => void
   setCodingMode: (mode: CodingModeId) => Promise<void>
   requestSetCodingMode: (mode: CodingModeId) => Promise<void>
   resolveCodingModeTransition: (confirmed: boolean) => void
@@ -143,6 +179,7 @@ type SettingsStore = {
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   codingMode: DEFAULT_CODING_MODE,
   codingModes: [],
+  codingModeOrder: getStoredCodingModeOrder(),
   permissionMode: 'default',
   currentModel: null,
   effortLevel: 'medium',
@@ -253,6 +290,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setCodingModeOrder: (order) => {
+    const cleaned = order.filter(
+      (id): id is CodingModeId => isVisibleCodingMode(id),
+    )
+    const merged = [...cleaned]
+    for (const id of VISIBLE_CODING_MODES) {
+      if (!merged.includes(id)) merged.push(id)
+    }
+    set({ codingModeOrder: merged })
+    storeCodingModeOrder(merged)
+  },
+
   setCodingMode: async (mode) => {
     if (!isVisibleCodingMode(mode)) {
       console.warn('[settings] setCodingMode rejected hidden mode', mode)
@@ -261,7 +310,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     const prev = get().codingMode
     set({ codingMode: mode })
     try {
-      const res = await codingModesApi.setCurrent(mode)
+      const res = await codingModesApi.setCurrent(mode, true)
 
       const derived = (res.permissionMode as PermissionMode) || get().permissionMode
       set({ permissionMode: derived })
@@ -283,6 +332,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
     set({ pendingCodingModeTransition: null })
 
+    try {
+      const res = await codingModesApi.setCurrent(mode, false)
+      const derived = (res.permissionMode as PermissionMode) || get().permissionMode
+      set({ codingMode: mode, permissionMode: derived })
+      return
+    } catch (err) {
+      const needsConfirm =
+        err instanceof ApiError &&
+        err.status === 409 &&
+        !!err.body &&
+        typeof err.body === 'object' &&
+        (err.body as Record<string, unknown>).confirmationRequired === true
+      if (!needsConfirm) {
+        console.warn('[settings] requestSetCodingMode failed', err)
+        return
+      }
+    }
+
+    const confirmed = await new Promise<boolean>((resolve) => {
+      set({ pendingCodingModeTransition: { target: mode, resolver: resolve } })
+    })
+    if (!confirmed) return
     await get().setCodingMode(mode)
   },
 

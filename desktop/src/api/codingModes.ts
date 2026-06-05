@@ -15,10 +15,10 @@ export const codingModesApi = {
     return api.get<CodingModeInfo & { mode: CodingModeId }>('/api/coding-mode')
   },
 
-  setCurrent(mode: CodingModeId) {
+  setCurrent(mode: CodingModeId, confirmed = false) {
     return api.put<{ ok: true; mode: CodingModeId; permissionMode: string }>(
       '/api/coding-mode',
-      { mode },
+      { mode, confirmed },
     )
   },
 }

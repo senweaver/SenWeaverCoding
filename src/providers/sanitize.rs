@@ -29,6 +29,104 @@ pub fn skip_serializing_tool_calls<T>(v: &Option<Vec<T>>) -> bool {
     v.as_ref().map_or(true, Vec::is_empty)
 }
 
+fn close_open_json_structures(prefix: &str) -> Option<String> {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for c in trimmed.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    let mut repaired = trimmed.to_string();
+    if escape {
+        repaired.pop();
+    }
+    if in_string {
+        repaired.push('"');
+    }
+    loop {
+        let end = repaired.trim_end();
+        match end.chars().last() {
+            Some(',') | Some(':') => {
+                let new_len = end.len() - 1;
+                repaired.truncate(new_len);
+            }
+            _ => break,
+        }
+    }
+    while let Some(close) = stack.pop() {
+        repaired.push(close);
+    }
+
+    match serde_json::from_str::<Value>(&repaired) {
+        Ok(_) => Some(repaired),
+        Err(_) => None,
+    }
+}
+
+pub fn repair_partial_tool_input_json(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return None;
+    }
+
+    if let Some(repaired) = close_open_json_structures(trimmed) {
+        return Some(repaired);
+    }
+
+    let mut comma_positions: Vec<usize> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for (idx, c) in trimmed.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            ',' => comma_positions.push(idx),
+            _ => {}
+        }
+    }
+
+    for &pos in comma_positions.iter().rev().take(32) {
+        if let Some(repaired) = close_open_json_structures(&trimmed[..pos]) {
+            return Some(repaired);
+        }
+    }
+
+    None
+}
+
 #[inline]
 pub fn normalize_tool_call_id(raw: Option<String>) -> String {
     normalize_tool_call_id_for_provider(raw, ProviderKind::Other)

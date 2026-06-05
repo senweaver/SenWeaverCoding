@@ -5,6 +5,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const SUMMARY_CHAR_LIMIT: usize = 200;
 const MAX_RULE_FILE_BYTES: u64 = 256 * 1024;
@@ -33,6 +36,41 @@ pub fn user_rules_dir() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".senweavercoding").join("rules"))
 }
 
+struct RulesCacheEntry {
+    rules: Vec<UserRuleMeta>,
+    signature: u64,
+    cached_at: Instant,
+}
+
+const RULES_CACHE_TTL: Duration = Duration::from_secs(5);
+
+fn rules_cache() -> &'static Mutex<Option<RulesCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<RulesCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn rules_refreshing() -> &'static AtomicBool {
+    static REFRESHING: AtomicBool = AtomicBool::new(false);
+    &REFRESHING
+}
+
+fn rules_signature(paths: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in paths {
+        path.hash(&mut hasher);
+        if let Ok(md) = fs::metadata(path) {
+            md.len().hash(&mut hasher);
+            if let Ok(mtime) = md.modified() {
+                if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                    dur.as_nanos().hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish()
+}
+
 pub fn list_user_rules() -> Vec<UserRuleMeta> {
     let Some(dir) = user_rules_dir() else {
         return Vec::new();
@@ -40,12 +78,60 @@ pub fn list_user_rules() -> Vec<UserRuleMeta> {
     if !dir.is_dir() {
         return Vec::new();
     }
+
+    if let Ok(guard) = rules_cache().lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.cached_at.elapsed() < RULES_CACHE_TTL {
+                return entry.rules.clone();
+            }
+            let stale = entry.rules.clone();
+            drop(guard);
+            schedule_user_rules_refresh(dir);
+            return stale;
+        }
+    }
+
+    compute_and_cache_user_rules(&dir)
+}
+
+fn schedule_user_rules_refresh(dir: PathBuf) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        let _ = compute_and_cache_user_rules(&dir);
+        return;
+    };
+    if rules_refreshing()
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    handle.spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = compute_and_cache_user_rules(&dir);
+        })
+        .await;
+        rules_refreshing().store(false, Ordering::Release);
+    });
+}
+
+fn compute_and_cache_user_rules(dir: &Path) -> Vec<UserRuleMeta> {
     let mut paths: Vec<PathBuf> = Vec::new();
-    walk_rule_files(&dir, 0, &mut paths);
+    walk_rule_files(dir, 0, &mut paths);
     paths.sort();
+    let signature = rules_signature(&paths);
+
+    if let Ok(mut guard) = rules_cache().lock() {
+        if let Some(entry) = guard.as_mut() {
+            if entry.signature == signature {
+                entry.cached_at = Instant::now();
+                return entry.rules.clone();
+            }
+        }
+    }
+
     let mut out: Vec<UserRuleMeta> = Vec::with_capacity(paths.len());
-    for path in paths {
-        match build_rule_meta(&dir, &path) {
+    for path in &paths {
+        match build_rule_meta(dir, path) {
             Ok(meta) => out.push(meta),
             Err(err) => {
                 tracing::debug!(
@@ -56,6 +142,14 @@ pub fn list_user_rules() -> Vec<UserRuleMeta> {
                 );
             }
         }
+    }
+
+    if let Ok(mut guard) = rules_cache().lock() {
+        *guard = Some(RulesCacheEntry {
+            rules: out.clone(),
+            signature,
+            cached_at: Instant::now(),
+        });
     }
     out
 }

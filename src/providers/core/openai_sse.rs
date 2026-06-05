@@ -9,6 +9,10 @@ use crate::providers::traits::{
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 
+const MAX_STREAM_TOOL_CALLS: usize = 1024;
+const MAX_STREAM_TOOL_ARGS_BYTES: usize = 64 * 1024 * 1024;
+const MAX_STREAM_TOOL_ARGS_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Debug, Deserialize)]
 pub struct StreamChunkResponse {
 
@@ -166,11 +170,12 @@ pub struct StreamToolCallAccumulator {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    arguments_overflow: bool,
 }
 
 impl StreamToolCallAccumulator {
 
-    pub fn apply_delta(&mut self, delta: &StreamToolCallDelta) {
+    pub fn apply_delta(&mut self, delta: &StreamToolCallDelta, remaining_total_budget: usize) -> usize {
         if let Some(id) = delta.id.as_ref().filter(|value| !value.is_empty()) {
             self.id = Some(id.clone());
         }
@@ -192,8 +197,22 @@ impl StreamToolCallAccumulator {
             .or(delta.arguments.as_ref())
             .filter(|value| !value.is_empty())
         {
-            self.arguments.push_str(arguments_delta);
+            let per_call_room = MAX_STREAM_TOOL_ARGS_BYTES.saturating_sub(self.arguments.len());
+            let room = per_call_room.min(remaining_total_budget);
+            if arguments_delta.len() <= room {
+                self.arguments.push_str(arguments_delta);
+                return arguments_delta.len();
+            } else if !self.arguments_overflow {
+                self.arguments_overflow = true;
+                tracing::warn!(
+                    target: "providers.openai_sse",
+                    per_call_limit = MAX_STREAM_TOOL_ARGS_BYTES,
+                    total_limit = MAX_STREAM_TOOL_ARGS_TOTAL_BYTES,
+                    "stream tool_call arguments exceeded size limit; truncating"
+                );
+            }
         }
+        0
     }
 
     pub fn into_provider_tool_call(self) -> Option<ProviderToolCall> {
@@ -206,6 +225,16 @@ impl StreamToolCallAccumulator {
         let normalized_arguments = if serde_json::from_str::<serde_json::Value>(&arguments).is_ok()
         {
             arguments
+        } else if let Some(repaired) =
+            crate::providers::sanitize::repair_partial_tool_input_json(&arguments)
+        {
+            tracing::warn!(
+                function = %name,
+                arguments_len = arguments.len(),
+                repaired_len = repaired.len(),
+                "streamed native tool-call arguments were truncated; recovered partial arguments via structural repair"
+            );
+            repaired
         } else {
             tracing::warn!(
                 function = %name,
@@ -335,6 +364,14 @@ pub fn sse_bytes_to_chunks(
                 match item {
                     Ok(bytes) => {
                         sse.push(&bytes);
+                        if sse.overflowed() {
+                            let _ = tx
+                                .send(Err(StreamError::Provider(
+                                    "SSE line exceeded size limit; upstream response malformed or truncated".to_string(),
+                                )))
+                                .await;
+                            return;
+                        }
                         while let Some(ev) = sse.next_event() {
                             if ev.is_done() || ev.data.is_empty() {
                                 continue;
@@ -398,6 +435,9 @@ pub fn sse_bytes_to_events(
             let mut sse = super::sse::SseParser::new();
             let mut tool_calls: Vec<StreamToolCallAccumulator> = Vec::new();
             let mut emitted_tool_calls = false;
+            let mut total_tool_args_bytes: usize = 0;
+            let mut saw_terminator = false;
+            let mut made_progress = false;
 
             match response.error_for_status_ref() {
                 Ok(_) => {}
@@ -412,13 +452,26 @@ pub fn sse_bytes_to_events(
                 match item {
                     Ok(bytes) => {
                         sse.push(&bytes);
+                        if sse.overflowed() {
+                            let _ = tx
+                                .send(Err(StreamError::Provider(
+                                    "SSE line exceeded size limit; upstream response malformed or truncated".to_string(),
+                                )))
+                                .await;
+                            return;
+                        }
                         while let Some(ev) = sse.next_event() {
-                            if ev.is_done() || ev.data.is_empty() {
+                            if ev.is_done() {
+                                saw_terminator = true;
+                                continue;
+                            }
+                            if ev.data.is_empty() {
                                 continue;
                             }
                             let line = format!("data: {}", ev.data);
 
                             if let Some(event) = parse_proxy_tool_event(&line) {
+                                made_progress = true;
                                 if tx.send(Ok(event)).await.is_err() {
                                     return;
                                 }
@@ -432,6 +485,7 @@ pub fn sse_bytes_to_events(
 
                             if let Some(usage_info) = chunk.usage.clone() {
                                 if let Some(usage) = usage_info.into_token_usage() {
+                                    made_progress = true;
                                     if tx
                                         .send(Ok(StreamEvent::Usage(usage)))
                                         .await
@@ -447,6 +501,7 @@ pub fn sse_bytes_to_events(
 
                                 if let Some(content) = &choice.delta.content {
                                     if !content.is_empty() {
+                                        made_progress = true;
                                         let mut text_chunk = StreamChunk::delta(content.clone());
                                         if count_tokens {
                                             text_chunk = text_chunk.with_token_estimate();
@@ -462,6 +517,7 @@ pub fn sse_bytes_to_events(
                                 }
                                 if let Some(reasoning) = &choice.delta.reasoning_content {
                                     if !reasoning.is_empty() {
+                                        made_progress = true;
                                         let reasoning_chunk =
                                             StreamChunk::reasoning(reasoning.clone());
                                         if tx
@@ -477,15 +533,29 @@ pub fn sse_bytes_to_events(
                                 if let Some(deltas) = choice.delta.tool_calls.as_ref() {
                                     for delta in deltas {
                                         let index = delta.index.unwrap_or(tool_calls.len());
+                                        if index >= MAX_STREAM_TOOL_CALLS {
+                                            tracing::warn!(
+                                                index,
+                                                max = MAX_STREAM_TOOL_CALLS,
+                                                "ignoring streamed tool_call with out-of-range index"
+                                            );
+                                            continue;
+                                        }
                                         if index >= tool_calls.len() {
                                             tool_calls.resize_with(index + 1, Default::default);
                                         }
                                         if let Some(acc) = tool_calls.get_mut(index) {
-                                            acc.apply_delta(delta);
+                                            let remaining = MAX_STREAM_TOOL_ARGS_TOTAL_BYTES
+                                                .saturating_sub(total_tool_args_bytes);
+                                            total_tool_args_bytes = total_tool_args_bytes
+                                                .saturating_add(acc.apply_delta(delta, remaining));
                                         }
                                     }
                                 }
 
+                                if choice.finish_reason.is_some() {
+                                    saw_terminator = true;
+                                }
                                 if choice.finish_reason.as_deref() == Some("tool_calls") {
                                     should_emit_tool_calls = true;
                                 }
@@ -497,6 +567,7 @@ pub fn sse_bytes_to_events(
                                     .drain(..)
                                     .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
                                 {
+                                    made_progress = true;
                                     if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err()
                                     {
                                         return;
@@ -517,10 +588,20 @@ pub fn sse_bytes_to_events(
                     .drain(..)
                     .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
                 {
+                    made_progress = true;
                     if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err() {
                         return;
                     }
                 }
+            }
+
+            if made_progress && !saw_terminator {
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "upstream stream closed before completion (no [DONE]/finish_reason); connection closed mid-response".to_string(),
+                    )))
+                    .await;
+                return;
             }
 
             let _ = tx.send(Ok(StreamEvent::Final)).await;

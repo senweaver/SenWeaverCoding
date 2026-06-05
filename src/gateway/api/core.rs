@@ -621,59 +621,6 @@ pub struct SkillsPutBody {
     pub prompt_injection_mode: Option<String>,
 }
 
-pub async fn handle_api_skills_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let config = state.config.lock().clone();
-    let skills = crate::skills::discover_skills(&config.workspace_dir, &config);
-    let disabled: std::collections::HashSet<String> = config
-        .skills
-        .disabled_skills
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let workspace_skills_dir = config.workspace_dir.join("skills");
-    let list: Vec<serde_json::Value> = skills
-        .into_iter()
-        .map(|s| {
-            let enabled = !disabled.contains(&s.name);
-            let path_str = s.location.as_ref().map(|p| p.display().to_string());
-            serde_json::json!({
-                "name": s.name,
-                "description": s.description,
-                "version": s.version,
-                "author": s.author,
-                "tags": s.tags,
-                "tools_count": s.tools.len(),
-                "prompts_count": s.prompts.len(),
-                "enabled": enabled,
-                "path": path_str,
-            })
-        })
-        .collect();
-
-    let prompt_mode = match config.skills.prompt_injection_mode {
-        crate::config::SkillsPromptInjectionMode::Full => "full",
-        crate::config::SkillsPromptInjectionMode::Compact => "compact",
-    };
-    Json(serde_json::json!({
-        "workspace_skills_dir": workspace_skills_dir.display().to_string(),
-        "open_skills_enabled": config.skills.open_skills_enabled,
-        "allow_scripts": config.skills.allow_scripts,
-        "disabled_skills": config.skills.disabled_skills,
-        "prompt_injection_mode": prompt_mode,
-        "skills": list,
-    }))
-    .into_response()
-}
-
 pub async fn handle_api_skills_put(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2279,70 +2226,130 @@ pub async fn handle_api_session_rename(
 #[derive(Debug, Deserialize)]
 pub struct SessionsRecentProjectsQuery {
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
-pub async fn handle_api_sessions_recent_projects(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(_q): Query<SessionsRecentProjectsQuery>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
+struct RecentProjectAgg {
+    real_path: String,
+    last_activity: chrono::DateTime<chrono::Utc>,
+    session_count: usize,
+}
+
+fn build_recent_projects(
+    metas: Vec<crate::channels::session::backend::SessionMetadata>,
+    default_dir: &str,
+    offset: usize,
+    limit: usize,
+) -> (Vec<serde_json::Value>, usize) {
+    use std::collections::HashMap;
+
+    let canonical = |dir: &str| -> String {
+        std::path::Path::new(dir)
+            .canonicalize()
+            .map(|p| display_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| dir.to_string())
+    };
+
+    let mut map: HashMap<String, RecentProjectAgg> = HashMap::new();
+    for meta in metas {
+        let Some(dir) = meta.work_dir.as_deref().map(str::trim).filter(|d| !d.is_empty())
+        else {
+            continue;
+        };
+        let real = canonical(dir);
+        let entry = map.entry(real.clone()).or_insert_with(|| RecentProjectAgg {
+            real_path: real.clone(),
+            last_activity: meta.last_activity,
+            session_count: 0,
+        });
+        entry.session_count += 1;
+        if meta.last_activity > entry.last_activity {
+            entry.last_activity = meta.last_activity;
+        }
     }
 
-    let work_dir = default_workspace_dir(&state);
-    let work_dir_for_blocking = work_dir.clone();
-    let (real_path, project_name, is_git, repo_name, branch) =
-        tokio::task::spawn_blocking(move || {
-            let path = std::path::Path::new(&work_dir_for_blocking);
-            let real_path = path
-                .canonicalize()
-                .map(|p| display_path(&p.to_string_lossy()))
-                .unwrap_or_else(|_| work_dir_for_blocking.clone());
+    let mut entries: Vec<RecentProjectAgg> = map.into_values().collect();
+    entries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+    let default_real = canonical(default_dir);
+    if let Some(pos) = entries.iter().position(|e| e.real_path == default_real) {
+        let pinned = entries.remove(pos);
+        entries.insert(0, pinned);
+    } else if !default_real.is_empty() {
+        entries.insert(
+            0,
+            RecentProjectAgg {
+                real_path: default_real,
+                last_activity: chrono::Utc::now(),
+                session_count: 0,
+            },
+        );
+    }
+
+    let total = entries.len();
+    let projects: Vec<serde_json::Value> = entries
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|entry| {
+            let path = std::path::Path::new(&entry.real_path);
             let project_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "workspace".to_string());
             let (is_git, repo_name, branch) = git_repo_info(path);
-            (real_path, project_name, is_git, repo_name, branch)
+            serde_json::json!({
+                "projectPath": entry.real_path,
+                "realPath": entry.real_path,
+                "projectName": project_name,
+                "isGit": is_git,
+                "repoName": repo_name,
+                "branch": branch,
+                "modifiedAt": entry.last_activity.to_rfc3339(),
+                "sessionCount": entry.session_count,
+            })
         })
-        .await
-        .unwrap_or_else(|_| {
-            (
-                work_dir.clone(),
-                "workspace".to_string(),
-                false,
-                None,
-                None,
-            )
-        });
-    let session_count = if let Some(backend) = state.session_backend.as_ref() {
+        .collect();
+
+    (projects, total)
+}
+
+pub async fn handle_api_sessions_recent_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionsRecentProjectsQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let default_dir = default_workspace_dir(&state);
+    let limit = q.limit.unwrap_or(10).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0);
+
+    let metas = if let Some(backend) = state.session_backend.as_ref() {
         let backend_arc = std::sync::Arc::clone(backend);
         tokio::task::spawn_blocking(move || {
             backend_arc
-                .list_sessions()
+                .list_sessions_with_metadata()
                 .into_iter()
-                .filter(|k| k.starts_with(GW_SESSION_PREFIX))
-                .count()
+                .filter(|m| m.key.starts_with(GW_SESSION_PREFIX))
+                .collect::<Vec<_>>()
         })
         .await
-        .unwrap_or(0)
+        .unwrap_or_default()
     } else {
-        0
+        Vec::new()
     };
-    let modified_at = chrono::Utc::now().to_rfc3339();
+
+    let (projects, total) =
+        tokio::task::spawn_blocking(move || build_recent_projects(metas, &default_dir, offset, limit))
+            .await
+            .unwrap_or_else(|_| (Vec::new(), 0));
 
     Json(serde_json::json!({
-        "projects": [{
-            "projectPath": work_dir,
-            "realPath": real_path,
-            "projectName": project_name,
-            "isGit": is_git,
-            "repoName": repo_name,
-            "branch": branch,
-            "modifiedAt": modified_at,
-            "sessionCount": session_count,
-        }]
+        "projects": projects,
+        "total": total,
     }))
     .into_response()
 }
@@ -2993,24 +3000,6 @@ fn git_changed_file_count(workdir: &std::path::Path) -> usize {
     output.lines().filter(|l| !l.is_empty()).count()
 }
 
-pub async fn handle_coding_session_hook(
-    State(state): State<AppState>,
-    Json(payload): Json<crate::tools::coding::session::runner::CodingSessionHookEvent>,
-) -> impl IntoResponse {
-
-    let _ = &state;
-
-    tracing::info!(
-        session_id = %payload.session_id,
-        event_type = %payload.event_type,
-        tool_name = ?payload.tool_name,
-        summary = ?payload.summary,
-        "Claude Code hook event received"
-    );
-
-    Json(serde_json::json!({ "ok": true }))
-}
-
 pub async fn handle_api_suggestions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3086,13 +3075,58 @@ pub async fn handle_api_workflows_execute(
     let mut run = crate::workflows::WorkflowRun::new(workflow.id.clone(), "");
     run.variables = workflow.variables.clone();
 
-    let resolver = |_agent: &crate::workflows::StepAgent| -> Option<(String, String)> { None };
-    let executor = |agent: crate::workflows::StepAgent, prompt: String| async move {
-        Ok((
-            format!("Executed ({agent:?}): {prompt}"),
-            prompt.len() as u64 / 4,
-            100u64,
-        ))
+    let cfg = state.config.lock().clone();
+    let temperature = cfg.default_temperature;
+
+    fn resolve_step_agent(
+        agent: &crate::workflows::StepAgent,
+    ) -> Option<crate::agent::registry::AgentInfo> {
+        let rt = crate::agent::multi_agent_runtime::global_runtime()?;
+        match agent {
+            crate::workflows::StepAgent::Default => None,
+            crate::workflows::StepAgent::ById { id } => rt.registry.get(id),
+            crate::workflows::StepAgent::ByName { name } => {
+                rt.registry.all().into_iter().find(|a| a.name == *name)
+            }
+        }
+    }
+
+    let resolver = |agent: &crate::workflows::StepAgent| -> Option<(String, String)> {
+        resolve_step_agent(agent).map(|info| (info.id, info.name))
+    };
+    let executor = move |agent: crate::workflows::StepAgent, prompt: String| {
+        let cfg = cfg.clone();
+        let resolved = resolve_step_agent(&agent);
+        async move {
+            let (provider_override, model_override) = match resolved {
+                Some(info) => (
+                    (!info.provider.trim().is_empty()).then_some(info.provider),
+                    (!info.model.trim().is_empty()).then_some(info.model),
+                ),
+                None => (None, None),
+            };
+            match crate::agent::run(
+                cfg,
+                Some(prompt.clone()),
+                provider_override,
+                model_override,
+                temperature,
+                Vec::new(),
+                false,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(output) => {
+                    let approx_in = (prompt.len() / 4) as u64;
+                    let approx_out = (output.len() / 4) as u64;
+                    Ok((output, approx_in, approx_out))
+                }
+                Err(e) => Err(format!("{e:#}")),
+            }
+        }
     };
 
     let engine = crate::workflows::WorkflowEngine::new();

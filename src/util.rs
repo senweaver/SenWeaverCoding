@@ -202,3 +202,58 @@ pub fn hidden_async_command<S: AsRef<OsStr>>(program: S) -> tokio::process::Comm
 pub fn decode_subprocess_bytes(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
+
+pub fn describe_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::path::PathBuf;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let base = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_string());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{base}.{}.{nanos}.tmp", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+pub async fn atomic_write_async(
+    path: impl AsRef<std::path::Path>,
+    bytes: impl Into<Vec<u8>>,
+) -> std::io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    let bytes = bytes.into();
+    tokio::task::spawn_blocking(move || atomic_write(&path, &bytes))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+}

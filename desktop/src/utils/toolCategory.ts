@@ -53,6 +53,7 @@ const STATIC_CATEGORY_MAP: Record<string, ToolCategory> = {
   code_outline: 'code_intel',
   code_to_spec: 'code_intel',
   code_xfile_refactor: 'code_intel',
+  code_review: 'code_intel',
   lsp: 'code_intel',
   lsp_symbols: 'code_intel',
   inline_complete: 'code_intel',
@@ -81,6 +82,7 @@ const STATIC_CATEGORY_MAP: Record<string, ToolCategory> = {
   notebook_edit: 'edit',
   glob_edit: 'edit',
   patch_apply: 'edit',
+  diff_apply: 'edit',
   lsp_rename: 'edit',
   restore_file: 'edit',
   copy_path: 'edit',
@@ -129,9 +131,9 @@ const STATIC_CATEGORY_MAP: Record<string, ToolCategory> = {
   enter_plan_mode: 'plan',
   exit_plan_mode: 'plan',
   update_plan: 'plan',
+  write_plan: 'plan',
 
   send_user_message: 'plan',
-  brief: 'plan',
   setup_agent: 'plan',
   ExitPlanMode: 'plan',
 
@@ -146,6 +148,7 @@ const STATIC_CATEGORY_MAP: Record<string, ToolCategory> = {
   task_stop: 'task',
   delegate: 'task',
   delegate_parallel: 'task',
+  spawn_workers: 'task',
   swarm: 'task',
   llm_task: 'task',
   team_create: 'task',
@@ -166,6 +169,7 @@ const STATIC_CATEGORY_MAP: Record<string, ToolCategory> = {
   worktree_exit: 'git',
 
   diagnostics: 'diagnostics',
+  debug_test_report: 'diagnostics',
 
   sessions_list: 'sessions',
   sessions_history: 'sessions',

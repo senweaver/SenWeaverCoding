@@ -497,6 +497,63 @@ fn resolve_open_skills_dir(config_open_skills_dir: Option<&str>) -> Option<PathB
     )
 }
 
+fn open_skills_sync_in_flight() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+fn run_open_skills_sync(repo_dir: &Path, clone: bool) {
+    let ok = if clone {
+        clone_open_skills_repo(repo_dir)
+    } else {
+        pull_open_skills_repo(repo_dir)
+    };
+    if ok {
+        let _ = mark_open_skills_synced(repo_dir);
+    } else {
+        tracing::warn!(
+            "open-skills {} failed; using local copy from {}",
+            if clone { "clone" } else { "update" },
+            repo_dir.display()
+        );
+    }
+}
+
+fn schedule_open_skills_sync(repo_dir: PathBuf, clone: bool) {
+    {
+        let mut guard = open_skills_sync_in_flight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !guard.insert(repo_dir.clone()) {
+            return;
+        }
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => {
+            let dir = repo_dir.clone();
+            crate::runtime::spawn_supervised("open_skills_sync", async move {
+                let task_dir = dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    run_open_skills_sync(&task_dir, clone);
+                })
+                .await;
+                open_skills_sync_in_flight()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&dir);
+            });
+        }
+        Err(_) => {
+            run_open_skills_sync(&repo_dir, clone);
+            open_skills_sync_in_flight()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&repo_dir);
+        }
+    }
+}
+
 fn ensure_open_skills_repo(
     config_open_skills_enabled: Option<bool>,
     config_open_skills_dir: Option<&str>,
@@ -508,22 +565,12 @@ fn ensure_open_skills_repo(
     let repo_dir = resolve_open_skills_dir(config_open_skills_dir)?;
 
     if !repo_dir.exists() {
-        if !clone_open_skills_repo(&repo_dir) {
-            return None;
-        }
-        let _ = mark_open_skills_synced(&repo_dir);
-        return Some(repo_dir);
+        schedule_open_skills_sync(repo_dir, true);
+        return None;
     }
 
     if should_sync_open_skills(&repo_dir) {
-        if pull_open_skills_repo(&repo_dir) {
-            let _ = mark_open_skills_synced(&repo_dir);
-        } else {
-            tracing::warn!(
-                "open-skills update failed; using local copy from {}",
-                repo_dir.display()
-            );
-        }
+        schedule_open_skills_sync(repo_dir.clone(), false);
     }
 
     Some(repo_dir)

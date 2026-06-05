@@ -620,10 +620,6 @@ export const CHANNEL_CATEGORIES: ReadonlyArray<{
 
 export const SESSION_BACKEND_CHOICES = SESSION_BACKEND_OPTIONS
 
-export function findChannelDefinition(id: string): ChannelDefinition | undefined {
-  return CHANNEL_DEFINITIONS.find((def) => def.id === id)
-}
-
 export function channelsByCategory(category: ChannelCategory): ChannelDefinition[] {
   return CHANNEL_DEFINITIONS.filter((def) => def.category === category)
 }

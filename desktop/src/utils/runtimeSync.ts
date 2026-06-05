@@ -8,6 +8,8 @@ import { wsManager } from '../api/websocket'
 import { useChatStore } from '../stores/chatStore'
 import { useProviderStore } from '../stores/providerStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useUIStore } from '../stores/uiStore'
+import { t } from '../i18n'
 import type { RuntimeSelection } from '../types/runtime'
 import {
   persistRuntimeSelection,
@@ -29,11 +31,18 @@ export async function syncRuntimeSelectionToBackend(
 
   if (isPersistableSessionId(sessionId)) {
     if (wsManager.isConnected(sessionId)) {
-      await wsManager.sendRuntimeConfig(
+      const confirmed = await wsManager.sendRuntimeConfig(
         sessionId,
         { providerId, modelId },
         { persist },
       )
+      if (!confirmed) {
+        useUIStore.getState().addToast({
+          type: 'warning',
+          message: t('runtime.syncTimeout'),
+          duration: 5000,
+        })
+      }
       return
     }
     useChatStore.getState().setSessionRuntime(sessionId, { providerId, modelId }, { persist })

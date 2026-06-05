@@ -9,7 +9,11 @@ import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import type { CodingModeId } from '../../types/codingMode'
-import { isVisibleCodingMode, CODING_MODE_ACCENT } from '../../types/codingMode'
+import {
+  isVisibleCodingMode,
+  CODING_MODE_ACCENT,
+  sortByCodingModeOrder,
+} from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
 
 type Props = {
@@ -54,6 +58,7 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const storeMode = useSettingsStore((s) => s.codingMode)
   const requestSetCodingMode = useSettingsStore((s) => s.requestSetCodingMode)
   const codingModes = useSettingsStore((s) => s.codingModes)
+  const codingModeOrder = useSettingsStore((s) => s.codingModeOrder)
   const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const [open, setOpen] = useState(false)
@@ -74,8 +79,8 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
       ? codingModes.map((m) => ({ id: m.id, permissionMode: m.permissionMode }))
       : FALLBACK_MODES.map((m) => ({ id: m.id, permissionMode: undefined }))
 
-  const items = sourceModes
-    .filter((m) => isVisibleCodingMode(m.id))
+  const visibleModes = sourceModes.filter((m) => isVisibleCodingMode(m.id))
+  const items = sortByCodingModeOrder(visibleModes, codingModeOrder)
     .map((m) => {
       const isAutonomous =
         m.permissionMode !== undefined
@@ -140,17 +145,19 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
     }
   }, [open, updateDropdownPos])
 
-  function applyMode(modeId: CodingModeId) {
+  async function applyMode(modeId: CodingModeId) {
     if (isControlled) {
       onChange?.(modeId)
-    } else {
-      void requestSetCodingMode(modeId)
-      if (activeTabId) setSessionCodingMode(activeTabId, modeId)
+      return
+    }
+    await requestSetCodingMode(modeId)
+    if (activeTabId && useSettingsStore.getState().codingMode === modeId) {
+      setSessionCodingMode(activeTabId, modeId)
     }
   }
 
   function handleSelect(modeId: CodingModeId) {
-    applyMode(modeId)
+    void applyMode(modeId)
     setOpen(false)
   }
 

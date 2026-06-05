@@ -582,6 +582,10 @@ fn ensure_fetch_webview(app: &AppHandle) -> Result<tauri::Webview> {
         WebviewUrl::External(initial),
     )
     .initialization_script(bridge)
+    .additional_browser_args(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+         --autoplay-policy=document-user-activation-required",
+    )
     .accept_first_mouse(false)
     .on_navigation(|target: &Url| {
         if target.scheme() == BRIDGE_SCHEME {

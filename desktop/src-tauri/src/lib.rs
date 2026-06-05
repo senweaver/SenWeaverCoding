@@ -34,6 +34,7 @@ const RESTART_DEBOUNCE_SECS: u64 = 45;
 const HEALTH_PROBE_HEADER: &str = "X-Sen-Ping";
 const HEALTH_PROBE_HEADER_VALUE: &str = "1";
 const BACKEND_STATE_EVENT: &str = "backend://state-change";
+const AGENT_WORKER_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 fn adapters_restart_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -1070,6 +1071,7 @@ fn start_embedded_gateway_once(
             let work = AssertUnwindSafe(|| {
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
+                    .thread_stack_size(AGENT_WORKER_STACK_SIZE)
                     .build()
                 {
                     Ok(rt) => rt,

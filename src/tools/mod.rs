@@ -6,7 +6,6 @@ pub mod ask;
 pub mod backup_tool;
 pub mod background_registry;
 pub mod brief;
-pub mod coding;
 pub mod browser;
 pub mod claude_code;
 #[cfg(feature = "tool-cloud-ops")]
@@ -86,7 +85,9 @@ pub mod notebook_edit;
 pub mod notion_tool;
 pub mod now;
 pub mod opencode_cli;
+pub mod diff_apply;
 pub mod patch_apply;
+pub mod write_plan;
 pub mod pdf_read;
 pub mod pipeline;
 pub mod poll;
@@ -176,6 +177,7 @@ pub use dir_list::DirListTool;
 pub use error::ToolErrorCause;
 
 pub use code::graph_query::CodeGraphQueryTool;
+pub use code::outline::CodeOutlineTool;
 pub use code::review::CodeReviewTool;
 pub use code::xfile_refactor::CodeXfileRefactorTool;
 pub use delegate::{BackgroundDelegateResult, BackgroundTaskStatus};
@@ -223,6 +225,7 @@ pub use autoresearch::{
 };
 pub use llm_task::LlmTaskTool;
 pub use lsp::LspTool;
+pub use lsp::format::LspFormatTool;
 pub use lsp::rename::LspRenameTool;
 pub use mcp::client::McpRegistry;
 pub use mcp::deferred::{
@@ -248,7 +251,9 @@ pub use notebook_edit::NotebookEditTool;
 pub use notion_tool::NotionTool;
 pub use now::NowTool;
 pub use opencode_cli::OpenCodeCliTool;
+pub use diff_apply::DiffApplyTool;
 pub use patch_apply::PatchApplyTool;
+pub use write_plan::WritePlanTool;
 pub use pdf_read::PdfReadTool;
 pub use poll::{ChannelMapHandle, PollTool};
 pub use powershell::PowerShellTool;
@@ -433,9 +438,12 @@ pub fn default_tools_with_runtime(
             GlobEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
         Box::new(LspRenameTool::new(security.clone())),
+        Box::new(lsp::format::LspFormatTool::new(security.clone())),
         Box::new(
             PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops),
         ),
+        Box::new(DiffApplyTool::new(security.clone())),
+        Box::new(WritePlanTool::new()),
         Box::new(ContentSearchTool::new(security)),
     ]
 }
@@ -576,7 +584,7 @@ pub fn all_tools_with_runtime(
     #[cfg(not(feature = "tool-productivity"))]
     let _ = (composio_key, composio_entity_id);
     #[cfg(feature = "tool-team")]
-    let team_registry: team::create::TeamRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let team_registry: team::create::TeamRegistry = team::global_team_registry();
     let optimization_state: incremental_optimize::OptimizationStateHandle = Arc::new(
         parking_lot::RwLock::new(incremental_optimize::OptimizationState::default()),
     );
@@ -665,27 +673,19 @@ pub fn all_tools_with_runtime(
         Arc::new(McpResourcesListTool::new()),
         Arc::new(McpResourcesReadTool::new(None)),
         Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode_flag))),
-        {
-            let pending_plan = if let Some(svc) = crate::services::try_get_services() {
-                svc.pending_plan.clone()
-            } else {
-                crate::tools::plan_mode::exit::new_pending_plan()
-            };
-            Arc::new(
-                ExitPlanModeTool::new_with_pending_plan(
-                    Arc::clone(&plan_mode_flag),
-                    pending_plan,
-                )
+        Arc::new(
+            ExitPlanModeTool::new(Arc::clone(&plan_mode_flag))
                 .with_workspace_root(security.workspace_root_handle()),
-            )
-        },
+        ),
         #[cfg(feature = "tool-curator")]
         {
             let svc = crate::services::try_get_services();
             let curator_flag = svc
                 .as_ref()
                 .map(|s| s.curator_mode_flag.clone())
-                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(false)));
+                .unwrap_or_else(|| {
+                    Arc::new(crate::tools::curator::tools::CuratorModeRegistry::new())
+                });
             let curator_state = svc
                 .as_ref()
                 .map(|s| s.curator_state.clone())
@@ -752,7 +752,9 @@ pub fn all_tools_with_runtime(
             let curator_flag = svc
                 .as_ref()
                 .map(|s| s.curator_mode_flag.clone())
-                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(false)));
+                .unwrap_or_else(|| {
+                    Arc::new(crate::tools::curator::tools::CuratorModeRegistry::new())
+                });
             let curator_state = svc
                 .as_ref()
                 .map(|s| s.curator_state.clone())
@@ -773,6 +775,7 @@ pub fn all_tools_with_runtime(
         Arc::new(FlowRunTool::new()),
         Arc::new(FlowRollbackTool::new()),
         Arc::new(CodeGraphQueryTool::new()),
+        Arc::new(CodeOutlineTool::new(workspace_dir.to_path_buf())),
         Arc::new(CodeReviewTool::new()),
         Arc::new(CodeXfileRefactorTool::new()),
         #[cfg(feature = "tool-utility-misc")]
@@ -808,7 +811,11 @@ pub fn all_tools_with_runtime(
         #[cfg(feature = "tool-team")]
         Arc::new(TeamDeleteTool::new(Arc::clone(&team_registry))),
         Arc::new(SendMessageTool::new(
-            Arc::new(RwLock::new(std::collections::HashMap::new())),
+            send_message::global_mailbox(),
+            "main".to_string(),
+        )),
+        Arc::new(send_message::ReadMessagesTool::new(
+            send_message::global_mailbox(),
             "main".to_string(),
         )),
         Arc::new(DirListTool::new(security.clone())),
@@ -864,9 +871,12 @@ pub fn all_tools_with_runtime(
         GlobEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
     ));
     tool_arcs.push(Arc::new(LspRenameTool::new(security.clone())));
+    tool_arcs.push(Arc::new(lsp::format::LspFormatTool::new(security.clone())));
     tool_arcs.push(Arc::new(
         PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
     ));
+    tool_arcs.push(Arc::new(DiffApplyTool::new(security.clone())));
+    tool_arcs.push(Arc::new(WritePlanTool::new()));
 
     #[cfg(target_os = "windows")]
     tool_arcs.push(Arc::new(PowerShellTool::new(security.clone())));
@@ -978,6 +988,7 @@ pub fn all_tools_with_runtime(
             browser_config.native_webdriver_url.clone(),
             browser_config.native_chrome_path.clone(),
             ComputerUseConfig {
+                enabled: browser_config.computer_use.enabled,
                 endpoint: browser_config.computer_use.endpoint.clone(),
                 api_key: browser_config.computer_use.api_key.clone(),
                 timeout_ms: browser_config.computer_use.timeout_ms,

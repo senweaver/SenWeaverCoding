@@ -128,13 +128,20 @@ impl WorkerSupervisor {
                     .clone()
                     .unwrap_or_else(|| "default".to_string())
             });
+        let effective_workspace_root = ctx
+            .parent_workspace_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.workspace_root.clone());
         let handle = Arc::new(WorkerHandle::new(
             worker_id.clone(),
             spec.parent_session_id.clone(),
             spec.parent_tool_use_id.clone(),
             spec.title.clone(),
             model,
-            self.workspace_root.clone(),
+            effective_workspace_root,
         ));
 
         self.register(Arc::clone(&handle));

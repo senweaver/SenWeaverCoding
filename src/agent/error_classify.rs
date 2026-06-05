@@ -26,6 +26,14 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
 
     if contains_any(
         &lower,
+        &["turn was cancelled", "turn was canceled", "turn cancelled", "turn canceled"],
+    ) || contains_any(message, &["已取消", "用户取消"])
+    {
+        return "CANCELLED";
+    }
+
+    if contains_any(
+        &lower,
         &[
             "insufficient balance",
             "insufficient_quota",

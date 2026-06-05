@@ -631,15 +631,19 @@ pub(crate) fn map_tool_name_alias(tool_name: &str) -> &str {
 
         "shell" | "bash" | "sh" | "exec" | "command" | "cmd" => "shell",
 
-        "browser_open" | "browser" | "web_search" => "http_request",
+        "browser" => "browser",
+        "browser_open" => "browser_open",
+        "web_search" | "websearch" => "web_search",
 
-        "send_message" | "sendmessage" => "message_send",
+        "send_message" | "sendmessage" | "message_send" => "send_message",
 
         "fileread" | "file_read" | "readfile" | "read_file" | "file" => "file_read",
         "filewrite" | "file_write" | "writefile" | "write_file" => "file_write",
         "filelist" | "file_list" | "listfiles" | "list_files" => "file_list",
 
-        "memoryrecall" | "memory_recall" | "recall" | "memrecall" => "memory_recall",
+        "memoryrecall" | "memory_recall" | "recall" | "memrecall" | "memory_search" => {
+            "memory_recall"
+        }
         "memorystore" | "memory_store" | "store" | "memstore" => "memory_store",
         "memoryforget" | "memory_forget" | "forget" | "memforget" => "memory_forget",
 

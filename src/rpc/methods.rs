@@ -334,7 +334,25 @@ impl RpcCtx {
         let sid = session_id.clone();
 
         tokio::spawn(async move {
-            let result = session.agent.turn_streamed(&prompt, event_tx).await;
+            use futures_util::FutureExt as _;
+            let caught = std::panic::AssertUnwindSafe(
+                session.agent.turn_streamed(&prompt, event_tx),
+            )
+            .catch_unwind()
+            .await;
+            let result = match caught {
+                Ok(r) => r,
+                Err(panic) => {
+                    let detail = crate::util::describe_panic(&*panic);
+                    tracing::error!(
+                        target: "rpc.session",
+                        "turn execution panicked (recovered): {detail}"
+                    );
+                    Err(crate::error::AgentError::ToolDispatchFailed(format!(
+                        "internal error recovered: {detail}"
+                    )))
+                }
+            };
             let _ = session_tx.send(session);
             let _ = result_tx.send(result);
         });

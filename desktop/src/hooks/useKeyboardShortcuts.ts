@@ -107,9 +107,12 @@ export function useKeyboardShortcuts() {
         e.preventDefault()
         e.stopPropagation()
         const settings = useSettingsStore.getState()
-        void settings.requestSetCodingMode('plan')
         const tabId = activeTabIdRef.current
-        if (tabId) setSessionCodingMode(tabId, 'plan')
+        void settings.requestSetCodingMode('plan').then(() => {
+          if (tabId && useSettingsStore.getState().codingMode === 'plan') {
+            setSessionCodingMode(tabId, 'plan')
+          }
+        })
         return
       }
 

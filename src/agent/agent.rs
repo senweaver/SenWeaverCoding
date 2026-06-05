@@ -724,7 +724,7 @@ impl Agent {
 
         self.apply_turn_preamble(user_message, &event_tx).await?;
         self.apply_gui_model_switch(&event_tx).await;
-        let effective_model = self.classify_model(user_message);
+        let mut effective_model = self.classify_model(user_message);
 
         let armed_plan_path: Option<String> = self.plan_execution_armed.lock().take();
 
@@ -746,60 +746,87 @@ impl Agent {
         let dedup_exempt = live_cfg.agent.tool_call_dedup_exempt.clone();
         drop(live_cfg);
         let excluded_tools: Vec<String> = Vec::new();
-        let provider_name = self.cached_provider.clone();
 
         let hook_runner_arc = self.hook_runner.as_ref().and_then(|h| h.current());
         let hook_runner_ref = hook_runner_arc.as_deref();
 
-        let gui_hooks: Arc<GuiHooksFromAgent> = Arc::new(GuiHooksFromAgent::from_agent(self));
+        let final_text = loop {
+            let provider_name = self.cached_provider.clone();
+            let gui_hooks: Arc<GuiHooksFromAgent> = Arc::new(GuiHooksFromAgent::from_agent(self));
 
-        let loop_result = {
-            let policy = crate::agent::loop_::policy::PolicyBundle::gui(
-                self.provider.as_ref(),
-                &self.tools,
-                self.observer.as_ref(),
-                provider_name.as_str(),
-                effective_model.as_str(),
-                &multimodal,
-                &pacing,
-                &excluded_tools,
-                &dedup_exempt,
-            )
-            .with_temperature(self.temperature)
-            .with_max_iterations(self.config.max_tool_iterations)
-            .with_cancellation(Some(cancel))
-            .with_event_sink(crate::agent::event_sink::EventSink::turn(event_tx.clone()))
-            .with_activated_tools(self.activated_tools.as_ref())
-            .with_hooks(hook_runner_ref)
-            .with_rbac(self.rbac_engine.as_ref(), self.rbac_identity.as_ref())
-            .with_model_switch_callback(Some(crate::agent::loop_::get_model_switch_state()))
-            .with_response_cache_hook(Some(gui_hooks.clone()))
-            .with_memory_session_hook(Some(gui_hooks.clone()))
-            .with_model_classifier_hook(Some(gui_hooks.clone()))
-            .with_turn_preamble_hook(Some(gui_hooks.clone()))
-            .with_gui_model_switch_hook(Some(gui_hooks.clone()))
-            .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
-            .with_experience_recorder_hook(Some(gui_hooks.clone()))
-            .with_plan_mode_nudge_hook(Some(gui_hooks.clone()))
-            .with_plan_execution_path(armed_plan_path.as_deref());
+            let loop_result = {
+                let policy = crate::agent::loop_::policy::PolicyBundle::gui(
+                    self.provider.as_ref(),
+                    &self.tools,
+                    self.observer.as_ref(),
+                    provider_name.as_str(),
+                    effective_model.as_str(),
+                    &multimodal,
+                    &pacing,
+                    &excluded_tools,
+                    &dedup_exempt,
+                )
+                .with_temperature(self.temperature)
+                .with_max_iterations(self.config.max_tool_iterations)
+                .with_cancellation(Some(cancel.clone()))
+                .with_event_sink(crate::agent::event_sink::EventSink::turn(event_tx.clone()))
+                .with_activated_tools(self.activated_tools.as_ref())
+                .with_hooks(hook_runner_ref)
+                .with_rbac(self.rbac_engine.as_ref(), self.rbac_identity.as_ref())
+                .with_model_switch_callback(Some(crate::agent::loop_::get_model_switch_state()))
+                .with_response_cache_hook(Some(gui_hooks.clone()))
+                .with_memory_session_hook(Some(gui_hooks.clone()))
+                .with_model_classifier_hook(Some(gui_hooks.clone()))
+                .with_turn_preamble_hook(Some(gui_hooks.clone()))
+                .with_gui_model_switch_hook(Some(gui_hooks.clone()))
+                .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
+                .with_experience_recorder_hook(Some(gui_hooks.clone()))
+                .with_plan_mode_nudge_hook(Some(gui_hooks.clone()))
+                .with_plan_execution_path(armed_plan_path.as_deref());
 
-            crate::agent::loop_::unified::UnifiedLoop::new(policy)
-                .run(&mut history_chat)
-                .await
-        };
+                crate::agent::loop_::unified::UnifiedLoop::new(policy)
+                    .run(&mut history_chat)
+                    .await
+            };
 
-        let final_text = match loop_result {
-            Ok(text) => text,
-            Err(err) => {
-                let msg = err.to_string();
-                let _ = event_tx
-                    .send(TurnEvent::Error {
-                        message: msg.clone(),
-                    })
-                    .await;
+            match loop_result {
+                Ok(text) => break text,
+                Err(err) => {
+                    if crate::agent::model_switch::is_model_switch_requested(&err).is_some() {
+                        tracing::info!(
+                            target: "runtime_model_switch",
+                            "GUI turn received model switch request mid-turn; applying switch and retrying instead of failing"
+                        );
+                        self.apply_gui_model_switch(&event_tx).await;
+                        effective_model = self.model_name.clone();
+                        continue;
+                    }
+                    let msg = err.to_string();
+                    let is_cancelled = matches!(
+                        err.downcast_ref::<AgentError>(),
+                        Some(AgentError::TurnCancelled)
+                    ) || crate::agent::error_classify::classify_turn_error_code(&msg)
+                        == "CANCELLED";
+                    if is_cancelled {
+                        let _ = event_tx
+                            .send(TurnEvent::Cancelling {
+                                reason: msg.clone(),
+                            })
+                            .await;
+                        crate::agent::dangling_tool_repair::close_orphan_user_turns(
+                            &mut self.history,
+                        );
+                        return Err(AgentError::TurnCancelled);
+                    }
+                    let _ = event_tx
+                        .send(TurnEvent::Error {
+                            message: msg.clone(),
+                        })
+                        .await;
 
-                crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
-                return Err(AgentError::ToolDispatchFailed(msg));
+                    crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+                    return Err(AgentError::ToolDispatchFailed(msg));
+                }
             }
         };
 
@@ -1240,6 +1267,8 @@ impl Agent {
             self.security_summary = Some(p.prompt_summary());
         }
         self.workspace_dir = path.clone();
+
+        crate::agent::token::optimizer::ensure_workspace_optimizer(path.clone());
 
         self.reload_skills_for_workspace(&path);
     }
@@ -2326,6 +2355,18 @@ impl Agent {
             prompt.push_str(&mode.system_prompt_injection());
         }
 
+        if live_cfg.buddy.enabled {
+            let companion = crate::buddy::companion::Companion::new(live_cfg.buddy.clone());
+            if companion.is_enabled() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&crate::buddy::prompt::buddy_system_prompt(
+                    &live_cfg.buddy.name,
+                    &live_cfg.buddy.personality,
+                    companion.mood(),
+                ));
+            }
+        }
+
         if let Some(theme) = crate::util::get_runtime_var("SEN_THEME") {
             let theme = theme.trim();
             if !theme.is_empty()
@@ -2476,8 +2517,7 @@ impl Agent {
 
         let coding_label = self.current_coding_mode.map(|m| m.label().to_string());
         let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
-        let perm_mode_lc =
-            crate::gateway::ws::desktop::desktop_runtime_state().permission_mode();
+        let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
         let tool_lc = call.name.to_ascii_lowercase();
         let guardrail_ctx = crate::guardrails::GuardrailContext {
             coding_mode: coding_label_lc.as_deref(),
@@ -2588,7 +2628,13 @@ impl Agent {
             observer: &Arc<dyn Observer>,
         ) -> (String, bool) {
             let start = Instant::now();
-            match tool.execute(call.arguments.clone()).await {
+            match crate::agent::loop_::execute_tool_panic_safe(
+                tool,
+                &call.name,
+                call.arguments.clone(),
+            )
+            .await
+            {
                 Ok(r) => {
                     observer.record_event(&ObserverEvent::ToolCall {
                         tool: call.name.clone(),
@@ -2763,6 +2809,7 @@ impl Agent {
     }
 
     pub async fn turn(&mut self, user_message: &str) -> Result<String, AgentError> {
+        use futures_util::FutureExt as _;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<TurnEvent>(TURN_EVENT_DRAIN_BUFFER);
         let drain = crate::runtime::spawn_supervised("agent.agent.drain", async move {
@@ -2771,10 +2818,26 @@ impl Agent {
             }
         })
         .into_inner();
-        let result = self.turn_streamed(user_message, tx).await;
+        let caught =
+            std::panic::AssertUnwindSafe(self.turn_streamed(user_message, tx))
+                .catch_unwind()
+                .await;
 
         let _ = drain.await;
-        result
+        match caught {
+            Ok(result) => result,
+            Err(panic) => {
+                let msg = crate::util::describe_panic(panic.as_ref());
+                tracing::error!(
+                    target: "agent",
+                    panic = %msg,
+                    "agent.turn panicked; isolated to this turn"
+                );
+                Err(AgentError::ToolDispatchFailed(format!(
+                    "turn panicked: {msg}"
+                )))
+            }
+        }
     }
 
     pub async fn turn_via_loop_core(&mut self, user_message: &str) -> Result<String, AgentError> {
@@ -2908,7 +2971,7 @@ impl Agent {
         let mut enriched = Self::build_user_envelope(user_message, &context);
 
         if let Some(svc) = crate::services::try_get_services() {
-            let mode = *svc.coding_mode.read();
+            let mode = crate::agent::coding_mode::active_coding_mode();
             if let Some(reminder) = crate::agent::mode::effects::pre_turn_reminder(mode) {
                 enriched.push_str("\n\n");
                 enriched.push_str(reminder);
@@ -2964,7 +3027,20 @@ impl Agent {
             provider,
             model
         );
+        let old_model = self.model_name.clone();
         self.model_name = model.clone();
+        if old_model != self.model_name && !old_model.is_empty() && !self.model_name.is_empty() {
+            let old_marker = format!("| Model: {old_model}");
+            let new_marker = format!("| Model: {}", self.model_name);
+            for entry in self.history.iter_mut() {
+                if let ConversationMessage::Chat(msg) = entry {
+                    if msg.role == "system" && msg.content.contains(&old_marker) {
+                        msg.content = msg.content.replacen(&old_marker, &new_marker, 1);
+                        break;
+                    }
+                }
+            }
+        }
 
         let (new_api_key, new_api_url) = {
             let config = self.shared_config.load();

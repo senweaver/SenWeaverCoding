@@ -57,7 +57,7 @@ const FALLBACK_PLAN_MODE_TOOLS: ReadonlySet<string> = new Set([
 
   'read_skill',
   'cloud_patterns',
-  'brief',
+  'send_user_message',
   'now',
 ])
 

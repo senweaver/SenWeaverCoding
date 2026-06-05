@@ -478,8 +478,11 @@ pub struct Config {
     #[serde(default)]
     pub cloud_ops: CloudOpsConfig,
 
-    #[serde(default, skip_serializing_if = "ConversationalAiConfig::is_disabled")]
-    pub conversational_ai: ConversationalAiConfig,
+    #[serde(default, skip_serializing_if = "HandsConfig::is_disabled")]
+    pub hands: HandsConfig,
+
+    #[serde(default, skip_serializing_if = "BuddyConfig::is_disabled")]
+    pub buddy: BuddyConfig,
 
     #[serde(default)]
     pub security_ops: SecurityOpsConfig,
@@ -611,6 +614,9 @@ pub struct Config {
     pub swarms: HashMap<String, SwarmConfig>,
 
     #[serde(default)]
+    pub teams: TeamsConfig,
+
+    #[serde(default)]
     pub hooks: HooksConfig,
 
     #[serde(default)]
@@ -636,9 +642,6 @@ pub struct Config {
 
     #[serde(default)]
     pub jira: JiraConfig,
-
-    #[serde(default)]
-    pub node_transport: NodeTransportConfig,
 
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
@@ -1498,6 +1501,37 @@ impl Default for NodesConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TeamsConfig {
+
+    #[serde(default)]
+    pub sync_enabled: bool,
+
+    #[serde(default = "default_max_team_size")]
+    pub max_team_size: usize,
+
+    #[serde(default = "default_team_message_channel_size")]
+    pub message_channel_size: usize,
+}
+
+fn default_max_team_size() -> usize {
+    20
+}
+
+fn default_team_message_channel_size() -> usize {
+    256
+}
+
+impl Default for TeamsConfig {
+    fn default() -> Self {
+        Self {
+            sync_enabled: false,
+            max_team_size: default_max_team_size(),
+            message_channel_size: default_team_message_channel_size(),
+        }
+    }
+}
+
 fn default_tts_provider() -> String {
     "openai".into()
 }
@@ -2348,66 +2382,6 @@ pub struct GatewayClientAuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct NodeTransportConfig {
-
-    #[serde(default = "default_node_transport_enabled")]
-    pub enabled: bool,
-
-    #[serde(default)]
-    pub shared_secret: String,
-
-    #[serde(default = "default_max_request_age")]
-    pub max_request_age_secs: i64,
-
-    #[serde(default = "default_require_https")]
-    pub require_https: bool,
-
-    #[serde(default)]
-    pub allowed_peers: Vec<String>,
-
-    #[serde(default)]
-    pub tls_cert_path: Option<String>,
-
-    #[serde(default)]
-    pub tls_key_path: Option<String>,
-
-    #[serde(default)]
-    pub mutual_tls: bool,
-
-    #[serde(default = "default_connection_pool_size")]
-    pub connection_pool_size: usize,
-}
-
-fn default_node_transport_enabled() -> bool {
-    true
-}
-fn default_max_request_age() -> i64 {
-    300
-}
-fn default_require_https() -> bool {
-    true
-}
-fn default_connection_pool_size() -> usize {
-    4
-}
-
-impl Default for NodeTransportConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_node_transport_enabled(),
-            shared_secret: String::new(),
-            max_request_age_secs: default_max_request_age(),
-            require_https: default_require_https(),
-            allowed_peers: Vec::new(),
-            tls_cert_path: None,
-            tls_key_path: None,
-            mutual_tls: false,
-            connection_pool_size: default_connection_pool_size(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComposioConfig {
 
     #[serde(default, alias = "enable")]
@@ -2516,6 +2490,9 @@ impl Default for SecretsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserComputerUseConfig {
 
+    #[serde(default)]
+    pub enabled: bool,
+
     #[serde(default = "default_browser_computer_use_endpoint")]
     pub endpoint: String,
 
@@ -2549,6 +2526,7 @@ fn default_browser_computer_use_timeout_ms() -> u64 {
 impl Default for BrowserComputerUseConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             endpoint: default_browser_computer_use_endpoint(),
             api_key: None,
             timeout_ms: default_browser_computer_use_timeout_ms(),
@@ -5370,7 +5348,40 @@ impl Default for JiraConfig {
 
 pub use crate::config::domain::cloud_ops::CloudOpsConfig;
 
-pub use crate::config::domain::conversational_ai::ConversationalAiConfig;
+pub use crate::buddy::types::BuddyConfig;
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HandsConfig {
+
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub dir: Option<String>,
+
+    #[serde(default = "default_hands_poll_secs")]
+    pub poll_secs: u64,
+}
+
+fn default_hands_poll_secs() -> u64 {
+    60
+}
+
+impl HandsConfig {
+    pub fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
+}
+
+impl Default for HandsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: None,
+            poll_secs: default_hands_poll_secs(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SecurityOpsConfig {
@@ -5453,7 +5464,8 @@ impl Default for Config {
             backup: BackupConfig::default(),
             data_retention: DataRetentionConfig::default(),
             cloud_ops: CloudOpsConfig::default(),
-            conversational_ai: ConversationalAiConfig::default(),
+            hands: HandsConfig::default(),
+            buddy: BuddyConfig::default(),
             security: SecurityConfig::default(),
             security_ops: SecurityOpsConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -5497,6 +5509,7 @@ impl Default for Config {
             delegate: DelegateToolConfig::default(),
             agents: HashMap::new(),
             swarms: HashMap::new(),
+            teams: TeamsConfig::default(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
@@ -5507,7 +5520,6 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
-            node_transport: NodeTransportConfig::default(),
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
             image_gen: ImageGenConfig::default(),
@@ -7902,13 +7914,6 @@ impl Config {
         }
 
         crate::services::proxy::runtime::ProxyRuntime::global().replace(self.proxy.clone());
-
-        if self.conversational_ai.enabled {
-            tracing::warn!(
-                "conversational_ai.enabled = true but conversational AI features are not yet \
-                 implemented; this section is reserved for future use and will be ignored"
-            );
-        }
     }
 
     async fn resolve_config_path_for_save(&self) -> Result<PathBuf> {

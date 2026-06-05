@@ -202,9 +202,13 @@ export function QuestionStrip() {
   function handleSkip() {
     if (!activeTabId || !pendingPermission || submittedRef.current) return
     submittedRef.current = true
-    respondToPermission(activeTabId, pendingPermission.requestId, true, {
+    const ok = respondToPermission(activeTabId, pendingPermission.requestId, true, {
       updatedInput: buildAnswerPayload(true),
     })
+    if (!ok) {
+      submittedRef.current = false
+      return
+    }
     clearComposer()
   }
 
@@ -215,9 +219,13 @@ export function QuestionStrip() {
       if (!details) return
     }
     submittedRef.current = true
-    respondToPermission(activeTabId, pendingPermission.requestId, true, {
+    const ok = respondToPermission(activeTabId, pendingPermission.requestId, true, {
       updatedInput: buildAnswerPayload(false),
     })
+    if (!ok) {
+      submittedRef.current = false
+      return
+    }
     clearComposer()
   }
 

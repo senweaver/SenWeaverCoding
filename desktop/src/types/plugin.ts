@@ -85,6 +85,7 @@ export type PluginMarketplaceSummary = {
 export type PluginListResponse = {
   plugins: PluginSummary[]
   marketplaces: PluginMarketplaceSummary[]
+  runtimeAvailable?: boolean
   summary: {
     total: number
     enabled: number

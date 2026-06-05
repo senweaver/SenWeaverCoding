@@ -271,6 +271,10 @@ impl ApprovalManager {
             return false;
         }
 
+        if !self.non_interactive && crate::trust::domain_regressed(tool_name) {
+            return true;
+        }
+
         if self.auto_approve.contains("*") || self.auto_approve.contains(tool_name) {
             return false;
         }
@@ -318,6 +322,14 @@ impl ApprovalManager {
 
         let mut log = self.audit_log.lock();
         log.push(entry);
+
+        let approved = decision != ApprovalResponse::No;
+        let reason = if approved {
+            ""
+        } else {
+            "user denied tool execution"
+        };
+        crate::trust::record_tool_decision(tool_name, approved, reason);
     }
 
     pub fn audit_log(&self) -> Vec<ApprovalLogEntry> {
@@ -364,6 +376,17 @@ fn append_audit_entry_to_disk(
 }
 
 fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
+    use std::io::IsTerminal as _;
+
+    if !io::stdin().is_terminal() {
+        tracing::warn!(
+            target: "approval",
+            tool = %request.tool_name,
+            "tool approval requested without an interactive terminal (channel/headless); auto-denying instead of blocking on stdin (configure autonomy auto-approve or use an interactive client to allow)"
+        );
+        return ApprovalResponse::No;
+    }
+
     let summary = summarize_args(&request.arguments);
     eprintln!();
     eprintln!("🔧 Agent wants to execute: {}", request.tool_name);

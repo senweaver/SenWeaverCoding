@@ -10,12 +10,14 @@ use tokio::sync::mpsc;
 
 use super::{McpError, McpServer};
 
+const MAX_INFLIGHT_REQUESTS: usize = 256;
+
 pub async fn serve(server: McpServer) -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin).lines();
 
     let (tx, mut rx) = mpsc::channel::<Value>(64);
-    let writer_handle = tokio::spawn(async move {
+    let writer_handle = crate::runtime::spawn_supervised("mcp.server.stdio.writer", async move {
         let mut stdout = tokio::io::stdout();
         while let Some(message) = rx.recv().await {
             let line = match serde_json::to_string(&message) {
@@ -57,6 +59,7 @@ pub async fn serve(server: McpServer) -> anyhow::Result<()> {
     });
 
     let server = Arc::new(server);
+    let inflight = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS));
     tracing::info!(
         target: "mcp.server.stdio",
         tools = server.exposed_tool_count(),
@@ -88,10 +91,16 @@ pub async fn serve(server: McpServer) -> anyhow::Result<()> {
             continue;
         }
 
+        let permit = match inflight.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+
         let parsed: Result<Value, _> = serde_json::from_str(trimmed);
         let server = server.clone();
         let tx = tx.clone();
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("mcp.server.stdio.request", async move {
+            let _permit = permit;
             match parsed {
                 Ok(req) => {
                     if let Some(resp) = server.dispatch(req).await {
@@ -114,6 +123,6 @@ pub async fn serve(server: McpServer) -> anyhow::Result<()> {
     }
 
     drop(tx);
-    let _ = writer_handle.await;
+    let _ = writer_handle.into_inner().await;
     Ok(())
 }

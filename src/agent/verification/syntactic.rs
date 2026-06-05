@@ -172,7 +172,7 @@ pub(crate) fn heuristic_check(source: &str, _lang: Language) -> VerificationRepo
                     ']' => '[',
                     '}' => '{',
 
-                    _ => unreachable!("invariant: outer match guard restricts ch to closing bracket trio"),
+                    _ => continue,
                 };
                 match stack.pop() {
                     Some((o, _, _)) if o == expected => {}

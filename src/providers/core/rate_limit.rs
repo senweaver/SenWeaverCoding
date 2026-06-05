@@ -19,8 +19,16 @@ pub struct TokenBucket {
 
 impl TokenBucket {
     pub fn new(capacity: f64, refill_per_sec: f64) -> Self {
-        assert!(capacity >= 0.0, "capacity must be non-negative");
-        assert!(refill_per_sec >= 0.0, "refill_per_sec must be non-negative");
+        let capacity = if capacity.is_finite() {
+            capacity.max(0.0)
+        } else {
+            0.0
+        };
+        let refill_per_sec = if refill_per_sec.is_finite() {
+            refill_per_sec.max(0.0)
+        } else {
+            0.0
+        };
         Self {
             capacity,
             refill_per_sec,

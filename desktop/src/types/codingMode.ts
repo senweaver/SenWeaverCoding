@@ -58,6 +58,43 @@ export const VISIBLE_CODING_MODES: CodingModeId[] = [
 export const isVisibleCodingMode = (id: string): id is CodingModeId =>
   (VISIBLE_CODING_MODES as readonly string[]).includes(id)
 
+export function applyCodingModeOrder(
+  ids: CodingModeId[],
+  order: CodingModeId[],
+): CodingModeId[] {
+  const seen = new Set<CodingModeId>()
+  const result: CodingModeId[] = []
+  for (const id of order) {
+    if (!seen.has(id) && ids.includes(id)) {
+      result.push(id)
+      seen.add(id)
+    }
+  }
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      result.push(id)
+      seen.add(id)
+    }
+  }
+  return result
+}
+
+export function sortByCodingModeOrder<T extends { id: CodingModeId }>(
+  items: T[],
+  order: CodingModeId[],
+): T[] {
+  const orderedIds = applyCodingModeOrder(
+    items.map((it) => it.id),
+    order,
+  )
+  const rank = new Map<CodingModeId, number>(orderedIds.map((id, i) => [id, i]))
+  return [...items].sort(
+    (a, b) =>
+      (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+  )
+}
+
 export type CodingModeAccentTokens = {
   container: string
   onContainer: string

@@ -301,7 +301,19 @@ impl AcpServer {
         let sid = session_id.clone();
 
         crate::runtime::task_manager::spawn_supervised("acp.session_turn", async move {
-            let result = session.agent.turn_streamed(&prompt, event_tx).await;
+            use futures_util::FutureExt as _;
+            let caught = std::panic::AssertUnwindSafe(
+                session.agent.turn_streamed(&prompt, event_tx),
+            )
+            .catch_unwind()
+            .await;
+            let result = match caught {
+                Ok(r) => r,
+                Err(panic) => Err(crate::error::AgentError::ToolDispatchFailed(format!(
+                    "internal error recovered: {}",
+                    crate::util::describe_panic(&*panic)
+                ))),
+            };
             let _ = session_tx.send(session);
             let _ = result_tx.send(result);
         });

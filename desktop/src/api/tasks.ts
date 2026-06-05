@@ -44,11 +44,6 @@ export const tasksApi = {
     return api.post<{ ok: true }>(`/api/scheduled-tasks/${id}/run`, {})
   },
 
-  async getRecentRuns(limit = 50) {
-    const res = await api.get<RunsResponse>(`/api/scheduled-tasks/runs?limit=${limit}`)
-    return { runs: res.runs.map((x) => normalizeRun(x as RunWire)) }
-  },
-
   async getTaskRuns(taskId: string) {
     const res = await api.get<RunsResponse>(`/api/scheduled-tasks/${taskId}/runs`)
     return { runs: res.runs.map((x) => normalizeRun(x as RunWire)) }

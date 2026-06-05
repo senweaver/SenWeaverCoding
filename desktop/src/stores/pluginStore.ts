@@ -15,6 +15,7 @@ import type {
 type PluginStore = {
   plugins: PluginSummary[]
   marketplaces: PluginListResponse['marketplaces']
+  runtimeAvailable: boolean
   summary: PluginListResponse['summary'] | null
   selectedPlugin: PluginDetail | null
   lastReloadSummary: PluginReloadSummary | null
@@ -35,6 +36,7 @@ type PluginStore = {
 export const usePluginStore = create<PluginStore>((set, get) => ({
   plugins: [],
   marketplaces: [],
+  runtimeAvailable: true,
   summary: null,
   selectedPlugin: null,
   lastReloadSummary: null,
@@ -50,6 +52,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
       set({
         plugins: data.plugins,
         marketplaces: data.marketplaces,
+        runtimeAvailable: data.runtimeAvailable !== false,
         summary: data.summary,
         isLoading: false,
       })

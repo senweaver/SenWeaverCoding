@@ -10,6 +10,8 @@ import { Button } from '../components/shared/Button'
 import { DirectoryPicker } from '../components/shared/DirectoryPicker'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
 import { ChannelDetailForm } from '../components/adapters/ChannelDetailForm'
+import { SupportedChannels } from '../components/adapters/SupportedChannels'
+import { IntegrationCatalog } from '../components/adapters/IntegrationCatalog'
 import {
   CHANNEL_CATEGORIES,
   CHANNEL_DEFINITIONS,
@@ -180,6 +182,8 @@ export function AdapterSettings() {
       <p className="text-xs text-[var(--color-text-secondary)]">
         {t('settings.adapters.descriptionFull')}
       </p>
+
+      <SupportedChannels />
 
       {}
       <section className="rounded-xl border border-[var(--color-border)] overflow-hidden">
@@ -393,6 +397,8 @@ export function AdapterSettings() {
           </section>
         )
       })}
+
+      <IntegrationCatalog />
 
       <ConfirmDialog
         open={pendingUnbind !== null}

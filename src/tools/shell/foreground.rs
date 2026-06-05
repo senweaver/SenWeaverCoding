@@ -100,9 +100,19 @@ pub(crate) async fn run_foreground_streamed(
     );
 
     let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-    if let Some(sid) = mirror_session_id {
-        background_registry::register_foreground(sid.to_string(), kill_tx);
-    }
+    let (foreground_token, _kill_tx_keepalive) = if let Some(sid) = mirror_session_id {
+        let connection_id = crate::session::current_connection_id();
+        (
+            Some(background_registry::register_foreground(
+                sid.to_string(),
+                connection_id,
+                kill_tx,
+            )),
+            None,
+        )
+    } else {
+        (None, Some(kill_tx))
+    };
 
     enum WaitOutcome {
         Exited(std::process::ExitStatus),
@@ -152,8 +162,8 @@ pub(crate) async fn run_foreground_streamed(
         }
     };
 
-    if let Some(sid) = mirror_session_id {
-        background_registry::unregister_foreground(sid);
+    if let (Some(sid), Some(token)) = (mirror_session_id, foreground_token) {
+        background_registry::unregister_foreground(sid, token);
     }
 
     let drained_stdout = tokio::time::timeout(Duration::from_millis(500), stdout_rx)

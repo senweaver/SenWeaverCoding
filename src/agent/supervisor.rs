@@ -156,7 +156,7 @@ impl Supervisor {
     ) -> tokio::task::JoinHandle<()> {
         let set = self.unhealthy_providers.clone();
         let mut rx = broadcaster.subscribe();
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("supervisor.health_subscriber", async move {
             while let Ok(signal) = rx.recv().await {
                 let key = signal.key();
                 let mut guard = set.write();
@@ -167,6 +167,7 @@ impl Supervisor {
                 }
             }
         })
+        .into_inner()
     }
 
     pub fn set_restart_callback(&self, callback: RestartCallback) {

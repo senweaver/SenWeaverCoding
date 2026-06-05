@@ -41,8 +41,50 @@ fn build_bridge_js() -> String {
         "window.__SEN_BRIDGE_BASE = {base:?};",
         base = bridge_base_url(),
     );
-    format!("{header}\n{BRIDGE_JS}")
+    format!("{header}\n{AUTOPLAY_GUARD_JS}\n{BRIDGE_JS}")
 }
+
+const AUTOPLAY_GUARD_JS: &str = r#"
+(() => {
+  if (window.__senAutoplayGuard) return;
+  window.__senAutoplayGuard = true;
+  let userInteracted = false;
+  const mark = () => { userInteracted = true; };
+  for (const ev of ['pointerdown', 'keydown', 'touchstart', 'mousedown']) {
+    window.addEventListener(ev, mark, { capture: true });
+  }
+  const guard = (el) => {
+    if (!el || el.__senAutoplayGuarded) return;
+    el.__senAutoplayGuarded = true;
+    el.addEventListener(
+      'play',
+      () => {
+        if (!userInteracted && !el.muted && el.volume > 0) {
+          try { el.pause(); } catch (_) {}
+        }
+      },
+      true,
+    );
+  };
+  const scan = (root) => {
+    if (!root || !root.querySelectorAll) return;
+    for (const el of root.querySelectorAll('video, audio')) guard(el);
+  };
+  scan(document);
+  document.addEventListener('DOMContentLoaded', () => scan(document), { once: true });
+  try {
+    const mo = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes || []) {
+          if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') guard(node);
+          else scan(node);
+        }
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (_) {}
+})();
+"#;
 
 const BRIDGE_JS: &str = r#"
 (() => {
@@ -2100,6 +2142,10 @@ fn ensure_dock_webview(
     let builder =
         WebviewBuilder::new(DOCK_WEBVIEW_LABEL, WebviewUrl::External(parsed))
             .initialization_script(bridge_js)
+            .additional_browser_args(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                 --autoplay-policy=document-user-activation-required",
+            )
             .accept_first_mouse(true)
             .on_navigation(move |target: &Url| {
                 if target.scheme() == BRIDGE_SCHEME {

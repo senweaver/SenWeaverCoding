@@ -18,12 +18,9 @@ import { isPlaceholderTitle, resolveSessionTitle } from '../../utils/sessionTitl
 import { Spinner } from '../shared/Spinner'
 import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
 import { AgentMonitorPanel } from './AgentMonitorPanel'
+import { searchApi } from '../../api/search'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
-
-type TimeGroup = 'today' | 'yesterday' | 'last7days' | 'last30days' | 'older'
-
-const TIME_GROUP_ORDER: TimeGroup[] = ['today', 'yesterday', 'last7days', 'last30days', 'older']
 
 const SIDEBAR_GROUP_PAGE_SIZE = 9
 
@@ -36,7 +33,7 @@ type WorkspaceGroup = {
   workspaceExists: boolean
   latestModifiedAt: number
   totalCount: number
-  timeGroups: Map<TimeGroup, SessionListItem[]>
+  sessions: SessionListItem[]
 }
 
 export function Sidebar() {
@@ -76,9 +73,8 @@ export function Sidebar() {
   const [renameValue, setRenameValue] = useState('')
 
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(new Set())
-  const [expandedTimeGroups, setExpandedTimeGroups] = useState<Set<string>>(new Set())
   const [workspacesShowMore, setWorkspacesShowMore] = useState(false)
-  const [timeGroupsShowMore, setTimeGroupsShowMore] = useState<Set<string>>(new Set())
+  const [sessionsShowMore, setSessionsShowMore] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     fetchSessions()
@@ -98,6 +94,36 @@ export function Sidebar() {
 
   const t = useTranslation()
 
+  const [contentMatches, setContentMatches] = useState<Map<string, number>>(new Map())
+
+  useEffect(() => {
+    const q = searchQuery.trim()
+    if (q.length < 2) {
+      setContentMatches((prev) => (prev.size === 0 ? prev : new Map()))
+      return
+    }
+    let cancelled = false
+    const handle = window.setTimeout(() => {
+      void searchApi
+        .searchSessions(q)
+        .then((res) => {
+          if (cancelled) return
+          const map = new Map<string, number>()
+          for (const hit of res.results) {
+            map.set(hit.sessionId, hit.matchCount)
+          }
+          setContentMatches(map)
+        })
+        .catch(() => {
+          if (!cancelled) setContentMatches(new Map())
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(handle)
+    }
+  }, [searchQuery])
+
   const filteredSessions = useMemo(() => {
     let result = sessions
     if (selectedProjects.length > 0) {
@@ -105,16 +131,18 @@ export function Sidebar() {
     }
     if (searchQuery) {
       const q = searchQuery.toLowerCase()
-      result = result.filter((s) => s.title.toLowerCase().includes(q))
+      result = result.filter(
+        (s) => s.title.toLowerCase().includes(q) || contentMatches.has(s.id),
+      )
     }
     return result
-  }, [sessions, selectedProjects, searchQuery])
+  }, [sessions, selectedProjects, searchQuery, contentMatches])
 
   const inSearchMode = searchQuery.trim().length > 0
 
   const unknownWorkspaceLabel = t('sidebar.other')
   const workspaceGroups = useMemo(
-    () => groupByWorkspaceAndTime(filteredSessions, unknownWorkspaceLabel),
+    () => groupByWorkspace(filteredSessions, unknownWorkspaceLabel),
     [filteredSessions, unknownWorkspaceLabel],
   )
 
@@ -137,18 +165,6 @@ export function Sidebar() {
       next.add(currentWorkspaceKey)
       return next
     })
-    setExpandedTimeGroups((prev) => {
-      const next = new Set(prev)
-      let changed = false
-      for (const tg of TIME_GROUP_ORDER) {
-        const key = `${currentWorkspaceKey}::${tg}`
-        if (!next.has(key)) {
-          next.add(key)
-          changed = true
-        }
-      }
-      return changed ? next : prev
-    })
   }, [currentWorkspaceKey])
 
   const toggleWorkspace = useCallback((workspaceKey: string) => {
@@ -160,20 +176,11 @@ export function Sidebar() {
     })
   }, [])
 
-  const toggleTimeGroup = useCallback((tgKey: string) => {
-    setExpandedTimeGroups((prev) => {
+  const revealMoreSessions = useCallback((workspaceKey: string) => {
+    setSessionsShowMore((prev) => {
+      if (prev.has(workspaceKey)) return prev
       const next = new Set(prev)
-      if (next.has(tgKey)) next.delete(tgKey)
-      else next.add(tgKey)
-      return next
-    })
-  }, [])
-
-  const revealMoreSessions = useCallback((tgKey: string) => {
-    setTimeGroupsShowMore((prev) => {
-      if (prev.has(tgKey)) return prev
-      const next = new Set(prev)
-      next.add(tgKey)
+      next.add(workspaceKey)
       return next
     })
   }, [])
@@ -293,14 +300,6 @@ export function Sidebar() {
     if ((e.target as HTMLElement).closest('button, input, textarea, select, a, [role="button"]')) return
     startDraggingRef.current?.()
   }, [])
-
-  const timeGroupLabels: Record<TimeGroup, string> = {
-    today: t('sidebar.timeGroup.today'),
-    yesterday: t('sidebar.timeGroup.yesterday'),
-    last7days: t('sidebar.timeGroup.last7days'),
-    last30days: t('sidebar.timeGroup.last30days'),
-    older: t('sidebar.timeGroup.older'),
-  }
 
   const renderSessionRow = (session: SessionListItem) => {
     const displayTitle = resolveSessionTitle(session.title, t('sidebar.untitled'))
@@ -558,50 +557,30 @@ export function Sidebar() {
                         </div>
                         {wsOpen && (
                           <div className="ml-3 mt-0.5">
-                            {TIME_GROUP_ORDER.map((tg) => {
-                              const items = ws.timeGroups.get(tg)
-                              if (!items || items.length === 0) return null
-                              const tgKey = `${ws.workspaceKey}::${tg}`
-                              const tgOpen = expandedTimeGroups.has(tgKey)
-                              const tgShowAll = timeGroupsShowMore.has(tgKey)
+                            {(() => {
+                              const items = ws.sessions
+                              const showAll = sessionsShowMore.has(ws.workspaceKey)
                               const visibleItems =
-                                tgShowAll || items.length <= SIDEBAR_GROUP_PAGE_SIZE
+                                showAll || items.length <= SIDEBAR_GROUP_PAGE_SIZE
                                   ? items
                                   : items.slice(0, SIDEBAR_GROUP_PAGE_SIZE)
                               const hiddenCount = items.length - visibleItems.length
                               return (
-                                <div key={tg} className="mb-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleTimeGroup(tgKey)}
-                                    aria-expanded={tgOpen}
-                                    aria-label={tgOpen ? t('sidebar.collapseTimeGroup') : t('sidebar.expandTimeGroup')}
-                                    className="flex w-full items-center gap-1 rounded-[8px] px-2 py-0.5 text-left text-xs font-semibold tracking-wide text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
-                                  >
-                                    <ChevronRightIcon open={tgOpen} size="sm" />
-                                    <span className="flex-1 truncate">{timeGroupLabels[tg]}</span>
-                                    <span className="flex-shrink-0 text-xs font-normal tabular-nums opacity-70">
-                                      {items.length}
-                                    </span>
-                                  </button>
-                                  {tgOpen && (
-                                    <>
-                                      {visibleItems.map(renderSessionRow)}
-                                      {hiddenCount > 0 && (
-                                        <button
-                                          type="button"
-                                          onClick={() => revealMoreSessions(tgKey)}
-                                          className="ml-4 mt-0.5 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--color-brand)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
-                                        >
-                                          <span className="material-symbols-outlined text-[14px]" aria-hidden="true">expand_more</span>
-                                          {t('sidebar.showMore', { count: hiddenCount })}
-                                        </button>
-                                      )}
-                                    </>
+                                <>
+                                  {visibleItems.map(renderSessionRow)}
+                                  {hiddenCount > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => revealMoreSessions(ws.workspaceKey)}
+                                      className="ml-4 mt-0.5 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--color-brand)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
+                                    >
+                                      <span className="material-symbols-outlined text-[14px]" aria-hidden="true">expand_more</span>
+                                      {t('sidebar.showMore', { count: hiddenCount })}
+                                    </button>
                                   )}
-                                </div>
+                                </>
                               )
-                            })}
+                            })()}
                           </div>
                         )}
                       </div>
@@ -730,30 +709,6 @@ export function Sidebar() {
   )
 }
 
-function groupByTime(sessions: SessionListItem[]): Map<TimeGroup, SessionListItem[]> {
-  const groups = new Map<TimeGroup, SessionListItem[]>()
-  const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const startOfYesterday = startOfToday - 86400000
-  const sevenDaysAgo = startOfToday - 7 * 86400000
-  const thirtyDaysAgo = startOfToday - 30 * 86400000
-
-  for (const session of sessions) {
-    const ts = new Date(session.modifiedAt).getTime()
-    let group: TimeGroup
-    if (ts >= startOfToday) group = 'today'
-    else if (ts >= startOfYesterday) group = 'yesterday'
-    else if (ts >= sevenDaysAgo) group = 'last7days'
-    else if (ts >= thirtyDaysAgo) group = 'last30days'
-    else group = 'older'
-
-    if (!groups.has(group)) groups.set(group, [])
-    groups.get(group)!.push(session)
-  }
-
-  return groups
-}
-
 function workspaceBasename(p: string): string {
   const trimmed = p.trim().replace(/[\\/]+$/, '')
   if (!trimmed) return ''
@@ -761,7 +716,7 @@ function workspaceBasename(p: string): string {
   return parts[parts.length - 1] || trimmed
 }
 
-function groupByWorkspaceAndTime(
+function groupByWorkspace(
   sessions: SessionListItem[],
   unknownLabel: string,
 ): WorkspaceGroup[] {
@@ -791,6 +746,9 @@ function groupByWorkspaceAndTime(
       const ts = new Date(s.modifiedAt).getTime()
       if (ts > latest) latest = ts
     }
+    const sortedSessions = [...items].sort(
+      (a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime(),
+    )
     out.push({
       workspaceKey: key,
       workspaceLabel,
@@ -798,7 +756,7 @@ function groupByWorkspaceAndTime(
       workspaceExists,
       latestModifiedAt: latest,
       totalCount: items.length,
-      timeGroups: groupByTime(items),
+      sessions: sortedSessions,
     })
   }
 

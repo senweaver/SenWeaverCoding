@@ -13,6 +13,7 @@ import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useTeamStore } from '../../stores/teamStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { sessionsApi } from '../../api/sessions'
+import { suggestionsApi, type PromptSuggestion } from '../../api/suggestions'
 import { anyProviderHasModel } from '../../utils/modelAvailability'
 import { isValidRuntimeSelection } from '../../utils/runtimeSelection'
 import { CodingModeSelector } from '../controls/CodingModeSelector'
@@ -349,6 +350,26 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const isHeroComposer = variant === 'hero' && !isMemberSession
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
   const showNoModelBanner = !isMemberSession && !hasModel
+
+  const [promptSuggestions, setPromptSuggestions] = useState<PromptSuggestion[]>([])
+  useEffect(() => {
+    if (!isHeroComposer || isWorkspaceMissing) {
+      setPromptSuggestions([])
+      return
+    }
+    let cancelled = false
+    suggestionsApi
+      .list()
+      .then((res) => {
+        if (!cancelled) setPromptSuggestions(res.suggestions.slice(0, 4))
+      })
+      .catch(() => {
+        if (!cancelled) setPromptSuggestions([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isHeroComposer, isWorkspaceMissing, resolvedWorkDir])
 
   useEffect(() => {
     textareaRef.current?.focus()
@@ -1205,6 +1226,24 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             </div>
           )}
 
+          {isHeroComposer && input.trim().length === 0 && promptSuggestions.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {promptSuggestions.map((s) => (
+                <button
+                  key={s.text}
+                  type="button"
+                  title={s.description}
+                  onClick={() => {
+                    setInput(s.text)
+                    textareaRef.current?.focus()
+                  }}
+                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 py-1 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)]"
+                >
+                  {s.text}
+                </button>
+              ))}
+            </div>
+          )}
           {isHeroComposer ? (
 
             <div className="flex flex-1 items-start gap-3">

@@ -18,7 +18,7 @@ import { useWorkersStore } from './workersStore'
 import { useBrowserPanelStore } from './browserPanelStore'
 import { useLspStore } from './lspStore'
 import { useUIStore } from './uiStore'
-import { t, type TranslationKey } from '../i18n'
+import { t } from '../i18n'
 import type { LspBroadcastEvent } from '../types/lsp'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import {
@@ -48,8 +48,6 @@ import type {
   AgentTimelineEntry,
   AttachmentRef,
   ChatState,
-  ComputerUsePermissionRequest,
-  ComputerUsePermissionResponse,
   PendingEdit,
   SubagentTimelineBucket,
   UIAttachment,
@@ -77,10 +75,6 @@ export type PerSessionState = {
     toolUseId?: string
     input: unknown
     description?: string
-  } | null
-  pendingComputerUsePermission: {
-    requestId: string
-    request: ComputerUsePermissionRequest
   } | null
   tokenUsage: TokenUsage
 
@@ -184,7 +178,6 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   activeThinkingStartedAt: null,
   activeThinkingLastChunkAt: null,
   pendingPermission: null,
-  pendingComputerUsePermission: null,
   tokenUsage: { input_tokens: 0, output_tokens: 0 },
   cumulativeTokens: 0,
   elapsedSeconds: 0,
@@ -258,14 +251,23 @@ function mergePendingEdit(
   return next
 }
 
+type PendingSessionCodingMode = {
+  sessionId: string
+  mode: CodingModeId
+  scope: 'session' | 'global'
+  from?: string
+}
+
 type ChatStore = {
   sessions: Record<string, PerSessionState>
   sessionCodingMode: Record<string, CodingModeId>
+  pendingSessionCodingMode: PendingSessionCodingMode | null
 
   getSession: (sessionId: string) => PerSessionState
   connectToSession: (sessionId: string) => void
   connectToWorker: (workerId: string) => void
   disconnectSession: (sessionId: string) => void
+  suspendSession: (sessionId: string) => void
   sendMessage: (
     sessionId: string,
     content: string,
@@ -280,16 +282,17 @@ type ChatStore = {
       rule?: string
       updatedInput?: Record<string, unknown>
     },
-  ) => void
-  respondToComputerUsePermission: (
-    sessionId: string,
-    requestId: string,
-    response: ComputerUsePermissionResponse,
-  ) => void
+  ) => boolean
   setSessionRuntime: (sessionId: string, selection: RuntimeSelection, options?: { persist?: boolean }) => void
 
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void
-  setSessionCodingMode: (sessionId: string, mode: CodingModeId) => void
+  setSessionCodingMode: (
+    sessionId: string,
+    mode: CodingModeId,
+    scope?: 'session' | 'global',
+  ) => void
+  resolveSessionCodingMode: (confirmed: boolean) => void
+  dismissAgentTaskNotification: (sessionId: string, toolUseId: string) => void
   stopGeneration: (sessionId: string) => void
   cancelTool: (sessionId: string, toolUseId?: string) => void
   reconcileStuckSession: (sessionId: string) => void
@@ -1160,6 +1163,32 @@ const updatePlanInlineToolUseIdsBySession = new Map<string, Set<string>>()
 let msgCounter = 0
 const nextId = () => `msg-${++msgCounter}-${Date.now()}`
 
+const KNOWN_SYSTEM_NOTIFICATION_SUBTYPES = new Set<string>([
+  'ws_reconnecting',
+  'ws_unreachable',
+  'runtime_config_updated',
+  'runtime_config_persist_failed',
+  'coding_mode_confirm_required',
+  'coding_mode_updated',
+  'permission_mode_updated',
+  'pii_config_updated',
+  'slash_commands',
+  'resource_wait_started',
+  'resource_wait_resolved',
+  'mcp_servers_updated',
+  'debug_pii_stats',
+  'task_notification',
+  'file_edit',
+  'status_detail',
+  'command_preview',
+  'cancelling',
+  'subagent_chunk',
+  'debug_tab_bound',
+  'debug_tab_unbound',
+  'prototype_ref_bound',
+  'prototype_ref_unbound',
+])
+
 function stripNoModelErrorMessages(messages: UIMessage[]): UIMessage[] {
   let mutated = false
   const next: UIMessage[] = []
@@ -1175,49 +1204,6 @@ function stripNoModelErrorMessages(messages: UIMessage[]): UIMessage[] {
 
 function emitNoModelWarning(): void {
   return
-}
-
-const ACTIONABLE_PROVIDER_ERROR_CODES = new Set<string>([
-  'INSUFFICIENT_BALANCE',
-  'AUTH_ERROR',
-  'MODEL_UNAVAILABLE',
-])
-
-let lastCriticalToastKey = ''
-let lastCriticalToastAt = 0
-
-function emitCriticalProviderErrorToast(
-  code: string | undefined,
-  rawMessage: string | undefined,
-): void {
-  if (!code || !ACTIONABLE_PROVIDER_ERROR_CODES.has(code)) return
-
-  const now = Date.now()
-  const dedupeKey = `${code}:${(rawMessage ?? '').trim()}`
-  if (dedupeKey === lastCriticalToastKey && now - lastCriticalToastAt < 4000) {
-    return
-  }
-  lastCriticalToastKey = dedupeKey
-  lastCriticalToastAt = now
-
-  const key = `error.${code}` as TranslationKey
-  const translated = t(key)
-  const friendly =
-    translated && translated !== key
-      ? translated
-      : (rawMessage ?? '').trim() || t('error.UNKNOWN_ERROR')
-
-  useUIStore.getState().addToast({
-    type: 'error',
-    message: friendly,
-    duration: 12000,
-    action: {
-      label: t('chat.noModel.openSettings'),
-      onClick: () => {
-        useUIStore.getState().openSettingsOverlay('providers')
-      },
-    },
-  })
 }
 
 const pendingDeltaBySession = new Map<string, string>()
@@ -1746,6 +1732,7 @@ function reconstructSubagentTimelines(
 export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: {},
   sessionCodingMode: {},
+  pendingSessionCodingMode: null,
 
   getSession: (sessionId) => get().sessions[sessionId] ?? createDefaultSessionState(),
 
@@ -1768,6 +1755,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           connectionState: 'connecting',
           messages: existing?.messages ?? [],
           historyLoaded: existing?.historyLoaded === true,
+          pendingPermission: existing?.pendingPermission ?? null,
         },
       },
     }))
@@ -1847,6 +1835,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       get().handleServerMessage(workerId, msg)
     })
+
+    get().loadHistory(workerId)
   },
 
   disconnectSession: (sessionId) => {
@@ -1878,6 +1868,36 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const { [sessionId]: _, ...rest } = s.sessions
       return { sessions: rest }
     })
+  },
+
+  suspendSession: (sessionId) => {
+    const session = get().sessions[sessionId]
+    if (!session) return
+    if (session.elapsedTimer) clearInterval(session.elapsedTimer)
+    if (hasPendingDelta(sessionId)) {
+      const text = consumePendingDelta(sessionId)
+      set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({ streamingText: sess.streamingText + text })) }))
+    } else {
+      consumePendingDelta(sessionId)
+    }
+    const current = get().sessions[sessionId]
+    if (!current) return
+    const sealedMessages = sealThinkingForSession(sessionId, current)
+    clearSessionStreamBuffers(sessionId)
+    wsManager.disconnect(sessionId)
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, () => ({
+        messages: sealedMessages,
+        connectionState: 'disconnected',
+        chatState: 'idle',
+        activeThinkingId: null,
+        activeThinkingContent: '',
+        activeThinkingStartedAt: null,
+        activeThinkingLastChunkAt: null,
+        elapsedTimer: null,
+        statusVerb: '',
+      })),
+    }))
   },
 
   sendMessage: (sessionId, content, attachments, options) => {
@@ -2029,6 +2049,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   respondToPermission: (sessionId, requestId, allowed, options) => {
+    if (wsManager.isAbandoned(sessionId)) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('chat.connectionLost'),
+        duration: 10000,
+        sessionId,
+        action: {
+          label: t('chat.reconnect'),
+          onClick: () => {
+            get().connectToSession(sessionId)
+          },
+        },
+      })
+      return false
+    }
     wsManager.send(sessionId, {
       type: 'permission_response',
       requestId,
@@ -2073,20 +2108,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })),
       }
     })
-  },
-
-  respondToComputerUsePermission: (sessionId, requestId, response) => {
-    wsManager.send(sessionId, {
-      type: 'computer_use_permission_response',
-      requestId,
-      response,
-    })
-    set((s) => ({
-      sessions: updateSessionIn(s.sessions, sessionId, () => ({
-        pendingComputerUsePermission: null,
-        chatState: response.userConsented === false ? 'idle' : 'tool_executing',
-      })),
-    }))
+    return true
   },
 
   setSessionRuntime: (sessionId, selection, options) => {
@@ -2101,12 +2123,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     wsManager.send(sessionId, { type: 'set_permission_mode', mode })
   },
 
-  setSessionCodingMode: (sessionId, mode) => {
+  setSessionCodingMode: (sessionId, mode, scope = 'session') => {
     if (!get().sessions[sessionId]) return
+    wsManager.send(sessionId, { type: 'set_coding_mode', mode, scope, confirmed: false })
+  },
+
+  resolveSessionCodingMode: (confirmed) => {
+    const pending = get().pendingSessionCodingMode
+    if (!pending) return
+    set({ pendingSessionCodingMode: null })
+    if (!confirmed) return
+    if (!get().sessions[pending.sessionId]) return
+    wsManager.send(pending.sessionId, {
+      type: 'set_coding_mode',
+      mode: pending.mode,
+      scope: pending.scope,
+      confirmed: true,
+    })
+  },
+
+  dismissAgentTaskNotification: (sessionId, toolUseId) => {
+    if (!get().sessions[sessionId]?.agentTaskNotifications[toolUseId]) return
     set((s) => ({
-      sessionCodingMode: { ...s.sessionCodingMode, [sessionId]: mode },
+      sessions: updateSessionIn(s.sessions, sessionId, (session) => {
+        const next = { ...session.agentTaskNotifications }
+        delete next[toolUseId]
+        return { agentTaskNotifications: next }
+      }),
     }))
-    wsManager.send(sessionId, { type: 'set_coding_mode', mode, scope: 'session' })
   },
 
   cancelTool: (sessionId, toolUseId) => {
@@ -2151,20 +2195,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!session) return s
       if (session.elapsedTimer) clearInterval(session.elapsedTimer)
       const sealedMessages = sealThinkingForSession(sessionId, session)
+      const partialText = session.streamingText
+      const committedMessages = partialText.trim()
+        ? appendAssistantTextMessage(sealedMessages, partialText, Date.now())
+        : sealedMessages
       return {
         sessions: {
           ...s.sessions,
           [sessionId]: {
             ...session,
-            messages: sealedMessages,
+            messages: committedMessages,
+            streamingText: '',
             chatState: 'idle',
             stopRequested: true,
             activeThinkingId: null,
             activeThinkingContent: '',
             activeThinkingStartedAt: null,
             activeThinkingLastChunkAt: null,
-            pendingPermission: null,
-            pendingComputerUsePermission: null,
             elapsedTimer: null,
             pendingResourceWaits: [],
             providerRetry: null,
@@ -2225,7 +2272,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       void useWorkersStore.getState().fetchByParent(sessionId)
     } catch {
-
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('chat.loadHistoryFailed'),
+        duration: 5000,
+      })
     }
   },
 
@@ -2256,7 +2307,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeToolName: null,
             streamingText: '',
             pendingPermission: null,
-            pendingComputerUsePermission: null,
             elapsedTimer: null,
             statusVerb: '',
             pendingRewind,
@@ -2275,7 +2325,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       void useWorkersStore.getState().fetchByParent(sessionId)
     } catch {
-
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('chat.loadHistoryFailed'),
+        duration: 5000,
+      })
     }
   },
 
@@ -2628,6 +2682,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           msg.type === 'session_title_updated' ||
           msg.type === 'task_update' ||
           msg.type === 'lsp_diagnostics' ||
+          msg.type === 'permission_request' ||
           msg.type === 'system_notification'
         if (!passThrough) {
           return
@@ -3288,7 +3343,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               input: msg.input,
               description: msg.description,
             },
-            pendingComputerUsePermission: null,
             chatState: 'permission_pending',
             activeThinkingId: null,
             messages: isQuestionTool
@@ -3305,19 +3359,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 }],
           }
         })
-        break
-
-      case 'computer_use_permission_request':
-        update((s) => ({
-          messages: sealThinkingForSession(sessionId, s),
-          pendingComputerUsePermission: {
-            requestId: msg.requestId,
-            request: msg.request,
-          },
-          pendingPermission: null,
-          chatState: 'permission_pending',
-          activeThinkingId: null,
-        }))
         break
 
       case 'message_complete': {
@@ -3362,10 +3403,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         update((s) => ({
           tokenUsage: msg.usage,
           cumulativeTokens: (s.cumulativeTokens ?? 0) + Math.max(0, turnDelta),
-          chatState: 'idle',
+          chatState: s.pendingPermission ? s.chatState : 'idle',
           activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
           elapsedTimer: null,
           pendingResourceWaits: [],
           providerRetry: null,
@@ -3524,7 +3563,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingLastChunkAt: null,
             streamingText: '',
             pendingPermission: null,
-            pendingComputerUsePermission: null,
             pendingResourceWaits: [],
             providerRetry: null,
           }
@@ -3534,7 +3572,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           useTabStore.getState().updateTabStatus(sessionId, 'idle')
         } else {
           useTabStore.getState().updateTabStatus(sessionId, 'error')
-          emitCriticalProviderErrorToast(msg.code, msg.message)
         }
         {
           const session = get().sessions[sessionId]
@@ -3543,6 +3580,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             update(() => ({ elapsedTimer: null }))
           }
         }
+        break
+      }
+
+      case 'context_compressed': {
         break
       }
 
@@ -3635,7 +3676,65 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }).catch(() => {})
         break
       }
+      case 'buddy_event': {
+        const event = msg.event
+        const greeting = msg.greeting
+        const showNotifications = msg.showNotifications
+        void import('../stores/buddyStore')
+          .then(({ useBuddyStore }) => {
+            useBuddyStore.getState().applyEvent(event, greeting, showNotifications)
+          })
+          .catch(() => {})
+        break
+      }
       case 'system_notification': {
+        if (msg.subtype === 'ws_reconnecting') {
+          set((s) => ({
+            sessions: updateSessionIn(s.sessions, sessionId, (sess) =>
+              sess.connectionState === 'connected' ||
+              sess.connectionState === 'connecting'
+                ? { connectionState: 'reconnecting' }
+                : {},
+            ),
+          }))
+          break
+        }
+        if (msg.subtype === 'ws_unreachable') {
+          const stuckSession = get().sessions[sessionId]
+          if (stuckSession?.elapsedTimer) clearInterval(stuckSession.elapsedTimer)
+          update((s) => {
+            const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
+            const baseMessages = merged.trim()
+              ? appendAssistantTextMessage(sealThinkingForSession(sessionId, s), merged, Date.now())
+              : sealThinkingForSession(sessionId, s)
+            return {
+              connectionState: 'disconnected',
+              messages: baseMessages,
+              streamingText: '',
+              chatState: 'idle',
+              activeThinkingId: null,
+              activeThinkingContent: '',
+              activeThinkingStartedAt: null,
+              activeThinkingLastChunkAt: null,
+              elapsedTimer: null,
+              providerRetry: null,
+            }
+          })
+          useTabStore.getState().updateTabStatus(sessionId, 'idle')
+          useUIStore.getState().addToast({
+            type: 'error',
+            message: t('chat.connectionLost'),
+            duration: 10000,
+            sessionId,
+            action: {
+              label: t('chat.reconnect'),
+              onClick: () => {
+                get().connectToSession(sessionId)
+              },
+            },
+          })
+          break
+        }
         const level = (msg as { level?: 'info' | 'warning' | 'error' }).level
         if (level === 'warning' || level === 'error') {
           const text =
@@ -3655,6 +3754,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           import('../api/websocket').then(({ wsManager }) => {
             wsManager.notifyRuntimeConfigUpdated(sessionId)
           }).catch(() => {})
+        }
+
+        if (
+          msg.subtype === 'coding_mode_confirm_required' &&
+          msg.data &&
+          typeof msg.data === 'object'
+        ) {
+          const data = msg.data as Record<string, unknown>
+          const mode = typeof data.mode === 'string' ? (data.mode as CodingModeId) : undefined
+          const scope = data.scope === 'global' ? 'global' : 'session'
+          const from = typeof data.from === 'string' ? data.from : undefined
+          const targetSessionId =
+            typeof data.sessionId === 'string' && data.sessionId.length > 0
+              ? data.sessionId
+              : sessionId
+          if (mode) {
+            set({
+              pendingSessionCodingMode: {
+                sessionId: targetSessionId,
+                mode,
+                scope,
+                from,
+              },
+            })
+          }
+          break
         }
 
         if (msg.subtype === 'coding_mode_updated' && msg.data && typeof msg.data === 'object') {
@@ -3918,6 +4043,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
           })
         }
+
+        if (!KNOWN_SYSTEM_NOTIFICATION_SUBTYPES.has(msg.subtype) && level !== 'warning' && level !== 'error') {
+          if (import.meta.env?.DEV) {
+            console.debug(
+              '[chatStore] unhandled system_notification subtype',
+              msg.subtype,
+            )
+          }
+        }
         break
       }
       case 'pong':
@@ -3944,6 +4078,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'lsp_server_status':
         useLspStore.getState().handleBroadcastEvent(msg as LspBroadcastEvent)
         break
+      default: {
+        if (import.meta.env?.DEV) {
+          console.debug(
+            '[chatStore] unhandled ws message type',
+            (msg as { type?: unknown }).type,
+          )
+        }
+        break
+      }
     }
   },
 }))

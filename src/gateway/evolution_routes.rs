@@ -143,7 +143,7 @@ pub async fn handle_overview(
         .map(|svc| svc.tool_search_metrics_snapshot())
         .unwrap_or_default();
     let deferred_builtin_count = services_opt
-        .map(|svc| svc.deferred_builtin_names.read().len() as u64)
+        .map(|svc| svc.deferred_builtin_total() as u64)
         .unwrap_or(0);
     Json(serde_json::json!({
         "enabled": snapshot.enabled,

@@ -7,6 +7,7 @@ pub mod checkpoint;
 
 pub mod code_edit_plan;
 pub mod plan_exec_verify;
+pub mod provider_handle;
 pub mod registry;
 pub mod traits;
 
@@ -21,6 +22,7 @@ pub use code_edit_plan::{
     render_planner_retry_prompt, step_from_plan, validate_planner_response,
 };
 pub use plan_exec_verify::{LayeredPlan, PlanExecVerifyFlow, PlanExecVerifyOptions};
+pub use provider_handle::ProviderAgentHandle;
 pub use registry::{global_agent_handle, global_checkpoint_store, set_global_agent_handle};
 pub use traits::{
     AgentHandle, Artifact, ExecOutcome, Executor, Flow, FlowContext, FlowError, FlowOutcome,

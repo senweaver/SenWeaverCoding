@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::providers::ChatMessage;
 use crate::util::truncate_with_ellipsis;
 
+const MAX_SESSION_HISTORY_BYTES: u64 = 256 * 1024 * 1024;
+
 pub fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
     history
         .iter()
@@ -75,6 +77,16 @@ pub(crate) fn load_interactive_session_history(
         return Ok(vec![ChatMessage::system(system_prompt)]);
     }
 
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_SESSION_HISTORY_BYTES {
+            anyhow::bail!(
+                "session history file too large ({} bytes, limit {})",
+                meta.len(),
+                MAX_SESSION_HISTORY_BYTES
+            );
+        }
+    }
+
     let raw = std::fs::read_to_string(path)?;
     let mut state: InteractiveSessionState = serde_json::from_str(&raw)?;
     if state.history.is_empty() {
@@ -92,7 +104,7 @@ pub(crate) fn save_interactive_session_history(path: &Path, history: &[ChatMessa
     }
 
     let payload = serde_json::to_string_pretty(&InteractiveSessionState::from_history(history))?;
-    std::fs::write(path, payload)?;
+    crate::util::atomic_write(path, payload.as_bytes())?;
     Ok(())
 }
 

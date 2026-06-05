@@ -234,14 +234,33 @@ export function PermissionDialog({
       {isPending && (
         <div className="flex items-center gap-2 border-t border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)] px-4 py-3">
           {isCrossSession ? (
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => ownerSessionId && focusSession(ownerSessionId)}
-              icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
-            >
-              切换到该会话处理
-            </Button>
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => ownerSessionId && respondToPermission(ownerSessionId, requestId, true)}
+                icon={<span className="material-symbols-outlined text-[14px]">check</span>}
+              >
+                {t('permission.allow')}
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => ownerSessionId && respondToPermission(ownerSessionId, requestId, false)}
+                icon={<span className="material-symbols-outlined text-[14px]">close</span>}
+              >
+                {t('permission.deny')}
+              </Button>
+              <div className="flex-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => ownerSessionId && focusSession(ownerSessionId)}
+                icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
+              >
+                {t('permission.switchToSession')}
+              </Button>
+            </>
           ) : (
             <>
               <Button

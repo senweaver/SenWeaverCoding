@@ -56,15 +56,19 @@ export function QuickModeSwitcher() {
   const { activeModal, closeModal } = useUIStore(
     useShallow((s) => ({ activeModal: s.activeModal, closeModal: s.closeModal })),
   )
-  const { currentMode, codingModes, requestSetCodingMode } = useSettingsStore(
+  const { globalCodingMode, codingModes, requestSetCodingMode } = useSettingsStore(
     useShallow((s) => ({
-      currentMode: s.codingMode,
+      globalCodingMode: s.codingMode,
       codingModes: s.codingModes,
       requestSetCodingMode: s.requestSetCodingMode,
     })),
   )
   const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
+  const sessionCodingMode = useChatStore((s) =>
+    activeTabId ? s.sessionCodingMode[activeTabId] : undefined,
+  )
+  const currentMode = sessionCodingMode ?? globalCodingMode
 
   const open = activeModal === 'quick-mode-switcher'
   useDockSuspend(open)
@@ -89,8 +93,11 @@ export function QuickModeSwitcher() {
       if (target) {
         e.preventDefault()
         e.stopPropagation()
-        void requestSetCodingMode(target.id)
-        if (activeTabId) setSessionCodingMode(activeTabId, target.id)
+        void requestSetCodingMode(target.id).then(() => {
+          if (activeTabId && useSettingsStore.getState().codingMode === target.id) {
+            setSessionCodingMode(activeTabId, target.id)
+          }
+        })
         closeModal()
       }
     }
@@ -130,8 +137,11 @@ export function QuickModeSwitcher() {
               <button
                 key={item.id}
                 onClick={() => {
-                  void requestSetCodingMode(item.id)
-                  if (activeTabId) setSessionCodingMode(activeTabId, item.id)
+                  void requestSetCodingMode(item.id).then(() => {
+                    if (activeTabId && useSettingsStore.getState().codingMode === item.id) {
+                      setSessionCodingMode(activeTabId, item.id)
+                    }
+                  })
                   closeModal()
                 }}
                 className={`w-full flex items-start gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${

@@ -6,9 +6,13 @@ use super::budget::{TokenBudgetConfig, TokenBudgetManager};
 use crate::agent::tool_handler::output_compressor::{
     CompressionResult, ToolOutputCompressor, ToolOutputCompressorConfig,
 };
+use parking_lot::{Mutex, RwLock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct TokenOptimizer {
@@ -165,17 +169,45 @@ static GLOBAL_OPTIMIZER: std::sync::LazyLock<arc_swap::ArcSwapOption<TokenOptimi
 static GLOBAL_PROJECT_LOC: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-pub fn ensure_global_optimizer(
-    compressor_config: ToolOutputCompressorConfig,
+type BaseConfig = (ToolOutputCompressorConfig, TokenBudgetConfig);
+
+static BASE_CONFIG: std::sync::LazyLock<arc_swap::ArcSwapOption<BaseConfig>> =
+    std::sync::LazyLock::new(arc_swap::ArcSwapOption::empty);
+
+fn workspace_optimizers() -> &'static RwLock<HashMap<String, Arc<TokenOptimizer>>> {
+    static MAP: OnceLock<RwLock<HashMap<String, Arc<TokenOptimizer>>>> = OnceLock::new();
+    MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn workspace_loc_in_flight() -> &'static Mutex<HashSet<String>> {
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn apply_project_loc(
     mut budget_config: TokenBudgetConfig,
-) {
-    let project_loc = GLOBAL_PROJECT_LOC.load(std::sync::atomic::Ordering::Relaxed);
-    if project_loc > 0 && budget_config.max_tool_result_tokens
-        == super::budget::default_max_tool_result_tokens()
+    project_loc: u64,
+) -> TokenBudgetConfig {
+    if project_loc > 0
+        && budget_config.max_tool_result_tokens
+            == super::budget::default_max_tool_result_tokens()
     {
         budget_config.max_tool_result_tokens =
             super::budget::dynamic_max_tool_result_tokens(project_loc as usize);
     }
+    budget_config
+}
+
+pub fn ensure_global_optimizer(
+    compressor_config: ToolOutputCompressorConfig,
+    budget_config: TokenBudgetConfig,
+) {
+    BASE_CONFIG.store(Some(Arc::new((
+        compressor_config.clone(),
+        budget_config.clone(),
+    ))));
+    let project_loc = GLOBAL_PROJECT_LOC.load(std::sync::atomic::Ordering::Relaxed);
+    let budget_config = apply_project_loc(budget_config, project_loc);
     GLOBAL_OPTIMIZER.store(Some(create_optimizer(compressor_config, budget_config)));
 }
 
@@ -195,12 +227,67 @@ pub fn ensure_global_optimizer_with_loc(
     ensure_global_optimizer(compressor_config, budget_config);
 }
 
-pub fn global_optimizer() -> Option<Arc<TokenOptimizer>> {
+pub fn set_workspace_project_loc(workspace_key: &str, project_loc: u64) {
+    let Some(base) = BASE_CONFIG.load_full() else {
+        return;
+    };
+    let (compressor_config, budget_config) = (*base).clone();
+    let budget_config = apply_project_loc(budget_config, project_loc);
+    let optimizer = create_optimizer(compressor_config, budget_config);
+    workspace_optimizers()
+        .write()
+        .insert(workspace_key.to_string(), optimizer);
+}
+
+pub fn ensure_workspace_optimizer(workspace_dir: PathBuf) {
+    if workspace_dir.as_os_str().is_empty() {
+        return;
+    }
+    if BASE_CONFIG.load_full().is_none() {
+        return;
+    }
+    let workspace_key = crate::session::workspace_key_from_path(&workspace_dir, "");
+    if workspace_optimizers().read().contains_key(&workspace_key) {
+        return;
+    }
+    {
+        let mut in_flight = workspace_loc_in_flight().lock();
+        if !in_flight.insert(workspace_key.clone()) {
+            return;
+        }
+    }
+    if tokio::runtime::Handle::try_current().is_err() {
+        workspace_loc_in_flight().lock().remove(&workspace_key);
+        return;
+    }
+    crate::runtime::spawn_supervised("workspace_token_budget", async move {
+        let scan_dir = workspace_dir.clone();
+        let cache_dir = workspace_dir.join(".senweavercoding");
+        let project_loc = tokio::task::spawn_blocking(move || {
+            super::budget::count_source_loc_cached(&scan_dir, &cache_dir)
+        })
+        .await
+        .unwrap_or(0);
+        set_workspace_project_loc(&workspace_key, project_loc);
+        workspace_loc_in_flight().lock().remove(&workspace_key);
+    });
+}
+
+pub fn active_optimizer() -> Option<Arc<TokenOptimizer>> {
+    if let Some(ctx) = crate::session::current_session_context() {
+        if let Some(opt) = workspace_optimizers().read().get(&ctx.workspace_key).cloned() {
+            return Some(opt);
+        }
+    }
     GLOBAL_OPTIMIZER.load_full()
 }
 
+pub fn global_optimizer() -> Option<Arc<TokenOptimizer>> {
+    active_optimizer()
+}
+
 pub fn compress_output(tool_name: &str, output: &str) -> String {
-    match GLOBAL_OPTIMIZER.load_full() {
+    match active_optimizer() {
         Some(opt) => opt.compress_tool_output(tool_name, output),
         None => output.to_string(),
     }

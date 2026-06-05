@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -37,6 +38,29 @@ pub enum DreamTrigger {
     OnSessionEnd,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoDreamState {
+    pub enabled: bool,
+    pub max_concurrent: u32,
+    pub tasks: Vec<DreamTask>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DreamTaskInput {
+    pub prompt: String,
+    #[serde(default)]
+    pub priority: Option<DreamPriority>,
+    pub trigger: DreamTrigger,
+    #[serde(default)]
+    pub max_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+const DEFAULT_DREAM_DURATION_MS: u64 = 120_000;
+
 #[derive(Clone)]
 pub struct AutoDreamService {
     inner: Arc<RwLock<AutoDreamInner>>,
@@ -47,6 +71,7 @@ struct AutoDreamInner {
     enabled: bool,
     max_concurrent: u32,
     running_count: u32,
+    persist_path: Option<PathBuf>,
 }
 
 impl AutoDreamService {
@@ -57,20 +82,166 @@ impl AutoDreamService {
                 enabled,
                 max_concurrent: 2,
                 running_count: 0,
+                persist_path: None,
             })),
         }
     }
 
-    pub async fn add_task(&self, task: DreamTask) {
+    pub async fn bind_persistence(&self, path: PathBuf) {
+        let loaded = tokio::fs::read(&path).await.ok().and_then(|bytes| {
+            serde_json::from_slice::<AutoDreamState>(&bytes).ok()
+        });
         let mut inner = self.inner.write().await;
-        inner.tasks.push(task);
+        inner.persist_path = Some(path);
+        if let Some(state) = loaded {
+            inner.enabled = state.enabled;
+            inner.max_concurrent = state.max_concurrent.max(1);
+            inner.tasks = state.tasks;
+        }
+    }
+
+    async fn persist(&self) {
+        let (path, state) = {
+            let inner = self.inner.read().await;
+            let Some(path) = inner.persist_path.clone() else {
+                return;
+            };
+            (
+                path,
+                AutoDreamState {
+                    enabled: inner.enabled,
+                    max_concurrent: inner.max_concurrent,
+                    tasks: inner.tasks.clone(),
+                },
+            )
+        };
+        match serde_json::to_vec_pretty(&state) {
+            Ok(bytes) => {
+                if let Err(err) = crate::util::atomic_write_async(&path, bytes).await {
+                    tracing::warn!(
+                        target: "auto_dream",
+                        error = %err,
+                        "failed to persist auto_dream state"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "auto_dream",
+                    error = %err,
+                    "failed to serialize auto_dream state"
+                );
+            }
+        }
+    }
+
+    pub async fn is_enabled(&self) -> bool {
+        self.inner.read().await.enabled
+    }
+
+    pub async fn set_enabled(&self, enabled: bool) {
+        {
+            let mut inner = self.inner.write().await;
+            inner.enabled = enabled;
+        }
+        self.persist().await;
+    }
+
+    pub async fn snapshot_state(&self) -> AutoDreamState {
+        let inner = self.inner.read().await;
+        AutoDreamState {
+            enabled: inner.enabled,
+            max_concurrent: inner.max_concurrent,
+            tasks: inner.tasks.clone(),
+        }
+    }
+
+    pub async fn create_task(&self, input: DreamTaskInput) -> DreamTask {
+        let task = DreamTask {
+            id: format!("dream-{}", uuid::Uuid::new_v4()),
+            prompt: input.prompt,
+            priority: input.priority.unwrap_or(DreamPriority::Normal),
+            trigger: input.trigger,
+            max_duration_ms: input.max_duration_ms.unwrap_or(DEFAULT_DREAM_DURATION_MS),
+            allowed_tools: input.allowed_tools.unwrap_or_default(),
+            created_at_ms: now_ms(),
+            last_run_ms: None,
+            run_count: 0,
+            enabled: input.enabled.unwrap_or(true),
+        };
+        {
+            let mut inner = self.inner.write().await;
+            inner.tasks.push(task.clone());
+        }
+        self.persist().await;
+        task
+    }
+
+    pub async fn update_task(&self, id: &str, input: DreamTaskInput) -> Option<DreamTask> {
+        let updated = {
+            let mut inner = self.inner.write().await;
+            let Some(task) = inner.tasks.iter_mut().find(|t| t.id == id) else {
+                return None;
+            };
+            task.prompt = input.prompt;
+            if let Some(priority) = input.priority {
+                task.priority = priority;
+            }
+            task.trigger = input.trigger;
+            if let Some(duration) = input.max_duration_ms {
+                task.max_duration_ms = duration;
+            }
+            if let Some(tools) = input.allowed_tools {
+                task.allowed_tools = tools;
+            }
+            if let Some(enabled) = input.enabled {
+                task.enabled = enabled;
+            }
+            task.clone()
+        };
+        self.persist().await;
+        Some(updated)
+    }
+
+    pub async fn add_task(&self, task: DreamTask) {
+        {
+            let mut inner = self.inner.write().await;
+            inner.tasks.push(task);
+        }
+        self.persist().await;
     }
 
     pub async fn remove_task(&self, id: &str) -> bool {
-        let mut inner = self.inner.write().await;
-        let before = inner.tasks.len();
-        inner.tasks.retain(|t| t.id != id);
-        inner.tasks.len() < before
+        let removed = {
+            let mut inner = self.inner.write().await;
+            let before = inner.tasks.len();
+            inner.tasks.retain(|t| t.id != id);
+            inner.tasks.len() < before
+        };
+        if removed {
+            self.persist().await;
+        }
+        removed
+    }
+
+    pub async fn try_begin(&self, id: &str) -> bool {
+        let ok = {
+            let mut inner = self.inner.write().await;
+            if !inner.enabled || inner.running_count >= inner.max_concurrent {
+                false
+            } else if let Some(task) = inner.tasks.iter_mut().find(|t| t.id == id && t.enabled) {
+                task.last_run_ms = Some(now_ms());
+                task.run_count += 1;
+                inner.running_count += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if ok {
+            self.persist().await;
+        }
+        ok
     }
 
     pub async fn pending_tasks(&self, now_ms: u64, is_idle: bool) -> Vec<DreamTask> {

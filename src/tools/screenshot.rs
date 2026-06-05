@@ -74,7 +74,12 @@ impl ScreenshotTool {
             });
         }
 
-        let output_path = self.security.workspace_dir().join(&safe_name);
+        let output_path = self.security.safe_artifact_anchor().join(&safe_name);
+        if let Some(parent) = output_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+        }
         let output_str = output_path.to_string_lossy().to_string();
 
         let Some(mut cmd_args) = Self::screenshot_command(&output_str) else {

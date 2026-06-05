@@ -298,11 +298,27 @@ impl Pipeline {
                         drop(permit);
                         result
                     });
-                    handles.push(handle);
+                    handles.push((task.id.clone(), handle));
                 }
-                for handle in handles {
-                    if let Ok(result) = handle.await {
-                        results.push(result);
+                for (task_id, handle) in handles {
+                    match handle.await {
+                        Ok(result) => results.push(result),
+                        Err(e) => {
+                            tracing::error!(
+                                target = "agent.pipeline",
+                                stage = %stage.name,
+                                task = %task_id,
+                                error = %e,
+                                "pipeline parallel task panicked or was cancelled"
+                            );
+                            results.push(TaskResult {
+                                task_id,
+                                output: serde_json::Value::Null,
+                                success: false,
+                                error: Some(format!("task did not complete: {e}")),
+                                duration_ms: 0,
+                            });
+                        }
                     }
                 }
             }

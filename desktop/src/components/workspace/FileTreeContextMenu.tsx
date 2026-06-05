@@ -150,18 +150,18 @@ export function FileTreeContextMenu({
           />
           <Separator />
           <MenuItem
-            label={t('workspace.cut')}
-            icon="content_cut"
-            onClick={() => {
-              onCutEntry(node)
-              onClose()
-            }}
-          />
-          <MenuItem
             label={t('workspace.copy')}
             icon="file_copy"
             onClick={() => {
               onCopyEntry(node)
+              onClose()
+            }}
+          />
+          <MenuItem
+            label={t('workspace.cut')}
+            icon="content_cut"
+            onClick={() => {
+              onCutEntry(node)
               onClose()
             }}
           />

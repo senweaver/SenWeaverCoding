@@ -19,10 +19,10 @@ import { revealInExplorer } from '../../lib/revealInExplorer'
 import { joinWorkspaceAbsPath } from '../../lib/workspacePath'
 import { inferLanguageFromPath, languageToMarkdownLang } from '../../lib/extLanguage'
 import { workspaceFilesApi } from '../../api/workspaceFiles'
-import { DeleteConfirmModal } from './DeleteConfirmModal'
 import { FileTreeContextMenu, type ContextMenuTarget } from './FileTreeContextMenu'
 import { FileTreeNodeView, type FilterState } from './FileTreeNodeView'
 import { InlineNamePrompt } from './InlineNamePrompt'
+import { DeleteConfirmModal } from './DeleteConfirmModal'
 
 type Props = {
   workDir: string
@@ -282,25 +282,19 @@ export function FileTree({ workDir, onSelect }: Props) {
     setDeleteTarget(node)
   }, [])
 
-  const handleConfirmDelete = useCallback(async () => {
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget) return
     const node = deleteTarget
-    if (!node) return
     try {
       await removeAction(node.relPath, node.isDir)
       setDeleteTarget(null)
-      addToast({
-        type: 'success',
-        message: t('files.deletedToTrash', { name: node.name }),
-        duration: 2400,
-      })
     } catch (err) {
-      setDeleteTarget(null)
       addToast({
         type: 'error',
         message: err instanceof Error ? err.message : String(err),
       })
     }
-  }, [addToast, deleteTarget, removeAction, t])
+  }, [addToast, deleteTarget, removeAction])
 
   const handleCreateSubmit = useCallback(
     async (value: string) => {
@@ -509,7 +503,7 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   const handleTreeKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (renameTarget || createTarget || deleteTarget) return
+      if (renameTarget || createTarget) return
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
@@ -625,7 +619,6 @@ export function FileTree({ workDir, onSelect }: Props) {
     [
       clipboard,
       createTarget,
-      deleteTarget,
       dirsForFlat,
       focusedRelPath,
       handleCopyNode,
@@ -861,7 +854,6 @@ export function FileTree({ workDir, onSelect }: Props) {
           depth={0}
           selectedRelPath={selectedRelPath}
           focusedRelPath={focusedRelPath}
-          cutRelPath={clipboard?.mode === 'cut' ? clipboard.relPath : null}
           renameTarget={renameTarget}
           createTarget={createTarget}
           filter={filterState}
@@ -925,7 +917,7 @@ export function FileTree({ workDir, onSelect }: Props) {
         <DeleteConfirmModal
           node={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
-          onConfirm={handleConfirmDelete}
+          onConfirm={confirmDelete}
         />
       )}
     </div>

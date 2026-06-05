@@ -48,7 +48,7 @@ pub use domain_matcher::DomainMatcher;
 pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};
 pub use otp::OtpValidator;
 pub use pairing::PairingGuard;
-pub use policy::{AutonomyLevel, SecurityPolicy};
+pub use policy::{is_system_path, AutonomyLevel, SecurityPolicy};
 pub use secrets::SecretStore;
 pub use traits::{NoopSandbox, Sandbox};
 

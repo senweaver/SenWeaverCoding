@@ -47,4 +47,12 @@ export const settingsApi = {
   getCliLauncherStatus() {
     return api.get<CliLauncherStatus>('/api/settings/cli-launcher')
   },
+
+  exportSyncSnapshot() {
+    return api.get<{ snapshot: unknown }>('/api/settings/sync/export')
+  },
+
+  importSyncSnapshot(snapshot: unknown) {
+    return api.post<{ applied: unknown }>('/api/settings/sync/import', snapshot)
+  },
 }

@@ -9,6 +9,7 @@ import { useTabStore } from '../stores/tabStore'
 import { useTranslation } from '../i18n'
 import { workersApi } from '../api/workers'
 import { MessageList } from '../components/chat/MessageList'
+import { SectionErrorBoundary } from '../components/layout/SectionErrorBoundary'
 import type { WorkerSnapshot } from '../types/chat'
 
 type Props = {
@@ -156,7 +157,9 @@ export function WorkerSession({ workerId }: Props) {
       </div>
 
       {hydrated ? (
-        <MessageList sessionId={workerId} />
+        <SectionErrorBoundary label="MessageList" resetKeys={[workerId]}>
+          <MessageList sessionId={workerId} />
+        </SectionErrorBoundary>
       ) : (
         <div className="flex flex-1 items-center justify-center text-[var(--color-text-tertiary)] text-sm">
           {t('common.loading') || 'Loading...'}

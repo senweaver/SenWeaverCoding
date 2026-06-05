@@ -8,6 +8,7 @@ import { useTabStore } from '../../stores/tabStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { focusSession } from '../../lib/focusSession'
 import { resolveSessionTitle } from '../../utils/sessionTitle'
+import { useTranslation } from '../../i18n'
 
 const typeStyles: Record<ToastType['type'], string> = {
   success: 'border-l-4 border-l-[var(--color-success)]',
@@ -17,6 +18,7 @@ const typeStyles: Record<ToastType['type'], string> = {
 }
 
 function ToastItem({ toast }: { toast: ToastType }) {
+  const t = useTranslation()
   const removeToast = useUIStore((s) => s.removeToast)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const ownerSession = useSessionStore((s) =>
@@ -63,7 +65,7 @@ function ToastItem({ toast }: { toast: ToastType }) {
               }}
               className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 py-0.5 text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
             >
-              切换到该会话
+              {t('permission.switchToSession')}
             </button>
           )}
           {toast.action && (

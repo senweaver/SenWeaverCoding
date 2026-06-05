@@ -209,8 +209,8 @@ impl ToolGroupRegistry {
                 description: "Development-related tools".to_string(),
                 tools: vec![
                     "git_operations".into(),
-                    "coding_session_cli".into(),
-                    "inline_coding_cli".into(),
+                    "claude_code".into(),
+                    "codex_cli".into(),
                     "project_intel".into(),
                 ],
                 enabled: false,

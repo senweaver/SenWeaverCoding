@@ -24,8 +24,10 @@ pub use bridge::SessionEventSink;
 pub use resource_lock::{
     AcquireError as ResourceAcquireError, ResourceEvent, ResourceGuard, ResourceKind,
     SessionContext, WaiterSnapshot, WorkspaceResourceManager, acquire_browser_for_current_session,
-    acquire_file_write_for_current_session, acquire_many_file_writes_for_current_session,
-    acquire_shell_for_current_session, current_session_context, global_workspace_resources,
+    acquire_file_write_for_current_session, acquire_file_write_locked,
+    acquire_many_file_writes_for_current_session,
+    acquire_shell_for_current_session, current_connection_id, current_session_context,
+    global_workspace_resources,
     install_global as install_global_workspace_resources, is_stale_for_current_session,
     record_read_for_current_session, record_write_for_current_session, scope_session_context,
     stale_file_error_message,
@@ -212,11 +214,18 @@ impl AgentSession {
             .into_inner();
 
         let turn_result = {
+            use futures_util::FutureExt as _;
             let mut guard = agent.lock().await;
-            guard
-                .turn_streamed(input, tx)
+            match std::panic::AssertUnwindSafe(guard.turn_streamed(input, tx))
+                .catch_unwind()
                 .await
-                .map_err(|e| e.to_string())
+            {
+                Ok(inner) => inner.map_err(|e| e.to_string()),
+                Err(panic) => Err(format!(
+                    "internal error recovered: {}",
+                    crate::util::describe_panic(&*panic)
+                )),
+            }
         };
 
         let _ = bridge_task.await;

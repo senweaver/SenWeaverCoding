@@ -138,12 +138,39 @@ pub async fn run_worker(
 
     let cancel_for_run = handle.cancel.clone();
 
-    let run_future = agent.turn_streamed(&prompt, tx);
+    let worker_workspace_dir = agent.current_workspace_dir().to_path_buf();
+    let worker_session_ctx = crate::session::SessionContext {
+        session_id: handle.worker_id.clone(),
+        workspace_key: crate::session::workspace_key_from_path(
+            &worker_workspace_dir,
+            &handle.worker_id,
+        ),
+        title: handle.title.clone(),
+        workspace_dir: worker_workspace_dir.to_string_lossy().into_owned(),
+        connection_id: None,
+    };
+    let worker_coding_mode = agent
+        .current_coding_mode()
+        .unwrap_or(crate::agent::coding_mode::CodingMode::Agent);
 
+    let run_future = {
+        let turn = agent.turn_streamed(&prompt, tx);
+        let mode_scoped =
+            crate::agent::coding_mode::scope_coding_mode(worker_coding_mode, turn);
+        crate::session::scope_session_context(worker_session_ctx, mode_scoped)
+    };
+
+    use futures_util::FutureExt as _;
     let result = tokio::select! {
         biased;
         _ = cancel_for_run.cancelled() => Err("worker cancelled by user".to_string()),
-        outcome = run_future => outcome.map_err(|e| e.to_string()),
+        outcome = std::panic::AssertUnwindSafe(run_future).catch_unwind() => match outcome {
+            Ok(inner) => inner.map_err(|e| e.to_string()),
+            Err(panic) => Err(format!(
+                "internal error recovered: {}",
+                crate::util::describe_panic(&*panic)
+            )),
+        },
     };
 
     bridge.abort();

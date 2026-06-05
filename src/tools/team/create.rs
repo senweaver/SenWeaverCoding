@@ -3,22 +3,9 @@
 // Licensed under the MIT License.
 use super::super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TeamInfo {
-    pub id: String,
-    pub name: String,
-    pub members: Vec<String>,
-    pub leader: Option<String>,
-    pub created_at: String,
-}
-
-pub type TeamRegistry = Arc<RwLock<HashMap<String, TeamInfo>>>;
+pub use crate::services::team_store::{TeamInfo, TeamRegistry};
 
 pub struct TeamCreateTool {
     registry: TeamRegistry,
@@ -101,11 +88,41 @@ impl Tool for TeamCreateTool {
             id: id.clone(),
             name: name.to_string(),
             members: members.clone(),
-            leader,
+            leader: leader.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 
         self.registry.write().insert(id.clone(), team);
+
+        let team_cfg = match crate::services::try_get_services() {
+            Some(svc) => {
+                let c = svc.config();
+                crate::agent::team_protocol::TeamConfig {
+                    message_channel_size: c.teams.message_channel_size.max(1),
+                    max_team_size: c.teams.max_team_size.max(1),
+                    ..crate::agent::team_protocol::TeamConfig::default()
+                }
+            }
+            None => crate::agent::team_protocol::TeamConfig::default(),
+        };
+        crate::services::team_runtime::create_team(
+            &id,
+            name,
+            &members,
+            leader.as_deref(),
+            team_cfg,
+        );
+
+        if let Some(svc) = crate::services::try_get_services() {
+            svc.team_memory_sync
+                .upsert(
+                    &format!("team:{id}"),
+                    &format!("Team '{name}' created with {} member(s)", members.len()),
+                    "team_create",
+                    vec!["team".to_string()],
+                )
+                .await;
+        }
 
         Ok(ToolResult {
             success: true,

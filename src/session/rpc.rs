@@ -66,7 +66,7 @@ pub async fn spawn_rpc_listener(
     actor: Arc<SessionActor>,
     socket_path: PathBuf,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::runtime::spawn_supervised("session.rpc.listener", async move {
         #[cfg(unix)]
         {
 
@@ -201,6 +201,7 @@ pub async fn spawn_rpc_listener(
             );
         }
     })
+    .into_inner()
 }
 
 pub async fn send_delta_to_peer(

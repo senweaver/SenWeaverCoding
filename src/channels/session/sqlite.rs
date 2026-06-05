@@ -217,6 +217,7 @@ impl SqliteSessionBackend {
 
             let reader = std::io::BufReader::new(file);
             let mut count = 0;
+            let mut failed = 0;
             for line in std::io::BufRead::lines(reader) {
                 let Ok(line) = line else { continue };
                 let trimmed = line.trim();
@@ -224,15 +225,41 @@ impl SqliteSessionBackend {
                     continue;
                 }
                 if let Ok(msg) = serde_json::from_str::<ChatMessage>(trimmed) {
-                    if self.append(key, &msg).is_ok() {
-                        count += 1;
+                    match self.append(key, &msg) {
+                        Ok(()) => count += 1,
+                        Err(e) => {
+                            failed += 1;
+                            tracing::warn!(
+                                target: "session.sqlite_migrate",
+                                session_key = key,
+                                error = %e,
+                                "failed to migrate JSONL row into sqlite session store"
+                            );
+                        }
                     }
                 }
             }
 
-            if count > 0 {
+            if failed > 0 {
+                tracing::warn!(
+                    target: "session.sqlite_migrate",
+                    session_key = key,
+                    migrated = count,
+                    failed,
+                    "JSONL migration completed with some failed rows; source file retained"
+                );
+            }
+
+            if count > 0 && failed == 0 {
                 let migrated_path = path.with_extension("jsonl.migrated");
-                let _ = std::fs::rename(&path, &migrated_path);
+                if let Err(e) = std::fs::rename(&path, &migrated_path) {
+                    tracing::warn!(
+                        target: "session.sqlite_migrate",
+                        session_key = key,
+                        error = %e,
+                        "failed to rename migrated JSONL source file"
+                    );
+                }
                 migrated += 1;
             }
         }

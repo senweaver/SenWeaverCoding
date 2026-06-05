@@ -95,7 +95,7 @@ pub fn render_minimal_diff(rel_path: &Path, before: &str, after: &str) -> Option
     let mut payload = header;
     payload.push_str(&body);
     if payload.len() > MAX_DIFF_PAYLOAD {
-        crate::util::truncate_string_bytes(&mut payload, MAX_DIFF_PAYLOAD);
+        payload.truncate(MAX_DIFF_PAYLOAD);
         payload.push_str("\n... (diff truncated)\n");
     }
     Some(payload)
@@ -252,43 +252,27 @@ pub async fn emit_file_edit(
         .map(String::from_utf8_lossy)
         .unwrap_or_default()
         .into_owned();
-    let before_is_none = before_bytes.is_none();
-    let after_is_none = after_bytes.is_none();
-
+    let (additions, deletions) = if before_bytes.is_none() {
+        let lines = after_text.split('\n').count() as i32;
+        let trailing = i32::from(after_text.ends_with('\n'));
+        (std::cmp::max(0, lines - trailing), 0i32)
+    } else if after_bytes.is_none() {
+        let lines = before_text.split('\n').count() as i32;
+        let trailing = i32::from(before_text.ends_with('\n'));
+        (0i32, std::cmp::max(0, lines - trailing))
+    } else {
+        count_line_changes(&before_text, &after_text)
+    };
+    if additions == 0 && deletions == 0 && before_bytes.is_some() && after_bytes.is_some() {
+        return;
+    }
     let rel = {
         let path_owned = path.to_path_buf();
         tokio::task::spawn_blocking(move || relativize_for_workspace(&path_owned))
             .await
             .unwrap_or_else(|_| path.to_path_buf())
     };
-
-    let rel_for_diff = rel.clone();
-    let computed = tokio::task::spawn_blocking(move || {
-        let (additions, deletions) = if before_is_none {
-            let lines = after_text.split('\n').count() as i32;
-            let trailing = i32::from(after_text.ends_with('\n'));
-            (std::cmp::max(0, lines - trailing), 0i32)
-        } else if after_is_none {
-            let lines = before_text.split('\n').count() as i32;
-            let trailing = i32::from(before_text.ends_with('\n'));
-            (0i32, std::cmp::max(0, lines - trailing))
-        } else {
-            count_line_changes(&before_text, &after_text)
-        };
-        let diff = render_minimal_diff(&rel_for_diff, &before_text, &after_text);
-        (additions, deletions, diff)
-    })
-    .await;
-
-    let (additions, deletions, diff) = match computed {
-        Ok(values) => values,
-        Err(_) => return,
-    };
-
-    if additions == 0 && deletions == 0 && !before_is_none && !after_is_none {
-        return;
-    }
-
+    let diff = render_minimal_diff(&rel, &before_text, &after_text);
     let event = DraftEvent::FileEdit {
         path: rel.to_string_lossy().into_owned(),
         additions,

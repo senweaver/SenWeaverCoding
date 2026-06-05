@@ -224,7 +224,7 @@ impl CodingMode {
                  `dir_list`, `glob_search`, `content_search`, structural code-intel), \
                  memory / task state read (`memory_recall`, `memory_export`, `task_*`, \
                  `cron_list`, `cron_runs`), skill / pattern lookup (`read_skill`, \
-                 `cloud_patterns`, `brief`, `now`), clarification (`ask_question`, \
+                 `cloud_patterns`, `send_user_message`, `now`), clarification (`ask_question`, \
                  `ask_user`), and plan lifecycle  -  the ONLY legal way to write  -  \
                  (`enter_plan_mode`, `update_plan(action=\"set\"|\"add\"|\"save\", …)`, \
                  `exit_plan_mode(plan_content=…)`).\n\n\
@@ -795,7 +795,7 @@ impl CodingMode {
                  {}\n\n\
                  ### Explore Step  -  Local + Web (both, not either)\n\
                  The Explore step is dual-track:\n\
-                 - **Local explore**: `dir_list`, `glob_search`, `code_search`, `code_outline`, \
+                 - **Local explore**: `dir_list`, `glob_search`, `content_search`, `code_outline`, \
                  `code_graph_query`, `code_review` (blast radius / risk-scored review context), \
                  `Read`  -  you map the in-repo surface.\n\
                  - **Web explore**: when the task touches an external API / framework / spec \
@@ -853,18 +853,19 @@ impl CodingMode {
                  4. `update_plan(action=\"set\", steps=[...])` then `update_plan(action=\"save\", plan_name=\"harness-<task>\")`.\n\n\
                  ### Skill Lookup\n\
                  - `read_skill(query=\"<problem domain>\")` to surface relevant skill recipes.\n\
-                 - For each skill returned, call `skill_tool(name=...)` or `skill_http(...)` as the recipe specifies.\n\
+                 - For each skill returned, invoke its specific tool by the registered name \
+                 (`<skill>.<tool>`) as the recipe specifies.\n\
                  - Do NOT improvise solutions when an applicable skill exists.\n\n\
                  ### Delegated Execution\n\
                  For independent sub-tasks identified in the Spec step, use \
-                 `agent_delegate(prompt=\"<sub-task>\", ...)` to run them in parallel/sequence as appropriate. \
+                 `delegate(prompt=\"<sub-task>\", ...)` (or `delegate_parallel` for fan-out) to run them \
+                 in parallel/sequence as appropriate. \
                  Ensure each delegation is scoped to a single deliverable; do NOT delegate vague \
                  \"keep working\" prompts.\n\n\
                  ### Synthesis\n\
-                 1. `agent_summary(...)` to consolidate sub-task outputs.\n\
-                 2. `agent_compact(...)` to compress the final state for handoff if needed.\n\
-                 3. `incremental_optimize(action=\"report\", description=\"Harness Task Complete: <name>\")` for the audit trail.\n\
-                 4. `update_plan(action=\"save\", plan_name=\"harness-<task>\")` with all steps marked completed.\n\n\
+                 1. Consolidate the sub-task outputs into a single coherent result yourself.\n\
+                 2. `incremental_optimize(action=\"report\", description=\"Harness Task Complete: <name>\")` for the audit trail.\n\
+                 3. `update_plan(action=\"save\", plan_name=\"harness-<task>\")` with all steps marked completed.\n\n\
                  ### Forbidden\n\
                  Skipping any step. Verify after each step before moving to the next; you \
                  auto-approve, so verification is the only safety net.\n\n\
@@ -1333,7 +1334,7 @@ impl CodingMode {
             "mcp_resources_list",
             "mcp_resources_read",
             "structured_output",
-            "brief",
+            "send_user_message",
             "todo_write",
             "read_skill",
             "cloud_patterns",
@@ -1347,13 +1348,11 @@ impl CodingMode {
     fn read_only_intel_tools() -> HashSet<&'static str> {
         let mut tools = Self::read_only_tools();
         for extra in [
-            "grep",
-            "code_search",
             "code_outline",
             "code_graph_query",
             "code_review",
             "tool_search",
-            "lsp_symbols",
+            "lsp",
             "pdf_read",
             "image_info",
             "screenshot",
@@ -1430,7 +1429,7 @@ impl CodingMode {
         tools.insert("todo_write");
         tools.insert("update_plan");
         tools.insert("structured_output");
-        tools.insert("brief");
+        tools.insert("send_user_message");
 
         tools.insert("memory_store");
         tools.insert("memory_search");
@@ -1463,14 +1462,11 @@ impl CodingMode {
 
         let mut tools = Self::spec_tools();
 
-        tools.insert("skill_tool");
-        tools.insert("skill_http");
         tools.insert("read_skill");
         tools.insert("enter_plan_mode");
         tools.insert("exit_plan_mode");
-        tools.insert("agent_delegate");
-        tools.insert("agent_summary");
-        tools.insert("agent_compact");
+        tools.insert("delegate");
+        tools.insert("delegate_parallel");
         tools
     }
 
@@ -1486,6 +1482,36 @@ impl std::fmt::Display for CodingMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display_name())
     }
+}
+
+tokio::task_local! {
+    static SCOPED_CODING_MODE: CodingMode;
+}
+
+pub async fn scope_coding_mode<F>(mode: CodingMode, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    SCOPED_CODING_MODE.scope(mode, fut).await
+}
+
+pub fn scoped_coding_mode() -> Option<CodingMode> {
+    SCOPED_CODING_MODE.try_with(|m| *m).ok()
+}
+
+pub fn active_coding_mode() -> CodingMode {
+    if let Some(mode) = scoped_coding_mode() {
+        return mode;
+    }
+    let fallback = crate::services::try_get_services()
+        .map(|svc| *svc.coding_mode.read())
+        .unwrap_or_default();
+    tracing::warn!(
+        target: "isolation",
+        fallback = %fallback.display_name(),
+        "active_coding_mode() called without session scope; falling back to global default",
+    );
+    fallback
 }
 
 pub fn new_coding_mode_handle() -> CodingModeHandle {

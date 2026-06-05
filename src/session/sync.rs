@@ -74,7 +74,7 @@ impl SessionSyncHub {
         let transport = self.transport.read().clone();
         if let Some(transport) = transport {
             let session_id = id.to_string();
-            tokio::spawn(async move {
+            crate::runtime::spawn_supervised("session.sync_transport", async move {
                 if let Err(e) = transport.send(&delta).await {
                     tracing::warn!(
                         target: "session.sync",

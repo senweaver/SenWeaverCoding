@@ -22,6 +22,7 @@ const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'user_message',
   'stop_generation',
   'approval_decision',
+  'permission_response',
   'set_runtime_config',
 ])
 
@@ -109,7 +110,7 @@ class WebSocketManager {
     sessionId: string,
     selection: { providerId: string; modelId: string },
     options?: { persist?: boolean },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const persist = options?.persist ?? true
     const wait = this.waitForRuntimeConfigUpdated(sessionId)
     this.send(sessionId, {
@@ -118,7 +119,7 @@ class WebSocketManager {
       providerId: selection.providerId,
       modelId: selection.modelId,
     })
-    return wait.catch(() => undefined)
+    return wait.then(() => true).catch(() => false)
   }
 
   isConnected(sessionId: string): boolean {
@@ -545,6 +546,14 @@ class WebSocketManager {
 
     const delay = Math.min(1000 * 2 ** conn.reconnectAttempt, MAX_RECONNECT_DELAY_MS)
     conn.reconnectAttempt++
+
+    this.broadcastSystemNotification(
+      sessionId,
+      'ws_reconnecting',
+      'WebSocket disconnected; attempting to reconnect.',
+      { attempt: conn.reconnectAttempt },
+      'info',
+    )
 
     conn.reconnectTimer = setTimeout(() => {
       if (this.connections.get(sessionId) === conn && !conn.intentionalClose) {

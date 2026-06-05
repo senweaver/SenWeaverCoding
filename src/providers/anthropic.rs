@@ -745,11 +745,12 @@ impl AnthropicProvider {
             )
     }
 
-    fn build_streaming_request(request: &NativeChatRequest<'_>) -> serde_json::Value {
-        let mut body =
-            serde_json::to_value(request).expect("NativeChatRequest should serialize to JSON");
+    fn build_streaming_request(
+        request: &NativeChatRequest<'_>,
+    ) -> serde_json::Result<serde_json::Value> {
+        let mut body = serde_json::to_value(request)?;
         body["stream"] = serde_json::Value::Bool(true);
-        body
+        Ok(body)
     }
 
     async fn parse_anthropic_sse(
@@ -918,17 +919,29 @@ impl AnthropicProvider {
 }
 
 fn sanitize_tool_call_arguments(raw: String) -> String {
-    if raw.is_empty() {
+    if raw.trim().is_empty() {
         return "{}".to_string();
     }
     match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(_) => raw,
         Err(err) => {
+            if let Some(repaired) =
+                crate::providers::sanitize::repair_partial_tool_input_json(&raw)
+            {
+                tracing::warn!(
+                    target: "providers.anthropic.stream",
+                    error = %err,
+                    raw_len = raw.len(),
+                    repaired_len = repaired.len(),
+                    "anthropic SSE delivered truncated tool_input JSON; recovered partial arguments via structural repair"
+                );
+                return repaired;
+            }
             tracing::warn!(
                 target: "providers.anthropic.stream",
                 error = %err,
                 raw_len = raw.len(),
-                "anthropic SSE produced incomplete tool_input JSON; substituting empty object"
+                "anthropic SSE produced unrecoverable tool_input JSON; substituting empty object"
             );
             "{}".to_string()
         }
@@ -1320,7 +1333,17 @@ impl Provider for AnthropicProvider {
                 stream: Some(true),
             };
 
-            let body = Self::build_streaming_request(&native_request);
+            let body = match Self::build_streaming_request(&native_request) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "anthropic request serialization error: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
 
             let mut req = client
                 .post(&url)

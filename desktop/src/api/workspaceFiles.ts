@@ -164,13 +164,12 @@ export const workspaceFilesApi = {
     flush(decoder.decode())
   },
 
-  remove(opts: { root: string; path: string; recursive?: boolean; toTrash?: boolean }) {
+  remove(opts: { root: string; path: string; recursive?: boolean }) {
     return api.delete<{ ok: boolean }>(
       `/api/workspace/entry${qs({
         root: opts.root,
         path: opts.path,
         recursive: opts.recursive,
-        toTrash: opts.toTrash,
       })}`,
     )
   },

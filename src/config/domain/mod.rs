@@ -6,7 +6,6 @@ pub mod agent;
 pub mod backup;
 pub mod channels;
 pub mod cloud_ops;
-pub mod conversational_ai;
 pub mod delegate_agents;
 pub mod evolution;
 pub mod gateway_net;

@@ -292,7 +292,7 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              MUST be a precision edit to a SINGLE file; after the Strike the post-tool \
              ImpactAnalysis hook will require listing every downstream dependent and \
              confirming their tests still pass. Do NOT batch unrelated edits in one Strike. \
-             The Explore phase is dual-track: local (`dir_list` / `code_search` / \
+             The Explore phase is dual-track: local (`dir_list` / `content_search` / \
              `Read`) AND web (`web_search` then `web_fetch`) when the task touches \
              external APIs / specs. Web evidence is explore-only — it never enters \
              a Strike. NEVER use `browser` for search.",
@@ -312,9 +312,9 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
         CodingMode::Harness => Some(
             "[Harness Reminder] Engineering-grade pipeline, four phases — DO NOT skip: \
              (1) Spec: `code_to_spec(summarize|analyze|generate)` + `update_plan(set|save)`; \
-             (2) Skill: `read_skill` then `skill_tool` / `skill_http` for the looked-up \
-             skills; (3) Delegate: `agent_delegate` for parallel sub-tasks; \
-             (4) Synthesis: `agent_summary` / `agent_compact` + `incremental_optimize(report)`. \
+             (2) Skill: `read_skill` then invoke the looked-up skill's own tool (`<skill>.<tool>`); \
+             (3) Delegate: `delegate` / `delegate_parallel` for parallel sub-tasks; \
+             (4) Synthesis: consolidate sub-task outputs yourself + `incremental_optimize(report)`. \
              You auto-approve; verify after each phase before moving on.",
         ),
         CodingMode::Vibe => Some(
@@ -355,9 +355,9 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              a clear answer with citations. \
              (1) Cite real `path:line-range` references when explaining code; never \
                  paraphrase without locating the source. \
-             (2) Prefer narrow lookups over reading whole files: `code_search`, \
+             (2) Prefer narrow lookups over reading whole files: \
                  `grep` / `content_search`, `code_outline`, `code_graph_query`, \
-                 `code_review`, `lsp_symbols`, `glob_search`. \
+                 `code_review`, `lsp`, `glob_search`. \
              (3) If the user's intent is genuinely ambiguous, call `ask_question` \
                  (you DO have it in this mode) — bundle related clarifications into \
                  ONE call. \

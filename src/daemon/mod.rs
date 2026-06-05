@@ -53,8 +53,14 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         .channel_max_backoff_secs
         .max(initial_backoff);
 
-    let _event_bus = crate::event_bus::integration::init_global_bus();
+    let _event_bus = crate::event_bus::integration::init_global_bus(
+        config
+            .config_path
+            .parent()
+            .map(|p| p.join("event_audit.jsonl")),
+    );
     let _multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
+    crate::agent::multi_agent_runtime::register_configured_agents(&_multi_agent_rt, &config);
 
     {
         let svc_data_dir = config
@@ -65,6 +71,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
             data_dir: svc_data_dir,
             shared_config: None,
+            team_sync_enabled: config.teams.sync_enabled,
             ..Default::default()
         });
     }
@@ -162,6 +169,21 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
                 async move { Box::pin(run_heartbeat_worker(cfg)).await }
             },
         ));
+    }
+
+    if config.hands.enabled {
+        let hands_cfg = config.clone();
+        handles.push(spawn_component_supervisor(
+            "hands",
+            initial_backoff,
+            max_backoff,
+            move || {
+                let cfg = hands_cfg.clone();
+                async move { Box::pin(crate::hands::runner::run(cfg)).await }
+            },
+        ));
+    } else {
+        crate::health::mark_component_ok("hands");
     }
 
     if config.cron.enabled {

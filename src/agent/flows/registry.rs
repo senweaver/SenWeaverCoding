@@ -16,7 +16,8 @@ fn slot() -> &'static RwLock<Option<Arc<dyn AgentHandle>>> {
 
 pub fn set_global_agent_handle(handle: Arc<dyn AgentHandle>) {
     let cell = slot();
-    *cell.write().expect("flow agent handle slot poisoned") = Some(handle);
+    let mut guard = cell.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(handle);
 }
 
 pub fn global_agent_handle() -> Option<Arc<dyn AgentHandle>> {

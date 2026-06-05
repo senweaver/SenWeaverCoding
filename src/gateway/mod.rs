@@ -68,6 +68,50 @@ use uuid::Uuid;
 
 pub const MAX_BODY_SIZE: usize = 65_536;
 
+static GATEWAY_EVENT_TX: std::sync::OnceLock<
+    tokio::sync::broadcast::Sender<serde_json::Value>,
+> = std::sync::OnceLock::new();
+
+pub fn install_gateway_event_tx(tx: tokio::sync::broadcast::Sender<serde_json::Value>) {
+    let _ = GATEWAY_EVENT_TX.set(tx);
+}
+
+pub fn emit_gateway_event(payload: serde_json::Value) {
+    if let Some(tx) = GATEWAY_EVENT_TX.get() {
+        let _ = tx.send(payload);
+    }
+}
+
+pub fn emit_session_task_notification(
+    session_id: &str,
+    data: serde_json::Value,
+) {
+    emit_gateway_event(serde_json::json!({
+        "type": "system_notification",
+        "subtype": "task_notification",
+        "sessionId": session_id,
+        "data": data,
+    }));
+}
+
+pub fn emit_session_task_update(
+    session_id: &str,
+    task_id: &str,
+    status: &str,
+    progress: Option<&str>,
+) {
+    let mut payload = serde_json::json!({
+        "type": "task_update",
+        "sessionId": session_id,
+        "taskId": task_id,
+        "status": status,
+    });
+    if let Some(progress) = progress.filter(|p| !p.trim().is_empty()) {
+        payload["progress"] = serde_json::Value::String(progress.to_string());
+    }
+    emit_gateway_event(payload);
+}
+
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 pub fn gateway_request_timeout_secs() -> u64 {
@@ -451,6 +495,16 @@ async fn run_gateway_inner(
         tracing::info!("Cron disabled; embedded scheduler not started");
     }
 
+    if with_scheduler && config.hands.enabled {
+        let hands_cfg = config.clone();
+        crate::runtime::task_manager::spawn_supervised("gateway.hands", async move {
+            if let Err(e) = crate::hands::runner::run(hands_cfg).await {
+                tracing::warn!("hands worker exited with error: {e}");
+            }
+        });
+        tracing::info!("Embedded hands worker started alongside gateway");
+    }
+
     if is_public_bind(host) && config.tunnel.provider == "none" {
         if !config.gateway.allow_public_bind {
             tracing::warn!(
@@ -492,8 +546,14 @@ async fn run_gateway_inner(
             .set_settings_path(parent.join("desktop_user.json"));
     }
 
-    let _event_bus = crate::event_bus::integration::init_global_bus();
+    let _event_bus = crate::event_bus::integration::init_global_bus(
+        config
+            .config_path
+            .parent()
+            .map(|p| p.join("event_audit.jsonl")),
+    );
     let _multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
+    crate::agent::multi_agent_runtime::register_configured_agents(&_multi_agent_rt, &config);
 
     {
         let workspace_root = if config.workspace_dir.as_os_str().is_empty() {
@@ -512,10 +572,20 @@ async fn run_gateway_inner(
     let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
         data_dir: svc_data_dir.clone(),
         shared_config: Some(Arc::clone(live_config_state.shared())),
+        team_sync_enabled: config.teams.sync_enabled,
         ..Default::default()
     });
     if let Some(svc) = crate::services::try_get_services() {
         svc.update_config(config.clone());
+        svc.auto_dream
+            .bind_persistence(svc_data_dir.join("auto_dream.json"))
+            .await;
+    }
+    if with_scheduler {
+        crate::runtime::task_manager::spawn_supervised("gateway.auto_dream_scheduler", async move {
+            crate::agent::auto_dream_scheduler::run().await;
+        });
+        tracing::info!("AutoDream scheduler started alongside gateway");
     }
     crate::event_bus::integration::publish_system(
         "gateway",
@@ -910,6 +980,7 @@ async fn run_gateway_inner(
     let cost_tracker = CostTracker::get_or_init_global(config.cost.clone(), &config.workspace_dir);
 
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
+    install_gateway_event_tx(event_tx.clone());
 
     {
         let usage_event_tx = event_tx.clone();
@@ -1064,17 +1135,35 @@ async fn run_gateway_inner(
         .map(|gp| Arc::new(GmailPushChannel::new(gp.clone())));
 
     let session_backend: Option<Arc<dyn SessionBackend>> = if config.gateway.session_persistence {
-        match SqliteSessionBackend::new(&config.workspace_dir) {
+        let backend_workspace_dir = config.workspace_dir.clone();
+        let backend_init =
+            tokio::task::spawn_blocking(move || SqliteSessionBackend::new(&backend_workspace_dir))
+                .await
+                .unwrap_or_else(|join_err| {
+                    Err(anyhow::anyhow!(
+                        "session backend init task panicked: {join_err}"
+                    ))
+                });
+        match backend_init {
             Ok(b) => {
                 tracing::info!("Gateway session persistence enabled (SQLite)");
+                let backend = Arc::new(b);
                 if config.gateway.session_ttl_hours > 0 {
-                    if let Ok(cleaned) = b.cleanup_stale(config.gateway.session_ttl_hours) {
-                        if cleaned > 0 {
-                            tracing::info!("Cleaned up {cleaned} stale gateway sessions");
+                    let cleanup_backend = Arc::clone(&backend);
+                    let ttl_hours = config.gateway.session_ttl_hours;
+                    tokio::task::spawn_blocking(move || {
+                        match cleanup_backend.cleanup_stale(ttl_hours) {
+                            Ok(cleaned) if cleaned > 0 => {
+                                tracing::info!("Cleaned up {cleaned} stale gateway sessions");
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("stale gateway session cleanup failed: {e}");
+                            }
                         }
-                    }
+                    });
                 }
-                Some(Arc::new(b))
+                Some(backend as Arc<dyn SessionBackend>)
             }
             Err(e) => {
                 tracing::warn!("Session persistence disabled: {e}");
@@ -1355,7 +1444,29 @@ async fn run_gateway_inner(
         )
         .layer(RequestBodyLimitLayer::new(16 * 1024 * 1024));
 
-    let a2a_state = a2a::build_a2a_state("sen", format!("http://{}:{}", host, actual_port));
+    let a2a_config = state.config.clone();
+    let a2a_state = a2a::build_a2a_state("sen", format!("http://{}:{}", host, actual_port))
+        .with_executor(Arc::new(move |description: String| {
+            let cfg_handle = a2a_config.clone();
+            tokio::spawn(async move {
+                let cfg = cfg_handle.lock().clone();
+                let temperature = cfg.default_temperature;
+                crate::agent::run(
+                    cfg,
+                    Some(description),
+                    None,
+                    None,
+                    temperature,
+                    Vec::new(),
+                    false,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|e| format!("{e:#}"))
+            })
+        }));
     let a2a_router = a2a::create_a2a_router(a2a_state);
 
     let agent_turn_router = routes::agent::agent_router(state.clone());
@@ -1391,6 +1502,18 @@ async fn run_gateway_inner(
         .route("/api/memory/{key}", delete(api::handle_api_memory_delete))
         .route("/api/cost", get(api::handle_api_cost))
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
+        .route(
+            "/api/channels",
+            get(api::handle_api_channels_get).put(api::handle_api_channels_put),
+        )
+        .route(
+            "/api/workflows/validate",
+            post(api::handle_api_workflows_validate),
+        )
+        .route(
+            "/api/workflows/execute",
+            post(api::handle_api_workflows_execute),
+        )
         .route("/api/health", get(api::handle_api_health))
         .route("/api/tips/next", get(api::handle_api_tips_next))
         .route("/api/tips/dismiss", post(api::handle_api_tips_dismiss))
@@ -1579,6 +1702,25 @@ async fn run_gateway_inner(
             "/api/web-fetch",
             get(desktop_routes::handle_web_fetch_get)
                 .put(desktop_routes::handle_web_fetch_put),
+        )
+        .route(
+            "/api/browser-config",
+            get(desktop_routes::handle_browser_config_get)
+                .put(desktop_routes::handle_browser_config_put),
+        )
+        .route(
+            "/api/auto-dream",
+            get(desktop_routes::handle_auto_dream_get)
+                .put(desktop_routes::handle_auto_dream_put),
+        )
+        .route(
+            "/api/auto-dream/tasks",
+            post(desktop_routes::handle_auto_dream_task_create),
+        )
+        .route(
+            "/api/auto-dream/tasks/{id}",
+            put(desktop_routes::handle_auto_dream_task_update)
+                .delete(desktop_routes::handle_auto_dream_task_delete),
         )
         .route(
             "/api/guardrails",
@@ -1786,27 +1928,6 @@ async fn run_gateway_inner(
             "/api/channels/restart",
             post(desktop_routes::handle_channels_restart),
         )
-        .route(
-            "/api/computer-use/status",
-            get(desktop_routes::handle_computer_use_status),
-        )
-        .route(
-            "/api/computer-use/setup",
-            post(desktop_routes::handle_computer_use_setup),
-        )
-        .route(
-            "/api/computer-use/apps",
-            get(desktop_routes::handle_computer_use_apps),
-        )
-        .route(
-            "/api/computer-use/authorized-apps",
-            get(desktop_routes::handle_computer_use_authorized_apps_get)
-                .put(desktop_routes::handle_computer_use_authorized_apps_put),
-        )
-        .route(
-            "/api/computer-use/open-settings",
-            post(desktop_routes::handle_computer_use_open_settings),
-        )
         .route("/api/haha-oauth", get(desktop_routes::handle_haha_oauth_status).delete(desktop_routes::handle_haha_oauth_logout))
         .route("/api/haha-oauth/start", post(desktop_routes::handle_haha_oauth_start))
         .route(
@@ -1874,6 +1995,15 @@ async fn run_gateway_inner(
         .route(
             "/api/settings/cli-launcher",
             get(desktop_routes::handle_settings_cli_launcher),
+        )
+        .route("/api/suggestions", get(desktop_routes::handle_suggestions))
+        .route(
+            "/api/settings/sync/export",
+            get(desktop_routes::handle_settings_sync_export),
+        )
+        .route(
+            "/api/settings/sync/import",
+            post(desktop_routes::handle_settings_sync_import),
         )
         .route(
             "/api/scheduled-tasks",
@@ -2079,14 +2209,26 @@ async fn run_gateway_inner(
         loop {
             tokio::select! {
                 conn = listener.accept() => {
-                    let (tcp_stream, remote_addr) = conn?;
+                    let (tcp_stream, remote_addr) = match conn {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("gateway TLS accept error (continuing): {e}");
+                            continue;
+                        }
+                    };
                     let tls_acceptor = tls_acceptor.clone();
-                    let svc = tower::MakeService::<
+                    let svc = match tower::MakeService::<
                         SocketAddr,
                         hyper::Request<hyper::body::Incoming>,
                     >::make_service(&mut app, remote_addr)
                     .await
-                    .expect("infallible make_service");
+                    {
+                        Ok(svc) => svc,
+                        Err(e) => {
+                            tracing::warn!("gateway make_service failed for {remote_addr} (continuing): {e}");
+                            continue;
+                        }
+                    };
 
                     let remote_addr_clone = remote_addr;
                     let _conn_task = crate::runtime::spawn_supervised(
@@ -2353,15 +2495,26 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
 
     let current_model = state.current_model();
     let system_prompt = {
-        let config_guard = state.config.lock();
-        crate::channels::build_system_prompt(
-            &config_guard.workspace_dir,
-            &current_model,
-            &[],
-            &[],
-            Some(&config_guard.identity),
-            None,
-        )
+        let (workspace_dir, identity) = {
+            let config_guard = state.config.lock();
+            (
+                config_guard.workspace_dir.clone(),
+                config_guard.identity.clone(),
+            )
+        };
+        let model_owned = current_model.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::channels::build_system_prompt(
+                &workspace_dir,
+                &model_owned,
+                &[],
+                &[],
+                Some(&identity),
+                None,
+            )
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("build_system_prompt join error: {e}"))?
     };
 
     let mut messages = Vec::with_capacity(1 + user_messages.len());

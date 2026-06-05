@@ -85,7 +85,21 @@ impl SdkSession {
                 }
             });
 
-        let response_text = agent.turn_streamed(&message.content, tx).await?;
+        let response_text = {
+            use futures_util::FutureExt as _;
+            match std::panic::AssertUnwindSafe(agent.turn_streamed(&message.content, tx))
+                .catch_unwind()
+                .await
+            {
+                Ok(inner) => inner?,
+                Err(panic) => {
+                    return Err(anyhow::anyhow!(
+                        "internal error recovered: {}",
+                        crate::util::describe_panic(&*panic)
+                    ));
+                }
+            }
+        };
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let metadata = self.build_metadata(duration_ms);
 

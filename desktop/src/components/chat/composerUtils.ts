@@ -13,7 +13,9 @@ export const SETTINGS_SLASH_COMMANDS: ReadonlyArray<{
   name: string
   description: string
   tab: SettingsTab
-}> = []
+}> = [
+  { name: 'plugins', description: 'Open the plugins manager', tab: 'plugins' },
+]
 
 export const FALLBACK_SLASH_COMMANDS = [
   ...PANEL_SLASH_COMMANDS,

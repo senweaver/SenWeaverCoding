@@ -269,7 +269,7 @@ impl Tool for FileEditTool {
             });
         }
 
-        let _resource_guard = match crate::session::acquire_file_write_for_current_session(
+        let _resource_guard = match crate::session::acquire_file_write_locked(
             &resolved_target,
         )
         .await

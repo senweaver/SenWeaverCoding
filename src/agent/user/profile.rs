@@ -2,11 +2,27 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+fn profile_cache() -> &'static RwLock<HashMap<PathBuf, (u128, String)>> {
+    static CACHE: OnceLock<RwLock<HashMap<PathBuf, (u128, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn file_mtime_nanos(meta: &std::fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
 
 const USER_PROFILE_FILENAME: &str = "USER.md";
 const DEFAULT_PROFILE: &str = "# User Profile\n\n\
@@ -56,19 +72,34 @@ impl UserProfile {
     }
 
     pub fn read(&self) -> Result<String> {
-        if !self.profile_path.exists() {
-            return Ok(String::new());
+        let meta = match std::fs::metadata(&self.profile_path) {
+            Ok(m) => m,
+            Err(_) => return Ok(String::new()),
+        };
+        let mtime = file_mtime_nanos(&meta);
+        if let Some((cached_mtime, cached)) =
+            profile_cache().read().get(&self.profile_path).cloned()
+        {
+            if cached_mtime == mtime {
+                return Ok(cached);
+            }
         }
-        std::fs::read_to_string(&self.profile_path)
-            .with_context(|| format!("Failed to read {}", self.profile_path.display()))
+        let content = std::fs::read_to_string(&self.profile_path)
+            .with_context(|| format!("Failed to read {}", self.profile_path.display()))?;
+        profile_cache()
+            .write()
+            .insert(self.profile_path.clone(), (mtime, content.clone()));
+        Ok(content)
     }
 
     pub fn write(&self, content: &str) -> Result<()> {
         if let Some(parent) = self.profile_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.profile_path, content)
-            .with_context(|| format!("Failed to write {}", self.profile_path.display()))
+        crate::util::atomic_write(&self.profile_path, content.as_bytes())
+            .with_context(|| format!("Failed to write {}", self.profile_path.display()))?;
+        profile_cache().write().remove(&self.profile_path);
+        Ok(())
     }
 
     pub fn ensure_exists(&self) -> Result<()> {

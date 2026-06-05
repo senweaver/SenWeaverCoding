@@ -30,7 +30,36 @@ impl Default for DebugTestReportTool {
 }
 
 fn workspace_anchor() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    if let Some(services) = crate::services::try_get_services() {
+        let ws = services.config().workspace_dir.clone();
+        if ws.is_absolute() && !crate::security::is_system_path(&ws) {
+            return ws;
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if cwd.is_absolute() && !crate::security::is_system_path(&cwd) {
+        return cwd;
+    }
+    if let Some(home) = report_home_dir() {
+        return home.join(".senweavercoding").join("runtime");
+    }
+    let mut tmp = std::env::temp_dir();
+    tmp.push("SenAgentOS");
+    tmp.push("runtime");
+    tmp
+}
+
+fn report_home_dir() -> Option<PathBuf> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
 }
 
 static ACTIVE_RUN_ID: OnceLock<RwLock<Option<String>>> = OnceLock::new();

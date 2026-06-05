@@ -102,7 +102,9 @@ impl UpdatePlanTool {
             rewrite_frontmatter_statuses(&content, &plan)
         };
         if updated != content {
-            if let Err(e) = tokio::fs::write(&file_path, &updated).await {
+            if let Err(e) =
+                crate::util::atomic_write_async(file_path.clone(), updated.into_bytes()).await
+            {
                 tracing::warn!(
                     target: "tools.update_plan",
                     error = %e,
@@ -146,11 +148,10 @@ impl UpdatePlanTool {
     }
 
     fn current_mode_is_plan() -> bool {
-        let Some(svc) = crate::services::try_get_services() else {
-            return false;
-        };
-        let mode = *svc.coding_mode.read();
-        matches!(mode, crate::agent::coding_mode::CodingMode::Plan)
+        matches!(
+            crate::agent::coding_mode::active_coding_mode(),
+            crate::agent::coding_mode::CodingMode::Plan
+        )
     }
 
     fn render_plan_progress_header(total: usize, completed: usize) -> String {
@@ -781,7 +782,7 @@ will."
                 let filename = format!("{plan_name}.plan.md");
                 let file_path = self.plans_dir_snapshot().join(&filename);
                 let md = self.render_plan_md(title, description);
-                tokio::fs::write(&file_path, &md).await?;
+                crate::util::atomic_write_async(&file_path, md.clone().into_bytes()).await?;
                 *self.active_plan_name.write() = Some(plan_name.to_string());
 
                 let header = if Self::current_mode_is_plan() {

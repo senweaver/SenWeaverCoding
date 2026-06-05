@@ -11,8 +11,8 @@ import { useCLITaskStore } from '../stores/cliTaskStore'
 import { useTeamStore } from '../stores/teamStore'
 import { useTranslation } from '../i18n'
 import { MessageList } from '../components/chat/MessageList'
+import { SectionErrorBoundary } from '../components/layout/SectionErrorBoundary'
 import { ChatInput } from '../components/chat/ChatInput'
-import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermissionModal'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { QuestionStrip } from '../components/chat/QuestionStrip'
@@ -24,7 +24,7 @@ export function ActiveSession() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessions = useSessionStore((s) => s.sessions)
   const connectToSession = useChatStore((s) => s.connectToSession)
-  const { chatState, totalTokens, hasMessages, hasStreamingText, pendingComputerUsePermission } =
+  const { chatState, totalTokens, hasMessages, hasStreamingText } =
     useChatStore(
       useShallow((s) => {
         const st = activeTabId ? s.sessions[activeTabId] : undefined
@@ -34,7 +34,6 @@ export function ActiveSession() {
           totalTokens: usage.input_tokens + usage.output_tokens,
           hasMessages: (st?.messages?.length ?? 0) > 0,
           hasStreamingText: !!st?.streamingText,
-          pendingComputerUsePermission: st?.pendingComputerUsePermission ?? null,
         }
       }),
     )
@@ -216,7 +215,9 @@ export function ActiveSession() {
             </div>
           )}
 
-          <MessageList />
+          <SectionErrorBoundary label="MessageList" resetKeys={[activeTabId]}>
+            <MessageList />
+          </SectionErrorBoundary>
         </>
       )}
 
@@ -233,13 +234,6 @@ export function ActiveSession() {
       )}
 
       <ChatInput variant={isEmpty && !isMemberSession ? 'hero' : 'default'} />
-
-      {!isMemberSession && activeTabId ? (
-        <ComputerUsePermissionModal
-          sessionId={activeTabId}
-          request={pendingComputerUsePermission?.request ?? null}
-        />
-      ) : null}
     </div>
   )
 }

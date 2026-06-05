@@ -1187,8 +1187,3 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     }
   },
 }))
-
-export function getBrowserPanelState(sessionId: string | null): BrowserPanelState | null {
-  if (!sessionId) return null
-  return useBrowserPanelStore.getState().panels[sessionId] ?? null
-}

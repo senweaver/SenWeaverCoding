@@ -268,11 +268,12 @@ impl TaskRouter {
     ) -> tokio::task::JoinHandle<()> {
         let map = self.health_penalties.clone();
         let mut rx = broadcaster.subscribe();
-        tokio::spawn(async move {
+        crate::runtime::spawn_supervised("task_router.health_subscriber", async move {
             while let Ok(signal) = rx.recv().await {
                 apply_signal(&map, &signal);
             }
         })
+        .into_inner()
     }
 }
 

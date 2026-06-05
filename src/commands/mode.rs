@@ -43,7 +43,7 @@ pub async fn handle_mode(ctx: CommandContext) -> CommandResult {
 
             if prev == CodingMode::Plan && new_mode != CodingMode::Plan {
                 if let Some(svc) = crate::services::try_get_services() {
-                    let _ = svc.pending_plan.write().take();
+                    let _ = svc.take_pending_plan();
                 }
             }
 

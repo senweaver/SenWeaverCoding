@@ -878,7 +878,8 @@ pub async fn handle_providers_settings_put(
         }
         let serialized = serde_json::to_string_pretty(&body)
             .unwrap_or_else(|_| body.to_string());
-        std::fs::write(&path, serialized).map_err(|e| format!("write settings: {e}"))
+        crate::util::atomic_write(&path, serialized.as_bytes())
+            .map_err(|e| format!("write settings: {e}"))
     })
     .await;
     match result {
@@ -1605,7 +1606,9 @@ pub async fn handle_user_rules_list(
             .into_response();
     };
     let exists = rules_dir.is_dir();
-    let metas = crate::user_rules::list_user_rules();
+    let metas = tokio::task::spawn_blocking(crate::user_rules::list_user_rules)
+        .await
+        .unwrap_or_default();
     let files: Vec<serde_json::Value> = metas
         .into_iter()
         .map(|meta| {
@@ -1758,7 +1761,7 @@ pub async fn handle_user_rule_upsert(
     let content_bytes = body.content.into_bytes();
     let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         std::fs::create_dir_all(&dir_owned)?;
-        std::fs::write(&path_owned, &content_bytes)?;
+        crate::util::atomic_write(&path_owned, &content_bytes)?;
         Ok(())
     })
     .await;
@@ -1967,7 +1970,7 @@ pub async fn handle_user_skill_upsert(
     let content_bytes = body.content.into_bytes();
     let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         std::fs::create_dir_all(&dir_owned)?;
-        std::fs::write(&entry_owned, &content_bytes)?;
+        crate::util::atomic_write(&entry_owned, &content_bytes)?;
         Ok(())
     })
     .await;
@@ -3230,6 +3233,7 @@ pub async fn handle_plugins_list(
         return Json(serde_json::json!({
             "plugins": plugins_json,
             "marketplaces": [],
+            "runtimeAvailable": true,
             "summary": {
                 "total": total,
                 "enabled": enabled_count,
@@ -3247,6 +3251,7 @@ pub async fn handle_plugins_list(
         Json(serde_json::json!({
             "plugins": empty_plugin_summary(),
             "marketplaces": [],
+            "runtimeAvailable": false,
             "summary": { "total": 0, "enabled": 0, "errorCount": 0, "marketplaceCount": 0 },
         }))
         .into_response()
@@ -3459,7 +3464,24 @@ pub async fn handle_teams_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    Json(serde_json::json!({ "teams": [] })).into_response()
+    let registry = crate::services::team_store::global_team_registry();
+    let teams: Vec<serde_json::Value> = {
+        let guard = registry.read();
+        let mut list: Vec<&crate::services::team_store::TeamInfo> = guard.values().collect();
+        list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        list.into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "name": t.name,
+                    "members": t.members,
+                    "leader": t.leader,
+                    "created_at": t.created_at,
+                })
+            })
+            .collect()
+    };
+    Json(serde_json::json!({ "teams": teams })).into_response()
 }
 
 pub async fn handle_teams_get(
@@ -3470,46 +3492,110 @@ pub async fn handle_teams_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    Json(serde_json::json!({
-        "name": name,
-        "description": "",
-        "members": [],
-    }))
-    .into_response()
+    let registry = crate::services::team_store::global_team_registry();
+    let found = {
+        let guard = registry.read();
+        guard
+            .get(&name)
+            .or_else(|| guard.values().find(|t| t.name == name))
+            .cloned()
+    };
+    match found {
+        Some(t) => Json(serde_json::json!({
+            "id": t.id,
+            "name": t.name,
+            "members": t.members,
+            "leader": t.leader,
+            "created_at": t.created_at,
+        }))
+        .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "team not found" })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn handle_teams_member_transcript(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((_team, _member)): Path<(String, String)>,
+    Path((team, member)): Path<(String, String)>,
 ) -> impl IntoResponse {
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    Json(serde_json::json!({ "messages": [] })).into_response()
+    match crate::services::team_runtime::transcript(&team, &member) {
+        Some(messages) => Json(serde_json::json!({ "messages": messages })).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "team not found" })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn handle_teams_member_send(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((_team, _member)): Path<(String, String)>,
-    Json(_body): Json<serde_json::Value>,
+    Path((team, member)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    Json(serde_json::json!({ "ok": true })).into_response()
+    let content = body
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if content.trim().is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "content is required" })),
+        )
+            .into_response();
+    }
+    let from = body
+        .get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or("user")
+        .to_string();
+
+    match crate::services::team_runtime::send_message(&team, &from, &member, &content) {
+        Ok(record) => Json(serde_json::json!({ "ok": true, "message": record })).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn handle_teams_delete(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_name): Path<String>,
+    Path(name): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    Json(serde_json::json!({ "ok": true })).into_response()
+    let registry = crate::services::team_store::global_team_registry();
+    let removed = {
+        let mut guard = registry.write();
+        if guard.remove(&name).is_some() {
+            true
+        } else if let Some(key) = guard
+            .iter()
+            .find(|(_, t)| t.name == name)
+            .map(|(k, _): (&String, _)| k.clone())
+        {
+            guard.remove(&key).is_some()
+        } else {
+            false
+        }
+    };
+    Json(serde_json::json!({ "ok": removed })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -3909,299 +3995,6 @@ pub async fn handle_channels_restart(
     }
 }
 
-fn detect_python() -> Option<(String, String)> {
-
-    let candidates: &[&[&str]] = if cfg!(target_os = "windows") {
-        &[&["py", "-3"], &["python"], &["python3"]]
-    } else {
-        &[&["python3"], &["python"]]
-    };
-    for cmd in candidates {
-        let mut command = crate::util::hidden_sync_command(cmd[0]);
-        for arg in &cmd[1..] {
-            command.arg(arg);
-        }
-        command.arg("--version");
-        if let Ok(out) = command.output() {
-            if out.status.success() {
-                let v = String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .to_string()
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                let v = if v.is_empty() {
-                    String::from_utf8_lossy(&out.stderr)
-                        .trim()
-                        .to_string()
-                } else {
-                    v
-                };
-                let path = which::which(cmd[0])
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| cmd[0].to_string());
-                return Some((v, path));
-            }
-        }
-    }
-    None
-}
-
-fn computer_use_venv_dir() -> std::path::PathBuf {
-    let base = directories::ProjectDirs::from("io", "senweaver", "senweavercoding")
-        .map(|p| p.data_local_dir().to_path_buf())
-        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
-        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join("computer_use_venv")
-}
-
-pub async fn handle_computer_use_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let supported = cfg!(target_os = "macos") || cfg!(target_os = "windows");
-    let (py_installed, py_version, py_path) = match tokio::task::spawn_blocking(detect_python).await
-    {
-        Ok(Some((v, p))) => (true, Some(v), Some(p)),
-        _ => (false, None, None),
-    };
-    let venv_dir = computer_use_venv_dir();
-    let venv_created = venv_dir.exists();
-    Json(serde_json::json!({
-        "platform": std::env::consts::OS,
-        "supported": supported,
-        "python": {
-            "installed": py_installed,
-            "version": py_version,
-            "path": py_path,
-        },
-        "venv": {
-            "created": venv_created,
-            "path": venv_dir.to_string_lossy(),
-        },
-        "dependencies": {
-            "installed": venv_created,
-            "requirementsFound": venv_created,
-        },
-        "permissions": {
-            "accessibility": serde_json::Value::Null,
-            "screenRecording": serde_json::Value::Null,
-        },
-    }))
-    .into_response()
-}
-
-pub async fn handle_computer_use_setup(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let mut steps: Vec<serde_json::Value> = Vec::new();
-    let mut success = true;
-
-    let py = match tokio::task::spawn_blocking(detect_python).await.ok().flatten() {
-        Some(p) => p,
-        None => {
-            return Json(serde_json::json!({
-                "success": false,
-                "steps": [{
-                    "name": "python_check",
-                    "ok": false,
-                    "message": "Python 3 not found on PATH; install it from python.org and retry.",
-                }],
-            }))
-            .into_response();
-        }
-    };
-    steps.push(serde_json::json!({
-        "name": "python_check",
-        "ok": true,
-        "message": format!("Found {}", py.0),
-    }));
-
-    let venv_dir = computer_use_venv_dir();
-    if let Some(parent) = venv_dir.parent() {
-        let parent = parent.to_path_buf();
-        let _ = tokio::task::spawn_blocking(move || std::fs::create_dir_all(parent)).await;
-    }
-
-    if !venv_dir.exists() {
-        let py_path = py.1.clone();
-        let venv_path = venv_dir.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            crate::util::hidden_sync_command(py_path)
-                .args(["-m", "venv"])
-                .arg(&venv_path)
-                .output()
-        })
-        .await;
-        match result {
-            Ok(Ok(out)) if out.status.success() => steps.push(serde_json::json!({
-                "name": "venv_create",
-                "ok": true,
-                "message": format!("Created venv at {}", venv_dir.to_string_lossy()),
-            })),
-            Ok(Ok(out)) => {
-                success = false;
-                steps.push(serde_json::json!({
-                    "name": "venv_create",
-                    "ok": false,
-                    "message": String::from_utf8_lossy(&out.stderr).into_owned(),
-                }));
-            }
-            _ => {
-                success = false;
-                steps.push(serde_json::json!({
-                    "name": "venv_create",
-                    "ok": false,
-                    "message": "Failed to spawn python -m venv",
-                }));
-            }
-        }
-    } else {
-        steps.push(serde_json::json!({
-            "name": "venv_create",
-            "ok": true,
-            "message": "Venv already exists",
-        }));
-    }
-
-    if success {
-        let pip = if cfg!(target_os = "windows") {
-            venv_dir.join("Scripts").join("pip.exe")
-        } else {
-            venv_dir.join("bin").join("pip")
-        };
-        if pip.exists() {
-            let pip_path = pip.clone();
-            let pkgs = vec!["pyautogui", "pillow", "pynput"];
-            let result = tokio::task::spawn_blocking(move || {
-                let mut cmd = crate::util::hidden_sync_command(pip_path);
-                cmd.arg("install").arg("--upgrade");
-                for pkg in pkgs {
-                    cmd.arg(pkg);
-                }
-                cmd.output()
-            })
-            .await;
-            match result {
-                Ok(Ok(out)) if out.status.success() => steps.push(serde_json::json!({
-                    "name": "pip_install",
-                    "ok": true,
-                    "message": "Installed pyautogui, pillow, pynput",
-                })),
-                Ok(Ok(out)) => {
-                    success = false;
-                    steps.push(serde_json::json!({
-                        "name": "pip_install",
-                        "ok": false,
-                        "message": String::from_utf8_lossy(&out.stderr).into_owned(),
-                    }));
-                }
-                _ => {
-                    success = false;
-                    steps.push(serde_json::json!({
-                        "name": "pip_install",
-                        "ok": false,
-                        "message": "Failed to spawn pip install",
-                    }));
-                }
-            }
-        } else {
-            success = false;
-            steps.push(serde_json::json!({
-                "name": "pip_install",
-                "ok": false,
-                "message": format!("pip not found at {}", pip.to_string_lossy()),
-            }));
-        }
-    }
-
-    Json(serde_json::json!({ "success": success, "steps": steps })).into_response()
-}
-
-pub async fn handle_computer_use_apps(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    Json(serde_json::json!({ "apps": [] })).into_response()
-}
-
-pub async fn handle_computer_use_authorized_apps_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    Json(serde_json::json!({
-        "authorizedApps": [],
-        "grantFlags": {
-            "clipboardRead": false,
-            "clipboardWrite": false,
-            "systemKeyCombos": false,
-        },
-    }))
-    .into_response()
-}
-
-pub async fn handle_computer_use_authorized_apps_put(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(_body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
-pub async fn handle_computer_use_open_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let pane = body
-        .get("pane")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Privacy_Accessibility");
-    #[cfg(target_os = "macos")]
-    {
-        let url = match pane {
-            "Privacy_ScreenCapture" => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-            }
-            _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-        };
-        let _ = crate::util::hidden_sync_command("open").arg(url).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = pane;
-        let _ = crate::util::hidden_sync_command("cmd")
-            .args(["/C", "start", "ms-settings:privacy"])
-            .spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = pane;
-    }
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
 pub async fn handle_haha_oauth_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4433,6 +4226,11 @@ pub struct SessionsSearchBody {
     pub query: String,
 }
 
+fn session_search_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
 pub async fn handle_search_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4444,6 +4242,7 @@ pub async fn handle_search_sessions(
     let Some(ref backend) = state.session_backend else {
         return Json(serde_json::json!({ "results": [] })).into_response();
     };
+    let _search_permit = session_search_gate().acquire().await.ok();
     let needle = body.query.to_ascii_lowercase();
     let backend_cloned = backend.clone();
     let results = tokio::task::spawn_blocking(move || {
@@ -4515,6 +4314,14 @@ pub async fn handle_settings_user_put(
         return e.into_response();
     }
     let path = desktop_user_settings_path(&state);
+    let changed_entries: Vec<(String, serde_json::Value)> = body
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -4541,11 +4348,22 @@ pub async fn handle_settings_user_put(
         }
         let serialized = serde_json::to_string_pretty(&existing)
             .unwrap_or_else(|_| existing.to_string());
-        std::fs::write(&path, serialized).map_err(|e| format!("write settings: {e}"))
+        crate::util::atomic_write(&path, serialized.as_bytes())
+            .map_err(|e| format!("write settings: {e}"))
     })
     .await;
     match result {
-        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Ok(())) => {
+            if !changed_entries.is_empty() {
+                if let Some(svc) = crate::services::try_get_services() {
+                    let sync = svc.settings_sync.clone();
+                    for (key, value) in changed_entries {
+                        sync.on_local_change(key, value).await;
+                    }
+                }
+            }
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
         Ok(Err(msg)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": msg })),
@@ -4557,6 +4375,46 @@ pub async fn handle_settings_user_put(
         )
             .into_response(),
     }
+}
+
+pub async fn handle_settings_sync_export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "services unavailable" })),
+        )
+            .into_response();
+    };
+    let device_id = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "desktop".to_string());
+    let snapshot = svc.settings_sync.export_snapshot(&device_id).await;
+    Json(serde_json::json!({ "snapshot": snapshot })).into_response()
+}
+
+pub async fn handle_settings_sync_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::services::settings_sync::SettingsSnapshot>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "services unavailable" })),
+        )
+            .into_response();
+    };
+    let applied = svc.settings_sync.import_snapshot(body).await;
+    Json(serde_json::json!({ "applied": applied })).into_response()
 }
 
 pub async fn handle_permissions_mode_get(
@@ -4577,6 +4435,8 @@ pub async fn handle_permissions_mode_get(
 #[derive(Debug, Deserialize)]
 pub struct SetPermissionModeBody {
     pub mode: String,
+    #[serde(default, alias = "sessionKey")]
+    pub session_key: Option<String>,
 }
 
 pub async fn handle_permissions_mode_put(
@@ -4587,7 +4447,15 @@ pub async fn handle_permissions_mode_put(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    super::ws::desktop::desktop_runtime_state().set_permission_mode(&body.mode);
+    match body.session_key.as_deref() {
+        Some(session_key) if !session_key.is_empty() => {
+            super::ws::desktop::desktop_runtime_state()
+                .set_session_permission_mode(session_key, &body.mode);
+        }
+        _ => {
+            super::ws::desktop::desktop_runtime_state().set_permission_mode(&body.mode);
+        }
+    }
     Json(serde_json::json!({ "ok": true, "mode": body.mode })).into_response()
 }
 
@@ -4760,6 +4628,8 @@ pub struct SetCodingModeBody {
     pub mode: String,
     #[serde(default)]
     pub confirmed: bool,
+    #[serde(default, alias = "sessionKey")]
+    pub session_key: Option<String>,
 }
 
 pub async fn handle_coding_mode_put(
@@ -4781,7 +4651,7 @@ pub async fn handle_coding_mode_put(
     };
     let svc_opt = crate::services::try_get_services();
     let previous_mode = svc_opt
-        .map(|svc| *svc.coding_mode.read())
+        .map(|svc| svc.resolve_coding_mode_for(body.session_key.as_deref()))
         .unwrap_or_default();
     let cfg = svc_opt
         .map(|svc| svc.config())
@@ -4811,11 +4681,22 @@ pub async fn handle_coding_mode_put(
         )
             .into_response();
     }
-    if let Some(svc) = svc_opt {
-        *svc.coding_mode.write() = parsed;
-    }
     let permission = derive_permission_from_coding(&parsed);
-    super::ws::desktop::desktop_runtime_state().set_permission_mode(permission);
+    match body.session_key.as_deref() {
+        Some(session_key) if !session_key.is_empty() => {
+            if let Some(svc) = svc_opt {
+                svc.set_session_coding_mode(session_key, parsed);
+            }
+            super::ws::desktop::desktop_runtime_state()
+                .set_session_permission_mode(session_key, permission);
+        }
+        _ => {
+            if let Some(svc) = svc_opt {
+                *svc.coding_mode.write() = parsed;
+            }
+            super::ws::desktop::desktop_runtime_state().set_permission_mode(permission);
+        }
+    }
     Json(serde_json::json!({
         "ok": true,
         "mode": parsed.display_name(),
@@ -4874,6 +4755,45 @@ pub async fn handle_settings_cli_launcher(
         "lastError": serde_json::Value::Null,
     }))
     .into_response()
+}
+
+async fn gather_prompt_context_signals(
+    workspace_dir: &std::path::Path,
+) -> crate::services::prompt_suggestion::ContextSignals {
+    let mut signals = crate::services::prompt_suggestion::ContextSignals::default();
+    let mut cmd = crate::util::hidden_async_command("git");
+    cmd.current_dir(workspace_dir)
+        .args(["status", "--porcelain"]);
+    if let Ok(output) = cmd.output().await {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                signals.has_uncommitted_changes = true;
+                let code = line.get(..2).unwrap_or("");
+                if matches!(code, "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD") {
+                    signals.has_merge_conflicts = true;
+                }
+            }
+        }
+    }
+    signals
+}
+
+pub async fn handle_suggestions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let workspace_dir = state.config.lock().workspace_dir.clone();
+    let signals = gather_prompt_context_signals(&workspace_dir).await;
+    let suggestions =
+        crate::services::prompt_suggestion::PromptSuggestionService::suggest(&signals);
+    Json(serde_json::json!({ "suggestions": suggestions })).into_response()
 }
 
 pub async fn handle_scheduled_tasks_list(
@@ -5432,7 +5352,32 @@ pub async fn handle_conversations_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    Json(serde_json::json!({ "conversations": [] })).into_response()
+    let Some(ref backend) = state.session_backend else {
+        return Json(serde_json::json!({ "conversations": [] })).into_response();
+    };
+    let backend_cloned = backend.clone();
+    let conversations = tokio::task::spawn_blocking(move || {
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        for meta in backend_cloned.list_sessions_with_metadata() {
+            let session_id = meta
+                .key
+                .strip_prefix("gw_")
+                .unwrap_or(&meta.key)
+                .to_string();
+            items.push(serde_json::json!({
+                "sessionId": session_id,
+                "title": meta.name.clone().unwrap_or_default(),
+                "workDir": meta.work_dir.clone(),
+                "createdAt": meta.created_at.to_rfc3339(),
+                "lastActivity": meta.last_activity.to_rfc3339(),
+                "messageCount": meta.message_count as u64,
+            }));
+        }
+        items
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({ "conversations": conversations })).into_response()
 }
 
 pub async fn handle_status(
@@ -8076,4 +8021,228 @@ pub async fn handle_background_shell_stream(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+fn build_browser_computer_use_payload(config: &crate::config::Config) -> serde_json::Value {
+    let cu = &config.browser.computer_use;
+    serde_json::json!({
+        "enabled": cu.enabled,
+        "endpoint": cu.endpoint,
+        "timeoutMs": cu.timeout_ms,
+        "allowRemoteEndpoint": cu.allow_remote_endpoint,
+        "windowAllowlist": cu.window_allowlist,
+        "apiKeySet": cu.api_key.is_some(),
+    })
+}
+
+pub async fn handle_browser_config_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    Json(build_browser_computer_use_payload(&config)).into_response()
+}
+
+pub async fn handle_browser_config_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(endpoint) = body.get("endpoint").and_then(|v| v.as_str()) {
+        if endpoint.trim().is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "endpoint must not be empty"})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(ms) = body.get("timeoutMs").and_then(|v| v.as_u64()) {
+        if ms == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "timeoutMs must be greater than 0"})),
+            )
+                .into_response();
+        }
+    }
+
+    let snapshot = {
+        let mut cfg = state.config.lock();
+        let cu = &mut cfg.browser.computer_use;
+        if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+            cu.enabled = enabled;
+        }
+        if let Some(endpoint) = body.get("endpoint").and_then(|v| v.as_str()) {
+            cu.endpoint = endpoint.trim().to_string();
+        }
+        if let Some(ms) = body.get("timeoutMs").and_then(|v| v.as_u64()) {
+            cu.timeout_ms = ms;
+        }
+        if let Some(allow) = body.get("allowRemoteEndpoint").and_then(|v| v.as_bool()) {
+            cu.allow_remote_endpoint = allow;
+        }
+        if let Some(list) = body.get("windowAllowlist").and_then(|v| v.as_array()) {
+            cu.window_allowlist = list
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        cfg.clone()
+    };
+
+    if let Err(e) = snapshot.save().await {
+        tracing::error!("Failed to save config (browser.computer_use): {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Failed to save configuration"})),
+        )
+            .into_response();
+    }
+    *state.config.lock() = snapshot.clone();
+    state.push_live_config(snapshot.clone());
+    Json(build_browser_computer_use_payload(&snapshot)).into_response()
+}
+
+fn dream_task_payload(task: &crate::services::auto_dream::DreamTask) -> serde_json::Value {
+    serde_json::to_value(task)
+        .map(to_camel_case_keys)
+        .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn auto_dream_state_payload(state: &crate::services::auto_dream::AutoDreamState) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": state.enabled,
+        "maxConcurrent": state.max_concurrent,
+        "tasks": state.tasks.iter().map(dream_task_payload).collect::<Vec<_>>(),
+    })
+}
+
+fn auto_dream_unavailable() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "services unavailable"})),
+    )
+        .into_response()
+}
+
+pub async fn handle_auto_dream_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return auto_dream_unavailable();
+    };
+    let snap = svc.auto_dream.snapshot_state().await;
+    Json(auto_dream_state_payload(&snap)).into_response()
+}
+
+pub async fn handle_auto_dream_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return auto_dream_unavailable();
+    };
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        svc.auto_dream.set_enabled(enabled).await;
+    }
+    let snap = svc.auto_dream.snapshot_state().await;
+    Json(auto_dream_state_payload(&snap)).into_response()
+}
+
+pub async fn handle_auto_dream_task_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return auto_dream_unavailable();
+    };
+    let snake = to_snake_case_keys(body);
+    let input = match serde_json::from_value::<crate::services::auto_dream::DreamTaskInput>(snake) {
+        Ok(input) => input,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("invalid task payload: {err}")})),
+            )
+                .into_response();
+        }
+    };
+    let task = svc.auto_dream.create_task(input).await;
+    Json(dream_task_payload(&task)).into_response()
+}
+
+pub async fn handle_auto_dream_task_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return auto_dream_unavailable();
+    };
+    let snake = to_snake_case_keys(body);
+    let input = match serde_json::from_value::<crate::services::auto_dream::DreamTaskInput>(snake) {
+        Ok(input) => input,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("invalid task payload: {err}")})),
+            )
+                .into_response();
+        }
+    };
+    match svc.auto_dream.update_task(&id, input).await {
+        Some(task) => Json(dream_task_payload(&task)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "task not found"})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_auto_dream_task_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return auto_dream_unavailable();
+    };
+    if svc.auto_dream.remove_task(&id).await {
+        Json(serde_json::json!({"status": "ok", "id": id})).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "task not found"})),
+        )
+            .into_response()
+    }
 }

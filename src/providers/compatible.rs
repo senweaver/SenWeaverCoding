@@ -446,8 +446,12 @@ impl OpenAiCompatibleProvider {
     }
 
     fn thinking_blacklist_key(&self, model: &str) -> String {
+        let workspace = crate::session::current_session_context()
+            .map(|c| c.workspace_key)
+            .unwrap_or_else(|| "__no_session__".to_string());
         format!(
-            "{}::{}",
+            "{}::{}::{}",
+            workspace,
             self.name.to_ascii_lowercase(),
             model.to_ascii_lowercase()
         )
@@ -506,14 +510,10 @@ impl OpenAiCompatibleProvider {
     fn reserved_output_tokens(&self, model: &str) -> usize {
         let window = self.context_window_for(model);
         let configured = self.max_tokens.map(|v| v as usize);
-        let in_curator = crate::services::try_get_services()
-            .map(|s| {
-                matches!(
-                    *s.coding_mode.read(),
-                    crate::agent::coding_mode::CodingMode::Curator
-                )
-            })
-            .unwrap_or(false);
+        let in_curator = matches!(
+            crate::agent::coding_mode::active_coding_mode(),
+            crate::agent::coding_mode::CodingMode::Curator
+        );
         let (lo, hi) = if in_curator {
             (4096usize, 32768usize)
         } else {
@@ -1084,20 +1084,26 @@ impl OpenAiCompatibleProvider {
     fn convert_tool_specs(
         tools: Option<&[crate::tools::ToolSpec]>,
     ) -> Option<Vec<serde_json::Value>> {
+        static CACHE: std::sync::LazyLock<crate::tools::spec_cache::ToolSpecCache> =
+            std::sync::LazyLock::new(crate::tools::spec_cache::ToolSpecCache::new);
         tools.map(|items| {
-            crate::tools::dedupe_tool_specs(items)
-                .iter()
-                .map(|tool| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                        }
+            let serialized = CACHE.get_or_compute("openai-compatible", items, |specs| {
+                let arr: Vec<serde_json::Value> = crate::tools::dedupe_tool_specs(specs)
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.parameters,
+                            }
+                        })
                     })
-                })
-                .collect()
+                    .collect();
+                serde_json::to_string(&arr).unwrap_or_default()
+            });
+            serde_json::from_str(&serialized).unwrap_or_default()
         })
     }
 

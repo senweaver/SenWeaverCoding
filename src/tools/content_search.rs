@@ -371,24 +371,36 @@ impl Tool for ContentSearchTool {
                             error = %e,
                             "external search binary failed to launch; falling back to pure-Rust walker"
                         );
-                        match pure_rust_search(
-                            pattern,
-                            &resolved_canon,
-                            output_mode,
-                            include,
-                            case_sensitive,
-                            context_before,
-                            context_after,
-                            max_results,
-                            TIMEOUT_SECS,
-                        ) {
-                            Ok(raw) => {
-                                let formatted = format_line_output(
+                        let pattern_owned = pattern.to_string();
+                        let resolved_canon_owned = resolved_canon.clone();
+                        let output_mode_owned = output_mode.to_string();
+                        let include_owned = include.map(|s| s.to_string());
+                        let workspace_canon_owned = workspace_canon.clone();
+                        let fallback_outcome = tokio::task::spawn_blocking(move || {
+                            pure_rust_search(
+                                &pattern_owned,
+                                &resolved_canon_owned,
+                                &output_mode_owned,
+                                include_owned.as_deref(),
+                                case_sensitive,
+                                context_before,
+                                context_after,
+                                max_results,
+                                TIMEOUT_SECS,
+                            )
+                            .map(|raw| {
+                                format_line_output(
                                     &raw,
-                                    &workspace_canon,
-                                    output_mode,
+                                    &workspace_canon_owned,
+                                    &output_mode_owned,
                                     max_results,
-                                );
+                                )
+                            })
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("content_search join error: {e}"))?;
+                        match fallback_outcome {
+                            Ok(formatted) => {
                                 return finalise_search_result(
                                     formatted,
                                     offset,

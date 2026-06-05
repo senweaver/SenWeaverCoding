@@ -7,6 +7,8 @@ use crate::providers::traits::ChatMessage;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
 pub struct SessionStore {
     sessions_dir: PathBuf,
 }
@@ -39,6 +41,19 @@ impl SessionStore {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
+
+        if let Ok(meta) = file.metadata() {
+            if meta.len() > MAX_SESSION_FILE_BYTES {
+                tracing::warn!(
+                    target: "channels.session",
+                    session_key,
+                    size = meta.len(),
+                    limit = MAX_SESSION_FILE_BYTES,
+                    "channel session file exceeds size limit; refusing to load"
+                );
+                return Vec::new();
+            }
+        }
 
         let reader = std::io::BufReader::new(file);
         let mut messages = Vec::new();
@@ -88,13 +103,14 @@ impl SessionStore {
 
     fn rewrite(&self, session_key: &str, messages: &[ChatMessage]) -> std::io::Result<()> {
         let path = self.session_path(session_key);
-        let mut file = std::fs::File::create(&path)?;
+        let mut buf = String::new();
         for msg in messages {
             let json = serde_json::to_string(msg)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            writeln!(file, "{json}")?;
+            buf.push_str(&json);
+            buf.push('\n');
         }
-        Ok(())
+        crate::util::atomic_write(&path, buf.as_bytes())
     }
 
     pub fn delete_session(&self, session_key: &str) -> std::io::Result<bool> {

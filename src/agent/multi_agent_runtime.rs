@@ -515,6 +515,46 @@ pub fn global_runtime() -> Option<Arc<MultiAgentRuntime>> {
     MANAGER.get()
 }
 
+pub fn register_configured_agents(rt: &MultiAgentRuntime, config: &crate::config::Config) {
+    use crate::agent::registry::{AgentCapability, AgentInfo};
+
+    if rt.registry.get("primary").is_none() {
+        let mut primary = AgentInfo::new("primary", "Primary Agent", "coder");
+        primary.capabilities.push(AgentCapability {
+            name: "coding".into(),
+            description: "Default single-agent session".into(),
+            proficiency: 1.0,
+        });
+        primary.capabilities.push(AgentCapability {
+            name: "general".into(),
+            description: "General purpose assistant".into(),
+            proficiency: 0.9,
+        });
+        let _ = rt.supervisor.register_agent(primary);
+    }
+
+    for (swarm_name, swarm_cfg) in &config.swarms {
+        for agent_name in &swarm_cfg.agents {
+            let id = format!("{swarm_name}/{agent_name}");
+            if rt.registry.get(&id).is_some() {
+                continue;
+            }
+            let mut info = AgentInfo::new(&id, agent_name.as_str(), swarm_name.as_str());
+            info.capabilities.push(AgentCapability {
+                name: agent_name.clone(),
+                description: format!("Swarm member of '{swarm_name}'"),
+                proficiency: 0.9,
+            });
+            info.capabilities.push(AgentCapability {
+                name: "general".into(),
+                description: "General fallback capability".into(),
+                proficiency: 0.6,
+            });
+            let _ = rt.supervisor.register_agent(info);
+        }
+    }
+}
+
 pub fn global_manager() -> &'static MultiAgentRuntimeManager {
     &MANAGER
 }

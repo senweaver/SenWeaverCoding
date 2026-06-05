@@ -18,6 +18,7 @@ export function PluginList() {
   const marketplaces = usePluginStore((s) => s.marketplaces)
   const summary = usePluginStore((s) => s.summary)
   const lastReloadSummary = usePluginStore((s) => s.lastReloadSummary)
+  const runtimeAvailable = usePluginStore((s) => s.runtimeAvailable)
   const isLoading = usePluginStore((s) => s.isLoading)
   const isApplying = usePluginStore((s) => s.isApplying)
   const error = usePluginStore((s) => s.error)
@@ -84,6 +85,22 @@ export function PluginList() {
 
   if (error) {
     return <div className="text-sm text-[var(--color-error)] py-4">{error}</div>
+  }
+
+  if (!runtimeAvailable) {
+    return (
+      <div className="text-center py-12 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6">
+        <span className="material-symbols-outlined text-[40px] text-[var(--color-text-tertiary)] mb-2 block">
+          extension_off
+        </span>
+        <p className="text-sm text-[var(--color-text-tertiary)]">
+          {t('settings.plugins.runtimeUnavailable')}
+        </p>
+        <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
+          {t('settings.plugins.runtimeUnavailableHint')}
+        </p>
+      </div>
+    )
   }
 
   if (plugins.length === 0) {

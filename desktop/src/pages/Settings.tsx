@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSettingsStore, PII_KIND_LABELS, type PiiKindLabel } from '../stores/settingsStore'
 import { useChatStore } from '../stores/chatStore'
 import { useTabStore } from '../stores/tabStore'
@@ -23,7 +23,10 @@ import type {
   CustomHttpHeader,
 } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
+import type { CodingModeId } from '../types/codingMode'
+import { sortByCodingModeOrder } from '../types/codingMode'
 import { ApiError } from '../api/client'
+import { settingsApi } from '../api/settings'
 import { AdapterSettings } from './AdapterSettings'
 import { ToolsAndMcpsSettings } from './ToolsAndMcpsSettings'
 import { HooksSettings } from './HooksSettings'
@@ -34,9 +37,16 @@ import { AgentsSettings } from './AgentsSettings'
 import { LspSettings } from './LspSettings'
 import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings'
 import { CredentialsSettings } from './CredentialsSettings'
+import { AutoDreamSettings } from './AutoDreamSettings'
+import { ComputerUseSettings } from './ComputerUseSettings'
 import { GlobalModelsPanel } from './GlobalModelsPanel'
 import { ProviderModelsPanel } from './ProviderModelsPanel'
+import { PluginList } from '../components/plugins/PluginList'
+import { PluginDetail } from '../components/plugins/PluginDetail'
+import { usePluginStore } from '../stores/pluginStore'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
+
+const SHOW_COMPUTER_USE_TAB = false
 
 export function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -66,9 +76,14 @@ export function Settings() {
             <TabButton icon="psychology" label={t('settings.tab.codingMode')} active={activeTab === 'codingMode'} onClick={() => setActiveTab('codingMode')} />
             <TabButton icon="policy" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
             <TabButton icon="build" label={t('settings.tab.mcp')} active={activeTab === 'mcp'} onClick={() => setActiveTab('mcp')} />
+            <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
             <TabButton icon="code" label={t('settings.tab.lsp')} active={activeTab === 'lsp'} onClick={() => setActiveTab('lsp')} />
             <TabButton icon="keyboard" label={t('settings.tab.keyboard')} active={activeTab === 'keyboard'} onClick={() => setActiveTab('keyboard')} />
             <TabButton icon="key" label={t('settings.tab.credentials')} active={activeTab === 'credentials'} onClick={() => setActiveTab('credentials')} />
+            <TabButton icon="bedtime" label={t('settings.tab.autoDream')} active={activeTab === 'autoDream'} onClick={() => setActiveTab('autoDream')} />
+            {SHOW_COMPUTER_USE_TAB && (
+              <TabButton icon="smart_toy" label={t('settings.tab.computerUse')} active={activeTab === 'computerUse'} onClick={() => setActiveTab('computerUse')} />
+            )}
             <TabButton icon="webhook" label={t('settings.tab.hooks')} active={activeTab === 'hooks'} onClick={() => setActiveTab('hooks')} />
           </div>
           <div className="flex-shrink-0 border-t border-[var(--color-border)] pt-2 mt-2">
@@ -89,6 +104,7 @@ export function Settings() {
           {activeTab === 'general' && <GeneralSettings />}
           {activeTab === 'adapters' && <AdapterSettings />}
           {activeTab === 'mcp' && <ToolsAndMcpsSettings />}
+          {activeTab === 'plugins' && <PluginsSettings />}
           {activeTab === 'lsp' && <LspSettings />}
           {activeTab === 'keyboard' && <KeyboardShortcutsSettings />}
           {activeTab === 'skills' && <RulesSkillsSubagentsSettings />}
@@ -96,8 +112,116 @@ export function Settings() {
           {activeTab === 'usage' && <UsageSettings />}
           {activeTab === 'evolution' && <EvolutionSettings />}
           {activeTab === 'credentials' && <CredentialsSettings />}
+          {activeTab === 'autoDream' && <AutoDreamSettings />}
+          {SHOW_COMPUTER_USE_TAB && activeTab === 'computerUse' && <ComputerUseSettings />}
         </div>
       </div>
+    </div>
+  )
+}
+
+function PluginsSettings() {
+  const selectedPlugin = usePluginStore((s) => s.selectedPlugin)
+  return selectedPlugin ? <PluginDetail /> : <PluginList />
+}
+
+function SettingsSyncSection() {
+  const t = useTranslation()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [isExporting, setIsExporting] = useState(false)
+  const [isImporting, setIsImporting] = useState(false)
+  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+
+  const handleExport = async () => {
+    setMessage(null)
+    setIsExporting(true)
+    try {
+      const res = await settingsApi.exportSyncSnapshot()
+      const json = JSON.stringify(res.snapshot ?? {}, null, 2)
+      const blob = new Blob([json], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      anchor.download = `senweavercoding-settings-${stamp}.json`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      setMessage({ kind: 'ok', text: t('settings.general.syncExported') })
+    } catch (err) {
+      setMessage({
+        kind: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  const handleImportFile = async (file: File) => {
+    setMessage(null)
+    setIsImporting(true)
+    try {
+      const text = await file.text()
+      const snapshot = JSON.parse(text)
+      await settingsApi.importSyncSnapshot(snapshot)
+      setMessage({ kind: 'ok', text: t('settings.general.syncImported') })
+    } catch (err) {
+      setMessage({
+        kind: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
+        {t('settings.general.syncTitle')}
+      </h2>
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
+        {t('settings.general.syncDescription')}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="secondary" size="sm" onClick={handleExport} loading={isExporting}>
+          <span className="material-symbols-outlined text-[14px]">download</span>
+          {t('settings.general.syncExport')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => fileInputRef.current?.click()}
+          loading={isImporting}
+        >
+          <span className="material-symbols-outlined text-[14px]">upload</span>
+          {t('settings.general.syncImport')}
+        </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            e.target.value = ''
+            if (file) void handleImportFile(file)
+          }}
+        />
+      </div>
+      {message && (
+        <div
+          className={`mt-2 text-xs px-3 py-2 rounded-[var(--radius-md)] border ${
+            message.kind === 'ok'
+              ? 'border-[var(--color-success)]/30 bg-[var(--color-success)]/12 text-[var(--color-success)]'
+              : 'border-[color:rgba(239,68,68,0.25)] bg-[color:rgba(239,68,68,0.08)] text-[var(--color-error)]'
+          }`}
+        >
+          {message.text}
+        </div>
+      )}
     </div>
   )
 }
@@ -1188,6 +1312,8 @@ function AdvancedSettingsSection({
 function CodingModeSettings() {
   const codingMode = useSettingsStore((s) => s.codingMode)
   const codingModes = useSettingsStore((s) => s.codingModes)
+  const codingModeOrder = useSettingsStore((s) => s.codingModeOrder)
+  const setCodingModeOrder = useSettingsStore((s) => s.setCodingModeOrder)
   const requestSetCodingMode = useSettingsStore((s) => s.requestSetCodingMode)
   const permissionMode = useSettingsStore((s) => s.permissionMode)
   const t = useTranslation()
@@ -1208,16 +1334,104 @@ function CodingModeSettings() {
     harness: 'precision_manufacturing',
   }
 
-  const modes = codingModes.length > 0 ? codingModes : []
+  const modes = useMemo(
+    () => sortByCodingModeOrder(codingModes, codingModeOrder),
+    [codingModes, codingModeOrder],
+  )
+
+  const [dragId, setDragId] = useState<CodingModeId | null>(null)
+  const [dragOverId, setDragOverId] = useState<CodingModeId | null>(null)
+  const dragStateRef = useRef<{
+    id: CodingModeId
+    startX: number
+    startY: number
+    pointerId: number
+    active: boolean
+  } | null>(null)
+  const suppressClickRef = useRef(false)
+
+  const modeIds = modes.map((m) => m.id)
+
+  const findModeAtPoint = (x: number, y: number): CodingModeId | null => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null
+    const row = el?.closest('[data-coding-mode-row]') as HTMLElement | null
+    const id = row?.getAttribute('data-coding-mode-row')
+    return id && modeIds.includes(id as CodingModeId) ? (id as CodingModeId) : null
+  }
+
+  const reorder = (sourceId: CodingModeId, targetId: CodingModeId) => {
+    if (sourceId === targetId) return
+    const fromIdx = modeIds.indexOf(sourceId)
+    const toIdx = modeIds.indexOf(targetId)
+    if (fromIdx === -1 || toIdx === -1) return
+    const next = [...modeIds]
+    next.splice(fromIdx, 1)
+    next.splice(toIdx, 0, sourceId)
+    setCodingModeOrder(next)
+  }
+
+  const handlePointerDown = (e: React.PointerEvent, id: CodingModeId) => {
+    if (e.button !== 0) return
+    suppressClickRef.current = false
+    dragStateRef.current = {
+      id,
+      startX: e.clientX,
+      startY: e.clientY,
+      pointerId: e.pointerId,
+      active: false,
+    }
+  }
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    const st = dragStateRef.current
+    if (!st) return
+    if (!st.active) {
+      const dx = e.clientX - st.startX
+      const dy = e.clientY - st.startY
+      if (Math.hypot(dx, dy) < 5) return
+      st.active = true
+      setDragId(st.id)
+      try {
+        ;(e.currentTarget as HTMLElement).setPointerCapture(st.pointerId)
+      } catch {
+        /* capture not supported */
+      }
+    }
+    const targetId = findModeAtPoint(e.clientX, e.clientY)
+    setDragOverId(targetId && targetId !== st.id ? targetId : null)
+  }
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    const st = dragStateRef.current
+    dragStateRef.current = null
+    if (!st) return
+    try {
+      ;(e.currentTarget as HTMLElement).releasePointerCapture(st.pointerId)
+    } catch {
+      /* capture not supported */
+    }
+    if (st.active) {
+      suppressClickRef.current = true
+      const targetId = findModeAtPoint(e.clientX, e.clientY)
+      setDragId(null)
+      setDragOverId(null)
+      if (targetId) reorder(st.id, targetId)
+    }
+  }
 
   return (
     <div>
       <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
         {t('settings.codingMode.title')}
       </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-2">
         {t('settings.codingMode.description')}
       </p>
+
+      <div className="mb-3 px-3 py-2 rounded-lg bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)] flex items-center gap-2">
+        <span className="material-symbols-outlined text-[14px]">drag_indicator</span>
+        {t('settings.codingMode.reorderHint')}
+      </div>
 
       <div className="mb-3 px-3 py-2 rounded-lg bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)] flex items-center gap-2">
         <span className="material-symbols-outlined text-[14px]">shield</span>
@@ -1227,20 +1441,49 @@ function CodingModeSettings() {
       <div className="flex flex-col gap-2">
         {modes.map((m) => {
           const isSelected = codingMode === m.id
+          const isDragging = dragId === m.id
+          const isDragOver = dragOverId === m.id && dragId !== null && dragId !== m.id
           return (
-            <button
+            <div
               key={m.id}
-              onClick={() => void requestSetCodingMode(m.id)}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-all text-left ${
+              role="button"
+              tabIndex={0}
+              data-coding-mode-row={m.id}
+              onClick={() => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false
+                  return
+                }
+                void requestSetCodingMode(m.id)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  void requestSetCodingMode(m.id)
+                }
+              }}
+              onPointerDown={(e) => handlePointerDown(e, m.id)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              style={{ touchAction: 'none' }}
+              className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border cursor-pointer select-none transition-all text-left ${
                 isSelected
                   ? 'border-[var(--color-brand)] bg-[var(--color-surface-container)] shadow-[var(--shadow-focus-ring)]'
                   : 'border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
+              }${isDragging ? ' opacity-50' : ''}${
+                isDragOver ? ' border-[var(--color-brand)] border-dashed' : ''
               }`}
             >
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">
+              <span
+                className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] cursor-grab active:cursor-grabbing shrink-0"
+                title={t('settings.codingMode.dragHandle')}
+              >
+                drag_indicator
+              </span>
+              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)] shrink-0">
                 {MODE_GLYPH[m.id] ?? 'tune'}
               </span>
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <div className="text-xs font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
                   {tCodingMode(m.id, 'label', m.label)}
                   <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)]">
@@ -1253,13 +1496,13 @@ function CodingModeSettings() {
               </div>
               {isSelected && (
                 <span
-                  className="material-symbols-outlined text-[18px] text-[var(--color-brand)]"
+                  className="material-symbols-outlined text-[18px] text-[var(--color-brand)] shrink-0"
                   style={{ fontVariationSettings: "'FILL' 1" }}
                 >
                   check_circle
                 </span>
               )}
-            </button>
+            </div>
           )
         })}
         {modes.length === 0 && (
@@ -1502,6 +1745,8 @@ function GeneralSettings() {
           />
         </button>
       </div>
+
+      <SettingsSyncSection />
 
     </div>
   )

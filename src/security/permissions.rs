@@ -82,12 +82,11 @@ const EDIT_TOOLS: &[&str] = &[
 const SYSTEM_TOOLS: &[&str] = &[
     "shell",
     "powershell",
-    "cron_create",
+    "cron_add",
+    "cron_list",
+    "cron_remove",
     "cron_update",
-    "cron_delete",
     "cron_run",
-    "cron_pause",
-    "cron_resume",
 
 ];
 
@@ -291,12 +290,9 @@ pub const PLAN_MODE_ALLOWED_TOOLS: &[&str] = &[
     "task_output",
     "structured_output",
 
-    "grep",
-    "code_search",
     "code_outline",
     "code_graph_query",
     "tool_search",
-    "lsp_symbols",
     "pdf_read",
     "multi_search",
     "tavily_search",
@@ -321,7 +317,7 @@ pub const PLAN_MODE_ALLOWED_TOOLS: &[&str] = &[
 
     "read_skill",
     "cloud_patterns",
-    "brief",
+    "send_user_message",
     "now",
 ];
 
@@ -359,13 +355,10 @@ pub const CURATOR_MODE_ALLOWED_TOOLS: &[&str] = &[
     "image_search",
     "discord_search",
     "workspace_deep_search",
-    "grep",
-    "code_search",
     "code_outline",
     "code_graph_query",
     "tool_search",
     "lsp",
-    "lsp_symbols",
     "pdf_read",
     "mcp_resources_list",
     "mcp_resources_read",
@@ -378,7 +371,7 @@ pub const CURATOR_MODE_ALLOWED_TOOLS: &[&str] = &[
     "ask_user",
     "read_skill",
     "cloud_patterns",
-    "brief",
+    "send_user_message",
     "now",
     "file_write",
     "file_edit",
@@ -496,6 +489,17 @@ impl ToolActivationGate for CliStdinGate {
         tool_name: &str,
     ) -> anyhow::Result<ToolActivationDecision> {
         let tool_name = tool_name.to_string();
+        {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                tracing::warn!(
+                    target: "security.permissions",
+                    tool = %tool_name,
+                    "tool activation requested without an interactive terminal; defaulting to deny"
+                );
+                return Ok(ToolActivationDecision::No);
+            }
+        }
         let decision = tokio::task::spawn_blocking(move || {
             use std::io::{self, BufRead, Write};
             eprintln!();

@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 pub mod core;
+pub mod format;
 pub mod rename;
-pub mod symbols;
 
 pub use core::*;

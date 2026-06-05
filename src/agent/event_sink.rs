@@ -67,6 +67,24 @@ impl EventSink {
         match self {
             Self::None | Self::Draft(_) => {}
             Self::Turn(sender) | Self::Both { turn: sender, .. } => {
+                if turn_event_is_droppable(&event) {
+                    match sender.try_send(event) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::trace!(
+                                target: "agent.event_sink",
+                                "dropping cosmetic turn event under backpressure to avoid stalling generation"
+                            );
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::debug!(
+                                target: "agent.event_sink",
+                                "turn event receiver dropped"
+                            );
+                        }
+                    }
+                    return;
+                }
                 if let Err(err) = sender.send(event).await {
                     tracing::debug!(
                         target: "agent.event_sink",
@@ -93,6 +111,13 @@ impl EventSink {
             _ => None,
         }
     }
+}
+
+fn turn_event_is_droppable(event: &TurnEvent) -> bool {
+    matches!(
+        event,
+        TurnEvent::ProgressTick { .. } | TurnEvent::StatusUpdate { .. }
+    )
 }
 
 #[must_use]

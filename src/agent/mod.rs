@@ -3,8 +3,10 @@
 // Licensed under the MIT License.
 #[allow(clippy::module_inception)]
 mod sqlite_gateway_hydrate;
+pub mod activity;
 #[allow(clippy::module_inception)]
 pub mod agent;
+pub mod auto_dream_scheduler;
 pub mod auto_title;
 pub mod bridge_types;
 pub mod builtin_skills;

@@ -7,6 +7,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useChatStore } from '../../stores/chatStore'
 import { resolveEffectiveRuntimeSelection } from '../../utils/runtimeSelection'
 import { resolveLspServerDisplayStatus, useLspStore } from '../../stores/lspStore'
 import { useActiveWorkspaceRoot } from '../../lib/activeWorkDir'
@@ -104,7 +105,15 @@ export function StatusBar() {
     [activeTabId, providers, activeProviderId, settingsModel, sessionRuntimeSelection, draftRuntimeSelection],
   )
 
-  const codingMode = useSettingsStore((s) => s.codingMode)
+  const globalCodingMode = useSettingsStore((s) => s.codingMode)
+  const sessionCodingMode = useChatStore((s) =>
+    activeTabId ? s.sessionCodingMode[activeTabId] : undefined,
+  )
+  const codingMode = sessionCodingMode ?? globalCodingMode
+  const connectionState = useChatStore((s) =>
+    activeTabId ? s.sessions[activeTabId]?.connectionState : undefined,
+  )
+  const connectToSession = useChatStore((s) => s.connectToSession)
   const codingModes = useSettingsStore((s) => s.codingModes)
   const settingsProviderName = useSettingsStore((s) => s.activeProviderName)
 
@@ -343,6 +352,28 @@ export function StatusBar() {
     >
       {}
       <div className="flex items-center gap-3">
+        {activeTabId &&
+          (connectionState === 'reconnecting' || connectionState === 'disconnected') && (
+            <button
+              type="button"
+              onClick={() => connectToSession(activeTabId)}
+              title={t('chat.reconnect')}
+              className="flex items-center gap-1 rounded-full px-1.5 py-px text-[var(--color-warning)] hover:bg-[var(--color-surface-hover)]"
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  connectionState === 'reconnecting'
+                    ? 'bg-[var(--color-warning)] animate-pulse'
+                    : 'bg-[var(--color-error)]'
+                }`}
+              />
+              <span className="text-[10px] uppercase tracking-wider font-bold">
+                {connectionState === 'reconnecting'
+                  ? t('statusBar.reconnecting')
+                  : t('statusBar.disconnected')}
+              </span>
+            </button>
+          )}
         <span className={codingModeBadgeClass} style={codingModeBadgeStyle} title={codingModeTitle}>
           <span className={codingModeIconClass} style={codingModeIconStyle}>{codingModeGlyph}</span>
           <span>{codingModeLabel}</span>

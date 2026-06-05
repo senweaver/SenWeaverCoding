@@ -2,10 +2,12 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+import { memo } from 'react'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { StreamingMarkdownRenderer } from '../markdown/StreamingMarkdownRenderer'
 import { AssistantMessageActions } from './AssistantMessageActions'
 import { InlineImageGallery } from './InlineImageGallery'
+import { sanitizeNarration } from '../../utils/sanitizeNarration'
 
 type Props = {
   content: string
@@ -17,7 +19,7 @@ type Props = {
   disableFork?: boolean
 }
 
-export function AssistantMessage({
+export const AssistantMessage = memo(function AssistantMessage({
   content,
   isStreaming,
   assistantTurnCopyText,
@@ -25,7 +27,8 @@ export function AssistantMessage({
   workDir,
   disableFork,
 }: Props) {
-  const documentLayout = shouldUseDocumentLayout(content)
+  const safeContent = sanitizeNarration(content)
+  const documentLayout = shouldUseDocumentLayout(safeContent)
   const showActions =
     !isStreaming && Boolean(assistantTurnCopyText?.trim())
 
@@ -44,10 +47,10 @@ export function AssistantMessage({
         >
           <div className={`text-[var(--color-text-primary)] ${documentLayout ? 'w-full' : 'max-w-full'}`}>
             {isStreaming ? (
-              <StreamingMarkdownRenderer content={content} />
+              <StreamingMarkdownRenderer content={safeContent} />
             ) : (
               <MarkdownRenderer
-                content={content}
+                content={safeContent}
                 variant={documentLayout ? 'document' : 'default'}
                 scale="chat"
               />
@@ -71,7 +74,7 @@ export function AssistantMessage({
       )}
     </div>
   )
-}
+})
 
 function shouldUseDocumentLayout(content: string) {
   const normalized = content.trim()

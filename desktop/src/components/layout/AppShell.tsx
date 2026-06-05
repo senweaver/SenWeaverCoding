@@ -28,6 +28,7 @@ import { startAiWriteWatcher } from '../../lib/aiWriteWatcher'
 import { startTaskbarAlertWatcher } from '../../lib/taskbarAlert'
 import { TabBar } from './TabBar'
 import { TitleBar } from './TitleBar'
+import { BuddyCompanion } from './BuddyCompanion'
 import { ResizeHandleRight } from './ResizeHandleRight'
 import { ResizeHandleBrowser } from './ResizeHandleBrowser'
 import { ResizeHandles } from './ResizeHandles'
@@ -112,6 +113,29 @@ export function AppShell() {
   useEffect(() => {
     if (settingsOverlayOpen) setSettingsMounted(true)
   }, [settingsOverlayOpen])
+
+  useEffect(() => {
+    let lastShownAt = 0
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent).detail as
+        | { label?: string; message?: string }
+        | undefined
+      const message = detail?.message?.trim()
+      if (!message) return
+      const now = Date.now()
+      if (now - lastShownAt < 3000) return
+      lastShownAt = now
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('app.runtimeError', { message }),
+        duration: 8000,
+      })
+    }
+    window.addEventListener('app:runtime-error', handler as EventListener)
+    return () => {
+      window.removeEventListener('app:runtime-error', handler as EventListener)
+    }
+  }, [t])
 
   useEffect(() => {
     const abort = new AbortController()
@@ -520,6 +544,7 @@ export function AppShell() {
       {terminalPanelOpen && <TerminalPanel />}
       <StatusBar />
       <ToastContainer />
+      <BuddyCompanion />
       <UpdateChecker />
       <CodingModeTransitionGuard />
       <QuickModeSwitcher />

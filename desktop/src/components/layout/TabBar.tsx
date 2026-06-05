@@ -24,6 +24,7 @@ export function TabBar() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const closeTab = useTabStore((s) => s.closeTab)
   const disconnectSession = useChatStore((s) => s.disconnectSession)
+  const suspendSession = useChatStore((s) => s.suspendSession)
 
   const moveTab = useTabStore((s) => s.moveTab)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -110,7 +111,7 @@ export function TabBar() {
       return
     }
 
-    disconnectSession(sessionId)
+    suspendSession(sessionId)
     closeTab(sessionId)
   }
 
@@ -123,7 +124,7 @@ export function TabBar() {
     setContextMenu(null)
     const otherIds = tabs.filter((t) => t.sessionId !== sessionId).map((t) => t.sessionId)
     for (const id of otherIds) {
-      disconnectSession(id)
+      suspendSession(id)
       closeTab(id)
     }
   }
@@ -133,7 +134,7 @@ export function TabBar() {
     const idx = tabs.findIndex((t) => t.sessionId === sessionId)
     const leftIds = tabs.slice(0, idx).map((t) => t.sessionId)
     for (const id of leftIds) {
-      disconnectSession(id)
+      suspendSession(id)
       closeTab(id)
     }
   }
@@ -143,7 +144,7 @@ export function TabBar() {
     const idx = tabs.findIndex((t) => t.sessionId === sessionId)
     const rightIds = tabs.slice(idx + 1).map((t) => t.sessionId)
     for (const id of rightIds) {
-      disconnectSession(id)
+      suspendSession(id)
       closeTab(id)
     }
   }
@@ -152,7 +153,7 @@ export function TabBar() {
     setContextMenu(null)
     const allIds = tabs.map((t) => t.sessionId)
     for (const id of allIds) {
-      disconnectSession(id)
+      suspendSession(id)
       closeTab(id)
     }
   }
@@ -359,7 +360,7 @@ export function TabBar() {
               <button
                 onClick={() => {
                   useChatStore.getState().stopGeneration(closingTabId)
-                  disconnectSession(closingTabId)
+                  suspendSession(closingTabId)
                   closeTab(closingTabId)
                   setClosingTabId(null)
                 }}
@@ -440,6 +441,11 @@ const TabItem = forwardRef<HTMLDivElement, {
   const t = useTranslation()
   const sessionRunning = useIsSessionRunning(tab.type === 'session' ? tab.sessionId : null)
   const queuedCount = useQueueLengthForSession(tab.type === 'session' ? tab.sessionId : null)
+  const awaitingApproval = useChatStore((s) =>
+    tab.type === 'session'
+      ? s.sessions[tab.sessionId]?.chatState === 'permission_pending'
+      : false,
+  )
   const isRunning = tab.type === 'session' && (tab.status === 'running' || sessionRunning)
   const displayTitle =
     tab.type === 'session' ? resolveSessionTitle(tab.title, t('sidebar.untitled')) : tab.title
@@ -467,7 +473,18 @@ const TabItem = forwardRef<HTMLDivElement, {
         transform: isDragging ? `translateX(${dragOffsetX}px) scale(1.02)` : undefined,
       }}
     >
-            {isRunning && (
+            {awaitingApproval && (
+              <span
+                aria-label={t('tabs.awaitingApproval')}
+                title={t('tabs.awaitingApproval')}
+                className="inline-flex items-center flex-shrink-0 text-[var(--color-warning)]"
+              >
+                <span className="material-symbols-outlined text-[13px]" style={{ fontVariationSettings: "'FILL' 1" }}>
+                  help
+                </span>
+              </span>
+            )}
+            {!awaitingApproval && isRunning && (
               <span
                 aria-label={t('common.running')}
                 className="inline-flex items-center flex-shrink-0 text-[var(--color-brand)]"
@@ -475,7 +492,7 @@ const TabItem = forwardRef<HTMLDivElement, {
                 <Spinner size={8} />
               </span>
             )}
-      {!isRunning && queuedCount > 0 && tab.type === 'session' && (
+      {!awaitingApproval && !isRunning && queuedCount > 0 && tab.type === 'session' && (
         <span
           aria-label={t('tabs.queuedBadge', { count: queuedCount })}
           title={t('tabs.queuedBadge', { count: queuedCount })}

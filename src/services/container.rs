@@ -28,8 +28,6 @@ use super::tool_telemetry::use_summary::ToolUseSummaryService;
 
 use crate::agent::coding_mode::{CodingMode, CodingModeHandle};
 use crate::commands::registry::CommandRegistry;
-use crate::tasks::runner::TaskRunner;
-use crate::tools::plan_mode::exit::PendingPlan;
 use crate::tools::todo_write::TodoStore;
 
 pub struct RuntimeFlags {
@@ -110,14 +108,14 @@ pub struct ServiceContainer {
     pub tool_use_summary: Arc<parking_lot::Mutex<ToolUseSummaryService>>,
 
     pub command_registry: CommandRegistry,
-    pub task_runner: TaskRunner,
 
     pub coding_mode: CodingModeHandle,
 
     pub session_coding_modes:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, CodingMode>>>,
 
-    pub pending_plan: PendingPlan,
+    session_pending_plans:
+        Arc<parking_lot::RwLock<std::collections::HashMap<String, String>>>,
 
     #[cfg(feature = "tool-curator")]
     pub curator_state: crate::tools::curator::state::CuratorState,
@@ -142,7 +140,11 @@ pub struct ServiceContainer {
 
     pub health_broadcaster: crate::agent::health_signal::HealthBroadcaster,
 
-    pub deferred_builtin_names: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+    pub deferred_builtin_names: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<String, std::collections::HashSet<String>>,
+        >,
+    >,
 
     pub tool_activation_store: Arc<ToolActivationStore>,
 
@@ -225,18 +227,21 @@ impl ServiceContainer {
             tool_use_summary: Arc::new(parking_lot::Mutex::new(ToolUseSummaryService::new())),
 
             command_registry,
-            task_runner: TaskRunner::new(),
             coding_mode: crate::agent::coding_mode::new_coding_mode_handle(),
             session_coding_modes: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
-            pending_plan: crate::tools::plan_mode::exit::new_pending_plan(),
+            session_pending_plans: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             #[cfg(feature = "tool-curator")]
             curator_state: crate::tools::curator::state::new_curator_state(),
             #[cfg(feature = "tool-curator")]
             pending_curator: crate::tools::curator::state::new_pending_curator(),
             #[cfg(feature = "tool-curator")]
-            curator_mode_flag: std::sync::Arc::new(parking_lot::RwLock::new(false)),
+            curator_mode_flag: std::sync::Arc::new(
+                crate::tools::curator::tools::CuratorModeRegistry::new(),
+            ),
             todo_store: crate::tools::todo_write::new_todo_store(),
             max_context_tokens: AtomicUsize::new(128_000),
             runtime_flags: Arc::new(RuntimeFlags::default()),
@@ -245,7 +250,7 @@ impl ServiceContainer {
             blackboard: Arc::new(crate::memory::blackboard::Blackboard::new()),
             health_broadcaster: crate::agent::health_signal::HealthBroadcaster::new(),
             deferred_builtin_names: Arc::new(parking_lot::RwLock::new(
-                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
             )),
             tool_activation_store: Arc::new(ToolActivationStore::new(
                 cfg.data_dir.join("tool_activations"),
@@ -378,6 +383,52 @@ impl ServiceContainer {
             }
         }
         *self.coding_mode.read()
+    }
+
+    fn pending_plan_key() -> String {
+        crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub fn set_pending_plan(&self, plan: String) {
+        self.session_pending_plans
+            .write()
+            .insert(Self::pending_plan_key(), plan);
+    }
+
+    pub fn take_pending_plan(&self) -> Option<String> {
+        self.session_pending_plans
+            .write()
+            .remove(&Self::pending_plan_key())
+    }
+
+    fn deferred_builtin_key() -> String {
+        crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub fn set_deferred_builtin_names(&self, names: std::collections::HashSet<String>) {
+        self.deferred_builtin_names
+            .write()
+            .insert(Self::deferred_builtin_key(), names);
+    }
+
+    pub fn deferred_builtin_names_snapshot(&self) -> std::collections::HashSet<String> {
+        self.deferred_builtin_names
+            .read()
+            .get(&Self::deferred_builtin_key())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn deferred_builtin_total(&self) -> usize {
+        self.deferred_builtin_names
+            .read()
+            .values()
+            .map(|s| s.len())
+            .sum()
     }
 }
 

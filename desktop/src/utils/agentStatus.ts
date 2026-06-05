@@ -176,7 +176,7 @@ export function deriveAgentStatus(ctx: AgentStatusContext): AgentStatus {
 
   if (hasRecentError(chatSession)) return 'error'
 
-  if (chatSession?.pendingPermission || chatSession?.pendingComputerUsePermission) {
+  if (chatSession?.pendingPermission) {
     return 'waiting'
   }
   if (chatSession?.chatState === 'permission_pending') return 'waiting'
