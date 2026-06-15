@@ -19,8 +19,11 @@ use crate::gateway::a2a::types::{
     ListAgentsResponse, SendTaskRequest, SendTaskResponse, TaskId, TaskResult,
 };
 
-pub type TaskExecutor =
-    Arc<dyn Fn(String) -> tokio::task::JoinHandle<Result<String, String>> + Send + Sync>;
+pub type TaskExecutor = Arc<
+    dyn Fn(String) -> futures_util::future::BoxFuture<'static, Result<String, String>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub struct A2aState {
@@ -123,8 +126,11 @@ pub async fn send_task(
         let tid = task_id.clone();
 
         spawn_supervised("gateway.a2a.task_executor", async move {
-            let handle = executor(description);
-            match handle.await {
+            use futures_util::FutureExt;
+            let outcome = std::panic::AssertUnwindSafe(executor(description))
+                .catch_unwind()
+                .await;
+            match outcome {
                 Ok(Ok(result_text)) => {
                     if let Some(mut t) = state_clone.get_task(&tid) {
                         if !t.is_terminal() {
@@ -145,8 +151,15 @@ pub async fn send_task(
                         }
                     }
                 }
-                Err(join_err) => {
-                    let err_msg = format!("Task execution panicked: {join_err}");
+                Err(panic_payload) => {
+                    let panic_text = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<non-string panic payload>".to_string()
+                    };
+                    let err_msg = format!("Task execution panicked: {panic_text}");
                     if let Some(mut t) = state_clone.get_task(&tid) {
                         if !t.is_terminal() {
                             t.mark_failed(&err_msg);
@@ -239,7 +252,19 @@ pub async fn discover_external(
 ) -> impl IntoResponse {
     tracing::info!("Discovering {} external A2A agents", urls.len());
 
-    let client = crate::gateway::a2a::client::A2aClient::new();
+    let client = match crate::gateway::a2a::client::A2aClient::new() {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build A2A discovery client");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(A2aError::invalid_request(format!(
+                    "Failed to build A2A HTTP client: {e}"
+                ))),
+            )
+                .into_response();
+        }
+    };
     let mut results: HashMap<String, serde_json::Value> = HashMap::new();
 
     for url in &urls {
@@ -267,7 +292,7 @@ pub async fn discover_external(
         }
     }
 
-    Json(results)
+    Json(results).into_response()
 }
 
 pub async fn list_all_agents(State(state): State<A2aState>) -> impl IntoResponse {

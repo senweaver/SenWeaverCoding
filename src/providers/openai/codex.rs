@@ -497,10 +497,9 @@ fn append_utf8_stream_chunk(
         Err(err) => {
             let valid_up_to = err.valid_up_to();
             if valid_up_to > 0 {
-
-                let prefix = std::str::from_utf8(&pending[..valid_up_to])
-                    .expect("valid UTF-8 prefix from Utf8Error::valid_up_to");
-                body.push_str(prefix);
+                if let Ok(prefix) = std::str::from_utf8(&pending[..valid_up_to]) {
+                    body.push_str(prefix);
+                }
                 pending.drain(..valid_up_to);
             }
 
@@ -527,11 +526,13 @@ async fn decode_responses_body(response: reqwest::Response) -> anyhow::Result<St
     }
 
     if !pending_utf8.is_empty() {
-        let err = std::str::from_utf8(&pending_utf8)
-            .expect_err("pending bytes should be invalid UTF-8 at end of stream");
-        return Err(anyhow::anyhow!(
-            "OpenAI Codex response ended with incomplete UTF-8: {err}"
-        ));
+        if let Ok(text) = std::str::from_utf8(&pending_utf8) {
+            body.push_str(text);
+        } else {
+            return Err(anyhow::anyhow!(
+                "OpenAI Codex response ended with incomplete UTF-8"
+            ));
+        }
     }
 
     if let Some(text) = parse_sse_text(&body)? {

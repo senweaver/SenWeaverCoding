@@ -152,7 +152,10 @@ impl ContextBudgetManager {
             render_open_files(qc),
         ));
         sections.push(render_section(BudgetTier::RagHits, render_rag(qc)));
-        sections.push(render_section(BudgetTier::Memory, render_memory(qc)));
+        sections.push(render_section(
+            BudgetTier::Memory,
+            render_memory(qc, memory_budget_chars(total_cap)),
+        ));
 
         let mut dropped = Vec::new();
         let mut total: usize = sections.iter().map(|s| s.tokens).sum();
@@ -253,17 +256,31 @@ fn render_rag(qc: &QueryContext) -> String {
     out
 }
 
-fn render_memory(qc: &QueryContext) -> String {
+fn memory_budget_chars(total_cap: usize) -> usize {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let tokens = (total_cap as f32 * BudgetTier::Memory.default_ratio()) as usize;
+    tokens.saturating_mul(4).max(256)
+}
+
+fn render_memory(qc: &QueryContext, max_chars: usize) -> String {
     let agents = qc.memory.agents_md.len();
     let claude = qc.memory.claude_md.len();
     let memory = qc.memory.memory_files.len();
     if agents + claude + memory == 0 {
         return String::new();
     }
-    format!(
-        "[Memory] agents_md={} claude_md={} memory_files={}\n",
-        agents, claude, memory
-    )
+    let body = qc.memory.build_prompt(max_chars);
+    if body.is_empty() {
+        return format!(
+            "[Memory] agents_md={} claude_md={} memory_files={}\n",
+            agents, claude, memory
+        );
+    }
+    format!("[Memory] agents_md={agents} claude_md={claude} memory_files={memory}\n{body}\n")
 }
 
 fn render_outline(qc: &QueryContext) -> String {

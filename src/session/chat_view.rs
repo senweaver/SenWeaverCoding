@@ -352,6 +352,8 @@ pub trait ChatViewSink {
     fn push_tool_result(&mut self, output: &str, is_error: bool);
     fn push_error(&mut self, message: &str);
     fn push_system(&mut self, message: &str);
+
+    fn reset(&mut self) {}
 }
 
 pub fn apply_session_event<S: ChatViewSink + ?Sized>(sink: &mut S, evt: &SessionEvent) {
@@ -516,7 +518,19 @@ where
                         ChatViewSurface::Gui => apply_session_event_gui(&mut *guard, &delta.event),
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let mut guard = sink.lock();
+                    guard.push_system(&format!(
+                        "view lagged behind by {skipped} update(s); some recent history may be delayed until the next live update"
+                    ));
+                    drop(guard);
+                    tracing::warn!(
+                        target: "session.sync",
+                        session_id = %session_id,
+                        skipped,
+                        "hub subscriber lagged behind broadcast; emitted a lag marker instead of full-snapshot replay because chat view sinks cannot be cleared without duplicating already-rendered history"
+                    );
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }

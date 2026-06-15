@@ -11,7 +11,21 @@ pub fn render_docx(
     template: CuratorTemplateKind,
     output_path: &Path,
 ) -> anyhow::Result<()> {
+    render_docx_with_diagrams(markdown, template, output_path, &[])
+}
+
+#[cfg(feature = "tool-curator")]
+pub fn render_docx_with_diagrams(
+    markdown: &str,
+    template: CuratorTemplateKind,
+    output_path: &Path,
+    diagrams: &[(String, std::path::PathBuf)],
+) -> anyhow::Result<()> {
     use docx_rs::*;
+    let diagram_map: std::collections::HashMap<String, std::path::PathBuf> = diagrams
+        .iter()
+        .map(|(code, path)| (normalize_diagram_code(code), path.clone()))
+        .collect();
     let typo = typography_for(template);
     let meta = extract_metadata(markdown, template);
 
@@ -78,6 +92,14 @@ pub fn render_docx(
     let blocks = parse_blocks(markdown);
     let mut skip_first_h1 = typo.include_cover_page;
     let mut blank_run_after_code = false;
+    let mut mermaid_idx = 0usize;
+    let total_mermaid_blocks = blocks
+        .iter()
+        .filter(|block| {
+            matches!(block, MdBlock::CodeBlock { lang, lines } if is_mermaid_block(lang, lines))
+        })
+        .count();
+    let positional_fallback_ok = diagrams.len() == total_mermaid_blocks;
 
     for block in &blocks {
         match block {
@@ -125,7 +147,37 @@ pub fn render_docx(
                 }
                 blank_run_after_code = false;
             }
-            MdBlock::CodeBlock { lines, .. } => {
+            MdBlock::CodeBlock { lang, lines } => {
+                let diagram_png = if !diagrams.is_empty() && is_mermaid_block(lang, lines) {
+                    let by_code = diagram_map.get(&normalize_diagram_code(&lines.join("\n")));
+                    let resolved = by_code.or_else(|| {
+                        if positional_fallback_ok {
+                            diagrams.get(mermaid_idx).map(|(_, p)| p)
+                        } else {
+                            None
+                        }
+                    });
+                    mermaid_idx += 1;
+                    resolved
+                } else {
+                    None
+                };
+                if let Some(png_path) = diagram_png {
+                    if let Some(para) = embed_image_paragraph(
+                        "",
+                        &png_path.to_string_lossy(),
+                        output_path.parent(),
+                        &typo,
+                    ) {
+                        doc = doc.add_paragraph(para);
+                        doc = doc.add_paragraph(
+                            Paragraph::new()
+                                .line_spacing(LineSpacing::new().before(40).after(40)),
+                        );
+                        blank_run_after_code = true;
+                        continue;
+                    }
+                }
                 doc = doc.add_table(render_code_block(lines, &typo));
                 doc = doc.add_paragraph(
                     Paragraph::new().line_spacing(LineSpacing::new().before(40).after(40)),
@@ -221,6 +273,18 @@ pub fn render_docx(
     _markdown: &str,
     _template: CuratorTemplateKind,
     _output_path: &Path,
+) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(
+        "DOCX renderer disabled: rebuild with the `tool-curator` feature enabled"
+    ))
+}
+
+#[cfg(not(feature = "tool-curator"))]
+pub fn render_docx_with_diagrams(
+    _markdown: &str,
+    _template: CuratorTemplateKind,
+    _output_path: &Path,
+    _diagrams: &[(String, std::path::PathBuf)],
 ) -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
         "DOCX renderer disabled: rebuild with the `tool-curator` feature enabled"
@@ -1164,6 +1228,116 @@ fn embed_image_paragraph(
             .line_spacing(LineSpacing::new().before(80).after(40))
             .add_run(Run::new().add_image(pic)),
     )
+}
+
+#[cfg(feature = "tool-curator")]
+fn normalize_diagram_code(code: &str) -> String {
+    let lines: Vec<&str> = code
+        .lines()
+        .map(|l| l.trim_end_matches(['\r', ' ', '\t']))
+        .collect();
+    let mut start = 0usize;
+    let mut end = lines.len();
+    while start < end && lines[start].is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].is_empty() {
+        end -= 1;
+    }
+    lines[start..end].join("\n").trim().to_string()
+}
+
+#[cfg(feature = "tool-curator")]
+fn first_diagram_line(lines: &[String]) -> Option<&str> {
+    let mut in_directive = false;
+    for raw in lines {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if in_directive {
+            if line.contains("}%%") {
+                in_directive = false;
+            }
+            continue;
+        }
+        if line.starts_with("%%{") {
+            if !line.contains("}%%") {
+                in_directive = true;
+            }
+            continue;
+        }
+        if line.starts_with("%%") {
+            continue;
+        }
+        return Some(line);
+    }
+    None
+}
+
+#[cfg(feature = "tool-curator")]
+fn is_mermaid_block(lang: &str, lines: &[String]) -> bool {
+    const DIAGRAM_TOKENS: &[&str] = &[
+        "graph",
+        "flowchart",
+        "flowchart-elk",
+        "sequencediagram",
+        "classdiagram",
+        "classdiagram-v2",
+        "statediagram",
+        "statediagram-v2",
+        "erdiagram",
+        "journey",
+        "gantt",
+        "pie",
+        "gitgraph",
+        "mindmap",
+        "timeline",
+        "requirement",
+        "requirementdiagram",
+        "quadrantchart",
+        "xychart",
+        "xychart-beta",
+        "sankey",
+        "sankey-beta",
+        "block-beta",
+        "packet",
+        "packet-beta",
+        "radar",
+        "radar-beta",
+        "treemap",
+        "treemap-beta",
+        "treeview-beta",
+        "venn-beta",
+        "wardley-beta",
+        "eventmodeling",
+        "ishikawa",
+        "ishikawa-beta",
+        "architecture",
+        "architecture-beta",
+        "kanban",
+        "c4context",
+        "c4container",
+        "c4component",
+        "c4dynamic",
+        "c4deployment",
+    ];
+    let lang_key = lang.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    if lang_key == "mermaid" {
+        return true;
+    }
+    if lang_key.is_empty() || lang_key == "text" || lang_key == "plaintext" || lang_key == "plain" {
+        if let Some(first) = first_diagram_line(lines) {
+            let token = first
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches([':', ';'])
+                .to_ascii_lowercase();
+            return DIAGRAM_TOKENS.iter().any(|s| token == *s);
+        }
+    }
+    false
 }
 
 #[cfg(feature = "tool-curator")]

@@ -124,8 +124,9 @@ impl Tool for SecurityAuditTool {
         let scope_samples = {
             let workspace = workspace.clone();
             let raw_scope = raw_scope.clone();
+            let security = self.runtime.security.clone();
             match tokio::task::spawn_blocking(move || {
-                collect_scope_samples(&workspace, &raw_scope, PER_FILE_BYTES, MAX_FILES)
+                collect_scope_samples(&workspace, &raw_scope, PER_FILE_BYTES, MAX_FILES, &security)
             })
             .await
             {

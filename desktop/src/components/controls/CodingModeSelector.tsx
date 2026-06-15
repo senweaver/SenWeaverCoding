@@ -23,6 +23,7 @@ type Props = {
 }
 
 const FALLBACK_MODES: { id: CodingModeId; label: string; descriptionKey: TranslationKey }[] = [
+  { id: 'auto', label: 'Auto', descriptionKey: 'codingMode.auto.description' },
   { id: 'agent', label: 'Agent', descriptionKey: 'codingMode.agent.description' },
   { id: 'spec', label: 'Spec', descriptionKey: 'codingMode.spec.description' },
   { id: 'plan', label: 'Plan', descriptionKey: 'codingMode.plan.description' },
@@ -33,6 +34,7 @@ const FALLBACK_MODES: { id: CodingModeId; label: string; descriptionKey: Transla
 ]
 
 const MODE_BADGE_GLYPH: Record<CodingModeId, string> = {
+  auto: 'auto_awesome',
   vibe: 'bolt',
   agent: 'robot_2',
   spec: 'description',
@@ -46,6 +48,7 @@ const MODE_BADGE_GLYPH: Record<CodingModeId, string> = {
   mvai: 'hub',
   harness: 'precision_manufacturing',
   curator: 'auto_stories',
+  designer: 'palette',
 }
 
 
@@ -61,6 +64,12 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   const codingModeOrder = useSettingsStore((s) => s.codingModeOrder)
   const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
+  const sessionMode = useChatStore((s) =>
+    activeTabId ? s.sessionCodingMode[activeTabId] : undefined,
+  )
+  const autoResolvedMode = useChatStore((s) =>
+    activeTabId ? s.sessionAutoResolvedMode[activeTabId] : undefined,
+  )
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -72,7 +81,11 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
   } | null>(null)
 
   const isControlled = value !== undefined
-  const currentMode: CodingModeId = isControlled ? value : storeMode
+  const currentMode: CodingModeId = isControlled
+    ? value
+    : activeTabId
+      ? sessionMode ?? storeMode
+      : storeMode
 
   const sourceModes =
     codingModes.length > 0
@@ -99,7 +112,12 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
       }
     })
 
-  const currentLabel = items.find((i) => i.id === currentMode)?.label ?? currentMode
+  const baseLabel = items.find((i) => i.id === currentMode)?.label ?? currentMode
+  const resolvedLabel =
+    currentMode === 'auto' && autoResolvedMode && autoResolvedMode !== 'auto'
+      ? t(`codingMode.${autoResolvedMode}.label` as TranslationKey)
+      : undefined
+  const currentLabel = resolvedLabel ? `${baseLabel} → ${resolvedLabel}` : baseLabel
 
   const updateDropdownPos = useCallback(() => {
     if (!triggerRef.current) return
@@ -150,10 +168,11 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
       onChange?.(modeId)
       return
     }
-    await requestSetCodingMode(modeId)
-    if (activeTabId && useSettingsStore.getState().codingMode === modeId) {
+    if (activeTabId && useChatStore.getState().sessions[activeTabId]) {
       setSessionCodingMode(activeTabId, modeId)
+      return
     }
+    await requestSetCodingMode(modeId)
   }
 
   function handleSelect(modeId: CodingModeId) {

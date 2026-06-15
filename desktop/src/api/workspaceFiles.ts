@@ -62,6 +62,21 @@ export const workspaceFilesApi = {
     )
   },
 
+  rawHandle(opts: { root: string }) {
+    return api.get<{ rawId: string }>(
+      `/api/workspace/raw-handle${qs({ root: opts.root })}`,
+    )
+  },
+
+  rawUrl(rawId: string, relPath: string): string {
+    const segs = relPath
+      .split('/')
+      .filter(Boolean)
+      .map((s) => encodeURIComponent(s))
+      .join('/')
+    return `${getBaseUrl()}/api/workspace/raw/${encodeURIComponent(rawId)}/${segs}`
+  },
+
   writeFile(opts: {
     root: string
     path: string
@@ -213,6 +228,7 @@ export const workspaceFilesApi = {
     root: string,
     onEvent: (event: WorkspaceWatchEvent) => void,
     onError?: (err: Event) => void,
+    onReconnect?: () => void,
   ): () => void {
     if (typeof window === 'undefined' || typeof window.EventSource !== 'function') {
       return () => {}
@@ -222,6 +238,7 @@ export const workspaceFilesApi = {
     let source: EventSource | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null
     let retryMs = 1000
+    let hadConnection = false
 
     const connect = () => {
       if (disposed) return
@@ -247,6 +264,10 @@ export const workspaceFilesApi = {
       }
       source.onopen = () => {
         retryMs = 1000
+        if (hadConnection) {
+          onReconnect?.()
+        }
+        hadConnection = true
       }
       source.onerror = (event: Event) => {
         if (source) {

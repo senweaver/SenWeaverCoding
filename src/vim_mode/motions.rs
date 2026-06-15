@@ -25,21 +25,16 @@ pub enum Motion {
     SearchBackward,
 }
 
-pub fn resolve_motion(motion: Motion, text: &str, cursor: usize, count: u32) -> usize {
-    let len = text.len();
-    if len == 0 {
+pub fn resolve_motion(motion: Motion, text: &str, cursor_char: usize, count: u32) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let char_len = chars.len();
+    if char_len == 0 {
         return 0;
     }
 
-    let chars: Vec<char> = text.chars().collect();
-    let char_len = chars.len();
+    let char_pos = cursor_char.min(char_len.saturating_sub(1));
 
-    let char_pos = text[..cursor.min(len)]
-        .chars()
-        .count()
-        .min(char_len.saturating_sub(1));
-
-    let target_char = match motion {
+    match motion {
         Motion::Left => char_pos.saturating_sub(count as usize),
         Motion::Right => (char_pos + count as usize).min(char_len.saturating_sub(1)),
         Motion::LineStart => 0,
@@ -114,7 +109,5 @@ pub fn resolve_motion(motion: Motion, text: &str, cursor: usize, count: u32) -> 
             pos
         }
         _ => char_pos,
-    };
-
-    chars[..target_char].iter().map(|c| c.len_utf8()).sum()
+    }
 }

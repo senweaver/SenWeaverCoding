@@ -10,18 +10,23 @@ use tokio::io::AsyncWriteExt;
 
 use super::EventBusHandle;
 use super::types::{
-    Event, EventPayload, LifecyclePhase, MemoryOperation, SystemCategory, ToolResultSummary,
+    CoordinationAction, Event, EventPayload, EventTarget, LifecyclePhase, MemoryOperation,
+    SystemCategory, TaskDelegationAction, ToolResultSummary,
 };
 
 static GLOBAL_BUS: LazyLock<RwLock<Option<EventBusHandle>>> = LazyLock::new(|| RwLock::new(None));
+
+static AUDIT_SUBSCRIBER: LazyLock<RwLock<Option<crate::runtime::task_manager::TaskHandle>>> =
+    LazyLock::new(|| RwLock::new(None));
 
 pub fn init_global_bus(audit_path: Option<PathBuf>) -> EventBusHandle {
     let handle = EventBusHandle::new(super::EventBus::new());
     *GLOBAL_BUS.write() = Some(handle.clone());
 
     let mut rx = handle.subscribe_all();
-    let _ =
-        crate::runtime::spawn_supervised("event_bus.integration.audit_subscriber", async move {
+    let task = crate::runtime::task_manager::spawn_supervised(
+        "event_bus.integration.audit_subscriber",
+        async move {
             let mut writer = match audit_path {
                 Some(path) => {
                     if let Some(parent) = path.parent() {
@@ -48,7 +53,39 @@ pub fn init_global_bus(audit_path: Option<PathBuf>) -> EventBusHandle {
                 None => None,
             };
 
-            while let Ok(event) = rx.recv().await {
+            loop {
+                let event = match rx.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            target: "event_bus",
+                            skipped,
+                            "audit subscriber lagged behind event bus; continuing"
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        match global_bus() {
+                            Some(bus) => {
+                                tracing::warn!(
+                                    target: "event_bus",
+                                    "audit subscriber channel closed; resubscribing to current global bus"
+                                );
+                                rx = bus.subscribe_all();
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                continue;
+                            }
+                            None => {
+                                tracing::info!(
+                                    target: "event_bus",
+                                    "audit subscriber stopping: global event bus dropped"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                };
+
                 let mut disable_writer = false;
                 if let Some(w) = writer.as_mut() {
                     match serde_json::to_string(&event) {
@@ -82,7 +119,16 @@ pub fn init_global_bus(audit_path: Option<PathBuf>) -> EventBusHandle {
                     event.payload,
                 );
             }
-        });
+        },
+    );
+
+    {
+        let mut guard = AUDIT_SUBSCRIBER.write();
+        if let Some(previous) = guard.take() {
+            previous.abort();
+        }
+        *guard = Some(task);
+    }
 
     handle
 }
@@ -172,5 +218,82 @@ pub async fn publish_message_sent(source: &str, channel: &str, preview: &str) {
             },
         ))
         .await;
+    }
+}
+
+pub fn publish_agent_request_now(
+    source: &str,
+    target_agent: &str,
+    request_id: &str,
+    capability: &str,
+    prompt: &str,
+    timeout_secs: u64,
+) {
+    if let Some(bus) = global_bus() {
+        bus.publish_now(Event::agent_request(
+            source,
+            target_agent.to_string(),
+            request_id,
+            capability,
+            prompt.chars().take(200).collect::<String>(),
+            timeout_secs,
+        ));
+    }
+}
+
+pub fn publish_agent_response_now(
+    source: &str,
+    target_agent: &str,
+    request_id: &str,
+    success: bool,
+    output: &str,
+    error: Option<String>,
+) {
+    if let Some(bus) = global_bus() {
+        bus.publish_now(Event::agent_response(
+            source,
+            target_agent.to_string(),
+            request_id,
+            success,
+            output.chars().take(200).collect::<String>(),
+            error.map(|e| e.chars().take(200).collect()),
+        ));
+    }
+}
+
+pub fn publish_task_delegation_now(
+    source: &str,
+    task_id: &str,
+    action: TaskDelegationAction,
+    description: &str,
+) {
+    if let Some(bus) = global_bus() {
+        bus.publish_now(Event::broadcast(
+            source,
+            EventPayload::TaskDelegation {
+                task_id: task_id.to_string(),
+                action,
+                description: description.chars().take(200).collect(),
+            },
+        ));
+    }
+}
+
+pub fn publish_coordination_now(
+    source: &str,
+    action: CoordinationAction,
+    topic: &str,
+    data: Option<serde_json::Value>,
+) {
+    if let Some(bus) = global_bus() {
+        bus.publish_now(Event::new(
+            source,
+            EventTarget::System,
+            EventPayload::Coordination {
+                action,
+                topic: topic.to_string(),
+                data,
+            },
+        ));
     }
 }

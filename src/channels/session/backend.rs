@@ -50,6 +50,15 @@ pub struct SessionQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DesignArtifactRecord {
+    pub rel_path: String,
+    pub submode: Option<String>,
+    pub surface: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 pub trait SessionBackend: Send + Sync {
 
     fn load(&self, session_key: &str) -> Vec<ChatMessage>;
@@ -79,6 +88,45 @@ pub trait SessionBackend: Send + Sync {
                     message_count: messages.len(),
                 }
             })
+            .collect()
+    }
+
+    fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
+        self.list_sessions_with_metadata()
+            .into_iter()
+            .find(|m| m.key == session_key)
+    }
+
+    fn count_user_messages(&self, session_key: &str) -> usize {
+        self.load_with_tombstones(session_key)
+            .iter()
+            .filter(|m| m.message.role == "user")
+            .count()
+    }
+
+    fn count_messages(&self, session_key: &str) -> usize {
+        self.load_with_tombstones(session_key).len()
+    }
+
+    fn load_tail(&self, session_key: &str, limit: usize) -> Vec<ChatMessage> {
+        let mut all = self.load(session_key);
+        if all.len() > limit {
+            all.split_off(all.len() - limit)
+        } else {
+            all
+        }
+    }
+
+    fn load_with_tombstones_range(
+        &self,
+        session_key: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<LoadedMessage> {
+        self.load_with_tombstones(session_key)
+            .into_iter()
+            .skip(offset)
+            .take(limit)
             .collect()
     }
 
@@ -194,5 +242,23 @@ pub trait SessionBackend: Send + Sync {
         _session_key: &str,
     ) -> Option<RewindStash> {
         None
+    }
+
+    fn record_design_artifact(
+        &self,
+        _session_key: &str,
+        _rel_path: &str,
+        _submode: Option<&str>,
+        _surface: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn list_design_artifacts(&self, _session_key: &str) -> Vec<DesignArtifactRecord> {
+        Vec::new()
+    }
+
+    fn delete_design_artifact(&self, _session_key: &str, _rel_path: &str) -> std::io::Result<()> {
+        Ok(())
     }
 }

@@ -116,6 +116,79 @@ const BRIDGE_JS: &str = r#"
     } catch (_) {}
   }
 
+  const vitals = {
+    lcp: null,
+    cls: 0,
+    inpMax: 0,
+    longTasks: 0,
+    longTaskTotalMs: 0,
+    fcp: null,
+  };
+  try {
+    new PerformanceObserver((list) => {
+      const entries = list.getEntries();
+      const last = entries[entries.length - 1];
+      if (last) vitals.lcp = Math.round(last.startTime);
+    }).observe({ type: 'largest-contentful-paint', buffered: true });
+  } catch (_) {}
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (!e.hadRecentInput) vitals.cls += e.value;
+      }
+    }).observe({ type: 'layout-shift', buffered: true });
+  } catch (_) {}
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.duration > vitals.inpMax) vitals.inpMax = Math.round(e.duration);
+      }
+    }).observe({ type: 'event', buffered: true, durationThreshold: 40 });
+  } catch (_) {}
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        vitals.longTasks += 1;
+        vitals.longTaskTotalMs += Math.round(e.duration);
+      }
+    }).observe({ type: 'longtask', buffered: true });
+  } catch (_) {}
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.name === 'first-contentful-paint') vitals.fcp = Math.round(e.startTime);
+      }
+    }).observe({ type: 'paint', buffered: true });
+  } catch (_) {}
+
+  if (!navigator.modelContext) {
+    const webMcpRegistry = new Map();
+    try {
+      Object.defineProperty(navigator, 'modelContext', {
+        configurable: true,
+        value: {
+          registerTool(tool) {
+            if (!tool || typeof tool.name !== 'string' || !tool.name ||
+                typeof tool.description !== 'string' || !tool.description ||
+                typeof tool.execute !== 'function') {
+              return Promise.reject(new TypeError('invalid tool definition'));
+            }
+            if (webMcpRegistry.has(tool.name)) {
+              return Promise.reject(new Error(`tool already registered: ${tool.name}`));
+            }
+            webMcpRegistry.set(tool.name, tool);
+            return Promise.resolve();
+          },
+          unregisterTool(name) {
+            webMcpRegistry.delete(name);
+            return Promise.resolve();
+          },
+        },
+      });
+      window.__senWebMcpRegistry = webMcpRegistry;
+    } catch (_) {}
+  }
+
   const ringMax = 256;
   const consoleRing = [];
   const wrapConsole = (level) => {
@@ -905,6 +978,132 @@ const BRIDGE_JS: &str = r#"
       const el = findOne(args && args.selector);
       return { selector: args.selector, text: (el.innerText || el.textContent || '').slice(0, 4000) };
     },
+    get_styles(args) {
+      const sel = args && args.selector;
+      if (sel) {
+        const el = findOne(sel);
+        return { selector: sel, tag: el.tagName.toLowerCase(), styles: computedStyleOf(el) };
+      }
+      const limit = (args && Number(args.limit)) || 600;
+      const textColors = new Map();
+      const bgColors = new Map();
+      const fontFamilies = new Map();
+      const fontSizes = new Map();
+      const radii = new Map();
+      const bump = (m, k) => { if (k) m.set(k, (m.get(k) || 0) + 1); };
+      const all = document.querySelectorAll('body *');
+      let sampled = 0;
+      for (let i = 0; i < all.length && sampled < limit; i++) {
+        const el = all[i];
+        if (!isVisibleEl(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        sampled++;
+        const cs = getComputedStyle(el);
+        const hasOwnText = Array.prototype.some.call(
+          el.childNodes,
+          (n) => n.nodeType === 3 && n.nodeValue && n.nodeValue.trim(),
+        );
+        if (hasOwnText) {
+          bump(textColors, cs.color);
+          bump(fontFamilies, cs.fontFamily);
+          bump(fontSizes, cs.fontSize);
+        }
+        const bg = cs.backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') bump(bgColors, bg);
+        const br = cs.borderRadius;
+        if (br && br !== '0px') bump(radii, br);
+      }
+      const top = (m, n) => Array.from(m.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, n)
+        .map(([value, count]) => ({ value, count }));
+      return {
+        url: window.location.href,
+        audit: {
+          sampled_elements: sampled,
+          distinct_text_colors: textColors.size,
+          text_colors: top(textColors, 16),
+          distinct_background_colors: bgColors.size,
+          background_colors: top(bgColors, 16),
+          distinct_font_families: fontFamilies.size,
+          font_families: top(fontFamilies, 8),
+          distinct_font_sizes: fontSizes.size,
+          font_sizes: top(fontSizes, 12),
+          distinct_border_radii: radii.size,
+          border_radii: top(radii, 8),
+        },
+      };
+    },
+    perf_vitals() {
+      const nav = performance.getEntriesByType('navigation')[0] || null;
+      const resources = performance.getEntriesByType('resource');
+      let transfer = 0;
+      for (const r of resources) transfer += (r.transferSize || 0);
+      const out = {
+        url: window.location.href,
+        lcp_ms: vitals.lcp,
+        fcp_ms: vitals.fcp,
+        cls: Math.round(vitals.cls * 1000) / 1000,
+        inp_worst_ms: vitals.inpMax || null,
+        long_tasks: vitals.longTasks,
+        long_task_total_ms: vitals.longTaskTotalMs,
+        resource_count: resources.length,
+        transfer_bytes: transfer,
+        js_heap_used_bytes: (performance.memory && performance.memory.usedJSHeapSize) || null,
+      };
+      if (nav) {
+        out.ttfb_ms = Math.round(nav.responseStart - nav.requestStart);
+        out.dom_content_loaded_ms = Math.round(nav.domContentLoadedEventEnd);
+        out.load_ms = Math.round(nav.loadEventEnd || 0) || null;
+        out.protocol = nav.nextHopProtocol || null;
+      }
+      out.verdict = {
+        lcp: out.lcp_ms == null ? 'unknown' : out.lcp_ms <= 2500 ? 'good' : out.lcp_ms <= 4000 ? 'needs-improvement' : 'poor',
+        cls: out.cls <= 0.1 ? 'good' : out.cls <= 0.25 ? 'needs-improvement' : 'poor',
+        inp: out.inp_worst_ms == null ? 'unknown' : out.inp_worst_ms <= 200 ? 'good' : out.inp_worst_ms <= 500 ? 'needs-improvement' : 'poor',
+      };
+      return out;
+    },
+    web_tools_list() {
+      const reg = window.__senWebMcpRegistry;
+      if (reg && reg.size) {
+        const tools = [];
+        for (const t of reg.values()) {
+          tools.push({
+            name: t.name,
+            description: String(t.description || '').slice(0, 500),
+            input_schema: t.inputSchema || null,
+          });
+        }
+        return { available: true, count: tools.length, tools, url: window.location.href };
+      }
+      if (navigator.modelContext && !window.__senWebMcpRegistry) {
+        return { available: false, native_api_present: true, count: 0, tools: [], url: window.location.href };
+      }
+      return { available: false, count: 0, tools: [], url: window.location.href };
+    },
+    async web_tools_call(args) {
+      const name = args && args.name;
+      if (!name) throw new Error('web_tools_call requires args.name');
+      const reg = window.__senWebMcpRegistry;
+      const tool = reg && reg.get(name);
+      if (!tool) throw new Error(`webmcp tool not registered on this page: ${name}`);
+      let input = (args && args.tool_args) || {};
+      if (typeof input === 'string') {
+        try { input = JSON.parse(input); } catch (_) { input = { value: input }; }
+      }
+      const started = Date.now();
+      const result = await Promise.resolve(tool.execute(input));
+      let payload = result;
+      try {
+        const text = JSON.stringify(result);
+        if (text && text.length > 16000) payload = { truncated: true, preview: text.slice(0, 16000) };
+      } catch (_) {
+        payload = String(result).slice(0, 16000);
+      }
+      return { name, elapsed_ms: Date.now() - started, result: payload };
+    },
     get_title() { return { title: document.title || '' }; },
     get_url() { return { url: window.location.href }; },
     snapshot(args) { return snapshotTree(args); },
@@ -1682,33 +1881,44 @@ impl DockSharedState {
     }
 
     fn remove_tab(&self, id: TabId) -> Option<TabId> {
-        let mut g = self.0.lock();
-        g.tabs.remove(&id);
-        g.order.retain(|x| *x != id);
-        g.last_state_url.remove(&id);
-        if g.active == Some(id) {
-            g.active = g.order.last().copied();
-        }
-        if g.agent_tab_id == Some(id) {
-            g.agent_tab_id = None;
-        }
-        if let Some(sid) = g.tab_session.remove(&id) {
-            if let Some(bucket) = g.agent_tabs_by_session.get_mut(&sid) {
-                bucket.retain(|t| *t != id);
-                if bucket.is_empty() {
-                    g.agent_tabs_by_session.remove(&sid);
+        let active = {
+            let mut g = self.0.lock();
+            g.tabs.remove(&id);
+            g.order.retain(|x| *x != id);
+            g.last_state_url.remove(&id);
+            if g.active == Some(id) {
+                g.active = g.order.last().copied();
+            }
+            if g.agent_tab_id == Some(id) {
+                g.agent_tab_id = None;
+            }
+            if let Some(sid) = g.tab_session.remove(&id) {
+                if let Some(bucket) = g.agent_tabs_by_session.get_mut(&sid) {
+                    bucket.retain(|t| *t != id);
+                    if bucket.is_empty() {
+                        g.agent_tabs_by_session.remove(&sid);
+                    }
                 }
             }
+            if g.agent_tab_id.is_none() {
+                g.agent_tab_id = g
+                    .agent_tabs_by_session
+                    .values()
+                    .flat_map(|bucket| bucket.iter().rev())
+                    .find(|tid| g.tabs.contains_key(tid))
+                    .copied();
+            }
+            g.active
+        };
+        #[cfg(windows)]
+        {
+            let mut log = cdp::net_log().lock();
+            log.tabs.remove(&id);
+            if log.active_capture == Some(id) {
+                log.active_capture = None;
+            }
         }
-        if g.agent_tab_id.is_none() {
-            g.agent_tab_id = g
-                .agent_tabs_by_session
-                .values()
-                .flat_map(|bucket| bucket.iter().rev())
-                .find(|tid| g.tabs.contains_key(tid))
-                .copied();
-        }
-        g.active
+        active
     }
 
     fn set_active(&self, id: TabId) -> Result<(), String> {
@@ -1946,17 +2156,27 @@ fn dispatch_bridge_event(
                 let url_owned = trimmed.to_string();
                 let opener = state.active();
                 let app_clone = app.clone();
+                let app_for_err = app.clone();
+                let url_for_err = url_owned.clone();
                 if let Err(err) = app.run_on_main_thread(move || {
                     if let Err(err) =
-                        open_url_in_new_tab(&app_clone, url_owned, opener)
+                        open_url_in_new_tab(&app_clone, url_owned.clone(), opener)
                     {
                         tracing::warn!(
                             "[browser_dock] openNewTab open_url_in_new_tab failed: {err}"
                         );
+                        emit_dock_error(&app_clone, opener, "openNewTab", &url_owned, &err);
                     }
                 }) {
                     tracing::warn!(
                         "[browser_dock] openNewTab run_on_main_thread failed: {err}"
+                    );
+                    emit_dock_error(
+                        &app_for_err,
+                        opener,
+                        "openNewTab",
+                        &url_for_err,
+                        &err.to_string(),
                     );
                 }
             }
@@ -2035,6 +2255,7 @@ pub fn senbridge_protocol_handler(
             });
     }
 
+
     if first_seg.eq_ignore_ascii_case("event") {
         let mut kind = String::new();
         let mut data_raw: Option<String> = None;
@@ -2065,6 +2286,35 @@ pub fn senbridge_protocol_handler(
         .unwrap_or_else(|_| {
             tauri::http::Response::new(Cow::Borrowed(&b""[..]))
         })
+}
+
+fn emit_dock_error(
+    app: &AppHandle,
+    tab_id: Option<TabId>,
+    action: &str,
+    url: &str,
+    message: &str,
+) {
+    let session_id = tab_id.and_then(|id| {
+        app.try_state::<DockSharedState>()
+            .and_then(|s| s.tab_session_of(id))
+    });
+    let payload = serde_json::json!({
+        "kind": "error",
+        "tabId": tab_id,
+        "sessionId": session_id,
+        "data": {
+            "action": action,
+            "url": url,
+            "message": message,
+            "tabId": tab_id,
+            "sessionId": session_id,
+            "ts": now_millis(),
+        },
+    });
+    if let Err(err) = app.emit("browser_dock_event", payload) {
+        tracing::warn!("[browser_dock] emit dock error event failed: {err}");
+    }
 }
 
 fn emit_tabs_event(app: &AppHandle, state: &DockSharedState) {
@@ -2119,6 +2369,36 @@ fn dock_logical_position(rect: Option<DockRect>) -> LogicalPosition<f64> {
     }
 }
 
+static DOCK_MAIN_THREAD_ID: std::sync::OnceLock<std::thread::ThreadId> =
+    std::sync::OnceLock::new();
+
+fn record_dock_main_thread() {
+    let _ = DOCK_MAIN_THREAD_ID.set(std::thread::current().id());
+}
+
+fn dock_thread_is_main() -> bool {
+    DOCK_MAIN_THREAD_ID
+        .get()
+        .is_some_and(|id| *id == std::thread::current().id())
+}
+
+fn with_dock_on_main_thread<F>(app: &AppHandle, label: &'static str, f: F) -> Result<(), String>
+where
+    F: FnOnce(&AppHandle) -> Result<(), String> + Send + 'static,
+{
+    if dock_thread_is_main() {
+        return f(app);
+    }
+    let app_for_main = app.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(f(&app_for_main));
+    })
+    .map_err(|e| format!("schedule {label} on the main thread failed: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(15))
+        .map_err(|e| format!("await {label} result failed: {e}"))?
+}
+
 fn ensure_dock_webview(
     app: &AppHandle,
     state: &DockSharedState,
@@ -2134,6 +2414,46 @@ fn ensure_dock_webview(
         .and_then(|id| state.snapshot_tab(id).0)
         .filter(|u| !u.trim().is_empty());
     let parsed = parse_target_url(initial_url)?;
+
+    let raw_rect = state.rect();
+    let initial_size = dock_logical_size(raw_rect);
+    let initial_position = dock_logical_position(raw_rect);
+
+    let app_for_attach = app.clone();
+    let (add_tx, add_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    app.run_on_main_thread(move || {
+        let result = build_and_attach_dock_webview(
+            &app_for_attach,
+            &main,
+            parsed,
+            initial_position,
+            initial_size,
+        );
+        let _ = add_tx.send(result);
+    })
+    .map_err(|e| {
+        format!("schedule add_child({DOCK_WEBVIEW_LABEL}) on the main thread failed: {e}")
+    })?;
+    add_rx
+        .recv_timeout(Duration::from_secs(15))
+        .map_err(|e| format!("await add_child({DOCK_WEBVIEW_LABEL}) result failed: {e}"))??;
+
+    state.set_dock_visible(true);
+
+    dock_webview(app)
+        .ok_or_else(|| "dock webview missing immediately after add_child".to_string())
+}
+
+fn build_and_attach_dock_webview(
+    app: &AppHandle,
+    main: &Window,
+    parsed: Url,
+    initial_position: LogicalPosition<f64>,
+    initial_size: LogicalSize<f64>,
+) -> Result<(), String> {
+    if dock_webview(app).is_some() {
+        return Ok(());
+    }
 
     let app_for_new_window = app.clone();
     let bridge_js = build_bridge_js();
@@ -2197,15 +2517,9 @@ fn ensure_dock_webview(
                 tauri::webview::NewWindowResponse::Deny
             });
 
-    let raw_rect = state.rect();
-    let initial_size = dock_logical_size(raw_rect);
-    let initial_position = dock_logical_position(raw_rect);
-
     main.add_child(builder, initial_position, initial_size)
-        .map_err(|e| format!("add_child({DOCK_WEBVIEW_LABEL}) failed: {e}"))?;
-
-    dock_webview(app)
-        .ok_or_else(|| "dock webview missing immediately after add_child".to_string())
+        .map(|_| ())
+        .map_err(|e| format!("add_child({DOCK_WEBVIEW_LABEL}) failed: {e}"))
 }
 
 fn clamp_rect_to_window(rect: DockRect, win: &Window) -> DockRect {
@@ -2248,29 +2562,40 @@ fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), St
     };
     let want_visible = has_active && rect.is_some() && !parked && session_matches_foreground;
 
-    let Some(wv) = dock_webview(app) else {
+    if dock_webview(app).is_none() {
         return Ok(());
-    };
-
-    if let Some(rect) = rect {
-        let pos = rect.position_logical();
-        let size = rect.size_logical();
-        wv.set_position(pos)
-            .map_err(|e| format!("set_position(dock) failed: {e}"))?;
-        wv.set_size(size)
-            .map_err(|e| format!("set_size(dock) failed: {e}"))?;
     }
 
     let was_visible = state.dock_visible();
-    if want_visible != was_visible {
+    let toggle_visible = want_visible != was_visible;
+    let pos_size = rect.map(|r| (r.position_logical(), r.size_logical()));
+
+    with_dock_on_main_thread(app, "dock layout", move |app| {
+        let Some(wv) = dock_webview(app) else {
+            return Ok(());
+        };
+        if let Some((pos, size)) = pos_size {
+            wv.set_position(pos)
+                .map_err(|e| format!("set_position(dock) failed: {e}"))?;
+            wv.set_size(size)
+                .map_err(|e| format!("set_size(dock) failed: {e}"))?;
+        }
+        if toggle_visible {
+            if want_visible {
+                wv.show().map_err(|e| format!("show(dock) failed: {e}"))?;
+            } else {
+                wv.hide().map_err(|e| format!("hide(dock) failed: {e}"))?;
+            }
+        }
+        Ok(())
+    })?;
+
+    if toggle_visible {
         if want_visible {
-            wv.show().map_err(|e| format!("show(dock) failed: {e}"))?;
             if let Some(active) = state.active() {
                 state.forget_state_url(active);
             }
             let _ = dock_navigate_active(app, state);
-        } else {
-            wv.hide().map_err(|e| format!("hide(dock) failed: {e}"))?;
         }
         state.set_dock_visible(want_visible);
     }
@@ -2295,36 +2620,44 @@ fn dock_navigate_active(app: &AppHandle, state: &DockSharedState) -> Result<(), 
     };
     let stored = state.snapshot_tab(active).0;
     let target = effective_nav_url(stored);
-    let Some(wv) = dock_webview(app) else {
-        return Ok(());
-    };
-    let parsed = parse_target_url(Some(target.clone()))?;
-    if let Ok(current) = wv.url() {
-        let cur_str = current.as_str();
-        let tgt_str = parsed.as_str();
-        if cur_str == tgt_str || urls_logically_match(cur_str, tgt_str) {
-            state.record_state_url(active, cur_str);
-            if let Some(controller) = app.try_state::<TauriDockController>() {
-                controller.signal_nav_ready(active);
-            }
+    let parsed = parse_target_url(Some(target))?;
+    with_dock_on_main_thread(app, "dock navigate", move |app| {
+        let Some(wv) = dock_webview(app) else {
             return Ok(());
+        };
+        let Some(state) = app.try_state::<DockSharedState>() else {
+            return Ok(());
+        };
+        if let Ok(current) = wv.url() {
+            let cur_str = current.as_str();
+            let tgt_str = parsed.as_str();
+            if cur_str == tgt_str || urls_logically_match(cur_str, tgt_str) {
+                state.record_state_url(active, cur_str);
+                if let Some(controller) = app.try_state::<TauriDockController>() {
+                    controller.signal_nav_ready(active);
+                }
+                return Ok(());
+            }
         }
-    }
-    state.forget_state_url(active);
-    wv.navigate(parsed)
-        .map_err(|e| format!("navigate failed: {e}"))?;
-    Ok(())
+        state.forget_state_url(active);
+        wv.navigate(parsed)
+            .map_err(|e| format!("navigate failed: {e}"))?;
+        Ok(())
+    })
 }
 
 fn focus_dock_webview(app: &AppHandle) {
-    let Some(webview) = dock_webview(app) else {
-        return;
-    };
-    #[cfg(windows)]
-    {
-        let _ = webview.with_webview(focus_webview2_native);
-    }
-    let _ = webview.set_focus();
+    let _ = with_dock_on_main_thread(app, "dock focus", move |app| {
+        let Some(webview) = dock_webview(app) else {
+            return Ok(());
+        };
+        #[cfg(windows)]
+        {
+            let _ = webview.with_webview(focus_webview2_native);
+        }
+        let _ = webview.set_focus();
+        Ok(())
+    });
 }
 
 #[cfg(windows)]
@@ -2354,6 +2687,581 @@ fn focus_webview2_native(platform: tauri::webview::PlatformWebview) {
         }
     }
     let _ = unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
+}
+
+#[cfg(windows)]
+pub(crate) mod cdp {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use parking_lot::Mutex;
+    use serde_json::{json, Value};
+    use tauri::Manager;
+    use windows::core::HSTRING;
+
+    use super::TabId;
+
+    const NET_LOG_CAP: usize = 600;
+
+    pub struct NetEntry {
+        pub url: String,
+        pub method: String,
+        pub resource_type: Option<String>,
+        pub status: Option<u64>,
+        pub mime: Option<String>,
+        pub encoded_len: Option<f64>,
+        pub error: Option<String>,
+        pub started_ms: i64,
+        pub finished_ms: Option<i64>,
+    }
+
+    #[derive(Default)]
+    pub struct TabNetLog {
+        pub capturing: bool,
+        pub order: Vec<String>,
+        pub map: HashMap<String, NetEntry>,
+    }
+
+    pub struct NetLog {
+        pub tabs: HashMap<TabId, TabNetLog>,
+        pub subscribed: HashSet<usize>,
+        pub active_capture: Option<TabId>,
+    }
+
+    impl NetLog {
+        pub fn bucket_mut(&mut self, tab_id: TabId) -> &mut TabNetLog {
+            self.tabs.entry(tab_id).or_default()
+        }
+    }
+
+    pub fn net_log() -> &'static Mutex<NetLog> {
+        static LOG: OnceLock<Mutex<NetLog>> = OnceLock::new();
+        LOG.get_or_init(|| {
+            Mutex::new(NetLog {
+                tabs: HashMap::new(),
+                subscribed: HashSet::new(),
+                active_capture: None,
+            })
+        })
+    }
+
+    pub async fn call(
+        webview: &tauri::Webview,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let method_s = method.to_string();
+        let params_s =
+            serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
+        let app = webview.app_handle().clone();
+        let wv = webview.clone();
+        super::with_dock_on_main_thread(&app, "cdp call dispatch", move |_app| {
+            wv.with_webview(move |platform| {
+                use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+                let outcome: windows::core::Result<()> = (move || {
+                    let controller = platform.controller();
+                    let core = unsafe { controller.CoreWebView2() }?;
+                    let handler = CallDevToolsProtocolMethodCompletedHandler::create(
+                        Box::new(move |hr: windows::core::Result<()>, body: String| {
+                            let _ = tx.send(match hr {
+                                Ok(()) => Ok(body),
+                                Err(e) => Err(e.message().to_string()),
+                            });
+                            Ok(())
+                        }),
+                    );
+                    let method_h = HSTRING::from(method_s.as_str());
+                    let params_h = HSTRING::from(params_s.as_str());
+                    unsafe {
+                        core.CallDevToolsProtocolMethod(&method_h, &params_h, &handler)
+                    }
+                })();
+                if let Err(err) = outcome {
+                    tracing::warn!("[browser_dock] cdp dispatch failed: {err}");
+                }
+            })
+            .map_err(|e| format!("with_webview: {e}"))
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(body))) => Ok(serde_json::from_str(&body)
+                .unwrap_or_else(|_| json!({ "raw": body }))),
+            Ok(Ok(Err(err))) => Err(anyhow::anyhow!("cdp {method}: {err}")),
+            Ok(Err(_)) => Err(anyhow::anyhow!(
+                "cdp {method}: dispatch dropped (webview2 unavailable)"
+            )),
+            Err(_) => Err(anyhow::anyhow!("cdp {method}: timeout")),
+        }
+    }
+
+    pub fn subscribe_network(webview: &tauri::Webview) -> anyhow::Result<()> {
+        let app = webview.app_handle().clone();
+        let wv = webview.clone();
+        super::with_dock_on_main_thread(&app, "cdp subscribe network", move |_app| {
+            wv.with_webview(|platform| {
+                use webview2_com::DevToolsProtocolEventReceivedEventHandler;
+                use windows::core::Interface;
+                let outcome: windows::core::Result<()> = (|| {
+                    let controller = platform.controller();
+                    let core = unsafe { controller.CoreWebView2() }?;
+                    let key = core.as_raw() as usize;
+                    {
+                        let mut log = net_log().lock();
+                        if !log.subscribed.insert(key) {
+                            return Ok(());
+                        }
+                    }
+                    for event in [
+                        "Network.requestWillBeSent",
+                        "Network.responseReceived",
+                        "Network.loadingFinished",
+                        "Network.loadingFailed",
+                    ] {
+                        let event_h = HSTRING::from(event);
+                        let receiver = unsafe {
+                            core.GetDevToolsProtocolEventReceiver(&event_h)
+                        }?;
+                        let event_name = event.to_string();
+                        let handler = DevToolsProtocolEventReceivedEventHandler::create(
+                            Box::new(move |_sender, args| {
+                                if let Some(args) = args {
+                                    let mut raw = windows::core::PWSTR::null();
+                                    if unsafe { args.ParameterObjectAsJson(&mut raw) }
+                                        .is_ok()
+                                    {
+                                        let body = webview2_com::take_pwstr(raw);
+                                        record_net_event(&event_name, &body);
+                                    }
+                                }
+                                Ok(())
+                            }),
+                        );
+                        let mut token: i64 = 0;
+                        unsafe {
+                            receiver.add_DevToolsProtocolEventReceived(&handler, &mut token)
+                        }?;
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = outcome {
+                    tracing::warn!("[browser_dock] cdp network subscribe failed: {err}");
+                }
+            })
+            .map_err(|e| format!("with_webview: {e}"))
+        })
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn record_net_event(event: &str, body: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(body) else {
+            return;
+        };
+        let Some(request_id) = v
+            .get("requestId")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+        else {
+            return;
+        };
+        let mut log = net_log().lock();
+        let Some(tab_id) = log.active_capture else {
+            return;
+        };
+        let bucket = log.bucket_mut(tab_id);
+        if !bucket.capturing {
+            return;
+        }
+        match event {
+            "Network.requestWillBeSent" => {
+                let url = v
+                    .pointer("/request/url")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if url.is_empty() || url.starts_with("data:") {
+                    return;
+                }
+                let method = v
+                    .pointer("/request/method")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("GET")
+                    .to_string();
+                let resource_type = v
+                    .get("type")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                if !bucket.map.contains_key(&request_id) {
+                    if bucket.order.len() >= NET_LOG_CAP {
+                        let oldest = bucket.order.remove(0);
+                        bucket.map.remove(&oldest);
+                    }
+                    bucket.order.push(request_id.clone());
+                }
+                bucket.map.insert(
+                    request_id,
+                    NetEntry {
+                        url,
+                        method,
+                        resource_type,
+                        status: None,
+                        mime: None,
+                        encoded_len: None,
+                        error: None,
+                        started_ms: super::now_millis(),
+                        finished_ms: None,
+                    },
+                );
+            }
+            "Network.responseReceived" => {
+                if let Some(e) = bucket.map.get_mut(&request_id) {
+                    e.status = v.pointer("/response/status").and_then(|x| x.as_u64());
+                    e.mime = v
+                        .pointer("/response/mimeType")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                }
+            }
+            "Network.loadingFinished" => {
+                if let Some(e) = bucket.map.get_mut(&request_id) {
+                    e.encoded_len =
+                        v.get("encodedDataLength").and_then(|x| x.as_f64());
+                    e.finished_ms = Some(super::now_millis());
+                }
+            }
+            "Network.loadingFailed" => {
+                if let Some(e) = bucket.map.get_mut(&request_id) {
+                    e.error = v
+                        .get("errorText")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    e.finished_ms = Some(super::now_millis());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn exec_cdp_emulate(
+    webview: &tauri::Webview,
+    args: &Value,
+    timeout: Duration,
+) -> Result<Value, anyhow::Error> {
+    let mut applied: Vec<&str> = Vec::new();
+    if args.get("reset").and_then(|v| v.as_bool()).unwrap_or(false) {
+        cdp::call(
+            webview,
+            "Emulation.clearDeviceMetricsOverride",
+            serde_json::json!({}),
+            timeout,
+        )
+        .await?;
+        let _ = cdp::call(webview, "Network.enable", serde_json::json!({}), timeout).await;
+        cdp::call(
+            webview,
+            "Network.emulateNetworkConditions",
+            serde_json::json!({
+                "offline": false,
+                "latency": 0,
+                "downloadThroughput": -1.0,
+                "uploadThroughput": -1.0,
+            }),
+            timeout,
+        )
+        .await?;
+        cdp::call(
+            webview,
+            "Emulation.setCPUThrottlingRate",
+            serde_json::json!({"rate": 1}),
+            timeout,
+        )
+        .await?;
+        applied.push("reset");
+        return Ok(serde_json::json!({"applied": applied}));
+    }
+    if let Some(vp) = args.get("viewport").filter(|v| v.is_object()) {
+        let width = vp.get("width").and_then(|v| v.as_u64()).unwrap_or(375).clamp(240, 7680);
+        let height = vp.get("height").and_then(|v| v.as_u64()).unwrap_or(812).clamp(320, 4320);
+        let mobile = vp
+            .get("mobile")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(width <= 500);
+        let scale = vp
+            .get("device_scale_factor")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        cdp::call(
+            webview,
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": scale,
+                "mobile": mobile,
+            }),
+            timeout,
+        )
+        .await?;
+        applied.push("viewport");
+    }
+    if let Some(net) = args.get("network").and_then(|v| v.as_str()) {
+        let conditions = match net {
+            "offline" => serde_json::json!({
+                "offline": true, "latency": 0,
+                "downloadThroughput": 0.0, "uploadThroughput": 0.0,
+            }),
+            "slow-3g" => serde_json::json!({
+                "offline": false, "latency": 400,
+                "downloadThroughput": 50_000.0, "uploadThroughput": 25_000.0,
+            }),
+            "fast-3g" => serde_json::json!({
+                "offline": false, "latency": 150,
+                "downloadThroughput": 180_000.0, "uploadThroughput": 84_000.0,
+            }),
+            "none" => serde_json::json!({
+                "offline": false, "latency": 0,
+                "downloadThroughput": -1.0, "uploadThroughput": -1.0,
+            }),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unknown network preset: {other} (use offline | slow-3g | fast-3g | none)"
+                ));
+            }
+        };
+        cdp::call(webview, "Network.enable", serde_json::json!({}), timeout).await?;
+        cdp::call(
+            webview,
+            "Network.emulateNetworkConditions",
+            conditions,
+            timeout,
+        )
+        .await?;
+        applied.push("network");
+    }
+    if let Some(rate) = args.get("cpu_rate").and_then(|v| v.as_f64()) {
+        cdp::call(
+            webview,
+            "Emulation.setCPUThrottlingRate",
+            serde_json::json!({"rate": rate.clamp(1.0, 20.0)}),
+            timeout,
+        )
+        .await?;
+        applied.push("cpu");
+    }
+    if applied.is_empty() {
+        return Err(anyhow::anyhow!(
+            "emulate requires at least one of: viewport / network / cpu_rate / reset"
+        ));
+    }
+    Ok(serde_json::json!({"applied": applied}))
+}
+
+#[cfg(windows)]
+async fn exec_cdp_network_capture(
+    webview: &tauri::Webview,
+    tab_id: TabId,
+    args: &Value,
+    timeout: Duration,
+) -> Result<Value, anyhow::Error> {
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("dump");
+    match mode {
+        "start" => {
+            cdp::call(
+                webview,
+                "Network.enable",
+                serde_json::json!({
+                    "maxResourceBufferSize": 16_000_000,
+                    "maxTotalBufferSize": 64_000_000,
+                }),
+                timeout,
+            )
+            .await?;
+            cdp::subscribe_network(webview)?;
+            let mut log = cdp::net_log().lock();
+            if let Some(previous) = log.active_capture {
+                if previous != tab_id {
+                    tracing::warn!(
+                        previous_tab = previous,
+                        new_tab = tab_id,
+                        "[browser_dock] network capture is single-instance; superseding the \
+                         capture on the previous tab (only one tab can capture at a time)"
+                    );
+                    if let Some(bucket) = log.tabs.get_mut(&previous) {
+                        bucket.capturing = false;
+                    }
+                }
+            }
+            {
+                let bucket = log.bucket_mut(tab_id);
+                bucket.order.clear();
+                bucket.map.clear();
+                bucket.capturing = true;
+            }
+            log.active_capture = Some(tab_id);
+            Ok(serde_json::json!({"capturing": true, "tab_id": tab_id}))
+        }
+        "stop" => {
+            let captured = {
+                let mut log = cdp::net_log().lock();
+                let captured = log
+                    .tabs
+                    .get_mut(&tab_id)
+                    .map(|b| {
+                        b.capturing = false;
+                        b.order.len()
+                    })
+                    .unwrap_or(0);
+                if log.active_capture == Some(tab_id) {
+                    log.active_capture = None;
+                }
+                captured
+            };
+            Ok(serde_json::json!({"capturing": false, "captured": captured, "tab_id": tab_id}))
+        }
+        "clear" => {
+            let mut log = cdp::net_log().lock();
+            if let Some(bucket) = log.tabs.get_mut(&tab_id) {
+                bucket.order.clear();
+                bucket.map.clear();
+            }
+            Ok(serde_json::json!({"cleared": true, "tab_id": tab_id}))
+        }
+        "body" => {
+            let request_id = args
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("mode=body requires request_id"))?;
+            let resp = cdp::call(
+                webview,
+                "Network.getResponseBody",
+                serde_json::json!({"requestId": request_id}),
+                timeout,
+            )
+            .await?;
+            let base64_encoded = resp
+                .get("base64Encoded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut body = resp
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let full_len = body.len();
+            if body.len() > 16_000 {
+                let mut cut = 16_000;
+                while !body.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                body.truncate(cut);
+            }
+            Ok(serde_json::json!({
+                "request_id": request_id,
+                "base64_encoded": base64_encoded,
+                "total_bytes": full_len,
+                "truncated": full_len > body.len(),
+                "body": body,
+            }))
+        }
+        "dump" => {
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120)
+                .min(400) as usize;
+            let url_filter = args
+                .get("url_contains")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase());
+            let only_failures = args
+                .get("only_failures")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let api_only = args
+                .get("api_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let log = cdp::net_log().lock();
+            let mut total = 0usize;
+            let mut failed = 0usize;
+            let mut items = Vec::new();
+            let bucket = log.tabs.get(&tab_id);
+            let capturing = bucket.map(|b| b.capturing).unwrap_or(false);
+            let (order, map) = match bucket {
+                Some(b) => (&b.order, &b.map),
+                None => {
+                    return Ok(serde_json::json!({
+                        "capturing": false,
+                        "total": 0,
+                        "failed": 0,
+                        "returned": 0,
+                        "requests": [],
+                        "tab_id": tab_id,
+                    }));
+                }
+            };
+            for id in order.iter() {
+                let Some(e) = map.get(id) else { continue };
+                total += 1;
+                let is_fail =
+                    e.error.is_some() || e.status.map(|s| s >= 400).unwrap_or(false);
+                if is_fail {
+                    failed += 1;
+                }
+                if let Some(f) = &url_filter {
+                    if !e.url.to_lowercase().contains(f.as_str()) {
+                        continue;
+                    }
+                }
+                if only_failures && !is_fail {
+                    continue;
+                }
+                if api_only {
+                    let rt = e.resource_type.as_deref().unwrap_or("");
+                    if rt != "XHR" && rt != "Fetch" {
+                        continue;
+                    }
+                }
+                if items.len() >= limit {
+                    continue;
+                }
+                let mut url = e.url.clone();
+                if url.len() > 300 {
+                    let mut cut = 300;
+                    while !url.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    url.truncate(cut);
+                }
+                items.push(serde_json::json!({
+                    "request_id": id,
+                    "url": url,
+                    "method": e.method,
+                    "type": e.resource_type,
+                    "status": e.status,
+                    "mime": e.mime,
+                    "encoded_bytes": e.encoded_len,
+                    "error": e.error,
+                    "duration_ms": e.finished_ms.map(|f| f.saturating_sub(e.started_ms)),
+                }));
+            }
+            Ok(serde_json::json!({
+                "capturing": capturing,
+                "total": total,
+                "failed": failed,
+                "returned": items.len(),
+                "requests": items,
+                "tab_id": tab_id,
+            }))
+        }
+        other => Err(anyhow::anyhow!(
+            "unknown network_capture mode: {other} (use start | stop | dump | body | clear)"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -2467,9 +3375,12 @@ pub async fn browser_dock_close(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    if let Some(webview) = dock_webview(&app) {
-        let _ = webview.close();
-    }
+    let _ = with_dock_on_main_thread(&app, "dock close webview", |app| {
+        if let Some(webview) = dock_webview(app) {
+            let _ = webview.close();
+        }
+        Ok(())
+    });
     state.reset();
     if let Some(controller) = app.try_state::<TauriDockController>() {
         controller.drain_pending("dock closed");
@@ -2485,30 +3396,6 @@ pub async fn browser_dock_release_agent_tab_for_session(
 ) -> Result<Vec<TabId>, String> {
     let released = state.release_agent_tabs_for_session(&session_id);
     Ok(released)
-}
-
-#[tauri::command]
-pub async fn browser_dock_bind_tab_to_session(
-    app: AppHandle,
-    state: tauri::State<'_, DockSharedState>,
-    session_id: String,
-    tab_id: TabId,
-) -> Result<(), String> {
-    state.bind_user_tab_to_session(&session_id, tab_id)?;
-    emit_tabs_event(&app, state.inner());
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn browser_dock_unbind_tab_from_session(
-    app: AppHandle,
-    state: tauri::State<'_, DockSharedState>,
-    session_id: String,
-    tab_id: TabId,
-) -> Result<(), String> {
-    state.unbind_tab_from_session(&session_id, tab_id)?;
-    emit_tabs_event(&app, state.inner());
-    Ok(())
 }
 
 #[tauri::command]
@@ -2637,9 +3524,12 @@ pub async fn browser_dock_close_tab(
     if was_active && new_active.is_some() {
         dock_navigate_active(&app, state.inner())?;
     } else if new_active.is_none() {
-        if let Some(wv) = dock_webview(&app) {
-            let _ = wv.hide();
-        }
+        let _ = with_dock_on_main_thread(&app, "dock hide", |app| {
+            if let Some(wv) = dock_webview(app) {
+                let _ = wv.hide();
+            }
+            Ok(())
+        });
         state.set_dock_visible(false);
     }
     update_dock_layout(&app, state.inner())?;
@@ -2697,8 +3587,42 @@ pub async fn browser_dock_list_tabs(
         .collect())
 }
 
+fn mirror_test_target_to_gateway(app: &AppHandle, session_id: &str, tab_id: Option<TabId>) {
+    let Some(url) = crate::current_gateway_url(app) else {
+        return;
+    };
+    let payload = serde_json::json!({ "sessionId": session_id, "tabId": tab_id });
+    tauri::async_runtime::spawn(async move {
+        static MIRROR_FAILURES: AtomicU64 = AtomicU64::new(0);
+        match crate::adapters_restart_client()
+            .post(format!("{url}/api/debug/test-target"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    crate::warn_emit_failure(
+                        &MIRROR_FAILURES,
+                        "browser_dock test-target mirror",
+                        &format!("gateway returned HTTP {}", resp.status().as_u16()),
+                    );
+                }
+            }
+            Err(err) => {
+                crate::warn_emit_failure(
+                    &MIRROR_FAILURES,
+                    "browser_dock test-target mirror",
+                    &err,
+                );
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub async fn browser_dock_pin_test_target(
+    app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
     session_id: String,
     tab_id: TabId,
@@ -2719,13 +3643,18 @@ pub async fn browser_dock_pin_test_target(
         }
     }
     set_test_target_tab(&sid, tab_id);
+    mirror_test_target_to_gateway(&app, &sid, Some(tab_id));
     Ok(())
 }
 
 #[tauri::command]
-pub async fn browser_dock_clear_test_target(session_id: String) -> Result<(), String> {
+pub async fn browser_dock_clear_test_target(
+    app: AppHandle,
+    session_id: String,
+) -> Result<(), String> {
     let sid = canonical_dock_session_id(&session_id);
     clear_test_target_tab(&sid);
+    mirror_test_target_to_gateway(&app, &sid, None);
     Ok(())
 }
 
@@ -2775,11 +3704,14 @@ pub async fn browser_dock_present_session(
                 }
             }
         }
-        if let Some(wv) = dock_webview(&app) {
-            if let Ok(parsed) = parse_target_url(None) {
-                let _ = wv.navigate(parsed);
+        let _ = with_dock_on_main_thread(&app, "dock navigate blank", |app| {
+            if let Some(wv) = dock_webview(app) {
+                if let Ok(parsed) = parse_target_url(None) {
+                    let _ = wv.navigate(parsed);
+                }
             }
-        }
+            Ok(())
+        });
         inner.set_parked(true);
         update_dock_layout(&app, inner)?;
         emit_tabs_event(&app, inner);
@@ -2805,12 +3737,15 @@ pub async fn browser_dock_set_foreground_session(
 }
 
 fn eval_dock(app: &AppHandle, _state: &DockSharedState, source: &str) -> Result<(), String> {
-    let webview = dock_webview(app)
-        .ok_or_else(|| "dock webview is not open".to_string())?;
-    webview
-        .eval(source)
-        .map_err(|e| format!("eval failed: {e}"))?;
-    Ok(())
+    let source = source.to_string();
+    with_dock_on_main_thread(app, "dock eval", move |app| {
+        let webview = dock_webview(app)
+            .ok_or_else(|| "dock webview is not open".to_string())?;
+        webview
+            .eval(&source)
+            .map_err(|e| format!("eval failed: {e}"))?;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -2941,9 +3876,8 @@ pub async fn browser_dock_screenshot(
 ) -> Result<serde_json::Value, String> {
     let _ = state;
     let full = full_page.unwrap_or(false);
-    if full {
-        if let Some(webview) = dock_webview(&app) {
-            let warmup = r#"(async () => {
+    if full && dock_webview(&app).is_some() {
+        let warmup = r#"(async () => {
                   try {
                     const total = Math.max(
                       document.documentElement.scrollHeight,
@@ -2957,9 +3891,13 @@ pub async fn browser_dock_screenshot(
                     window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
                   } catch (_) {}
                 })();"#;
-            let _ = webview.eval(warmup);
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        }
+        let _ = with_dock_on_main_thread(&app, "dock screenshot warmup", move |app| {
+            if let Some(webview) = dock_webview(app) {
+                let _ = webview.eval(warmup);
+            }
+            Ok(())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
     let app_xcap = app.clone();
     let bytes = tokio::task::spawn_blocking(move || capture_dock_window(&app_xcap))
@@ -2991,16 +3929,20 @@ pub async fn browser_dock_open_devtools(
     app: AppHandle,
     _state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    let webview = dock_webview(&app)
+    let _ = dock_webview(&app)
         .ok_or_else(|| "dock webview is not open".to_string())?;
     #[cfg(debug_assertions)]
     {
-        webview.open_devtools();
+        with_dock_on_main_thread(&app, "dock open devtools", |app| {
+            if let Some(webview) = dock_webview(app) {
+                webview.open_devtools();
+            }
+            Ok(())
+        })?;
         return Ok(());
     }
     #[cfg(not(debug_assertions))]
     {
-        let _ = webview;
         Err("DevTools are only available in debug builds".to_string())
     }
 }
@@ -3010,16 +3952,20 @@ pub async fn browser_dock_close_devtools(
     app: AppHandle,
     _state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
-    let webview = dock_webview(&app)
+    let _ = dock_webview(&app)
         .ok_or_else(|| "dock webview is not open".to_string())?;
     #[cfg(debug_assertions)]
     {
-        webview.close_devtools();
+        with_dock_on_main_thread(&app, "dock close devtools", |app| {
+            if let Some(webview) = dock_webview(app) {
+                webview.close_devtools();
+            }
+            Ok(())
+        })?;
         return Ok(());
     }
     #[cfg(not(debug_assertions))]
     {
-        let _ = webview;
         Err("DevTools are only available in debug builds".to_string())
     }
 }
@@ -3132,7 +4078,16 @@ impl TauriDockController {
                             "sessionId": session_id,
                         },
                     });
-                    let _ = inner_for_task.app.emit("browser_dock_event", payload);
+                    static TAKEOVER_END_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+                    if let Err(err) =
+                        inner_for_task.app.emit("browser_dock_event", payload)
+                    {
+                        crate::warn_emit_failure(
+                            &TAKEOVER_END_EMIT_FAILURES,
+                            "browser_dock takeover-end",
+                            &err,
+                        );
+                    }
                 }
             });
             guard.insert(
@@ -3159,7 +4114,14 @@ impl TauriDockController {
                     "sessionId": session_id,
                 },
             });
-            let _ = self.0.app.emit("browser_dock_event", payload);
+            static TAKEOVER_START_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+            if let Err(err) = self.0.app.emit("browser_dock_event", payload) {
+                crate::warn_emit_failure(
+                    &TAKEOVER_START_EMIT_FAILURES,
+                    "browser_dock takeover-start",
+                    &err,
+                );
+            }
         }
     }
 
@@ -3181,6 +4143,16 @@ impl TauriDockController {
         };
         for tx in waiters {
             let _ = tx.send(());
+        }
+    }
+
+    fn prune_nav_waiters(&self, tab_id: TabId) {
+        let mut g = self.0.nav_waiters.lock();
+        if let Some(waiters) = g.get_mut(&tab_id) {
+            waiters.retain(|tx| !tx.is_closed());
+            if waiters.is_empty() {
+                g.remove(&tab_id);
+            }
         }
     }
 
@@ -3230,11 +4202,15 @@ impl TauriDockController {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => {
+                self.prune_nav_waiters(tab_id);
                 Err(anyhow::anyhow!("nav ready channel closed"))
             }
-            Err(_) => Err(anyhow::anyhow!(
-                "timed out waiting for dock navigation to complete on tab {tab_id}"
-            )),
+            Err(_) => {
+                self.prune_nav_waiters(tab_id);
+                Err(anyhow::anyhow!(
+                    "timed out waiting for dock navigation to complete on tab {tab_id}"
+                ))
+            }
         }
     }
 
@@ -3271,7 +4247,7 @@ impl TauriDockController {
                 *buf = ChunkBuffer::new(total);
             }
             if buf.ingest(seq, payload) {
-                Some(guard.remove(&req_id).unwrap().assemble())
+                guard.remove(&req_id).map(|b| b.assemble())
             } else {
                 None
             }
@@ -3489,7 +4465,8 @@ impl DockController for TauriDockController {
 
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
         let preview_session = state.tab_session_of(tab_id);
-        let _ = self.0.app.emit(
+        static EXEC_PREVIEW_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+        if let Err(err) = self.0.app.emit(
             "browser_dock_event",
             serde_json::json!({
                 "kind": "agent_action",
@@ -3504,7 +4481,17 @@ impl DockController for TauriDockController {
                     "ts": now_millis(),
                 },
             }),
-        );
+        ) {
+            crate::warn_emit_failure(
+                &EXEC_PREVIEW_EMIT_FAILURES,
+                "browser_dock exec agent_action",
+                &err,
+            );
+        }
+
+        if matches!(req.kind.as_str(), "emulate" | "network_capture") {
+            return self.exec_cdp_kind(tab_id, &req).await;
+        }
 
         self.exec_on_tab(tab_id, req).await
     }
@@ -3539,9 +4526,8 @@ impl DockController for TauriDockController {
             );
         }
 
-        if full_page {
-            if let Some(webview) = dock_webview(&self.0.app) {
-                let warmup = r#"(async () => {
+        if full_page && dock_webview(&self.0.app).is_some() {
+            let warmup = r#"(async () => {
                   try {
                     const total = Math.max(
                       document.documentElement.scrollHeight,
@@ -3555,8 +4541,50 @@ impl DockController for TauriDockController {
                     window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
                   } catch (_) {}
                 })();"#;
-                let _ = webview.eval(warmup);
-                tokio::time::sleep(Duration::from_millis(120)).await;
+            let _ = with_dock_on_main_thread(&self.0.app, "dock screenshot warmup", move |app| {
+                if let Some(webview) = dock_webview(app) {
+                    let _ = webview.eval(warmup);
+                }
+                Ok(())
+            });
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+
+        #[cfg(windows)]
+        {
+            if let Some(webview) = dock_webview(&self.0.app) {
+                match cdp::call(
+                    &webview,
+                    "Page.captureScreenshot",
+                    serde_json::json!({
+                        "format": "png",
+                        "captureBeyondViewport": full_page,
+                    }),
+                    Duration::from_millis(10_000),
+                )
+                .await
+                {
+                    Ok(v) => {
+                        if let Some(data) = v.get("data").and_then(|d| d.as_str()) {
+                            use base64::Engine;
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(data)
+                            {
+                                if !bytes.is_empty() {
+                                    return Ok(bytes);
+                                }
+                            }
+                        }
+                        tracing::warn!(
+                            "[browser_dock] cdp screenshot returned no data, falling back"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "[browser_dock] cdp screenshot failed, falling back: {err}"
+                        );
+                    }
+                }
             }
         }
 
@@ -3625,9 +4653,12 @@ impl DockController for TauriDockController {
         if was_active && new_active.is_some() {
             let _ = dock_navigate_active(&self.0.app, &state);
         } else if new_active.is_none() {
-            if let Some(wv) = dock_webview(&self.0.app) {
-                let _ = wv.hide();
-            }
+            let _ = with_dock_on_main_thread(&self.0.app, "dock hide", |app| {
+                if let Some(wv) = dock_webview(app) {
+                    let _ = wv.hide();
+                }
+                Ok(())
+            });
             state.set_dock_visible(false);
         }
         update_dock_layout(&self.0.app, &state)
@@ -3770,20 +4801,67 @@ impl DockController for TauriDockController {
                     }
                 }
             }
-            if let Some(wv) = dock_webview(&self.0.app) {
-                if let Ok(parsed) = parse_target_url(None) {
-                    let _ = wv.navigate(parsed);
+            let _ = with_dock_on_main_thread(&self.0.app, "dock navigate blank", |app| {
+                if let Some(wv) = dock_webview(app) {
+                    if let Ok(parsed) = parse_target_url(None) {
+                        let _ = wv.navigate(parsed);
+                    }
                 }
-            }
+                Ok(())
+            });
             state.set_parked(true);
             let _ = update_dock_layout(&self.0.app, &state);
             emit_tabs_event(&self.0.app, &state);
         }
         Ok(target)
     }
+
+    async fn park(&self) -> Result<()> {
+        let state = self
+            .0
+            .app
+            .try_state::<DockSharedState>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
+        state.set_parked(true);
+        if let Err(err) = update_dock_layout(&self.0.app, &state) {
+            tracing::warn!("[browser_dock] park update_dock_layout failed: {err}");
+        }
+        emit_tabs_event(&self.0.app, &state);
+        Ok(())
+    }
 }
 
 impl TauriDockController {
+    async fn exec_cdp_kind(&self, tab_id: TabId, req: &DockRequest) -> Result<DockResponse> {
+        #[cfg(windows)]
+        {
+            let webview = dock_webview(&self.0.app)
+                .ok_or_else(|| anyhow::anyhow!("dock webview is not open"))?;
+            let timeout = Duration::from_millis(req.timeout_ms.clamp(2_000, 30_000));
+            let value = match req.kind.as_str() {
+                "emulate" => exec_cdp_emulate(&webview, &req.args, timeout).await?,
+                "network_capture" => {
+                    exec_cdp_network_capture(&webview, tab_id, &req.args, timeout).await?
+                }
+                other => return Err(anyhow::anyhow!("unsupported cdp kind: {other}")),
+            };
+            Ok(DockResponse {
+                ok: true,
+                value,
+                error: None,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = tab_id;
+            Err(anyhow::anyhow!(
+                "browser action '{}' requires the Windows WebView2 dock (CDP); use snapshot / get_styles / network_errors instead",
+                req.kind
+            ))
+        }
+    }
+
     async fn exec_navigate_via_rust(
         &self,
         tab_id: TabId,
@@ -3851,7 +4929,8 @@ impl TauriDockController {
 
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
         let preview_session = state.tab_session_of(tab_id);
-        let _ = self.0.app.emit(
+        static NAVIGATE_PREVIEW_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+        if let Err(err) = self.0.app.emit(
             "browser_dock_event",
             serde_json::json!({
                 "kind": "agent_action",
@@ -3866,13 +4945,25 @@ impl TauriDockController {
                     "ts": now_millis(),
                 },
             }),
-        );
+        ) {
+            crate::warn_emit_failure(
+                &NAVIGATE_PREVIEW_EMIT_FAILURES,
+                "browser_dock navigate agent_action",
+                &err,
+            );
+        }
 
-        let webview = dock_webview(&self.0.app)
+        let _ = dock_webview(&self.0.app)
             .ok_or_else(|| anyhow::anyhow!("dock webview is not open"))?;
-        webview
-            .navigate(parsed)
-            .map_err(|err| anyhow::anyhow!("webview navigate failed: {err}"))?;
+        with_dock_on_main_thread(&self.0.app, "dock navigate", move |app| {
+            let webview = dock_webview(app)
+                .ok_or_else(|| "dock webview is not open".to_string())?;
+            webview
+                .navigate(parsed)
+                .map_err(|err| format!("webview navigate failed: {err}"))?;
+            Ok(())
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
 
         let wait_budget = Duration::from_millis(req.timeout_ms.max(ready_timeout.as_millis() as u64));
         match self.await_dock_ready(tab_id, wait_budget).await {
@@ -3896,7 +4987,7 @@ impl TauriDockController {
     }
 
     async fn exec_on_tab(&self, tab_id: TabId, req: DockRequest) -> Result<DockResponse> {
-        let webview = dock_webview(&self.0.app)
+        let _ = dock_webview(&self.0.app)
             .ok_or_else(|| anyhow::anyhow!("dock webview is not open"))?;
 
         let req_id = self.0.next_req_id.fetch_add(1, Ordering::SeqCst);
@@ -3915,7 +5006,14 @@ impl TauriDockController {
             "window.__senDockBridge && window.__senDockBridge.exec({});",
             payload_js
         );
-        if let Err(err) = webview.eval(&source) {
+        if let Err(err) = with_dock_on_main_thread(&self.0.app, "dock exec eval", move |app| {
+            let webview = dock_webview(app)
+                .ok_or_else(|| "dock webview is not open".to_string())?;
+            webview
+                .eval(&source)
+                .map_err(|e| format!("{e}"))?;
+            Ok(())
+        }) {
             self.forget_request(req_id);
             return Err(anyhow::anyhow!("dock eval failed: {err}"));
         }
@@ -3993,22 +5091,22 @@ fn capture_dock_window(app: &AppHandle) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow::anyhow!("main window unavailable"))?;
     let main_title = main_window.title().unwrap_or_default();
 
+    let current_pid = std::process::id();
     let xcap_windows = xcap::Window::all()
         .map_err(|err| anyhow::anyhow!("xcap::Window::all failed: {err}"))?;
-    let target = xcap_windows
+    let mut own_windows: Vec<xcap::Window> = xcap_windows
         .into_iter()
-        .find(|w| {
-            let same_title = w
-                .title()
-                .map(|t| t == main_title)
-                .unwrap_or(false);
-            let same_app = w
-                .app_name()
-                .map(|a| a.contains("sen-desktop"))
-                .unwrap_or(false);
-            same_title || same_app
-        })
-        .ok_or_else(|| anyhow::anyhow!("could not locate main window via xcap"))?;
+        .filter(|w| w.pid().map(|p| p == current_pid).unwrap_or(false))
+        .collect();
+    let target = if let Some(idx) = own_windows.iter().position(|w| {
+        w.title().map(|t| t == main_title).unwrap_or(false)
+    }) {
+        own_windows.swap_remove(idx)
+    } else if let Some(first) = own_windows.into_iter().next() {
+        first
+    } else {
+        return Err(anyhow::anyhow!("could not locate main window via xcap"));
+    };
     let captured: RgbaImage = target
         .capture_image()
         .map_err(|err| anyhow::anyhow!("xcap capture_image failed: {err}"))?;
@@ -4050,6 +5148,7 @@ fn capture_dock_window(app: &AppHandle) -> Result<Vec<u8>> {
 }
 
 pub fn install_into(app: &AppHandle) {
+    record_dock_main_thread();
     let controller = TauriDockController::new(app.clone());
     app.manage(controller.clone());
     senweavercoding::tools::browser::install_dock_controller(Arc::new(controller));

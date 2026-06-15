@@ -86,7 +86,7 @@ pub fn export_snapshot(workspace_dir: &Path) -> Result<usize> {
     }
 
     let snapshot_path = snapshot_path(workspace_dir);
-    if let Err(e) = fs::write(&snapshot_path, &output) {
+    if let Err(e) = crate::util::atomic_write(&snapshot_path, output.as_bytes()) {
         tracing::error!(path = %snapshot_path.display(), error = %e, "snapshot export: failed to write file");
         anyhow::bail!("Failed to write snapshot file: {}", e);
     }

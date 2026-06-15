@@ -37,9 +37,11 @@ const CODING_MODE_BACKEND_TO_ID: Record<string, CodingModeId> = {
   mvai: 'mvai',
   harness: 'harness',
   curator: 'curator',
+  designer: 'designer',
 }
 
 const CODING_MODE_ICON: Record<CodingModeId, string> = {
+  auto: '✨',
   vibe: '∞',
   spec: '📋',
   plan: '📄',
@@ -53,6 +55,7 @@ const CODING_MODE_ICON: Record<CodingModeId, string> = {
   mvai: '⚡',
   harness: '🛡',
   curator: '📚',
+  designer: '🎨',
 }
 
 function formatUsd(value: number): string {
@@ -146,7 +149,12 @@ export function UsageSettings() {
     void fetchUsage()
     void fetchRuntime()
     subscribeRealtime()
+    const pollId = window.setInterval(() => {
+      void fetchUsage()
+      void fetchRuntime()
+    }, 30_000)
     return () => {
+      window.clearInterval(pollId)
       unsubscribeRealtime()
     }
   }, [fetchUsage, fetchRuntime, subscribeRealtime, unsubscribeRealtime])

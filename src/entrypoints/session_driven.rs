@@ -100,6 +100,24 @@ pub async fn run_session_driven(agent: Arc<Mutex<Agent>>, prompt_label: &str) ->
         spawn_hub_subscriber(session_id.clone(), transcript.clone(), ChatViewSurface::Cli)
     });
 
+    let session_ctx = {
+        let guard = agent.lock().await;
+        let workspace_dir = guard
+            .current_workspace_dir()
+            .to_string_lossy()
+            .into_owned();
+        crate::session::SessionContext {
+            session_id: session_id.clone(),
+            workspace_key: workspace_dir.clone(),
+            title: session_id.clone(),
+            workspace_dir,
+            connection_id: None,
+        }
+    };
+
+    let cli_permission_mode = crate::gateway::ws::desktop::desktop_runtime_state()
+        .permission_mode_for(&session_id);
+
     let (session, event_rx) = match session_actor.clone() {
         Some(actor) => {
             AgentSession::with_agent_and_state(SessionConfig::default(), agent, actor)
@@ -163,7 +181,54 @@ pub async fn run_session_driven(agent: Arc<Mutex<Agent>>, prompt_label: &str) ->
     });
 
     while let Some(input) = input_rx.recv().await {
-        session.submit(&input).await;
+        match crate::commands::dispatch::dispatch_slash_input(&input).await {
+            crate::commands::dispatch::SlashOutcome::NotCommand => {
+                let perm_scoped = crate::gateway::ws::desktop::scope_permission_mode(
+                    cli_permission_mode.clone(),
+                    session.submit(&input),
+                );
+                let result =
+                    crate::session::scope_session_context(session_ctx.clone(), perm_scoped).await;
+                if let Err(err) = result {
+                    tracing::warn!(error = %err, "CLI: session turn failed");
+                    let mut stdout = io::stdout().lock();
+                    let _ = writeln!(stdout, "\x1b[31m[error] 本轮对话失败: {err}\x1b[0m");
+                    let _ = stdout.flush();
+                }
+            }
+            crate::commands::dispatch::SlashOutcome::Quit => break,
+            crate::commands::dispatch::SlashOutcome::Clear => {
+                let mut stdout = io::stdout().lock();
+                let _ = write!(stdout, "\x1b[2J\x1b[H");
+                let _ = stdout.flush();
+            }
+            crate::commands::dispatch::SlashOutcome::Handled { success, message } => {
+                let mut stdout = io::stdout().lock();
+                if success {
+                    let _ = writeln!(stdout, "{message}");
+                } else {
+                    let _ = writeln!(stdout, "\x1b[31m{message}\x1b[0m");
+                }
+            }
+            crate::commands::dispatch::SlashOutcome::Followup { message, prompt } => {
+                if let Some(msg) = message {
+                    let mut stdout = io::stdout().lock();
+                    let _ = writeln!(stdout, "{msg}");
+                }
+                let perm_scoped = crate::gateway::ws::desktop::scope_permission_mode(
+                    cli_permission_mode.clone(),
+                    session.submit(&prompt),
+                );
+                let result =
+                    crate::session::scope_session_context(session_ctx.clone(), perm_scoped).await;
+                if let Err(err) = result {
+                    tracing::warn!(error = %err, "CLI: session follow-up turn failed");
+                    let mut stdout = io::stdout().lock();
+                    let _ = writeln!(stdout, "\x1b[31m[error] 续转对话失败: {err}\x1b[0m");
+                    let _ = stdout.flush();
+                }
+            }
+        }
     }
 
     drop(session);
@@ -198,8 +263,12 @@ pub async fn submit_single_turn(agent: Arc<Mutex<Agent>>, input: &str) -> Result
             let _ = collector_tx.send(buf);
         });
 
-    session.submit(input).await;
+    let _ = session.submit(input).await;
     drop(session);
-    let output = collector_rx.await.unwrap_or_default();
+    let output = collector_rx.await.map_err(|_| {
+        anyhow::anyhow!(
+            "single-turn output collector channel closed before the turn finished; no output was captured"
+        )
+    })?;
     Ok(output)
 }

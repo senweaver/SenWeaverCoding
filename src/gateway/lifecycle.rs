@@ -5,8 +5,8 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(crate) static GATEWAY_SHUTDOWN_SIGNAL: OnceLock<tokio::sync::watch::Sender<bool>> =
-    OnceLock::new();
+static GATEWAY_SHUTDOWN: parking_lot::RwLock<Option<tokio::sync::watch::Sender<bool>>> =
+    parking_lot::RwLock::new(None);
 pub(crate) static GATEWAY_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static GATEWAY_FULLY_STOPPED: AtomicBool = AtomicBool::new(false);
 
@@ -35,8 +35,17 @@ pub fn snapshot_startup_warnings() -> Vec<StartupWarning> {
     startup_warnings_store().read().clone()
 }
 
+pub(crate) fn install_shutdown_sender(tx: tokio::sync::watch::Sender<bool>) {
+    *GATEWAY_SHUTDOWN.write() = Some(tx);
+}
+
+pub(crate) fn clear_shutdown_sender() {
+    *GATEWAY_SHUTDOWN.write() = None;
+}
+
 pub fn request_shutdown() -> bool {
-    if let Some(tx) = GATEWAY_SHUTDOWN_SIGNAL.get() {
+    let guard = GATEWAY_SHUTDOWN.read();
+    if let Some(tx) = guard.as_ref() {
         let _ = tx.send(true);
         true
     } else {
@@ -44,9 +53,27 @@ pub fn request_shutdown() -> bool {
     }
 }
 
+pub fn request_embedded_shutdown() -> bool {
+    request_shutdown()
+}
+
+pub async fn wait_embedded_stopped(timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !is_running() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 pub fn is_shutdown_requested() -> bool {
-    GATEWAY_SHUTDOWN_SIGNAL
-        .get()
+    GATEWAY_SHUTDOWN
+        .read()
+        .as_ref()
         .map(|tx| *tx.borrow())
         .unwrap_or(false)
 }
@@ -71,6 +98,7 @@ impl GatewayRunningGuard {
 
 impl Drop for GatewayRunningGuard {
     fn drop(&mut self) {
+        clear_shutdown_sender();
         GATEWAY_RUNNING.store(false, Ordering::SeqCst);
         GATEWAY_FULLY_STOPPED.store(true, Ordering::SeqCst);
     }

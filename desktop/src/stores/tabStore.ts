@@ -24,6 +24,28 @@ type TabPersistence = {
   activeTabId: string | null
 }
 
+let saveTabsTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushTabs(state: { tabs: Tab[]; activeTabId: string | null }) {
+  const data: TabPersistence = {
+    openTabs: state.tabs.map((t) => ({ sessionId: t.sessionId, title: t.title, type: t.type })),
+    activeTabId: state.activeTabId,
+  }
+  try {
+    localStorage.setItem(TAB_STORAGE_KEY, JSON.stringify(data))
+  } catch {  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    if (saveTabsTimer !== null) {
+      clearTimeout(saveTabsTimer)
+      saveTabsTimer = null
+      flushTabs(useTabStore.getState())
+    }
+  })
+}
+
 type TabStore = {
   tabs: Tab[]
   activeTabId: string | null
@@ -126,14 +148,11 @@ export const useTabStore = create<TabStore>((set, get) => ({
   },
 
   saveTabs: () => {
-    const { tabs, activeTabId } = get()
-    const data: TabPersistence = {
-      openTabs: tabs.map((t) => ({ sessionId: t.sessionId, title: t.title, type: t.type })),
-      activeTabId,
-    }
-    try {
-      localStorage.setItem(TAB_STORAGE_KEY, JSON.stringify(data))
-    } catch {  }
+    if (saveTabsTimer !== null) return
+    saveTabsTimer = setTimeout(() => {
+      saveTabsTimer = null
+      flushTabs(get())
+    }, 300)
   },
 
   restoreTabs: async () => {

@@ -56,7 +56,7 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
   error: null,
 
   fetchConfig: async () => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: Object.keys(get().config).length === 0, error: null })
     try {
       const config = await adaptersApi.getConfig()
       set({ config, isLoading: false })

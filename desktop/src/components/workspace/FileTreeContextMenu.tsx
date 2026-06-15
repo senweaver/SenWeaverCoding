@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import type { FileTreeNode } from '../../types/workspaceFile'
 
@@ -59,6 +59,26 @@ export function FileTreeContextMenu({
 }: Props) {
   const t = useTranslation()
   const ref = useRef<HTMLDivElement | null>(null)
+  const [pos, setPos] = useState({ x, y })
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) {
+      setPos({ x, y })
+      return
+    }
+    const rect = el.getBoundingClientRect()
+    const margin = 6
+    let nextX = x
+    let nextY = y
+    if (nextX + rect.width + margin > window.innerWidth) {
+      nextX = Math.max(margin, window.innerWidth - rect.width - margin)
+    }
+    if (nextY + rect.height + margin > window.innerHeight) {
+      nextY = Math.max(margin, window.innerHeight - rect.height - margin)
+    }
+    setPos({ x: nextX, y: nextY })
+  }, [x, y, target])
 
   useEffect(() => {
     function onDoc(event: MouseEvent) {
@@ -85,7 +105,7 @@ export function FileTreeContextMenu({
     <div
       ref={ref}
       role="menu"
-      style={{ left: x, top: y, boxShadow: 'var(--shadow-dropdown)' }}
+      style={{ left: pos.x, top: pos.y, boxShadow: 'var(--shadow-dropdown)' }}
       className="fixed z-50 min-w-[180px] rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] py-1 text-xs"
     >
       {isDir && (

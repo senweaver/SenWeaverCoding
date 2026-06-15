@@ -279,9 +279,153 @@ impl CliEntrypoint {
     }
 
     async fn run_remote(options: CliOptions) -> anyhow::Result<()> {
-        tracing::info!("Remote mode requested  -  connecting to bridge");
+        use futures_util::{SinkExt, StreamExt};
+        use std::io::Write as _;
 
-        Self::run_headless(options).await
+        let config = crate::Config::load_or_init().await?;
+        let host = if config.gateway.host == "0.0.0.0" {
+            "127.0.0.1".to_string()
+        } else {
+            config.gateway.host.clone()
+        };
+        let port = config.gateway.port;
+        let session_id = options
+            .session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let mut url = format!("ws://{host}:{port}/ws/chat?session_id={session_id}");
+        if let Some(token) = config.gateway.paired_tokens.first() {
+            url.push_str(&format!("&token={token}"));
+        } else if config.gateway.require_pairing {
+            anyhow::bail!(
+                "remote 模式需要 gateway 配对 token：gateway.require_pairing 已开启，但 config.toml 的 [gateway] paired_tokens 为空。\
+                 请先在 gateway 端完成配对（或在 [gateway] 中加入有效 token / 关闭 require_pairing）后重试。"
+            );
+        }
+
+        tracing::info!(url = %format!("ws://{host}:{port}/ws/chat"), "Remote mode: connecting to gateway");
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.map_err(|e| {
+            anyhow::anyhow!(
+                "remote 模式连接 gateway 失败（ws://{host}:{port}/ws/chat）：{e}\n\
+                 请确认：1) gateway 已启动（运行 `sen gateway`）；2) config.toml 的 [gateway] host/port 配置正确；\
+                 3) 若启用 require_pairing，paired_tokens 中需有有效 token。"
+            )
+        })?;
+
+        let (mut sink, mut stream) = ws_stream.split();
+
+        let connect_msg = serde_json::json!({
+            "type": "connect",
+            "session_id": session_id,
+            "device_name": "sen-cli-remote",
+            "capabilities": ["text"],
+        });
+        sink.send(tokio_tungstenite::tungstenite::Message::Text(
+            connect_msg.to_string().into(),
+        ))
+        .await?;
+
+        async fn remote_turn<S, R>(
+            sink: &mut S,
+            stream: &mut R,
+            content: &str,
+        ) -> anyhow::Result<()>
+        where
+            S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+            S::Error: std::error::Error + Send + Sync + 'static,
+            R: futures_util::Stream<
+                    Item = Result<
+                        tokio_tungstenite::tungstenite::Message,
+                        tokio_tungstenite::tungstenite::Error,
+                    >,
+                > + Unpin,
+        {
+            use std::io::Write as _;
+            let msg = serde_json::json!({ "type": "message", "content": content });
+            sink.send(tokio_tungstenite::tungstenite::Message::Text(
+                msg.to_string().into(),
+            ))
+            .await?;
+
+            while let Some(incoming) = stream.next().await {
+                match incoming? {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+                            continue;
+                        };
+                        match parsed["type"].as_str().unwrap_or("") {
+                            "chunk" => {
+                                print!("{}", parsed["content"].as_str().unwrap_or(""));
+                                let _ = std::io::stdout().flush();
+                            }
+                            "tool_call" => {
+                                eprintln!(
+                                    "\x1b[2m→ {}\x1b[0m",
+                                    parsed["name"].as_str().unwrap_or("tool")
+                                );
+                            }
+                            "error" => {
+                                eprintln!(
+                                    "\x1b[31m远程错误：{}\x1b[0m",
+                                    parsed["content"]
+                                        .as_str()
+                                        .or_else(|| parsed["message"].as_str())
+                                        .unwrap_or("unknown")
+                                );
+                            }
+                            "done" => {
+                                println!();
+                                return Ok(());
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => {
+                        anyhow::bail!("远程会话已被 gateway 关闭");
+                    }
+                    _ => {}
+                }
+            }
+            anyhow::bail!("远程连接中断：gateway 在回合完成前断开")
+        }
+
+        if let Some(prompt) = options.prompt {
+            remote_turn(&mut sink, &mut stream, &prompt).await?;
+            return Ok(());
+        }
+
+        println!("已连接到远程 gateway（session: {session_id}）。输入 /exit 退出。");
+        loop {
+            print!("\x1b[1;32mremote>\x1b[0m ");
+            let _ = std::io::stdout().flush();
+            let line = tokio::task::spawn_blocking(|| {
+                let mut buf = String::new();
+                match std::io::stdin().read_line(&mut buf) {
+                    Ok(0) => None,
+                    Ok(_) => Some(buf),
+                    Err(_) => None,
+                }
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(line) = line else { break };
+            let input = line.trim();
+            if input.is_empty() {
+                continue;
+            }
+            if input == "/exit" || input == "/quit" {
+                break;
+            }
+            remote_turn(&mut sink, &mut stream, input).await?;
+        }
+
+        let _ = sink
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+        Ok(())
     }
 
     async fn run_interactive(options: CliOptions, config: crate::Config) -> anyhow::Result<()> {

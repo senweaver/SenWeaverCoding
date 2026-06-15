@@ -157,7 +157,7 @@ export type AgentSnapshot = {
   lastEditPath: string | null
 }
 
-function hasRecentError(chat: PerSessionState | null | undefined): boolean {
+export function hasRecentError(chat: PerSessionState | null | undefined): boolean {
   if (!chat) return false
   const list = chat.messages
   if (!list || list.length === 0) return false

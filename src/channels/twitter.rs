@@ -44,10 +44,19 @@ impl TwitterChannel {
             return false;
         }
 
+        let dedup = self.dedup.read().await;
+        dedup.contains(tweet_id)
+    }
+
+    async fn mark_processed(&self, tweet_id: &str) {
+        if tweet_id.is_empty() {
+            return;
+        }
+
         let mut dedup = self.dedup.write().await;
 
         if dedup.contains(tweet_id) {
-            return true;
+            return;
         }
 
         if dedup.len() >= DEDUP_CAPACITY {
@@ -58,7 +67,6 @@ impl TwitterChannel {
         }
 
         dedup.insert(tweet_id.to_string());
-        false
     }
 
     async fn get_authenticated_user_id(&self) -> anyhow::Result<String> {
@@ -212,6 +220,7 @@ impl Channel for TwitterChannel {
                         }
                     };
 
+                    let mut dropped = false;
                     if let Some(tweets) = data.get("data").and_then(|d| d.as_array()) {
 
                         let user_map: std::collections::HashMap<String, String> = data
@@ -230,7 +239,7 @@ impl Channel for TwitterChannel {
                             })
                             .unwrap_or_default();
 
-                        for tweet in tweets.iter().rev() {
+                        'tweets: for tweet in tweets.iter().rev() {
                             let tweet_id = tweet.get("id").and_then(|i| i.as_str()).unwrap_or("");
                             let author_id = tweet
                                 .get("author_id")
@@ -285,23 +294,37 @@ impl Channel for TwitterChannel {
                                 attachments: vec![],
                             };
 
-                            if tx.send(channel_msg).await.is_err() {
-                                tracing::warn!("Twitter: message channel closed");
-                                return Ok(());
-                            }
-
-                            if since_id.as_deref().map_or(true, |s| tweet_id > s) {
-                                since_id = Some(tweet_id.to_string());
+                            match crate::channels::forward_channel_message(
+                                "twitter",
+                                &tx,
+                                channel_msg,
+                            ) {
+                                crate::channels::ForwardOutcome::Delivered => {
+                                    self.mark_processed(tweet_id).await;
+                                    if since_id.as_deref().map_or(true, |s| tweet_id > s) {
+                                        since_id = Some(tweet_id.to_string());
+                                    }
+                                }
+                                crate::channels::ForwardOutcome::Dropped => {
+                                    dropped = true;
+                                    break 'tweets;
+                                }
+                                crate::channels::ForwardOutcome::Closed => {
+                                    tracing::warn!("Twitter: message channel closed");
+                                    return Ok(());
+                                }
                             }
                         }
                     }
 
-                    if let Some(newest) = data
-                        .get("meta")
-                        .and_then(|m| m.get("newest_id"))
-                        .and_then(|n| n.as_str())
-                    {
-                        since_id = Some(newest.to_string());
+                    if !dropped {
+                        if let Some(newest) = data
+                            .get("meta")
+                            .and_then(|m| m.get("newest_id"))
+                            .and_then(|n| n.as_str())
+                        {
+                            since_id = Some(newest.to_string());
+                        }
                     }
                 }
                 Ok(resp) => {

@@ -382,18 +382,29 @@ impl Channel for BlueskyChannel {
             };
 
             let mut latest_indexed_at: Option<String> = None;
-            for notif in &listing.notifications {
+            let mut dropped = false;
+            'batch: for notif in &listing.notifications {
                 if let Some(msg) = self.parse_notification(notif) {
-                    latest_indexed_at = Some(notif.indexed_at.clone());
-                    if tx.send(msg).await.is_err() {
-                        return Ok(());
+                    match crate::channels::forward_channel_message("bluesky", &tx, msg) {
+                        crate::channels::ForwardOutcome::Delivered => {
+                            latest_indexed_at = Some(notif.indexed_at.clone());
+                        }
+                        crate::channels::ForwardOutcome::Dropped => {
+                            dropped = true;
+                            break 'batch;
+                        }
+                        crate::channels::ForwardOutcome::Closed => {
+                            return Ok(());
+                        }
                     }
                 }
             }
 
-            if let Some(ref seen_at) = latest_indexed_at {
-                if let Err(e) = self.update_seen(seen_at).await {
-                    tracing::warn!("Bluesky updateSeen error: {e}");
+            if !dropped {
+                if let Some(ref seen_at) = latest_indexed_at {
+                    if let Err(e) = self.update_seen(seen_at).await {
+                        tracing::warn!("Bluesky updateSeen error: {e}");
+                    }
                 }
             }
 

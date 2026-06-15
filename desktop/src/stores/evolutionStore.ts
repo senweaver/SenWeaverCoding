@@ -120,7 +120,7 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
   error: null,
 
   async fetchAll() {
-    set({ loading: true, error: null })
+    set({ loading: get().overview === null, error: null })
     try {
       await Promise.all([
         get().fetchOverview(),

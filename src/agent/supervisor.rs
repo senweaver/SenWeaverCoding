@@ -124,6 +124,8 @@ pub struct Supervisor {
     restart_callback: RwLock<Option<RestartCallback>>,
 
     unhealthy_providers: UnhealthyProviderSet,
+
+    health_subscriber_started: std::sync::atomic::AtomicBool,
 }
 
 impl Supervisor {
@@ -137,6 +139,7 @@ impl Supervisor {
             max_event_log: 1000,
             restart_callback: RwLock::new(None),
             unhealthy_providers: Arc::new(RwLock::new(HashMap::new())),
+            health_subscriber_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -153,21 +156,29 @@ impl Supervisor {
     pub fn spawn_health_subscriber(
         &self,
         broadcaster: &HealthBroadcaster,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if self
+            .health_subscriber_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
         let set = self.unhealthy_providers.clone();
         let mut rx = broadcaster.subscribe();
-        crate::runtime::spawn_supervised("supervisor.health_subscriber", async move {
-            while let Ok(signal) = rx.recv().await {
-                let key = signal.key();
-                let mut guard = set.write();
-                if signal.is_unhealthy() {
-                    guard.insert(key, signal);
-                } else {
-                    guard.remove(&key);
+        Some(
+            crate::runtime::spawn_supervised("supervisor.health_subscriber", async move {
+                while let Ok(signal) = rx.recv().await {
+                    let key = signal.key();
+                    let mut guard = set.write();
+                    if signal.is_unhealthy() {
+                        guard.insert(key, signal);
+                    } else {
+                        guard.remove(&key);
+                    }
                 }
-            }
-        })
-        .into_inner()
+            })
+            .into_inner(),
+        )
     }
 
     pub fn set_restart_callback(&self, callback: RestartCallback) {

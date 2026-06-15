@@ -73,48 +73,67 @@ impl Channel for VoiceWakeChannel {
         let energy_threshold = config.energy_threshold;
         let silence_timeout = Duration::from_millis(u64::from(config.silence_timeout_ms));
         let max_capture = Duration::from_secs(u64::from(config.max_capture_secs));
-        let sample_rate: u32;
-        let channels_count: u16;
-        let _audio_stream;
 
-        {
-            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let (meta_tx, meta_rx) = std::sync::mpsc::channel::<Result<(u32, u16)>>();
+        let (stream_stop_tx, stream_stop_rx) = std::sync::mpsc::channel::<()>();
+        let audio_tx_thread = audio_tx.clone();
+        std::thread::Builder::new()
+            .name("voice-wake-audio".to_string())
+            .spawn(move || {
+                use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-            let host = cpal::default_host();
-            let device = host
-                .default_input_device()
-                .ok_or_else(|| anyhow::anyhow!("No default audio input device available"))?;
+                let init = (|| -> Result<(cpal::Stream, u32, u16)> {
+                    let host = cpal::default_host();
+                    let device = host.default_input_device().ok_or_else(|| {
+                        anyhow::anyhow!("No default audio input device available")
+                    })?;
 
-            let supported = device.default_input_config()?;
-            sample_rate = supported.sample_rate().0;
-            channels_count = supported.channels();
+                    let supported = device.default_input_config()?;
+                    let sample_rate = supported.sample_rate().0;
+                    let channels_count = supported.channels();
 
-            info!(
-                device = ?device.name().unwrap_or_default(),
-                sample_rate,
-                channels = channels_count,
-                "VoiceWake: opening audio input"
-            );
+                    info!(
+                        device = ?device.name().unwrap_or_default(),
+                        sample_rate,
+                        channels = channels_count,
+                        "VoiceWake: opening audio input"
+                    );
 
-            let stream_config: cpal::StreamConfig = supported.into();
-            let audio_tx_clone = audio_tx.clone();
+                    let stream_config: cpal::StreamConfig = supported.into();
 
-            let stream = device.build_input_stream(
-                &stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let stream = device.build_input_stream(
+                        &stream_config,
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            let _ = audio_tx_thread.try_send(data.to_vec());
+                        },
+                        move |err| {
+                            warn!("VoiceWake: audio stream error: {err}");
+                        },
+                        None,
+                    )?;
 
-                    let _ = audio_tx_clone.try_send(data.to_vec());
-                },
-                move |err| {
-                    warn!("VoiceWake: audio stream error: {err}");
-                },
-                None,
-            )?;
+                    stream.play()?;
+                    Ok((stream, sample_rate, channels_count))
+                })();
 
-            stream.play()?;
+                match init {
+                    Ok((stream, sample_rate, channels_count)) => {
+                        let _ = meta_tx.send(Ok((sample_rate, channels_count)));
+                        let _audio_stream = stream;
+                        let _ = stream_stop_rx.recv();
+                    }
+                    Err(err) => {
+                        let _ = meta_tx.send(Err(err));
+                    }
+                }
+            })?;
 
-            _audio_stream = stream;
-        }
+        let meta = tokio::task::spawn_blocking(move || meta_rx.recv()).await?;
+        let (sample_rate, channels_count) = meta.map_err(|_| {
+            anyhow::anyhow!("VoiceWake: audio thread exited before reporting input configuration")
+        })??;
+
+        let _stream_stop_guard = stream_stop_tx;
 
         drop(audio_tx);
 
@@ -225,8 +244,14 @@ impl Channel for VoiceWakeChannel {
                                         attachments: vec![],
                                     };
 
-                                    if let Err(e) = tx.send(msg).await {
-                                        warn!("VoiceWake: failed to dispatch message: {e}");
+                                    if crate::channels::forward_channel_message(
+                                        "voice_wake",
+                                        &tx,
+                                        msg,
+                                    )
+                                    .is_closed()
+                                    {
+                                        warn!("VoiceWake: message channel closed");
                                     }
                                 }
                             }

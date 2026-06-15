@@ -116,7 +116,13 @@ impl Tool for MemoryRecallTool {
             .map_or(5, |v| v as usize)
             .min(1000);
 
-        match self.memory.recall(query, limit, None, since, until).await {
+        let session_id = crate::session::current_session_context().map(|c| c.session_id);
+
+        match self
+            .memory
+            .recall(query, limit, session_id.as_deref(), since, until)
+            .await
+        {
             Ok(entries) if entries.is_empty() => Ok(ToolResult {
                 success: true,
                 output: "No memories found.".into(),

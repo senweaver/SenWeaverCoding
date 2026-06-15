@@ -68,6 +68,36 @@ fn patch_history_runtime_model(history: &mut [ChatMessage], old_model: &str, new
     }
 }
 
+pub fn resolve_model_override_target(
+    requested: &str,
+    config: &Config,
+) -> Option<(Option<String>, String)> {
+    let trimmed = requested.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("fast") {
+        if let Some(route) = config
+            .model_routes
+            .iter()
+            .find(|r| r.hint.eq_ignore_ascii_case("fast"))
+        {
+            return Some((Some(route.provider.clone()), route.model.clone()));
+        }
+        if let Some(fast) = config
+            .agent_runtime
+            .fast_apply_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            return Some((None, fast.to_string()));
+        }
+        return None;
+    }
+    Some((None, trimmed.to_string()))
+}
+
 pub use crate::agent::model_switch::{
     ModelSwitchCallback, clear_model_switch_request, get_model_switch_state, scope_model_switch,
 };
@@ -405,7 +435,8 @@ fn canonical_tool_alias(name: &str) -> Option<&'static str> {
         | "edit_file" | "editfile" => "file_edit",
         "bash" | "sh" | "exec" | "command" | "cmd" | "terminal" | "run_command"
         | "runcommand" | "shell_command" => "shell",
-        "ls" | "list_files" | "listfiles" | "list_dir" | "listdir" | "dir" => "file_list",
+        "ls" | "list_files" | "listfiles" | "list_dir" | "listdir" | "dir" | "file_list"
+        | "filelist" => "dir_list",
         "askquestion" => "ask_question",
         "askuser" => "ask_user",
         "memory_search" | "memorysearch" | "memrecall" | "memory_query" => "memory_recall",
@@ -1492,6 +1523,43 @@ fn maybe_inject_channel_delivery_defaults(
     }
 }
 
+async fn request_session_tool_approval(
+    mgr: &ApprovalManager,
+    request: &ApprovalRequest,
+    on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
+    cancellation_token: Option<&CancellationToken>,
+    description: &str,
+) -> Option<crate::approval::SessionApprovalVerdict> {
+    if !mgr.has_session_sink() {
+        return None;
+    }
+    let tx = on_delta?;
+    let mut rx = crate::gateway::ws::gateway_approval_bus().subscribe();
+    let request_id = mgr.request_via_session(request)?;
+    let _ = tx
+        .send(DraftEvent::PermissionRequest {
+            request_id: request_id.clone(),
+            tool_name: request.tool_name.clone(),
+            input: request.arguments.clone(),
+            description: Some(description.to_string()),
+        })
+        .await;
+    Some(
+        crate::approval::wait_for_session_decision(&request_id, &mut rx, cancellation_token)
+            .await,
+    )
+}
+
+fn approval_timeout_denial(tool_name: &str) -> String {
+    format!(
+        "Approval request for tool '{}' timed out after {}s with no user response; the call was \
+         denied. Ask the user to respond to the approval prompt, or have them adjust the \
+         [autonomy] auto_approve configuration.",
+        tool_name,
+        crate::approval::SESSION_APPROVAL_TIMEOUT_MS / 1000
+    )
+}
+
 async fn execute_one_tool(
     call_name: &str,
     call_arguments: serde_json::Value,
@@ -1502,6 +1570,8 @@ async fn execute_one_tool(
     cancellation_token: Option<&CancellationToken>,
     rbac_engine: Option<&std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<&crate::security::rbac::CallerIdentity>,
+    approval: Option<&ApprovalManager>,
+    guardrails_pre_cleared: bool,
 ) -> Result<ToolExecutionOutcome> {
 
     tracing::debug!(
@@ -1565,30 +1635,122 @@ async fn execute_one_tool(
         }
     }
 
-    let coding_label = Some(crate::agent::coding_mode::active_coding_mode().label().to_string());
-    let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
-    let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
-    let tool_lc = call_name.to_ascii_lowercase();
-    let guardrail_ctx = crate::guardrails::GuardrailContext {
-        coding_mode: coding_label_lc.as_deref(),
-        permission_mode: Some(&perm_mode_lc),
-        tool_name: Some(&tool_lc),
-    };
-    if let Err(reason) =
-        crate::guardrails::check_tool_guardrails(call_name, Some(&guardrail_ctx))
-    {
-        let duration = start.elapsed();
-        observer.record_event(&ObserverEvent::ToolCall {
-            tool: call_name.to_string(),
-            duration,
-            success: false,
-        });
-        return Ok(ToolExecutionOutcome {
-            output: format!("Blocked by guardrails: {reason}"),
-            success: false,
-            error_reason: Some(reason),
-            duration,
-        });
+    if !guardrails_pre_cleared {
+        let coding_label =
+            Some(crate::agent::coding_mode::active_coding_mode().label().to_string());
+        let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
+        let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
+        let tool_lc = call_name.to_ascii_lowercase();
+        let guardrail_ctx = crate::guardrails::GuardrailContext {
+            coding_mode: coding_label_lc.as_deref(),
+            permission_mode: Some(&perm_mode_lc),
+            tool_name: Some(&tool_lc),
+        };
+        match crate::guardrails::evaluate_tool_guardrails(call_name, Some(&guardrail_ctx)) {
+            crate::guardrails::GuardrailDecision::Allow => {}
+            crate::guardrails::GuardrailDecision::Deny(reason) => {
+                let duration = start.elapsed();
+                observer.record_event(&ObserverEvent::ToolCall {
+                    tool: call_name.to_string(),
+                    duration,
+                    success: false,
+                });
+                return Ok(ToolExecutionOutcome {
+                    output: format!("Blocked by guardrails: {reason}"),
+                    success: false,
+                    error_reason: Some(reason),
+                    duration,
+                });
+            }
+            crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
+                let mode_auto_approved = crate::agent::mode::effects::mode_auto_approves(
+                    crate::agent::coding_mode::active_coding_mode(),
+                );
+                let mut timeout_denial: Option<String> = None;
+                let approved = if mode_auto_approved {
+                    true
+                } else if let Some(mgr) = approval {
+                    let request = ApprovalRequest {
+                        tool_name: call_name.to_string(),
+                        arguments: call_arguments.clone(),
+                    };
+                    let parent_draft = take_parent_draft_channel();
+                    match request_session_tool_approval(
+                        mgr,
+                        &request,
+                        parent_draft.as_ref(),
+                        cancellation_token,
+                        &format!("Guardrail approval required: {reason}"),
+                    )
+                    .await
+                    {
+                        Some(crate::approval::SessionApprovalVerdict::Decision(decision)) => {
+                            mgr.record_decision(
+                                call_name,
+                                &call_arguments,
+                                decision,
+                                "guardrail",
+                            );
+                            decision != ApprovalResponse::No
+                        }
+                        Some(crate::approval::SessionApprovalVerdict::Cancelled) => {
+                            mgr.record_decision(
+                                call_name,
+                                &call_arguments,
+                                ApprovalResponse::No,
+                                "guardrail",
+                            );
+                            return Err(tool_loop_cancelled());
+                        }
+                        Some(crate::approval::SessionApprovalVerdict::TimedOut) => {
+                            mgr.record_decision(
+                                call_name,
+                                &call_arguments,
+                                ApprovalResponse::No,
+                                "guardrail",
+                            );
+                            timeout_denial = Some(approval_timeout_denial(call_name));
+                            false
+                        }
+                        None => {
+                            if mgr.is_non_interactive() {
+                                false
+                            } else {
+                                let decision = mgr.prompt_cli(&request);
+                                mgr.record_decision(
+                                    call_name,
+                                    &call_arguments,
+                                    decision,
+                                    "guardrail",
+                                );
+                                decision != ApprovalResponse::No
+                            }
+                        }
+                    }
+                } else {
+                    false
+                };
+                if !approved {
+                    let duration = start.elapsed();
+                    observer.record_event(&ObserverEvent::ToolCall {
+                        tool: call_name.to_string(),
+                        duration,
+                        success: false,
+                    });
+                    let denial = timeout_denial.unwrap_or_else(|| {
+                        format!(
+                            "Blocked by guardrails: approval required but not granted ({reason})"
+                        )
+                    });
+                    return Ok(ToolExecutionOutcome {
+                        output: denial.clone(),
+                        success: false,
+                        error_reason: Some(denial),
+                        duration,
+                    });
+                }
+            }
+        }
     }
 
     {
@@ -1699,7 +1861,8 @@ async fn execute_one_tool(
             target: "agent.tool",
             tool = %call_name,
             timeout_secs = limit_secs,
-            "tool execution timed out; recovering as a tool error so the turn keeps running"
+            elapsed_ms = duration.as_millis() as u64,
+            "tool execution timed out; the in-flight tool future has been dropped to best-effort cancel tool-side work (kill_on_drop children are reaped on drop). Tools that spawn children without kill_on_drop may leave an orphan until OS reclaim; recovering as a non-silent tool error so the turn keeps running"
         );
         observer.record_event(&ObserverEvent::ToolCall {
             tool: call_name.to_string(),
@@ -1969,6 +2132,7 @@ fn should_execute_tools_in_parallel(
 
 async fn execute_tools_parallel(
     tool_calls: &[ParsedToolCall],
+    guardrails_pre_cleared: &[bool],
     tools_registry: &[Box<dyn Tool>],
     tool_registry: Option<&ToolRegistry>,
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -1976,6 +2140,7 @@ async fn execute_tools_parallel(
     cancellation_token: Option<&CancellationToken>,
     rbac_engine: Option<&std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<&crate::security::rbac::CallerIdentity>,
+    approval: Option<&ApprovalManager>,
 ) -> Result<Vec<ToolExecutionOutcome>> {
 
     let configured_cap = resolve_parallel_tool_cap();
@@ -1985,9 +2150,11 @@ async fn execute_tools_parallel(
 
     let futures: Vec<_> = tool_calls
         .iter()
-        .map(|call| {
+        .enumerate()
+        .map(|(call_idx, call)| {
             let sem = semaphore.clone();
             let tool_call_id = call.tool_call_id.clone();
+            let pre_cleared = guardrails_pre_cleared.get(call_idx).copied().unwrap_or(false);
             async move {
                 let _permit = match sem.acquire_owned().await {
                     Ok(p) => p,
@@ -2007,6 +2174,8 @@ async fn execute_tools_parallel(
                             cancellation_token,
                             rbac_engine,
                             rbac_identity,
+                            approval,
+                            pre_cleared,
                         )
                         .await
                     })
@@ -2045,6 +2214,7 @@ async fn execute_tools_parallel(
 
 async fn execute_tools_sequential(
     tool_calls: &[ParsedToolCall],
+    guardrails_pre_cleared: &[bool],
     tools_registry: &[Box<dyn Tool>],
     tool_registry: Option<&ToolRegistry>,
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -2052,10 +2222,12 @@ async fn execute_tools_sequential(
     cancellation_token: Option<&CancellationToken>,
     rbac_engine: Option<&std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<&crate::security::rbac::CallerIdentity>,
+    approval: Option<&ApprovalManager>,
 ) -> Result<Vec<ToolExecutionOutcome>> {
     let mut outcomes = Vec::with_capacity(tool_calls.len());
 
-    for call in tool_calls {
+    for (call_idx, call) in tool_calls.iter().enumerate() {
+        let pre_cleared = guardrails_pre_cleared.get(call_idx).copied().unwrap_or(false);
         let res = CURRENT_TOOL_CALL_ID
             .scope(call.tool_call_id.clone(), async {
                 execute_one_tool(
@@ -2068,6 +2240,8 @@ async fn execute_tools_sequential(
                     cancellation_token,
                     rbac_engine,
                     rbac_identity,
+                    approval,
+                    pre_cleared,
                 )
                 .await
             })
@@ -2097,6 +2271,7 @@ async fn execute_tools_sequential(
 }
 
 async fn fire_post_turn_hooks(
+    channel_name: &str,
     response_cache_hook: Option<&std::sync::Arc<dyn crate::agent::loop_::traits::ResponseCacheHook>>,
     experience_recorder_hook: Option<
         &std::sync::Arc<dyn crate::agent::loop_::traits::ExperienceRecorderHook>,
@@ -2109,6 +2284,7 @@ async fn fire_post_turn_hooks(
     output_tokens: u32,
     tools_used: &[String],
     tool_results: &[(String, bool)],
+    record_learning: bool,
 ) {
     if let (Some(hook), Some(key)) = (response_cache_hook, cache_key) {
         hook.write_back(key, model, final_text, output_tokens).await;
@@ -2125,6 +2301,11 @@ async fn fire_post_turn_hooks(
     if let Some(hook) = memory_session_hook {
         hook.on_turn_end(final_text, tools_used).await;
     }
+    if record_learning {
+        record_post_turn_learning(user_message, model, final_text, tool_results);
+        spawn_turn_heuristics_recording(channel_name, user_message, final_text, tool_results);
+    }
+    spawn_post_turn_session_memory(user_message, final_text);
     if !tool_results.is_empty() {
         let records: Vec<crate::services::agent_summary::ToolUsageRecord> = tool_results
             .iter()
@@ -2154,6 +2335,142 @@ async fn fire_post_turn_hooks(
             summary.summary_text
         );
     }
+}
+
+fn spawn_turn_heuristics_recording(
+    channel_name: &str,
+    user_message: &str,
+    final_text: &str,
+    tool_results: &[(String, bool)],
+) {
+    if channel_name == "delegate" {
+        return;
+    }
+    if channel_name == "gui" && crate::gateway::lifecycle::is_running() {
+        return;
+    }
+    let user_message = user_message.to_string();
+    let final_text = final_text.to_string();
+    let tool_results: Vec<(String, bool)> = tool_results.to_vec();
+    crate::runtime::spawn_supervised("agent.loop.turn_heuristics", async move {
+        let Some(svc) = crate::services::try_get_services() else {
+            return;
+        };
+        let hooks = crate::agent::profile::runtime_hooks::LearningHooks::from_config(
+            &svc.config(),
+        );
+        let tool_result_refs: Vec<(&str, bool)> = tool_results
+            .iter()
+            .map(|(name, success)| (name.as_str(), *success))
+            .collect();
+        hooks.record_turn_heuristics(&user_message, &final_text, &tool_result_refs);
+    });
+}
+
+pub(crate) fn record_post_turn_learning(
+    user_message: &str,
+    model: &str,
+    final_text: &str,
+    tool_results: &[(String, bool)],
+) {
+    let Some(engine) = crate::agent::reward::reinforcement::global_reinforcement_engine() else {
+        return;
+    };
+    let tool_success_rate = if tool_results.is_empty() {
+        1.0
+    } else {
+        tool_results.iter().filter(|(_, ok)| *ok).count() as f64 / tool_results.len() as f64
+    };
+    let response_reward = if final_text.trim().is_empty() { -0.5 } else { 0.5 };
+    let reward = ((tool_success_rate * 2.0 - 1.0) * 0.5 + response_reward).clamp(-1.0, 1.0);
+    let temperature_used = crate::services::try_get_services()
+        .map(|svc| svc.config().default_temperature)
+        .unwrap_or(0.7);
+    let record = crate::agent::reward::reinforcement::TurnRecord {
+        turn_index: engine.total_turns(),
+        timestamp: chrono::Utc::now(),
+        reward,
+        model_used: model.to_string(),
+        temperature_used,
+        query_category: format!(
+            "{:?}",
+            crate::agent::eval::estimate_complexity(user_message)
+        ),
+        tools_used: tool_results.iter().map(|(name, _)| name.clone()).collect(),
+        response_length: final_text.len(),
+    };
+    let _ = engine.record_turn(record);
+}
+
+fn spawn_post_turn_session_memory(user_message: &str, final_text: &str) {
+    let Some(svc) = crate::services::try_get_services() else {
+        return;
+    };
+    let cfg = svc.config();
+    let auto_save = cfg.memory.auto_save;
+    let extraction_cfg = svc.extraction_config.clone();
+    if !auto_save && !extraction_cfg.enabled {
+        return;
+    }
+    if final_text.trim().is_empty() {
+        return;
+    }
+    let session_memory = svc.session_memory.clone();
+    let user_msg = user_message.to_string();
+    let assistant_text = final_text.to_string();
+    let session_context = crate::session::current_session_context();
+    crate::runtime::spawn_supervised("agent.loop.session_memory", async move {
+        let work = async move {
+            if auto_save {
+                let summary = format!(
+                    "U: {} | A: {}",
+                    truncate_with_ellipsis(&user_msg, 400),
+                    truncate_with_ellipsis(&assistant_text, 800)
+                );
+                session_memory
+                    .store(
+                        "last_turn",
+                        &summary,
+                        crate::services::memory::session::SessionMemoryCategory::TaskContext,
+                    )
+                    .await;
+            }
+            let extracted = crate::services::memory::extract::extract_from_turn(
+                &user_msg,
+                &assistant_text,
+                &extraction_cfg,
+            );
+            for memory in extracted {
+                let category = match memory.category {
+                    crate::services::memory::extract::MemoryCategory::Preference => {
+                        crate::services::memory::session::SessionMemoryCategory::UserPreference
+                    }
+                    crate::services::memory::extract::MemoryCategory::Decision => {
+                        crate::services::memory::session::SessionMemoryCategory::Decision
+                    }
+                    crate::services::memory::extract::MemoryCategory::Fact
+                    | crate::services::memory::extract::MemoryCategory::Convention
+                    | crate::services::memory::extract::MemoryCategory::ProjectStructure => {
+                        crate::services::memory::session::SessionMemoryCategory::ProjectContext
+                    }
+                    crate::services::memory::extract::MemoryCategory::Workflow => {
+                        crate::services::memory::session::SessionMemoryCategory::TaskContext
+                    }
+                };
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    memory.content.hash(&mut hasher);
+                    format!("extracted_{:016x}", hasher.finish())
+                };
+                session_memory.store(&key, &memory.content, category).await;
+            }
+        };
+        match session_context {
+            Some(ctx) => crate::session::scope_session_context(ctx, work).await,
+            None => work.await,
+        }
+    });
 }
 
 pub(crate) async fn run_unified_loop_impl(
@@ -2201,6 +2518,13 @@ pub(crate) async fn run_unified_loop_impl(
         tool_descriptions,
     } = policy;
     let _ = &model_classifier_hook;
+    let approval: Option<&ApprovalManager> = approval.or_else(|| {
+        if channel_name == "gui" {
+            crate::approval::session_surface_approval_manager()
+        } else {
+            None
+        }
+    });
 
     let user_msg_for_hooks: String = history
         .iter()
@@ -2232,6 +2556,7 @@ pub(crate) async fn run_unified_loop_impl(
         if let Some(cached) = hook.try_hit(key, &user_msg_for_hooks).await {
             history.push(ChatMessage::assistant(cached.clone()));
             fire_post_turn_hooks(
+                channel_name,
                 response_cache_hook.as_ref(),
                 experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
@@ -2242,6 +2567,7 @@ pub(crate) async fn run_unified_loop_impl(
                 0,
                 &[],
                 &[],
+                true,
             )
             .await;
             return Ok(cached);
@@ -2293,8 +2619,9 @@ pub(crate) async fn run_unified_loop_impl(
         max_iterations,
         None,
         pacing
-            .step_timeout_secs
-            .map(|s| std::time::Duration::from_secs(s)),
+            .total_turn_timeout_secs
+            .filter(|s| *s > 0)
+            .map(std::time::Duration::from_secs),
     );
 
     let mut plan_nudge_state =
@@ -2363,14 +2690,22 @@ pub(crate) async fn run_unified_loop_impl(
     let mut parse_issue_nudges_used = 0usize;
     const MAX_PARSE_ISSUE_NUDGES: usize = 2;
 
+    let mut compression_retry_floor: Option<usize> = None;
+
+    let mut pacing_break_reason: Option<crate::agent::executor_core::PacingExceeded> = None;
+
+    let mut turn_tool_results: Vec<(String, bool)> = Vec::new();
+
     for iteration in 0..max_iterations {
         if let Err(budget_exceeded) = _pacing_gov.tick() {
             tracing::warn!(
                 target: "agent.pacing",
                 turn_id = %turn_id,
                 reason = %budget_exceeded,
-                "agent turn pacing budget exceeded"
+                "agent turn pacing budget exceeded; ending turn gracefully"
             );
+            pacing_break_reason = Some(budget_exceeded);
+            break;
         }
 
         tracing::debug!(
@@ -2475,7 +2810,7 @@ pub(crate) async fn run_unified_loop_impl(
 
         let coding_mode_allowlist: Option<HashSet<&str>> =
             crate::agent::coding_mode::active_coding_mode().allowed_tools();
-        let plan_mode_active = plan_mode_flag.map_or(false, |f| *f.read());
+        let plan_mode_active = plan_mode_flag.is_some_and(crate::tools::PlanModeFlag::is_active);
 
         let mode_hash = {
             use std::hash::{Hash, Hasher};
@@ -2638,11 +2973,18 @@ pub(crate) async fn run_unified_loop_impl(
         if let Some(svc) = crate::services::try_get_services() {
             let cfg_snapshot = svc.config();
             let compression_cfg = cfg_snapshot.agent.context_compression.clone();
-            if compression_cfg.enabled {
-                let budget_window = crate::agent::token::optimizer::global_optimizer()
-                    .map(|opt| opt.budget().context_window())
-                    .unwrap_or(128_000);
-                let context_window = budget_window.max(32_000);
+            let budget_window = crate::agent::token::optimizer::global_optimizer()
+                .map(|opt| opt.budget().context_window())
+                .unwrap_or(128_000);
+            let context_window = budget_window.max(32_000);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let compression_threshold =
+                (context_window as f64 * compression_cfg.threshold_ratio) as usize;
+            let estimated_tokens = crate::agent::context::compressor::estimate_tokens(history);
+            let over_threshold = estimated_tokens > compression_threshold;
+            let retry_blocked =
+                compression_retry_floor.is_some_and(|floor| estimated_tokens <= floor);
+            if compression_cfg.enabled && over_threshold && !retry_blocked {
                 let compressor = crate::agent::context::compressor::ContextCompressor::new(
                     compression_cfg,
                     context_window,
@@ -2701,6 +3043,12 @@ pub(crate) async fn run_unified_loop_impl(
                         return Err(tool_loop_cancelled());
                     }
                     Some(Ok(result)) if result.compressed => {
+                        if result.tokens_after > compression_threshold {
+                            compression_retry_floor =
+                                Some(result.tokens_after + compression_threshold / 5);
+                        } else {
+                            compression_retry_floor = None;
+                        }
                         if let Some(ref tx) = on_delta {
                             let _ = tx
                                 .send(DraftEvent::ContextCompressed {
@@ -2717,8 +3065,13 @@ pub(crate) async fn run_unified_loop_impl(
                             "history compressed before LLM call"
                         );
                     }
-                    Some(Ok(_)) => {}
+                    Some(Ok(result)) => {
+                        compression_retry_floor =
+                            Some(result.tokens_after + compression_threshold / 5);
+                    }
                     Some(Err(err)) => {
+                        compression_retry_floor =
+                            Some(estimated_tokens + compression_threshold / 5);
                         tracing::warn!(
                             target: "agent.context.compress",
                             error = %err,
@@ -2822,8 +3175,20 @@ pub(crate) async fn run_unified_loop_impl(
                         .await
                         .and_then(|s| s.retry_after_ms)
                     {
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms.min(10_000)))
-                            .await;
+                        let sleep =
+                            tokio::time::sleep(std::time::Duration::from_millis(retry_ms.min(10_000)));
+                        match cancellation_token.as_ref() {
+                            Some(token) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = token.cancelled() => {
+                                        return Err(tool_loop_cancelled());
+                                    }
+                                    _ = sleep => {}
+                                }
+                            }
+                            None => sleep.await,
+                        }
                     }
                 }
             }
@@ -2912,6 +3277,23 @@ pub(crate) async fn run_unified_loop_impl(
                     })
                 }
                 Err(stream_err) => {
+                    if cancellation_token
+                        .as_ref()
+                        .is_some_and(|t| t.is_cancelled())
+                    {
+                        return Err(tool_loop_cancelled());
+                    }
+                    if stream_err.to_string().contains("stream idle timeout")
+                        && llm_resilience_attempt < LLM_RESILIENCE_MAX_RETRIES
+                    {
+                        tracing::warn!(
+                            provider = active_provider_name,
+                            model = active_model,
+                            iteration = iteration + 1,
+                            "provider stream idle timeout; retrying streaming call instead of degrading to non-streaming: {stream_err}"
+                        );
+                        Err(stream_err)
+                    } else {
                     tracing::warn!(
                         provider = active_provider_name,
                         model = active_model,
@@ -2943,6 +3325,7 @@ pub(crate) async fn run_unified_loop_impl(
                         cancellation_token.as_ref(),
                     )
                     .await
+                    }
                 }
             }
         } else {
@@ -3450,7 +3833,12 @@ pub(crate) async fn run_unified_loop_impl(
                     )
                     .await;
                     _turn_metrics.mark_ok();
+                    let turn_tools_used: Vec<String> = turn_tool_results
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect();
                     fire_post_turn_hooks(
+                        channel_name,
                         response_cache_hook.as_ref(),
                         experience_recorder_hook.as_ref(),
                         memory_session_hook.as_ref(),
@@ -3459,8 +3847,9 @@ pub(crate) async fn run_unified_loop_impl(
                         model,
                         &display_text,
                         0,
-                        &[],
-                        &[],
+                        &turn_tools_used,
+                        &turn_tool_results,
+                        true,
                     )
                     .await;
                     return Ok(display_text);
@@ -3469,6 +3858,8 @@ pub(crate) async fn run_unified_loop_impl(
                 let _ = tx.send(DraftEvent::Clear).await;
 
                 let mut chunk = String::new();
+                let mut delivered_chars = 0usize;
+                let mut delivery_interrupted = false;
                 for word in display_text.split_inclusive(char::is_whitespace) {
                     if cancellation_token
                         .as_ref()
@@ -3477,17 +3868,42 @@ pub(crate) async fn run_unified_loop_impl(
                         return Err(tool_loop_cancelled());
                     }
                     chunk.push_str(word);
-                    if chunk.len() >= STREAM_CHUNK_MIN_CHARS
-                        && tx
+                    if chunk.len() >= STREAM_CHUNK_MIN_CHARS {
+                        let pending = chunk.len();
+                        if tx
                             .send(DraftEvent::Content(std::mem::take(&mut chunk)))
                             .await
                             .is_err()
-                    {
-                        break;
+                        {
+                            delivery_interrupted = true;
+                            break;
+                        }
+                        delivered_chars += pending;
                     }
                 }
-                if !chunk.is_empty() {
-                    let _ = tx.send(DraftEvent::Content(chunk)).await;
+                if !delivery_interrupted && !chunk.is_empty() {
+                    let pending = chunk.len();
+                    if tx.send(DraftEvent::Content(chunk)).await.is_err() {
+                        delivery_interrupted = true;
+                    } else {
+                        delivered_chars += pending;
+                    }
+                }
+                if delivery_interrupted {
+                    let total_chars = display_text.len();
+                    tracing::error!(
+                        target: "agent.loop",
+                        turn_id = %turn_id,
+                        delivered_chars,
+                        total_chars,
+                        "event consumer disconnected during final chunked delivery; marking turn interrupted instead of recording undelivered content as a successful turn"
+                    );
+                    _turn_metrics.mark_status("interrupted");
+                    return Err(anyhow::Error::new(
+                        crate::error::AgentError::StreamInterrupted(format!(
+                            "final response delivery interrupted after {delivered_chars}/{total_chars} chars; turn not recorded as delivered"
+                        )),
+                    ));
                 }
             }
             history.push(ChatMessage::assistant(response_text.clone()));
@@ -3515,7 +3931,12 @@ pub(crate) async fn run_unified_loop_impl(
             )
             .await;
             _turn_metrics.mark_ok();
+            let turn_tools_used: Vec<String> = turn_tool_results
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
             fire_post_turn_hooks(
+                channel_name,
                 response_cache_hook.as_ref(),
                 experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
@@ -3524,8 +3945,9 @@ pub(crate) async fn run_unified_loop_impl(
                 model,
                 &display_text,
                 0,
-                &[],
-                &[],
+                &turn_tools_used,
+                &turn_tool_results,
+                true,
             )
             .await;
             return Ok(display_text);
@@ -3554,6 +3976,7 @@ pub(crate) async fn run_unified_loop_impl(
         let allow_parallel_execution = should_execute_tools_in_parallel(&tool_calls, approval);
         let mut executable_indices: Vec<usize> = Vec::new();
         let mut executable_calls: Vec<ParsedToolCall> = Vec::new();
+        let mut executable_pre_cleared: Vec<bool> = Vec::new();
 
         let mut deferred_system_after_tool_batch: Vec<String> = Vec::new();
 
@@ -3618,6 +4041,159 @@ pub(crate) async fn run_unified_loop_impl(
                     call.name
                 );
             }
+
+            let pre_hook_guardrail_cleared = {
+                let coding_label = Some(
+                    crate::agent::coding_mode::active_coding_mode()
+                        .label()
+                        .to_string(),
+                );
+                let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
+                let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
+                let tool_lc = call.name.to_ascii_lowercase();
+                let guardrail_ctx = crate::guardrails::GuardrailContext {
+                    coding_mode: coding_label_lc.as_deref(),
+                    permission_mode: Some(&perm_mode_lc),
+                    tool_name: Some(&tool_lc),
+                };
+                let pre_hook_denial: Option<String> = match crate::guardrails::evaluate_tool_guardrails(
+                    &call.name,
+                    Some(&guardrail_ctx),
+                ) {
+                    crate::guardrails::GuardrailDecision::Allow => None,
+                    crate::guardrails::GuardrailDecision::Deny(reason) => {
+                        Some(format!("Blocked by guardrails: {reason}"))
+                    }
+                    crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
+                        let mode_auto_approved =
+                            crate::agent::mode::effects::mode_auto_approves(
+                                crate::agent::coding_mode::active_coding_mode(),
+                            );
+                        if mode_auto_approved {
+                            None
+                        } else if let Some(mgr) = approval {
+                            let request = ApprovalRequest {
+                                tool_name: call.name.clone(),
+                                arguments: call.arguments.clone(),
+                            };
+                            match request_session_tool_approval(
+                                mgr,
+                                &request,
+                                on_delta.as_ref(),
+                                cancellation_token.as_ref(),
+                                &format!("Guardrail approval required: {reason}"),
+                            )
+                            .await
+                            {
+                                Some(crate::approval::SessionApprovalVerdict::Decision(
+                                    decision,
+                                )) => {
+                                    mgr.record_decision(
+                                        &call.name,
+                                        &call.arguments,
+                                        decision,
+                                        "guardrail",
+                                    );
+                                    if decision == ApprovalResponse::No {
+                                        Some(format!(
+                                            "Blocked by guardrails: approval required but not \
+                                             granted ({reason})"
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Some(crate::approval::SessionApprovalVerdict::Cancelled) => {
+                                    mgr.record_decision(
+                                        &call.name,
+                                        &call.arguments,
+                                        ApprovalResponse::No,
+                                        "guardrail",
+                                    );
+                                    return Err(tool_loop_cancelled());
+                                }
+                                Some(crate::approval::SessionApprovalVerdict::TimedOut) => {
+                                    mgr.record_decision(
+                                        &call.name,
+                                        &call.arguments,
+                                        ApprovalResponse::No,
+                                        "guardrail",
+                                    );
+                                    Some(approval_timeout_denial(&call.name))
+                                }
+                                None => {
+                                    if mgr.is_non_interactive() {
+                                        Some(format!(
+                                            "Blocked by guardrails: approval required but not \
+                                             granted ({reason})"
+                                        ))
+                                    } else {
+                                        let decision = mgr.prompt_cli(&request);
+                                        mgr.record_decision(
+                                            &call.name,
+                                            &call.arguments,
+                                            decision,
+                                            "guardrail",
+                                        );
+                                        if decision == ApprovalResponse::No {
+                                            Some(format!(
+                                                "Blocked by guardrails: approval required but \
+                                                 not granted ({reason})"
+                                            ))
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Some(format!(
+                                "Blocked by guardrails: approval required but not granted \
+                                 ({reason})"
+                            ))
+                        }
+                    }
+                };
+                if let Some(denial) = pre_hook_denial {
+                    runtime_trace::record_event(
+                        "tool_call_result",
+                        Some(channel_name),
+                        Some(provider_name),
+                        Some(model),
+                        Some(&turn_id),
+                        Some(false),
+                        Some(&denial),
+                        serde_json::json!({
+                            "iteration": iteration + 1,
+                            "tool": call.name.clone(),
+                            "arguments": scrub_credentials(&call.arguments.to_string()),
+                            "guardrail_pre_hook": true,
+                        }),
+                    );
+                    if let Some(ref tx) = on_delta {
+                        let _ = tx
+                            .send(DraftEvent::Progress(format!(
+                                "\u{274c} {}: {}\n",
+                                call.name,
+                                truncate_with_ellipsis(&denial, 200)
+                            )))
+                            .await;
+                    }
+                    ordered_results[idx] = Some((
+                        call.name.clone(),
+                        call.tool_call_id.clone(),
+                        ToolExecutionOutcome {
+                            output: denial.clone(),
+                            success: false,
+                            error_reason: Some(denial),
+                            duration: Duration::ZERO,
+                        },
+                    ));
+                    continue;
+                }
+                true
+            };
+
             if let Some(hooks) = hooks {
                 match hooks
                     .run_before_tool_call(tool_name.clone(), tool_args.clone())
@@ -3675,6 +4251,88 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_reply_target,
             );
 
+            let allowlist_denial = {
+                let mode = crate::agent::coding_mode::active_coding_mode();
+                mode.allowed_tools().and_then(|allowed| {
+                    if allowed.contains(tool_name.as_str()) {
+                        None
+                    } else {
+                        let mut listed: Vec<&str> = allowed.iter().copied().collect();
+                        listed.sort_unstable();
+                        let preview: String = listed
+                            .iter()
+                            .take(12)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let extra = if listed.len() > 12 {
+                            format!(", ... ({} more)", listed.len() - 12)
+                        } else {
+                            String::new()
+                        };
+                        let hint = if matches!(
+                            mode,
+                            crate::agent::coding_mode::CodingMode::Plan
+                        ) {
+                            " To produce or update the plan document call \
+                             `update_plan(action=\"set\"|\"add\"|\"save\", ...)`. \
+                             When planning is finished call `exit_plan_mode` so the \
+                             user can press the Build button to switch to Agent mode \
+                             for execution."
+                        } else {
+                            ""
+                        };
+                        Some((
+                            mode,
+                            format!(
+                                "Tool '{}' is not permitted in {} mode.{} Allowed tools: {}{}",
+                                tool_name,
+                                mode.label(),
+                                hint,
+                                preview,
+                                extra
+                            ),
+                        ))
+                    }
+                })
+            };
+            if let Some((denied_mode, denial_message)) = allowlist_denial {
+                crate::agent::mode::effects::record_mode_intercept(
+                    crate::agent::mode::effects::ModeInterceptReason::ToolNotAllowed,
+                    &crate::agent::mode::effects::ModeInterceptContext {
+                        mode: denied_mode,
+                        channel: Some(channel_name),
+                        provider: Some(provider_name),
+                        model: Some(model),
+                        turn_id: Some(&turn_id),
+                        tool: Some(&tool_name),
+                        tool_call_id: call.tool_call_id.as_deref(),
+                        iteration: Some(iteration + 1),
+                        message: Some(&denial_message),
+                    },
+                );
+                if let Some(ref tx) = on_delta {
+                    let _ = tx
+                        .send(DraftEvent::Progress(format!(
+                            "\u{274c} {}: {}\n",
+                            tool_name,
+                            truncate_with_ellipsis(&denial_message, 200)
+                        )))
+                        .await;
+                }
+                ordered_results[idx] = Some((
+                    tool_name.clone(),
+                    call.tool_call_id.clone(),
+                    ToolExecutionOutcome {
+                        output: denial_message.clone(),
+                        success: false,
+                        error_reason: Some(denial_message),
+                        duration: Duration::ZERO,
+                    },
+                ));
+                continue;
+            }
+
             let intercept = {
                 let mode = crate::agent::coding_mode::active_coding_mode();
                 crate::agent::mode::effects::mode_blocks_tool(mode, &tool_name)
@@ -3728,16 +4386,49 @@ pub(crate) async fn run_unified_loop_impl(
                         arguments: tool_args.clone(),
                     };
 
-                    let decision = if mgr.is_non_interactive() {
-                        ApprovalResponse::No
-                    } else {
-                        mgr.prompt_cli(&request)
+                    let mut timeout_denied = false;
+                    let decision = match request_session_tool_approval(
+                        mgr,
+                        &request,
+                        on_delta.as_ref(),
+                        cancellation_token.as_ref(),
+                        &format!("Tool '{tool_name}' requires approval before execution"),
+                    )
+                    .await
+                    {
+                        Some(crate::approval::SessionApprovalVerdict::Decision(decision)) => {
+                            decision
+                        }
+                        Some(crate::approval::SessionApprovalVerdict::Cancelled) => {
+                            mgr.record_decision(
+                                &tool_name,
+                                &tool_args,
+                                ApprovalResponse::No,
+                                channel_name,
+                            );
+                            return Err(tool_loop_cancelled());
+                        }
+                        Some(crate::approval::SessionApprovalVerdict::TimedOut) => {
+                            timeout_denied = true;
+                            ApprovalResponse::No
+                        }
+                        None => {
+                            if mgr.is_non_interactive() {
+                                ApprovalResponse::No
+                            } else {
+                                mgr.prompt_cli(&request)
+                            }
+                        }
                     };
 
                     mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
 
                     if decision == ApprovalResponse::No {
-                        let denied = "Denied by user.".to_string();
+                        let denied = if timeout_denied {
+                            approval_timeout_denial(&tool_name)
+                        } else {
+                            "Denied by user.".to_string()
+                        };
                         runtime_trace::record_event(
                             "tool_call_result",
                             Some(channel_name),
@@ -3930,6 +4621,11 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             executable_indices.push(idx);
+            executable_pre_cleared.push(
+                pre_hook_guardrail_cleared
+                    && tool_name == call.name
+                    && tool_args == call.arguments,
+            );
             executable_calls.push(ParsedToolCall {
                 name: tool_name,
                 arguments: tool_args,
@@ -3946,6 +4642,7 @@ pub(crate) async fn run_unified_loop_impl(
                         parent_draft_for_scope,
                         execute_tools_parallel(
                             &executable_calls,
+                            &executable_pre_cleared,
                             tools_registry,
                             tool_registry,
                             activated_tools,
@@ -3953,6 +4650,7 @@ pub(crate) async fn run_unified_loop_impl(
                             cancellation_token.as_ref(),
                             rbac_engine,
                             rbac_identity,
+                            approval,
                         ),
                     )
                     .await?;
@@ -3968,6 +4666,7 @@ pub(crate) async fn run_unified_loop_impl(
                         parent_draft_for_scope,
                         execute_tools_sequential(
                             &executable_calls,
+                            &executable_pre_cleared,
                             tools_registry,
                             tool_registry,
                             activated_tools,
@@ -3975,6 +4674,7 @@ pub(crate) async fn run_unified_loop_impl(
                             cancellation_token.as_ref(),
                             rbac_engine,
                             rbac_identity,
+                            approval,
                         ),
                     )
                     .await?;
@@ -4002,17 +4702,6 @@ pub(crate) async fn run_unified_loop_impl(
                     "output": scrub_credentials(&outcome.output),
                 }),
             );
-
-            if let Some(hooks) = hooks {
-                let tool_result_obj = crate::tools::ToolResult {
-                    success: outcome.success,
-                    output: outcome.output.clone(),
-                    error: None,
-                };
-                hooks
-                    .fire_after_tool_call(&call.name, &tool_result_obj, outcome.duration)
-                    .await;
-            }
 
             if let Some(ref tx) = on_delta {
                 let secs = outcome.duration.as_secs();
@@ -4046,6 +4735,17 @@ pub(crate) async fn run_unified_loop_impl(
                         success: outcome.success,
                         tool_call_id: call.tool_call_id.clone(),
                     })
+                    .await;
+            }
+
+            if let Some(hooks) = hooks {
+                let tool_result_obj = crate::tools::ToolResult {
+                    success: outcome.success,
+                    output: outcome.output.clone(),
+                    error: None,
+                };
+                hooks
+                    .fire_after_tool_call(&call.name, &tool_result_obj, outcome.duration)
                     .await;
             }
 
@@ -4190,6 +4890,8 @@ pub(crate) async fn run_unified_loop_impl(
                 }
             }
 
+            turn_tool_results.push((tool_name.clone(), outcome.success));
+
             crate::agent::profile::runtime_hooks::publish_tool_event(
                 &tool_name,
                 outcome.success,
@@ -4289,6 +4991,7 @@ pub(crate) async fn run_unified_loop_impl(
                 let _ = tx.send(DraftEvent::Clear).await;
             }
             fire_post_turn_hooks(
+                channel_name,
                 response_cache_hook.as_ref(),
                 experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
@@ -4299,6 +5002,7 @@ pub(crate) async fn run_unified_loop_impl(
                 0,
                 &[],
                 &[],
+                false,
             )
             .await;
             return Ok(halt_text);
@@ -4320,6 +5024,7 @@ pub(crate) async fn run_unified_loop_impl(
                 let _ = tx.send(DraftEvent::Clear).await;
             }
             fire_post_turn_hooks(
+                channel_name,
                 response_cache_hook.as_ref(),
                 experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
@@ -4330,6 +5035,7 @@ pub(crate) async fn run_unified_loop_impl(
                 0,
                 &[],
                 &[],
+                false,
             )
             .await;
             return Ok(halt_text);
@@ -4353,6 +5059,7 @@ pub(crate) async fn run_unified_loop_impl(
                     .await;
             }
             fire_post_turn_hooks(
+                channel_name,
                 response_cache_hook.as_ref(),
                 experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
@@ -4363,6 +5070,7 @@ pub(crate) async fn run_unified_loop_impl(
                 0,
                 &[],
                 &[],
+                false,
             )
             .await;
             return Ok(pause_text);
@@ -4482,6 +5190,7 @@ pub(crate) async fn run_unified_loop_impl(
                  control to the user. The next user message will resume execution.",
             ));
             fire_post_turn_hooks(
+                channel_name,
                 response_cache_hook.as_ref(),
                 experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
@@ -4492,12 +5201,21 @@ pub(crate) async fn run_unified_loop_impl(
                 0,
                 &[],
                 &[],
+                false,
             )
             .await;
             return Ok(pair_text);
         }
     }
 
+    let exhausted_reason = match pacing_break_reason {
+        Some(crate::agent::executor_core::PacingExceeded::TotalTimeout { .. }) => {
+            "agent turn exceeded total time budget"
+        }
+        Some(crate::agent::executor_core::PacingExceeded::IterationBudget { .. }) | None => {
+            "agent exceeded maximum tool iterations"
+        }
+    };
     runtime_trace::record_event(
         "tool_loop_exhausted",
         Some(channel_name),
@@ -4505,7 +5223,7 @@ pub(crate) async fn run_unified_loop_impl(
         Some(model),
         Some(&turn_id),
         Some(false),
-        Some("agent exceeded maximum tool iterations"),
+        Some(exhausted_reason),
         serde_json::json!({
             "max_iterations": max_iterations,
         }),
@@ -4530,9 +5248,18 @@ pub(crate) async fn run_unified_loop_impl(
         &plan_exec_nudge_state,
     )
     .await;
-    let overflow_text = format!(
-        "已达到本轮最大迭代步数（{max_iterations}），为避免无限循环在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
-    );
+    let overflow_text = match pacing_break_reason {
+        Some(crate::agent::executor_core::PacingExceeded::TotalTimeout { limit }) => format!(
+            "本轮执行已超过总时长上限（{}秒），为避免长时间占用在此安全停止。已完成的工作已保留，可基于当前进展继续对话。",
+            limit.as_secs()
+        ),
+        Some(crate::agent::executor_core::PacingExceeded::IterationBudget { limit }) => format!(
+            "已达到本轮迭代步数预算（{limit}），为避免无限循环在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+        ),
+        None => format!(
+            "已达到本轮最大迭代步数（{max_iterations}），为避免无限循环在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+        ),
+    };
     _turn_metrics.mark_ok();
     history.push(ChatMessage::assistant(overflow_text.clone()));
     if let Some(ref tx) = on_delta {
@@ -5060,32 +5787,38 @@ pub async fn run(
         "read_user_rule",
         "Load the full body of a user instruction rule by name. Use when: an entry in <available_user_rules> looks relevant and you need its complete content.",
     ));
-    tool_descs.push((
-        "cron_add",
-        "Create a cron job. Supports schedule kinds: cron, at, every; and job types: shell or agent.",
-    ));
-    tool_descs.push((
-        "cron_list",
-        "List all cron jobs with schedule, status, and metadata.",
-    ));
-    tool_descs.push(("cron_remove", "Remove a cron job by job_id."));
-    tool_descs.push((
-        "cron_update",
-        "Patch a cron job (schedule, enabled, command/prompt, model, delivery, session_target).",
-    ));
-    tool_descs.push((
-        "cron_run",
-        "Force-run a cron job immediately and record a run history entry.",
-    ));
-    tool_descs.push(("cron_runs", "Show recent run history for a cron job."));
-    tool_descs.push((
-        "screenshot",
-        "Capture a screenshot of the current screen. Returns file path and base64-encoded PNG. Use when: visual verification, UI inspection, debugging displays.",
-    ));
-    tool_descs.push((
-        "image_info",
-        "Read image file metadata (format, dimensions, size) and optionally base64-encode it. Use when: inspecting images, preparing visual data for analysis.",
-    ));
+    #[cfg(feature = "tool-cron")]
+    {
+        tool_descs.push((
+            "cron_add",
+            "Create a cron job. Supports schedule kinds: cron, at, every; and job types: shell or agent.",
+        ));
+        tool_descs.push((
+            "cron_list",
+            "List all cron jobs with schedule, status, and metadata.",
+        ));
+        tool_descs.push(("cron_remove", "Remove a cron job by job_id."));
+        tool_descs.push((
+            "cron_update",
+            "Patch a cron job (schedule, enabled, command/prompt, model, delivery, session_target).",
+        ));
+        tool_descs.push((
+            "cron_run",
+            "Force-run a cron job immediately and record a run history entry.",
+        ));
+        tool_descs.push(("cron_runs", "Show recent run history for a cron job."));
+    }
+    #[cfg(feature = "tool-image")]
+    {
+        tool_descs.push((
+            "screenshot",
+            "Capture a screenshot of the current screen. Returns file path and base64-encoded PNG. Use when: visual verification, UI inspection, debugging displays.",
+        ));
+        tool_descs.push((
+            "image_info",
+            "Read image file metadata (format, dimensions, size) and optionally base64-encode it. Use when: inspecting images, preparing visual data for analysis.",
+        ));
+    }
     if config.browser.enabled {
         tool_descs.push((
             "browser_open",
@@ -5098,6 +5831,7 @@ pub async fn run(
             "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover, 'execute' to run (optionally with connected_account_id), 'connect' to OAuth.",
         ));
     }
+    #[cfg(feature = "tool-cron")]
     tool_descs.push((
         "schedule",
         "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
@@ -5520,13 +6254,34 @@ pub async fn run(
                 }
             };
 
-            let effective_input = full_input.trim().to_string();
+            let mut effective_input = full_input.trim().to_string();
             if effective_input.is_empty() {
                 continue;
             }
 
-            if effective_input == "/quit" || effective_input == "/exit" {
-                break;
+            match crate::commands::dispatch::dispatch_slash_input(&effective_input).await {
+                crate::commands::dispatch::SlashOutcome::NotCommand => {}
+                crate::commands::dispatch::SlashOutcome::Quit => break,
+                crate::commands::dispatch::SlashOutcome::Clear => {
+                    history.retain(|m| m.role == "system");
+                    print!("\x1b[2J\x1b[H");
+                    let _ = std::io::stdout().flush();
+                    continue;
+                }
+                crate::commands::dispatch::SlashOutcome::Handled { success, message } => {
+                    if success {
+                        println!("{message}");
+                    } else {
+                        eprintln!("\x1b[31m{message}\x1b[0m");
+                    }
+                    continue;
+                }
+                crate::commands::dispatch::SlashOutcome::Followup { message, prompt } => {
+                    if let Some(msg) = message {
+                        println!("{msg}");
+                    }
+                    effective_input = prompt;
+                }
             }
 
             interactive_turn_count += 1;
@@ -5569,6 +6324,7 @@ pub async fn run(
                 format!("{context}[{now}] {effective_input}")
             };
 
+            let history_len_before_turn = history.len();
             history.push(ChatMessage::user(&enriched));
 
             let excluded_tools = compute_excluded_mcp_tools(
@@ -5601,6 +6357,7 @@ pub async fn run(
                     const SPINNER: &[&str] = &["?", "?", "?", "?", "?", "?", "?", "?", "?", "?"];
                     let mut spinner_active = is_tty;
                     let content_was_streamed = content_was_streamed_clone;
+                    let mut spinner_frame = 0usize;
                     if spinner_active {
                         let _ = write!(std::io::stderr(), "\x1b[2m{} Thinking…\x1b[0m", SPINNER[0]);
                         let _ = std::io::stderr().flush();
@@ -5639,7 +6396,7 @@ pub async fn run(
                                     _ => {}
                                 }
                             }
-                            Ok(None) | Err(_) => {
+                            Ok(None) => {
                                 if spinner_active {
                                     let _ =
                                         write!(std::io::stderr(), "\r\x1b[2mThinking… done\x1b[0m");
@@ -5648,11 +6405,42 @@ pub async fn run(
                                 }
                                 break;
                             }
+                            Err(_) => {
+                                if spinner_active {
+                                    spinner_frame = (spinner_frame + 1) % SPINNER.len();
+                                    let _ = write!(
+                                        std::io::stderr(),
+                                        "\r\x1b[2m{} Thinking…\x1b[0m",
+                                        SPINNER[spinner_frame]
+                                    );
+                                    let _ = std::io::stderr().flush();
+                                }
+                            }
                         }
                     }
                 });
 
             let model_switch_callback = get_model_switch_state();
+            if let Some(bs) = crate::bootstrap::try_get_state() {
+                if let Some(requested) = bs.read(|s| s.main_loop_model_override.clone()) {
+                    match resolve_model_override_target(&requested, &config) {
+                        Some((provider_override, target_model)) => {
+                            let target_provider =
+                                provider_override.unwrap_or_else(|| provider_name.clone());
+                            if target_model != model_name || target_provider != provider_name {
+                                *model_switch_callback.lock() =
+                                    Some((target_provider, target_model));
+                            }
+                        }
+                        None => {
+                            eprintln!(
+                                "\x1b[31m未找到可用的 fast 模型配置：请在 model_routes 中配置 hint=\"fast\" 的路由，或设置 agent_runtime.fast_apply_model。\x1b[0m"
+                            );
+                            bs.write(|s| s.main_loop_model_override = None);
+                        }
+                    }
+                }
+            }
             let response = loop {
                 let policy = crate::agent::loop_::policy::PolicyBundle::cli(
                     provider.as_ref(),
@@ -5713,7 +6501,12 @@ pub async fn run(
                             clear_model_switch_request();
                             continue;
                         }
-                        eprintln!("Error: {e}");
+                        eprintln!(
+                            "\x1b[1;31m✖ 本轮请求失败：{e}\x1b[0m\n\x1b[2m  本轮输入未写入会话历史，可直接重新发送或调整后重试（网络/限流问题通常稍候重试即可）。\x1b[0m"
+                        );
+                        if history.len() > history_len_before_turn {
+                            history.truncate(history_len_before_turn);
+                        }
                         break String::new();
                     }
                 }

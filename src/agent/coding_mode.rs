@@ -38,6 +38,8 @@ pub enum CodingMode {
     Harness,
 
     Curator,
+
+    Designer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,7 @@ impl CodingMode {
             "mvai" => Some(Self::Mvai),
             "harness" | "hn" | "hs" => Some(Self::Harness),
             "curator" | "cu" | "curate" | "curation" => Some(Self::Curator),
+            "designer" | "des" | "ui" => Some(Self::Designer),
             _ => None,
         }
     }
@@ -545,37 +548,121 @@ impl CodingMode {
                  (no detailed objectives), you MUST act as a senior software QA engineer and \
                  **auto-expand the test matrix yourself**. Never reply \"what do you want to test?\". \
                  You own the planning, the user only provides the URL + entry credentials.\n\
-                 Built-in 10-dimension matrix (cover ALL unless the user pinned `focus_tags`):\n\
-                 1. Functional correctness  -  the happy path of each major feature works as advertised.\n\
+                 Built-in 12-dimension matrix (cover ALL unless the user pinned `focus_tags`):\n\
+                 1. Functional correctness  -  the happy path of each major feature works as advertised. \
+                    Exercise EVERY major feature, not just page reachability  -  a page that loads but whose \
+                    primary action fails is a P0 functional finding.\n\
                  2. UI visuals & interactions  -  layout integrity, hover/focus states, tooltips, modals.\n\
                  3. Forms & validation  -  required fields, type / length / pattern, error messages, RTL / emoji / zero-width.\n\
                  4. Navigation & routing  -  links, breadcrumbs, browser back/forward, deep links, 404s.\n\
                  5. Error handling & boundaries  -  4xx / 5xx responses, network failure, empty state, optimistic UI rollback.\n\
                  6. Accessibility (a11y)  -  semantic landmarks, alt text, ARIA roles, keyboard-only navigation, focus order, contrast.\n\
-                 7. Performance  -  first paint / interactive, long tasks, layout thrash, memory growth on repeated navigation.\n\
+                 7. Performance  -  measured, not guessed: `browser action=perf_vitals` returns real Core Web Vitals \
+                    (LCP / FCP / CLS / worst-INP, long-task count+total, TTFB, resource count, transfer bytes) with \
+                    good / needs-improvement / poor verdicts. Run it once per key page after `network_idle`; flag \
+                    LCP > 2.5s, CLS > 0.1, INP > 200ms, long-task total > 1s as performance findings with the numbers.\n\
                  8. Security basics  -  XSS reflection probes on every text input, CSRF tokens on forms, open redirect, \
                     error message leakage, password autofill safety, mixed-content.\n\
-                 9. Network anomaly recovery  -  offline, slow 3G throttle, 5xx retry behavior, request abort/resume.\n\
-                 10. Responsive & cross-viewport  -  quickly re-run the smoke happy-path at mobile (375x812) and tablet (768x1024).\n\n\
+                 9. Network anomaly recovery  -  use `browser action=emulate network=offline` (then reload and check the \
+                    app's offline/error state), `network=slow-3g` (check skeletons, no broken half-renders), then ALWAYS \
+                    `emulate reset=true` before the next dimension. 5xx retry behavior, request abort/resume.\n\
+                 10. Responsive & cross-viewport  -  `browser action=emulate viewport={{\"width\":375,\"height\":812,\"mobile\":true}}` \
+                    then re-run the smoke happy-path, repeat at 768x1024 (tablet), finish with `emulate reset=true`.\n\
+                 11. Visual design & theme consistency  -  color palette compliance, typography scale, spacing rhythm, \
+                    border-radius uniformity, dark/light theme integrity. Quantify with `browser action=get_styles` \
+                    (see the Visual & Theme Consistency Audit below)  -  never judge colors by eyeballing screenshots alone.\n\
+                 12. Data integrity & loading  -  every data-driven component actually loads real data, list/detail/count \
+                    consistency, persistence across reload, pagination/sort/filter correctness, no stuck skeletons or \
+                    silent empty components (see the Data Integrity Checks below).\n\n\
+                 ### Visual & Theme Consistency Audit (use `browser action=get_styles`)\n\
+                 The dock exposes computed-style extraction so visual QA is measured, not guessed:\n\
+                 - Element-level: `browser action=get_styles selector=@e3` returns the element's computed \
+                   color / background-color / font-family / font-size / font-weight / line-height / border-radius / \
+                   box-shadow / padding / margin plus its bounding rect. Use it to verify a specific component \
+                   against the spec (exact hex/rgb, px values).\n\
+                 - Page-level: `browser action=get_styles` (no selector) returns a style audit  -  distinct text \
+                   colors, background colors, font families, font sizes and border radii across visible elements, \
+                   each with usage counts.\n\
+                 Per page protocol: run the page-level audit once per visited page, record the audit JSON, and flag \
+                 `add_finding category=ui` when (a) distinct font families > 3, (b) distinct text colors > 12 with a \
+                 long tail of one-off colors, (c) near-duplicate colors differing by 1-2 hex steps (palette drift), \
+                 (d) mixed border-radius scales on the same component class, or (e) the palette differs page-to-page \
+                 (compare audits across pages  -  the design system should be ONE system).\n\
+                 When a prototype reference is bound (Figma link or prototype tab), the prototype is the ground \
+                 truth: extract its exact tokens (via `figma_fetch action=node` palette/text-style digest, or \
+                 `get_styles` on the prototype tab) and diff them against the implementation's `get_styles` output \
+                 value-by-value. Report every mismatch with expected vs actual (e.g. `#1A73E8 expected, #2196F3 found`).\n\n\
+                 ### Data Integrity & Completeness Checks\n\
+                 Testing \"the page opens\" is NOT testing. For every data-driven surface:\n\
+                 - Load reality: after `network_idle`, assert the component shows real records  -  not a skeleton, \
+                   not an empty list, not `undefined/null/NaN` placeholder text. `assert kind=count` on list rows, \
+                   `get_text` to spot-check rendered values.\n\
+                 - List ↔ detail consistency: open an item from a list and verify the detail page shows the SAME \
+                   values (title, status, amounts). Mismatch = P1 data finding.\n\
+                 - Counters & badges: when the UI claims `N items / unread M`, count the actual rendered rows and diff.\n\
+                 - CRUD round-trip (non-destructive): create a test record (clearly named e.g. `qa-probe-<run_id>`), \
+                   verify it appears in the list, edit it, `reload` and verify persistence, then delete ONLY that \
+                   self-created record. Never mutate or delete pre-existing user data.\n\
+                 - Pagination / sort / filter: change page, sort order, and one filter; verify the row set actually \
+                   changes accordingly and stays consistent after `back`/`forward`.\n\
+                 - Media & assets: `network_errors` after each page drains failed image/font/script loads; broken \
+                   assets are findings even when layout looks intact.\n\
+                 - API ↔ UI cross-check (the strongest data test): `network_capture mode=start` before exercising a \
+                   data-driven page, then `network_capture mode=dump api_only=true` after it settles. For the key list \
+                   endpoint, `network_capture mode=body request_id=<id>` to read the JSON the backend actually returned, \
+                   count its records, and diff against the rendered row count / displayed values. API returned 20 but UI \
+                   shows 12 with no pagination hint = P1 data finding; API 200 with empty UI = P1 rendering finding; \
+                   UI shows data with no API call = stale-cache suspicion. `mode=stop` when the dimension wraps.\n\
+                 - Stuck states: a spinner/skeleton still visible after network idle + 3s is a P1 loading finding.\n\n\
+                 ### Instrumented Testing (CDP-grade actions, Windows dock)\n\
+                 The dock drives the embedded WebView2 over the Chrome DevTools Protocol, so QA is instrument-based, \
+                 not simulation-guessing. The instruments and their contract:\n\
+                 - `perf_vitals`: per-page Core Web Vitals snapshot (collected since page load by in-page observers; \
+                   works on every platform). Quote the numbers in findings, never \"feels slow\".\n\
+                 - `emulate`: viewport / network (offline | slow-3g | fast-3g | none) / cpu_rate overrides. They apply to \
+                   the ACTIVE tab and persist until cleared  -  end every degraded-condition test with `emulate reset=true`, \
+                   and never leave throttling on a user's pre-authenticated pinned tab.\n\
+                 - `network_capture`: full request/response audit (method, status, mime, bytes, duration, failure reason) \
+                   plus `mode=body` for JSON inspection. Use it for the API ↔ UI cross-check above and for spotting \
+                   slow endpoints (sort by duration_ms in your analysis).\n\
+                 - `web_tools_list` / `web_tools_call`: WebMCP fast path. Call `web_tools_list` once per app under test  -  \
+                   if the page registered tools via `navigator.modelContext`, prefer invoking them for setup/data probing \
+                   (deterministic, no selector flakiness), but ALWAYS re-verify the visible UI afterwards with snapshot/assert: \
+                   a tool succeeding while the UI shows nothing is itself a finding.\n\
+                 - `run_steps`: batch up to 20 simple actions (open / wait / click / fill / assert / screenshot / ...) in one \
+                   call for linear flows  -  e.g. open → wait → assert → perf_vitals → screenshot. It stops at the first \
+                   failure by default; use it to cut round-trips on smoke passes, and fall back to single actions when a \
+                   step needs its result inspected before deciding the next step.\n\
+                 These instruments respect the pre-login habit: the user logs into the target site in a dock tab, you \
+                 `pin_test_target` that tab, and every instrument (capture, vitals, emulate) runs against the live, \
+                 authenticated session  -  never `clear_storage` on it without `force` and explicit user intent.\n\n\
                  Built-in discovery path (default exploration order, no permission needed):\n\
                  landing → primary entry → login/signup → core CRUD/feature → settings/profile → \
                  logout → 404/403/500 → mobile viewport pass.\n\n\
                  Mandatory workflow:\n\
                  a. `debug_test_report action=start ...` (capture `run_id`).\n\
                  b. **Immediately** call `debug_test_report action=add_test_plan dimensions=[…] cases_outline=[…]` \
-                    submitting the 10-dimension matrix above (or only the user-pinned ones) plus an \
+                    submitting the 12-dimension matrix above (or only the user-pinned ones) plus an \
                     outline of the cases you intend to run. Never skip this step.\n\
                  c. Walk the matrix dimension-by-dimension, each case executes through the standard \
-                    browser actions (`open_tab / snapshot / assert / screenshot / console_logs / network_idle`). \
+                    browser actions (`open_tab / snapshot / assert / screenshot / console_logs / network_idle / \
+                    get_styles / network_errors / perf_vitals / emulate / network_capture / web_tools_list`), \
+                    batching linear flows with `run_steps` to keep the run fast. \
                     Every bug found triggers an immediate `add_finding` + `attach_screenshot`.\n\
-                 d. After each dimension wraps, call `add_case` to record the rolled-up case verdict.\n\
+                 d. After each dimension wraps, call `add_case` to record the rolled-up case verdict \
+                    (pass / fail / blocked + evidence). Every one of the 12 dimensions must end with an \
+                    `add_case`  -  a dimension with zero recorded cases is an incomplete run.\n\
                  e. When the matrix is fully exercised, batch-emit `add_analysis_note` events \
                     (category=root_cause|performance|security|a11y|ux|risk) and `add_runbook_section` events \
                     (section_kind=context|preconditions|test_data|sop_steps|expected|regression_checklist|troubleshooting).\n\
                  f. Call `debug_test_report action=finalize`. Surface **all three** output paths in the \
                     final turn: `report.md` (测试报告), `analysis.md` (分析报告), `runbook.md` (操作文档). \
                     The three documents are non-negotiable  -  never finalize without first emitting at \
-                    least one `add_analysis_note` and one `add_runbook_section`.\n\n\
+                    least one `add_analysis_note` and one `add_runbook_section`.\n\
+                 g. The final turn summary must read like a professional QA sign-off: per-dimension verdict \
+                    table (dimension / cases run / pass / fail / blocked), the P0/P1/P2 finding counts, the \
+                    overall release recommendation (通过 / 有条件通过 / 不通过), and the three document paths. \
+                    Never end with just \"testing done\".\n\n\
                  ### Credential References\n\
                  The user can either type credentials directly into the chat or pre-store them in \
                  the persistent vault (Settings → Credentials) and reference them as \
@@ -1060,6 +1147,7 @@ impl CodingMode {
                  expand it BEFORE exiting so the downstream implementation is unambiguous.\n\n\
                  {web_research}\n\n{verification}"
             ),
+            Self::Designer => super::designer::designer_system_prompt_injection(),
         }
     }
 
@@ -1072,6 +1160,7 @@ impl CodingMode {
             Self::Mvai => Some(Self::mvai_tools()),
             Self::Harness => Some(Self::harness_tools()),
             Self::Curator => Some(Self::curator_tools()),
+            Self::Designer => Some(Self::designer_tools()),
             Self::Agent => None,
             _ => None,
         }
@@ -1105,6 +1194,7 @@ impl CodingMode {
             | Self::Spec
             | Self::Architect
             | Self::Pair
+            | Self::Designer
             | Self::ContextEng => ResourceProfile {
                 browser: true,
                 shell: true,
@@ -1115,7 +1205,7 @@ impl CodingMode {
 
     pub fn approval_policy(&self) -> ModeApprovalPolicy {
         match self {
-            Self::Agent | Self::Harness => ModeApprovalPolicy::AutoApprove,
+            Self::Agent | Self::Harness | Self::Designer => ModeApprovalPolicy::AutoApprove,
             Self::Ask => ModeApprovalPolicy::ReadOnly,
             _ => ModeApprovalPolicy::Default,
         }
@@ -1175,6 +1265,7 @@ impl CodingMode {
             Self::Mvai => "mvai",
             Self::Harness => "harness",
             Self::Curator => "curator",
+            Self::Designer => "designer",
         }
     }
 
@@ -1193,6 +1284,7 @@ impl CodingMode {
             Self::Mvai => "🔗",
             Self::Harness => "⚙",
             Self::Curator => "📚",
+            Self::Designer => "🎨",
         }
     }
 
@@ -1211,6 +1303,7 @@ impl CodingMode {
             Self::Mvai => "MVAI",
             Self::Harness => "Harness",
             Self::Curator => "Curator",
+            Self::Designer => "Designer",
         }
     }
 
@@ -1256,6 +1349,9 @@ impl CodingMode {
             Self::Curator => {
                 "Research curator  -  extensively mines the web and local workspace, then authors a professional paper / solution / technical report with DOCX export. Stops after the document lands so a later switch to Agent mode can implement the blueprint verbatim."
             }
+            Self::Designer => {
+                "Design studio  -  ten UI/design surfaces (prototype, dashboard, slide deck, diagram, image, video, HyperFrames, audio, from Figma, from template) driven by a discovery → plan → generate → critique pipeline; renders artifacts in a dedicated preview panel and reuses your configured model providers for every model and media call."
+            }
         }
     }
 
@@ -1274,6 +1370,7 @@ impl CodingMode {
             Self::Mvai,
             Self::Harness,
             Self::Curator,
+            Self::Designer,
         ]
     }
 
@@ -1283,6 +1380,7 @@ impl CodingMode {
             Self::Spec,
             Self::Plan,
             Self::Curator,
+            Self::Designer,
             Self::Ask,
             Self::Debug,
             Self::Harness,
@@ -1299,6 +1397,7 @@ impl CodingMode {
                 | Self::Debug
                 | Self::Harness
                 | Self::Curator
+                | Self::Designer
         )
     }
 
@@ -1476,6 +1575,40 @@ impl CodingMode {
             .copied()
             .collect()
     }
+
+    fn designer_tools() -> HashSet<&'static str> {
+        let mut tools = Self::read_only_intel_tools();
+        tools.insert("file_write");
+        tools.insert("file_edit");
+        tools.insert("multi_edit");
+        tools.insert("glob_edit");
+        tools.insert("patch_apply");
+        tools.insert("restore_file");
+        tools.insert("copy_path");
+        tools.insert("move_path");
+        tools.insert("delete_path");
+        tools.insert("create_directory");
+        tools.insert("diagnostics");
+        tools.insert("shell");
+        tools.insert("browser");
+        tools.insert("todo_write");
+        tools.insert("update_plan");
+        tools.insert("structured_output");
+        tools.insert("send_user_message");
+        tools.insert("delegate");
+        tools.insert("delegate_parallel");
+        tools.insert("multi_persona_review");
+        tools.insert("media_generate");
+        tools.insert("image_gen");
+        tools.insert("design_system_read");
+        tools.insert("designer_skill_read");
+        tools.insert("designer_template_read");
+        tools.insert("designer_lint");
+        tools.insert("deck_compile");
+        tools.insert("designer_scaffold");
+        tools.insert("figma_fetch");
+        tools
+    }
 }
 
 impl std::fmt::Display for CodingMode {
@@ -1503,9 +1636,18 @@ pub fn active_coding_mode() -> CodingMode {
     if let Some(mode) = scoped_coding_mode() {
         return mode;
     }
-    let fallback = crate::services::try_get_services()
-        .map(|svc| *svc.coding_mode.read())
-        .unwrap_or_default();
+    let Some(svc) = crate::services::try_get_services() else {
+        return CodingMode::default();
+    };
+    if let Some(session) = crate::session::current_session_context() {
+        if let Some(mode) = svc.session_coding_mode(&format!("gw_{}", session.session_id)) {
+            return mode;
+        }
+        if let Some(mode) = svc.session_coding_mode(&session.session_id) {
+            return mode;
+        }
+    }
+    let fallback = *svc.coding_mode.read();
     tracing::warn!(
         target: "isolation",
         fallback = %fallback.display_name(),

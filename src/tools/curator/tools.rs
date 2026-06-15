@@ -178,7 +178,7 @@ impl Tool for EnterCuratorModeTool {
         }
 
         self.flag.set_active(true);
-        *self.state.write() = Some(CuratorActive {
+        self.state.set(CuratorActive {
             slug: slug.clone(),
             intent: intent.clone(),
             template,
@@ -266,8 +266,7 @@ impl Tool for CuratorCollectTool {
             .unwrap_or_default();
         let active = self
             .state
-            .read()
-            .clone()
+            .get()
             .ok_or_else(|| anyhow::anyhow!("curator_collect requires an active Curator session (call enter_curator_mode first)."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -481,8 +480,7 @@ impl Tool for CuratorDeepCollectTool {
             .to_string();
         let active = self
             .state
-            .read()
-            .clone()
+            .get()
             .ok_or_else(|| anyhow::anyhow!(
                 "curator_deep_collect requires an active Curator session (call enter_curator_mode first)."
             ))?;
@@ -884,8 +882,7 @@ impl Tool for CuratorTemplateApplyTool {
         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
         let active = self
             .state
-            .read()
-            .clone()
+            .get()
             .ok_or_else(|| anyhow::anyhow!("curator_template_apply requires an active Curator session."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
         let info = template_for(template);
@@ -961,11 +958,7 @@ impl Tool for CuratorTemplateApplyTool {
             }
         };
 
-        let mut state = self.state.write();
-        if let Some(active_state) = state.as_mut() {
-            active_state.template = template;
-        }
-        drop(state);
+        self.state.set_template(template);
         Ok(ToolResult {
             success: true,
             output: format!("Applied template `{}` to: {}", kind_label, applied.join(", ")),
@@ -1049,8 +1042,7 @@ impl Tool for ExitCuratorModeTool {
 
         let active = self
             .state
-            .read()
-            .clone()
+            .get()
             .ok_or_else(|| anyhow::anyhow!("exit_curator_mode requires an active Curator session."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
 
@@ -1244,25 +1236,23 @@ impl Tool for ExitCuratorModeTool {
         };
 
         self.flag.set_active(false);
-        *self.plan_flag.write() = false;
+        self.plan_flag.set(false);
 
         let payload = PendingCuratorPayload {
             slug: active.slug.clone(),
             template: active.template,
-            final_md_path: final_path.to_string_lossy().into_owned(),
-            impl_blueprint_path: blueprint_path.to_string_lossy().into_owned(),
-            docx_path: final_docx_path_opt
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-            root_dir: active.root_dir.to_string_lossy().into_owned(),
+            final_md_path: display_path(&final_path),
+            impl_blueprint_path: display_path(&blueprint_path),
+            docx_path: final_docx_path_opt.as_ref().map(|p| display_path(p)),
+            root_dir: display_path(&active.root_dir),
             final_md_body: final_content.to_string(),
             impl_blueprint_body: impl_blueprint.to_string(),
         };
-        *self.pending.write() = Some(payload);
-        *self.state.write() = None;
+        self.pending.set(payload);
+        self.state.clear();
 
         let docx_line = if let Some(ref p) = final_docx_path_opt {
-            format!("\nfinal.docx: `{}`", p.display())
+            format!("\nfinal.docx: `{}`", display_path(p))
         } else {
             "\nfinal.docx: (skipped by allow_docx_skip  -  degraded deliverable)".to_string()
         };
@@ -1278,8 +1268,8 @@ impl Tool for ExitCuratorModeTool {
              Awaiting user's Build click  -  DO NOT call any other tool now; the user will click \
              Build → Switch to start the engineering implementation in Agent mode, and that \
              implementation MUST mirror impl_blueprint.md verbatim.",
-            final_path.display(),
-            blueprint_path.display(),
+            display_path(&final_path),
+            display_path(&blueprint_path),
             active.slug,
             active.template.label()
         );
@@ -1288,11 +1278,11 @@ impl Tool for ExitCuratorModeTool {
              ===CURATOR_MARKDOWN_BEGIN===\nslug: {}\ntemplate: {}\nfinal_md_path: {}\nimpl_blueprint_path: {}\n{}---\n{final_content}\n===CURATOR_MARKDOWN_END===",
             active.slug,
             active.template.label(),
-            final_path.display(),
-            blueprint_path.display(),
+            display_path(&final_path),
+            display_path(&blueprint_path),
             final_docx_path_opt
                 .as_ref()
-                .map(|p| format!("docx_path: {}\n", p.display()))
+                .map(|p| format!("docx_path: {}\n", display_path(p)))
                 .unwrap_or_default()
         );
         let envelope = if crate::token_saver::is_enabled() {
@@ -1491,6 +1481,20 @@ fn uniquify_slug(workspace: &Path, slug: String) -> String {
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
     format!("{slug}-{stamp:x}")
+}
+
+pub(super) fn display_path(path: &Path) -> String {
+    strip_extended_length_prefix(&path.to_string_lossy())
+}
+
+fn strip_extended_length_prefix(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    raw.to_string()
 }
 
 fn pathdiff_or_self(target: &Path, base: &Path) -> String {

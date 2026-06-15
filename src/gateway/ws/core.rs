@@ -537,7 +537,31 @@ async fn process_chat_message(
     let cancelled_atomic = agent.cancel_token();
 
     let content_owned = content.to_string();
-    let turn_fut = async { agent.turn_streamed(&content_owned, event_tx).await };
+    let turn_coding_mode = agent.current_coding_mode().unwrap_or_else(|| {
+        crate::services::try_get_services()
+            .map(|svc| svc.resolve_coding_mode_for(Some(session_key)))
+            .unwrap_or_default()
+    });
+    let session_ctx = crate::session::SessionContext {
+        session_id: session_key.to_string(),
+        workspace_key: session_key.to_string(),
+        title: session_key.to_string(),
+        workspace_dir: agent
+            .current_workspace_dir()
+            .to_string_lossy()
+            .into_owned(),
+        connection_id: None,
+    };
+    let turn_permission_mode = crate::gateway::ws::desktop::desktop_runtime_state()
+        .permission_mode_for(session_key);
+    let turn_fut = async {
+        let inner = agent.turn_streamed(&content_owned, event_tx);
+        let mode_scoped =
+            crate::agent::coding_mode::scope_coding_mode(turn_coding_mode, inner);
+        let perm_scoped =
+            crate::gateway::ws::desktop::scope_permission_mode(turn_permission_mode, mode_scoped);
+        crate::session::scope_session_context(session_ctx, perm_scoped).await
+    };
 
     let forward_fut = async {
         let mut accumulated_text = String::new();

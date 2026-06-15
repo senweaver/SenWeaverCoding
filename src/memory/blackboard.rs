@@ -102,11 +102,6 @@ impl BlackboardJournal {
     pub fn open(dir: &Path, session: &str) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{session}.jsonl"));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)?;
 
         let mut in_memory: Vec<BlackboardChange> = Vec::new();
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -120,20 +115,63 @@ impl BlackboardJournal {
             }
         }
 
+        let lock_path = dir.join(format!("{session}.jsonl.lock"));
+        let lock = match crate::session::write_lock::SessionWriteLock::acquire(&lock_path) {
+            Ok(lock) => lock,
+            Err(e) => {
+                warn!(
+                    lock = %lock_path.display(),
+                    "failed to probe blackboard journal lock: {e}; persistence disabled"
+                );
+                None
+            }
+        };
+
         let (writer, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let spawned = std::thread::Builder::new()
-            .name("blackboard-journal".to_string())
-            .spawn(move || {
-                use std::io::Write;
-                let mut file = file;
-                while let Ok(bytes) = rx.recv() {
-                    if let Err(e) = file.write_all(&bytes) {
-                        warn!("blackboard journal append failed: {e}");
-                    }
+        match lock {
+            Some(lock) => {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)?;
+                let spawned = std::thread::Builder::new()
+                    .name("blackboard-journal".to_string())
+                    .spawn(move || {
+                        use std::io::Write;
+                        let mut file = file;
+                        let mut last_touch = Instant::now();
+                        loop {
+                            match rx.recv_timeout(Duration::from_secs(30)) {
+                                Ok(bytes) => {
+                                    if let Err(e) = file.write_all(&bytes) {
+                                        warn!("blackboard journal append failed: {e}");
+                                    }
+                                    if last_touch.elapsed() >= Duration::from_secs(5) {
+                                        lock.touch();
+                                        last_touch = Instant::now();
+                                    }
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                    lock.touch();
+                                    last_touch = Instant::now();
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        drop(lock);
+                    });
+                if let Err(e) = spawned {
+                    warn!(
+                        "blackboard journal writer thread failed to start: {e}; persistence disabled"
+                    );
                 }
-            });
-        if let Err(e) = spawned {
-            warn!("blackboard journal writer thread failed to start: {e}; persistence disabled");
+            }
+            None => {
+                warn!(
+                    path = %path.display(),
+                    "another process is journaling this blackboard session; persistence disabled (in-memory only)"
+                );
+            }
         }
 
         Ok(Self {

@@ -19,6 +19,7 @@ pub mod rpc;
 pub mod resource_lock;
 pub mod run_state;
 pub mod workspace_run;
+pub mod write_lock;
 
 pub use bridge::SessionEventSink;
 pub use resource_lock::{
@@ -153,7 +154,7 @@ impl AgentSession {
         SessionEventSink::new(self.event_tx.clone())
     }
 
-    pub async fn submit(&self, input: &str) {
+    pub async fn submit(&self, input: &str) -> Result<(), anyhow::Error> {
         let turn_start = std::time::Instant::now();
         let agent_id = self
             .config
@@ -170,7 +171,7 @@ impl AgentSession {
                 output: format!("[session] received: {}", input),
                 tokens_used: 0,
             }));
-            return;
+            return Ok(());
         };
 
         let (tx, mut rx) = mpsc::channel::<TurnEvent>(128);
@@ -216,6 +217,7 @@ impl AgentSession {
         let turn_result = {
             use futures_util::FutureExt as _;
             let mut guard = agent.lock().await;
+            guard.reset_cancel();
             match std::panic::AssertUnwindSafe(guard.turn_streamed(input, tx))
                 .catch_unwind()
                 .await
@@ -245,6 +247,7 @@ impl AgentSession {
             0
         };
 
+        let turn_error = turn_result.as_ref().err().cloned();
         let final_output = match turn_result {
             Ok(text) => text,
             Err(msg) => {
@@ -259,6 +262,11 @@ impl AgentSession {
             output: final_output,
             tokens_used,
         }));
+
+        match turn_error {
+            Some(msg) => Err(anyhow::anyhow!(msg)),
+            None => Ok(()),
+        }
     }
 
     pub async fn submit_cancellable(&self, input: &str, cancel: CancellationToken) -> bool {
@@ -384,10 +392,32 @@ pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
                 return None;
             }
         }
+        TurnEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            description,
+        } => {
+            if matches!(tool_name.as_str(), "ask_question" | "ask_user" | "AskQuestion") {
+                return None;
+            }
+            let arguments = match description {
+                Some(desc) => serde_json::json!({
+                    "description": desc,
+                    "input": input,
+                }),
+                None => input,
+            };
+            SessionEventKind::ApprovalRequested {
+                id: request_id,
+                tool_name,
+                arguments,
+                issued_at: chrono::Utc::now(),
+            }
+        }
         TurnEvent::ProgressTick { .. }
         | TurnEvent::CommandPreview { .. }
         | TurnEvent::Cancelling { .. }
-        | TurnEvent::PermissionRequest { .. }
         | TurnEvent::PiiSanitized { .. }
         | TurnEvent::PlanProgressCommitted { .. }
         | TurnEvent::StreamReset => {

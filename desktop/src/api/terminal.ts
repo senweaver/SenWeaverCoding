@@ -18,7 +18,6 @@ export type TerminalOutputPayload = {
 export type TerminalExitPayload = {
   session_id: number
   code: number
-  signal?: string | null
 }
 
 type Unlisten = () => void

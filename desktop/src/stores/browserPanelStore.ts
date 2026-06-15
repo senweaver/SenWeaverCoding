@@ -30,6 +30,17 @@ import {
 } from '../lib/browserDock'
 import { useTabStore } from './tabStore'
 import { useUIStore } from './uiStore'
+import { t } from '../i18n'
+import type { TranslationKey } from '../i18n'
+
+function notifyDockActionFailed(actionLabelKey: TranslationKey, err: unknown): void {
+  console.warn(`[browserDock] ${actionLabelKey} failed`, err)
+  useUIStore.getState().addToast({
+    type: 'error',
+    message: t('browser.panel.toast.actionFailed', { action: t(actionLabelKey) }),
+    duration: 5000,
+  })
+}
 
 const SCHEME_RE = /^[a-z][a-z0-9+\-.]*:/i
 const WINDOWS_PATH_RE = /^[a-z]:[\\/]/i
@@ -166,6 +177,8 @@ export type BrowserPanelState = {
 
   prototypeRefTabId: number | null
 
+  prototypeRefFigmaUrl: string | null
+
   columnWidth: number
 
   columnWidthAuto: boolean
@@ -235,6 +248,10 @@ type StoreState = {
   setPrototypeRefTab: (sessionId: string, tabId: number) => void
 
   clearPrototypeRefTab: (sessionId: string) => void
+
+  setPrototypeRefFigma: (sessionId: string, url: string) => void
+
+  clearPrototypeRefFigma: (sessionId: string) => void
 
   setColumnWidth: (sessionId: string, px: number) => void
 
@@ -390,6 +407,7 @@ const DEFAULT_STATE: BrowserPanelState = {
   activeTabId: null,
   preferredTestTabId: null,
   prototypeRefTabId: null,
+  prototypeRefFigmaUrl: null,
   columnWidth: BROWSER_COLUMN_WIDTH_BOUNDS.default,
   columnWidthAuto: true,
   drawerHeightRatio: 0.35,
@@ -595,6 +613,8 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
   openForTool: async (sessionId, opts) => {
     const source: BrowserPanelSource = opts?.source ?? 'tool'
     const seedUrl = opts?.url ?? null
+    const prevActiveSessionId = get().activeSessionId
+    const prevVisible = get().panels[sessionId]?.visible ?? false
     const activeTabId = useTabStore.getState().activeTabId
     const isForegroundSession = activeTabId === sessionId
     if (!isForegroundSession) {
@@ -644,7 +664,13 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         }
       }
     } catch (err) {
-      console.warn('[browserDock] openForTool present failed', err)
+      set((state) => ({
+        panels: patchPanel(state.panels, sessionId, { visible: prevVisible }),
+        activeSessionId:
+          state.activeSessionId === sessionId ? prevActiveSessionId : state.activeSessionId,
+      }))
+      notifyDockActionFailed('browser.panel.action.open', err)
+      return
     }
     dockRequestState().catch((err) => {
       console.warn('[browserDock] dockRequestState failed', err)
@@ -653,7 +679,8 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
 
   toggle: async (sessionId, opts) => {
     const cur = get().panels[sessionId] ?? DEFAULT_STATE
-    const ownsActive = get().activeSessionId === sessionId
+    const prevActiveSessionId = get().activeSessionId
+    const ownsActive = prevActiveSessionId === sessionId
     const wasVisible = ownsActive && cur.visible
     const wantsVisible = !wasVisible
     const source: BrowserPanelSource = opts?.source ?? 'manual'
@@ -679,7 +706,13 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         await dockHide()
       }
     } catch (err) {
-      console.warn('[browserDock] toggle dock failed', err)
+      set((state) => ({
+        activeSessionId: wantsVisible
+          ? (state.activeSessionId === sessionId ? prevActiveSessionId : state.activeSessionId)
+          : state.activeSessionId,
+        panels: patchPanel(state.panels, sessionId, { visible: wasVisible }),
+      }))
+      notifyDockActionFailed('browser.panel.action.toggle', err)
     }
   },
 
@@ -693,14 +726,14 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       try {
         await get().openForTool(sessionId, { source: 'manual', url: normalized })
       } catch (err) {
-        console.warn('[browserDock] navigate openForTool failed', err)
+        notifyDockActionFailed('browser.panel.action.navigate', err)
       }
       return
     }
     try {
       await dockNavigate(normalized)
     } catch (err) {
-      console.warn('[browserDock] dockNavigate failed', err)
+      notifyDockActionFailed('browser.panel.action.navigate', err)
     }
   },
 
@@ -709,7 +742,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       await dockBack()
       if (sessionId) get().appendUserAction(sessionId, { kind: 'back', detail: '' })
     } catch (err) {
-      console.warn('[browserDock] back failed', err)
+      notifyDockActionFailed('browser.panel.back', err)
     }
   },
 
@@ -718,7 +751,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       await dockForward()
       if (sessionId) get().appendUserAction(sessionId, { kind: 'forward', detail: '' })
     } catch (err) {
-      console.warn('[browserDock] forward failed', err)
+      notifyDockActionFailed('browser.panel.forward', err)
     }
   },
 
@@ -732,7 +765,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         })
       }
     } catch (err) {
-      console.warn('[browserDock] reload failed', err)
+      notifyDockActionFailed('browser.panel.reload', err)
     }
   },
 
@@ -743,7 +776,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     try {
       await dockSetZoom(next)
     } catch (err) {
-      console.warn('[browserDock] zoom failed', err)
+      notifyDockActionFailed('browser.panel.menu.zoom', err)
     }
   },
 
@@ -850,7 +883,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       })
       return id
     } catch (err) {
-      console.warn('[browserDock] newTab failed', err)
+      notifyDockActionFailed('browser.panel.tabs.new', err)
       return null
     }
   },
@@ -865,7 +898,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         })
       }
     } catch (err) {
-      console.warn('[browserDock] closeTab failed', err)
+      notifyDockActionFailed('browser.panel.tabs.close', err)
     }
   },
 
@@ -890,7 +923,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         detail: String(tabId),
       })
     } catch (err) {
-      console.warn('[browserDock] activateTab failed', err)
+      notifyDockActionFailed('browser.panel.tabs.activate', err)
     }
   },
 
@@ -948,6 +981,26 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     }))
     get().appendUserAction(sessionId, {
       kind: 'clear_prototype_ref',
+      detail: '',
+    })
+  },
+
+  setPrototypeRefFigma: (sessionId, url) => {
+    set((state) => ({
+      panels: patchPanel(state.panels, sessionId, { prototypeRefFigmaUrl: url }),
+    }))
+    get().appendUserAction(sessionId, {
+      kind: 'set_prototype_ref_figma',
+      detail: url,
+    })
+  },
+
+  clearPrototypeRefFigma: (sessionId) => {
+    set((state) => ({
+      panels: patchPanel(state.panels, sessionId, { prototypeRefFigmaUrl: null }),
+    }))
+    get().appendUserAction(sessionId, {
+      kind: 'clear_prototype_ref_figma',
       detail: '',
     })
   },

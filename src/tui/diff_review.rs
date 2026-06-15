@@ -28,6 +28,10 @@ pub struct DiffReviewState {
     pub scroll: u16,
 
     pub toast: Option<String>,
+
+    pub reverting_entries: std::collections::HashSet<u64>,
+
+    preview_cache: std::collections::HashMap<u64, (u64, std::sync::Arc<Vec<HunkView>>)>,
     list_state: ListState,
 }
 
@@ -36,6 +40,31 @@ impl DiffReviewState {
         let mut s = Self::default();
         s.list_state.select(Some(0));
         s
+    }
+
+    pub fn cached_hunks(
+        &mut self,
+        entry_id: u64,
+        diff: Option<&str>,
+    ) -> std::sync::Arc<Vec<HunkView>> {
+        let Some(diff) = diff else {
+            return std::sync::Arc::new(Vec::new());
+        };
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            diff.hash(&mut h);
+            h.finish()
+        };
+        if let Some((cached_fp, hunks)) = self.preview_cache.get(&entry_id) {
+            if *cached_fp == fingerprint {
+                return hunks.clone();
+            }
+        }
+        let parsed = std::sync::Arc::new(parse_unified_diff(diff));
+        self.preview_cache
+            .insert(entry_id, (fingerprint, parsed.clone()));
+        parsed
     }
 
     pub fn clamp_selection(&mut self, entry_count: usize, hunk_count: usize) {
@@ -296,7 +325,8 @@ pub fn draw(
         .split(area);
 
     draw_entry_list(f, state, &entries, cols[0]);
-    draw_preview(f, state, entries.get(state.selected_entry).copied(), cols[1]);
+    let selected_entry = entries.get(state.selected_entry).copied();
+    draw_preview(f, state, selected_entry, cols[1]);
     draw_legend(f, state, cols[2]);
 }
 
@@ -306,15 +336,20 @@ fn draw_entry_list(
     entries: &[&PendingEdit],
     area: Rect,
 ) {
+    let reverting = state.reverting_entries.clone();
     let items: Vec<ListItem> = entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let marker = match e.status() {
-                PendingStatus::Pending => "•",
-                PendingStatus::Applied => "A",
-                PendingStatus::Reverted => "R",
-                PendingStatus::PartiallyReverted => "~",
+            let marker = if reverting.contains(&e.id) {
+                super::theme::spinner_frame_now()
+            } else {
+                match e.status() {
+                    PendingStatus::Pending => "•",
+                    PendingStatus::Applied => "A",
+                    PendingStatus::Reverted => "R",
+                    PendingStatus::PartiallyReverted => "~",
+                }
             };
             let batch_hint = e
                 .edit_batch_id
@@ -349,7 +384,7 @@ fn draw_entry_list(
 
 fn draw_preview(
     f: &mut Frame,
-    state: &DiffReviewState,
+    state: &mut DiffReviewState,
     entry: Option<&PendingEdit>,
     area: Rect,
 ) {
@@ -360,11 +395,7 @@ fn draw_preview(
         return;
     };
 
-    let hunks = entry
-        .diff
-        .as_deref()
-        .map(parse_unified_diff)
-        .unwrap_or_default();
+    let hunks = state.cached_hunks(entry.id, entry.diff.as_deref());
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled(

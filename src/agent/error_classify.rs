@@ -146,7 +146,10 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
 
 pub fn user_facing_error_json(message: &str, code: &str) -> serde_json::Value {
     serde_json::json!({
+        "type": "error",
         "error": message,
+        "message": message,
         "code": code,
+        "detail": message,
     })
 }

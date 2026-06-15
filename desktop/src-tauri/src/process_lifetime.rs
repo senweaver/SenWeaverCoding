@@ -83,8 +83,9 @@ mod platform {
 
             if let Err(err) = AssignProcessToJobObject(job, GetCurrentProcess()) {
 
-                tracing::info!(
-                    "[sen-desktop] AssignProcessToJobObject failed ({err}); likely already in a job, relying on graceful shutdown for child cleanup"
+                tracing::warn!(
+                    "[sen-desktop] AssignProcessToJobObject failed ({err}); child processes will NOT be auto-killed by the OS on abnormal exit. \
+                     Graceful shutdown will explicitly kill known children (gateway child, terminal shells) as a fallback"
                 );
                 let _ = CloseHandle(job);
                 return;
@@ -147,6 +148,10 @@ pub fn install_kill_on_close_job() {
 
 static SHUTDOWN_LATCH: OnceLock<()> = OnceLock::new();
 
+pub fn is_shutting_down() -> bool {
+    SHUTDOWN_LATCH.get().is_some()
+}
+
 pub fn run_full_shutdown(app: &AppHandle, deadline: Duration) {
     if SHUTDOWN_LATCH.set(()).is_err() {
         return;
@@ -190,6 +195,8 @@ pub fn run_full_shutdown(app: &AppHandle, deadline: Duration) {
             );
         }
     }
+
+    crate::kill_gateway_child();
 
     #[cfg(unix)]
     {

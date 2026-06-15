@@ -3,7 +3,6 @@
 // Licensed under the MIT License.
 
 pub mod motions;
-pub mod operators;
 pub mod text_objects;
 pub mod transitions;
 pub mod types;

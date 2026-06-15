@@ -14,6 +14,7 @@ import { useTabStore, SCHEDULED_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { focusSession } from '../../lib/focusSession'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
+import { useDesignerCanvasStore } from '../../stores/designerCanvasStore'
 import { isPlaceholderTitle, resolveSessionTitle } from '../../utils/sessionTitle'
 import { Spinner } from '../shared/Spinner'
 import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
@@ -61,6 +62,10 @@ export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const activeTabId = useTabStore((s) => s.activeTabId)
+  const designerCanvasOpen = useDesignerCanvasStore((s) =>
+    activeTabId ? s.panels[activeTabId]?.visible ?? false : false,
+  )
+  const toggleDesignerCanvas = useDesignerCanvasStore((s) => s.toggle)
   const closeTab = useTabStore((s) => s.closeTab)
   const disconnectSession = useChatStore((s) => s.disconnectSession)
   const stopGeneration = useChatStore((s) => s.stopGeneration)
@@ -606,6 +611,24 @@ export function Sidebar() {
       )}
 
       <div className="flex items-center justify-end gap-1 border-t border-[var(--color-border)] p-2">
+        <button
+          type="button"
+          onClick={() => {
+            const sessionId = useTabStore.getState().activeTabId
+            if (!sessionId) return
+            toggleDesignerCanvas(sessionId)
+          }}
+          title={t('designer.canvas.toggle')}
+          aria-label={t('designer.canvas.toggle')}
+          aria-pressed={designerCanvasOpen}
+          className={
+            designerCanvasOpen
+              ? 'inline-flex items-center justify-center rounded-md p-1.5 bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] transition-colors'
+              : 'inline-flex items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+          }
+        >
+          <span className="material-symbols-outlined text-[16px]">palette</span>
+        </button>
         {isTauri && (
           <button
             type="button"

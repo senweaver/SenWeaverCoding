@@ -43,6 +43,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "include_dir",
  "inventory",
  "jsonwebtoken",
  "landlock",
@@ -82,6 +83,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde-big-array",
+ "serde_ignored",
  "serde_json",
  "serde_yaml",
  "sha2",
@@ -9499,6 +9501,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "futures-util",
  "image",
  "libc",
  "parking_lot",
@@ -9513,6 +9516,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -9615,6 +9619,16 @@ dependencies = [
  "indexmap 2.14.0",
  "itoa",
  "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
  "serde_core",
 ]
 

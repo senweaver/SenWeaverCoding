@@ -48,7 +48,7 @@ export function FileTree({ workDir, onSelect }: Props) {
   const rootLoaded = useWorkspaceFilesStore((s) => s.rootLoaded)
   const rootLoading = useWorkspaceFilesStore((s) => s.rootLoading)
   const rootError = useWorkspaceFilesStore((s) => s.rootError)
-  const refreshRoot = useWorkspaceFilesStore((s) => s.refreshRoot)
+  const refreshAll = useWorkspaceFilesStore((s) => s.refreshAll)
   const loadDirectory = useWorkspaceFilesStore((s) => s.loadDirectory)
   const selectedRelPath = useWorkspaceFilesStore((s) => s.selectedRelPath)
   const renameAction = useWorkspaceFilesStore((s) => s.rename)
@@ -734,7 +734,7 @@ export function FileTree({ workDir, onSelect }: Props) {
             icon="refresh"
             label={t('files.refresh')}
             onClick={() => {
-              void refreshRoot()
+              void refreshAll()
             }}
           />
         </div>
@@ -899,7 +899,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           onNewFolder={handleNewFolder}
           onRename={handleRename}
           onDelete={handleDelete}
-          onRefresh={refreshRoot}
+          onRefresh={refreshAll}
           onUpload={handleUpload}
           onCopyAbsolutePath={handleCopyAbsolutePath}
           onCopyRelativePath={handleCopyRelativePath}

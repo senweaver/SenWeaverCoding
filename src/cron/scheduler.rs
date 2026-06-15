@@ -29,6 +29,14 @@ use tokio::time::{self, Duration};
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
 const SCHEDULER_COMPONENT: &str = "scheduler";
+const STALE_RUNNING_MIN_SECS: u64 = 30 * 60;
+
+fn stale_running_threshold(config: &Config) -> chrono::Duration {
+    let attempts = u64::from(config.reliability.scheduler_retries).saturating_add(1);
+    let job_budget_secs = SHELL_JOB_TIMEOUT_SECS.saturating_mul(attempts);
+    let secs = job_budget_secs.max(STALE_RUNNING_MIN_SECS);
+    chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX))
+}
 
 fn apply_cron_permission_mode(autonomy: &mut AutonomyConfig, permission_mode: Option<&str>) {
     let Some(raw) = permission_mode.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -123,16 +131,43 @@ pub async fn run(config: Config) -> Result<()> {
         Err(e) => tracing::warn!("Failed to sync declarative cron jobs: {e}"),
     }
 
+    match crate::cron::reset_running_runs(&config, Utc::now()) {
+        Ok(count) if count > 0 => {
+            tracing::warn!(
+                count,
+                "Scheduler startup: reset stale 'running' cron run records left by a previous process"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Scheduler startup: failed to reset stale running cron runs: {e}"),
+    }
+
     if config.cron.catch_up_on_startup {
         catch_up_overdue_jobs(&config, &security).await;
     } else {
         tracing::info!("Scheduler startup: catch-up disabled by config");
     }
 
+    let stale_threshold = stale_running_threshold(&config);
+
     loop {
         interval.tick().await;
 
         crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+
+        match crate::cron::reset_stale_running(&config, Utc::now(), stale_threshold) {
+            Ok(count) if count > 0 => {
+                tracing::warn!(
+                    count,
+                    threshold_secs = stale_threshold.num_seconds(),
+                    "Scheduler tick: reset stale 'running' cron run records left by a killed or panicked execution"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Scheduler tick: failed to reset stale running cron runs: {e}");
+            }
+        }
 
         let jobs = match due_jobs(&config, Utc::now()) {
             Ok(jobs) => jobs,
@@ -249,8 +284,28 @@ async fn process_due_jobs(
 
     crate::health::mark_component_ok(component);
 
+    let claim_now = Utc::now();
+    let mut claimed_jobs = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        match crate::cron::claim_job(config, &job, claim_now) {
+            Ok(true) => claimed_jobs.push(job),
+            Ok(false) => tracing::debug!(
+                job_id = %job.id,
+                "cron job already claimed or advanced; skipping to avoid duplicate run"
+            ),
+            Err(e) => tracing::warn!(
+                job_id = %job.id,
+                "failed to claim cron job: {e}; skipping to avoid duplicate run"
+            ),
+        }
+    }
+
+    if claimed_jobs.is_empty() {
+        return;
+    }
+
     let max_concurrent = config.scheduler.max_concurrent.max(1);
-    let mut in_flight = stream::iter(jobs.into_iter().map(|job| {
+    let mut in_flight = stream::iter(claimed_jobs.into_iter().map(|job| {
         let config = config.clone();
         let security = Arc::clone(security);
         let component = component.to_owned();
@@ -388,17 +443,31 @@ async fn persist_job_result(
 ) -> bool {
     let duration_ms = (finished_at - started_at).num_milliseconds();
 
+    let mut delivery_failure: Option<String> = None;
     if let Err(e) = deliver_if_configured(config, job, output).await {
-        if job.delivery.best_effort {
-            tracing::warn!("Cron delivery failed (best_effort): {e}");
-        } else {
+        delivery_failure = Some(e.to_string());
+        tracing::error!(
+            job_id = %job.id,
+            error = %e,
+            best_effort = job.delivery.best_effort,
+            "cron job delivery_failed"
+        );
+        if !job.delivery.best_effort {
             success = false;
-            tracing::warn!("Cron delivery failed: {e}");
         }
     }
 
-    let stored_output = prepend_cron_run_meta(job, output);
-    let status = if success { "ok" } else { "error" };
+    let mut stored_output = prepend_cron_run_meta(job, output);
+    if let Some(ref err) = delivery_failure {
+        stored_output = format!("--- delivery_failed: {err} ---\n{stored_output}");
+    }
+    let status = if !success {
+        "error"
+    } else if delivery_failure.is_some() {
+        "delivery_failed"
+    } else {
+        "ok"
+    };
 
     if let Some(rid) = run_id {
         let _ = crate::cron::finalize_run(
@@ -775,7 +844,7 @@ async fn run_job_command_with_timeout(
         );
     }
 
-    let child = match build_cron_shell_command(&job.command, &config.workspace_dir) {
+    let mut child = match build_cron_shell_command(&job.command, &config.workspace_dir) {
         Ok(mut cmd) => match cmd.spawn() {
             Ok(child) => child,
             Err(e) => return (false, format!("spawn error: {e}")),
@@ -783,24 +852,86 @@ async fn run_job_command_with_timeout(
         Err(e) => return (false, format!("shell setup error: {e}")),
     };
 
-    match time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let cap = super::store::MAX_CRON_OUTPUT_BYTES;
+
+    let drain = async {
+        let (status, stdout_capped, stderr_capped) = tokio::join!(
+            child.wait(),
+            read_stream_capped(stdout, cap),
+            read_stream_capped(stderr, cap),
+        );
+        (status, stdout_capped, stderr_capped)
+    };
+
+    match time::timeout(timeout, drain).await {
+        Ok((Ok(status), (stdout, stdout_truncated), (stderr, stderr_truncated))) => {
+            let stdout_note = if stdout_truncated {
+                "\n...[truncated]"
+            } else {
+                ""
+            };
+            let stderr_note = if stderr_truncated {
+                "\n...[truncated]"
+            } else {
+                ""
+            };
             let combined = format!(
-                "status={}\nstdout:\n{}\nstderr:\n{}",
-                output.status,
+                "status={}\nstdout:\n{}{}\nstderr:\n{}{}",
+                status,
                 stdout.trim(),
-                stderr.trim()
+                stdout_note,
+                stderr.trim(),
+                stderr_note
             );
-            (output.status.success(), combined)
+            (status.success(), combined)
         }
-        Ok(Err(e)) => (false, format!("spawn error: {e}")),
-        Err(_) => (
-            false,
-            format!("job timed out after {}s", timeout.as_secs_f64()),
-        ),
+        Ok((Err(e), _, _)) => (false, format!("spawn error: {e}")),
+        Err(_) => {
+            let _ = child.start_kill();
+            (
+                false,
+                format!("job timed out after {}s", timeout.as_secs_f64()),
+            )
+        }
     }
+}
+
+async fn read_stream_capped<R>(reader: Option<R>, cap: usize) -> (String, bool)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let Some(mut reader) = reader else {
+        return (String::new(), false);
+    };
+
+    let mut collected: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let mut buf = [0u8; 8192];
+
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if collected.len() < cap {
+                    let remaining = cap - collected.len();
+                    let take = remaining.min(n);
+                    collected.extend_from_slice(&buf[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    (String::from_utf8_lossy(&collected).into_owned(), truncated)
 }
 
 fn build_cron_shell_command(

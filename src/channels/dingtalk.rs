@@ -111,6 +111,172 @@ impl DingTalkChannel {
         let gw: GatewayResponse = resp.json().await?;
         Ok(gw)
     }
+
+    async fn run_stream_session(
+        &self,
+        tx: &tokio::sync::mpsc::Sender<ChannelMessage>,
+    ) -> anyhow::Result<bool> {
+        tracing::info!("DingTalk: registering gateway connection...");
+
+        let gw = self.register_connection().await?;
+        let ws_url = format!("{}?ticket={}", gw.endpoint, gw.ticket);
+
+        tracing::info!("DingTalk: connecting to stream WebSocket...");
+        let (ws_stream, _) = crate::services::require_services()
+            .proxy_runtime()
+            .ws_connect(&ws_url, "channel.dingtalk", self.proxy_url.as_deref())
+            .await?;
+        let (mut write, mut read) = ws_stream.split();
+
+        tracing::info!("DingTalk: connected and listening for messages...");
+
+        while let Some(msg) = read.next().await {
+            let msg = match msg {
+                Ok(Message::Text(t)) => t,
+                Ok(Message::Close(_)) => return Ok(false),
+                Err(e) => {
+                    tracing::warn!("DingTalk WebSocket error: {e}");
+                    return Ok(false);
+                }
+                _ => continue,
+            };
+
+            let frame: serde_json::Value = match serde_json::from_str(msg.as_ref()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let frame_type = frame.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match frame_type {
+                "SYSTEM" => {
+
+                    let message_id = frame
+                        .get("headers")
+                        .and_then(|h| h.get("messageId"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+
+                    let pong = serde_json::json!({
+                        "code": 200,
+                        "headers": {
+                            "contentType": "application/json",
+                            "messageId": message_id,
+                        },
+                        "message": "OK",
+                        "data": "",
+                    });
+
+                    if let Err(e) = write.send(Message::Text(pong.to_string().into())).await {
+                        tracing::warn!("DingTalk: failed to send pong: {e}");
+                        return Ok(false);
+                    }
+                }
+                "EVENT" | "CALLBACK" => {
+
+                    let message_id = frame
+                        .get("headers")
+                        .and_then(|h| h.get("messageId"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let ack_frame = |message_id: &str| {
+                        serde_json::json!({
+                            "code": 200,
+                            "headers": {
+                                "contentType": "application/json",
+                                "messageId": message_id,
+                            },
+                            "message": "OK",
+                            "data": "",
+                        })
+                    };
+
+                    let data = match Self::parse_stream_data(&frame) {
+                        Some(v) => v,
+                        None => {
+                            tracing::debug!("DingTalk: frame has no parseable data payload");
+                            let _ = write
+                                .send(Message::Text(ack_frame(&message_id).to_string().into()))
+                                .await;
+                            continue;
+                        }
+                    };
+
+                    let content = data
+                        .get("text")
+                        .and_then(|t| t.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .trim();
+
+                    if content.is_empty() {
+                        let _ = write
+                            .send(Message::Text(ack_frame(&message_id).to_string().into()))
+                            .await;
+                        continue;
+                    }
+
+                    let sender_id = data
+                        .get("senderStaffId")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unknown");
+
+                    if !self.is_user_allowed(sender_id) {
+                        tracing::warn!(
+                            "DingTalk: ignoring message from unauthorized user: {sender_id}"
+                        );
+                        let _ = write
+                            .send(Message::Text(ack_frame(&message_id).to_string().into()))
+                            .await;
+                        continue;
+                    }
+
+                    let chat_id = Self::resolve_chat_id(&data, sender_id);
+
+                    if let Some(webhook) = data.get("sessionWebhook").and_then(|w| w.as_str()) {
+                        let webhook = webhook.to_string();
+                        let mut webhooks = self.session_webhooks.write().await;
+
+                        webhooks.insert(chat_id.clone(), webhook.clone());
+                        webhooks.insert(sender_id.to_string(), webhook);
+                    }
+
+                    let channel_msg = ChannelMessage {
+                        id: Uuid::new_v4().to_string(),
+                        sender: sender_id.to_string(),
+                        reply_target: chat_id,
+                        content: content.to_string(),
+                        channel: "dingtalk".to_string(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        thread_ts: None,
+                        interruption_scope_id: None,
+                        attachments: vec![],
+                    };
+
+                    match crate::channels::forward_channel_message("dingtalk", tx, channel_msg) {
+                        crate::channels::ForwardOutcome::Delivered => {
+                            let _ = write
+                                .send(Message::Text(ack_frame(&message_id).to_string().into()))
+                                .await;
+                        }
+                        crate::channels::ForwardOutcome::Dropped => {}
+                        crate::channels::ForwardOutcome::Closed => {
+                            tracing::warn!("DingTalk: message channel closed");
+                            return Ok(true);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -155,147 +321,44 @@ impl Channel for DingTalkChannel {
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        tracing::info!("DingTalk: registering gateway connection...");
+        let mut reconnect_attempt: u32 = 0;
 
-        let gw = self.register_connection().await?;
-        let ws_url = format!("{}?ticket={}", gw.endpoint, gw.ticket);
-
-        tracing::info!("DingTalk: connecting to stream WebSocket...");
-        let (ws_stream, _) = crate::services::require_services()
-            .proxy_runtime()
-            .ws_connect(&ws_url, "channel.dingtalk", self.proxy_url.as_deref())
-            .await?;
-        let (mut write, mut read) = ws_stream.split();
-
-        tracing::info!("DingTalk: connected and listening for messages...");
-
-        while let Some(msg) = read.next().await {
-            let msg = match msg {
-                Ok(Message::Text(t)) => t,
-                Ok(Message::Close(_)) => break,
-                Err(e) => {
-                    tracing::warn!("DingTalk WebSocket error: {e}");
-                    break;
-                }
-                _ => continue,
-            };
-
-            let frame: serde_json::Value = match serde_json::from_str(msg.as_ref()) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            let frame_type = frame.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-            match frame_type {
-                "SYSTEM" => {
-
-                    let message_id = frame
-                        .get("headers")
-                        .and_then(|h| h.get("messageId"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("");
-
-                    let pong = serde_json::json!({
-                        "code": 200,
-                        "headers": {
-                            "contentType": "application/json",
-                            "messageId": message_id,
-                        },
-                        "message": "OK",
-                        "data": "",
-                    });
-
-                    if let Err(e) = write.send(Message::Text(pong.to_string().into())).await {
-                        tracing::warn!("DingTalk: failed to send pong: {e}");
-                        break;
-                    }
-                }
-                "EVENT" | "CALLBACK" => {
-
-                    let data = match Self::parse_stream_data(&frame) {
-                        Some(v) => v,
-                        None => {
-                            tracing::debug!("DingTalk: frame has no parseable data payload");
-                            continue;
-                        }
-                    };
-
-                    let content = data
-                        .get("text")
-                        .and_then(|t| t.get("content"))
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .trim();
-
-                    if content.is_empty() {
-                        continue;
-                    }
-
-                    let sender_id = data
-                        .get("senderStaffId")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("unknown");
-
-                    if !self.is_user_allowed(sender_id) {
-                        tracing::warn!(
-                            "DingTalk: ignoring message from unauthorized user: {sender_id}"
-                        );
-                        continue;
-                    }
-
-                    let chat_id = Self::resolve_chat_id(&data, sender_id);
-
-                    if let Some(webhook) = data.get("sessionWebhook").and_then(|w| w.as_str()) {
-                        let webhook = webhook.to_string();
-                        let mut webhooks = self.session_webhooks.write().await;
-
-                        webhooks.insert(chat_id.clone(), webhook.clone());
-                        webhooks.insert(sender_id.to_string(), webhook);
-                    }
-
-                    let message_id = frame
-                        .get("headers")
-                        .and_then(|h| h.get("messageId"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("");
-
-                    let ack = serde_json::json!({
-                        "code": 200,
-                        "headers": {
-                            "contentType": "application/json",
-                            "messageId": message_id,
-                        },
-                        "message": "OK",
-                        "data": "",
-                    });
-                    let _ = write.send(Message::Text(ack.to_string().into())).await;
-
-                    let channel_msg = ChannelMessage {
-                        id: Uuid::new_v4().to_string(),
-                        sender: sender_id.to_string(),
-                        reply_target: chat_id,
-                        content: content.to_string(),
-                        channel: "dingtalk".to_string(),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        thread_ts: None,
-                        interruption_scope_id: None,
-                        attachments: vec![],
-                    };
-
-                    if tx.send(channel_msg).await.is_err() {
-                        tracing::warn!("DingTalk: message channel closed");
-                        break;
-                    }
-                }
-                _ => {}
+        loop {
+            if tx.is_closed() {
+                tracing::info!("DingTalk: message channel closed; stopping listener");
+                return Ok(());
             }
-        }
 
-        anyhow::bail!("DingTalk WebSocket stream ended")
+            let session_started = std::time::Instant::now();
+            let session: anyhow::Result<bool> = self.run_stream_session(&tx).await;
+
+            match session {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    tracing::warn!("DingTalk: WebSocket stream ended; reconnecting");
+                }
+                Err(e) => {
+                    tracing::warn!("DingTalk: WebSocket session error: {e:#}");
+                }
+            }
+
+            if tx.is_closed() {
+                tracing::info!("DingTalk: message channel closed; stopping listener");
+                return Ok(());
+            }
+
+            if session_started.elapsed() >= std::time::Duration::from_secs(60) {
+                reconnect_attempt = 0;
+            }
+            let wait = crate::channels::reconnect_backoff_delay(reconnect_attempt, 2, 60, 500);
+            tracing::warn!(
+                "DingTalk: reconnecting in {:.3}s (attempt #{})",
+                wait.as_secs_f64(),
+                reconnect_attempt.saturating_add(1),
+            );
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            tokio::time::sleep(wait).await;
+        }
     }
 
     async fn health_check(&self) -> bool {

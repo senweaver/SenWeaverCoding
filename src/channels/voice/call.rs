@@ -343,9 +343,9 @@ impl VoiceCallChannel {
             interruption_scope_id: Some(call_id.to_string()),
             attachments: vec![],
         };
-        tx.send(msg)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send call event: {e}"))?;
+        if crate::channels::forward_channel_message("voice_call", tx, msg).is_closed() {
+            anyhow::bail!("Failed to send call event: message channel closed");
+        }
         Ok(())
     }
 

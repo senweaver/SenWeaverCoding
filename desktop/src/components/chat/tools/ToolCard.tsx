@@ -149,8 +149,7 @@ export function ToolCard({
   const verb = isSpawnWorkers
     ? t('chat.workers.spawnVerb') || 'spawned'
     : t(VERB_KEYS[category])
-  const codingMode = useSettingsStore((s) => s.codingMode)
-  const modeBadge = compact ? null : getModeBadge(codingMode)
+  const modeBadge = compact ? null : getModeBadge(useSettingsStore.getState().codingMode)
   const expandable =
     renderer.alwaysExpandable === true ||
     Boolean(result && hasMeaningfulOutput(result.content))

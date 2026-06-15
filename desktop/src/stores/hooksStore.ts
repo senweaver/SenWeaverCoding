@@ -16,14 +16,14 @@ type HooksStore = {
   update: (patch: HooksPatch) => Promise<void>
 }
 
-export const useHooksStore = create<HooksStore>((set) => ({
+export const useHooksStore = create<HooksStore>((set, get) => ({
   config: null,
   isLoading: false,
   isSaving: false,
   error: null,
 
   fetch: async () => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: get().config === null, error: null })
     try {
       const config = await hooksApi.get()
       set({ config, isLoading: false })

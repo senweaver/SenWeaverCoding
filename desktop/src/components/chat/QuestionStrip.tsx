@@ -92,9 +92,10 @@ function normalizeQuestions(input: unknown): Question[] {
 export function QuestionStrip() {
   const t = useTranslation()
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const sessionState = useChatStore((s) => (activeTabId ? s.sessions[activeTabId] : undefined))
   const respondToPermission = useChatStore((s) => s.respondToPermission)
-  const pendingPermission = sessionState?.pendingPermission ?? null
+  const pendingPermission = useChatStore((s) =>
+    activeTabId ? s.sessions[activeTabId]?.pendingPermission ?? null : null,
+  )
   const isQuestion = isAskQuestionToolName(pendingPermission?.toolName)
 
   const questions = useMemo(

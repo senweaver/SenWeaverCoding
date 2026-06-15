@@ -246,7 +246,7 @@ impl Channel for NostrChannel {
                             interruption_scope_id: None,
                             attachments: vec![],
                         };
-                        if tx.send(msg).await.is_err() {
+                        if crate::channels::forward_channel_message("nostr", &tx, msg).is_closed() {
                             tracing::info!("Nostr listener: message bus closed, stopping");
                             break;
                         }

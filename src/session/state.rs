@@ -5,11 +5,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use once_cell::sync::Lazy;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+
+const CONFLICT_JOURNAL_CAP: usize = 256;
 
 use crate::observability::session_write_mode_metrics;
 use crate::session::event::{SessionEvent, SessionEventKind};
@@ -291,12 +295,48 @@ impl SessionState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConflictRecord {
+    pub source_session_id: String,
+    pub remote_seq: u64,
+    pub remote_version: u64,
+    pub remote_last_seen_seq: u64,
+    pub local_version: u64,
+    pub event_kind: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+static SESSION_ACTOR_REGISTRY: Lazy<RwLock<HashMap<SessionId, Weak<SessionActor>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+fn register_session_actor(id: &SessionId, actor: &Arc<SessionActor>) {
+    SESSION_ACTOR_REGISTRY
+        .write()
+        .insert(id.clone(), Arc::downgrade(actor));
+}
+
+fn deregister_session_actor(id: &str) {
+    SESSION_ACTOR_REGISTRY.write().remove(id);
+}
+
+pub fn session_actor(id: &str) -> Option<Arc<SessionActor>> {
+    SESSION_ACTOR_REGISTRY.read().get(id).and_then(Weak::upgrade)
+}
+
 pub struct SessionActor {
     state: RwLock<SessionState>,
     log: Arc<SessionEventLog>,
     hub: Arc<SessionSyncHub>,
 
     conflict_count: AtomicU64,
+
+    conflict_journal: Mutex<Vec<SessionConflictRecord>>,
+
+    append_degraded: AtomicBool,
+
+    replay_readonly: AtomicBool,
+
+    remote_versions: Mutex<HashMap<String, u64>>,
 }
 
 impl SessionActor {
@@ -309,12 +349,18 @@ impl SessionActor {
         let id: SessionId = id.into();
         let state = SessionState::new(id.clone());
         hub.register(id.clone());
-        Arc::new(Self {
+        let actor = Arc::new(Self {
             state: RwLock::new(state),
             log,
             hub,
             conflict_count: AtomicU64::new(0),
-        })
+            conflict_journal: Mutex::new(Vec::new()),
+            append_degraded: AtomicBool::new(false),
+            replay_readonly: AtomicBool::new(false),
+            remote_versions: Mutex::new(HashMap::new()),
+        });
+        register_session_actor(&id, &actor);
+        actor
     }
 
     pub fn open_or_create(
@@ -323,30 +369,45 @@ impl SessionActor {
         hub: Arc<SessionSyncHub>,
     ) -> Arc<Self> {
         let id: SessionId = id.into();
-        let replayed = log.replay(&id).unwrap_or_else(|err| {
-            tracing::warn!(
-                session_id = %id,
-                error = %err,
-                "session log replay failed; starting from empty state"
-            );
-            None
-        });
-
-        let state = match replayed {
-            Some(state) => {
+        let mut replay_degraded = false;
+        let state = match log.replay(&id) {
+            Ok(Some(state)) => {
                 session_write_mode_metrics::incr_session_replayed();
                 state
             }
-            None => SessionState::new(id.clone()),
+            Ok(None) => SessionState::new(id.clone()),
+            Err(err) => {
+                replay_degraded = true;
+                tracing::error!(
+                    session_id = %id,
+                    error = %err,
+                    "session log replay failed with an I/O error; on-disk history may exist but could not be read. Entering degraded mode (writes suppressed) to avoid clobbering existing data"
+                );
+                SessionState::new(id.clone())
+            }
         };
 
         hub.register(id.clone());
-        Arc::new(Self {
+        let actor = Arc::new(Self {
             state: RwLock::new(state),
             log,
             hub,
             conflict_count: AtomicU64::new(0),
-        })
+            conflict_journal: Mutex::new(Vec::new()),
+            append_degraded: AtomicBool::new(replay_degraded),
+            replay_readonly: AtomicBool::new(replay_degraded),
+            remote_versions: Mutex::new(HashMap::new()),
+        });
+        register_session_actor(&id, &actor);
+        if actor.persistence_degraded() {
+            tracing::warn!(
+                session_id = %id,
+                read_only = actor.log.is_read_only(),
+                writer_degraded = actor.log.is_degraded(),
+                "session opened with degraded persistence; events may not be durably written to disk"
+            );
+        }
+        actor
     }
 
     pub fn id(&self) -> SessionId {
@@ -368,28 +429,45 @@ impl SessionActor {
     }
 
     pub fn apply(&self, evt: &SessionEvent) -> SessionDelta {
+        self.apply_event(evt, true)
+    }
+
+    fn apply_event(&self, evt: &SessionEvent, forward_transport: bool) -> SessionDelta {
         let version;
         {
             let mut guard = self.state.write();
             version = guard.apply(evt);
         }
 
-        let seq = match self.log.append(evt) {
-            Ok(seq) => {
-                session_write_mode_metrics::incr_session_event_persisted();
-                seq
-            }
-            Err(err) => {
-                session_write_mode_metrics::incr_session_apply_failed();
-                tracing::warn!(
-                    error = %err,
-                    "failed to append session event to log; broadcast continues"
-                );
-                version
+        let read_only = self.replay_readonly.load(Ordering::Relaxed);
+
+        let seq = if read_only {
+            version
+        } else {
+            match self.log.append(evt) {
+                Ok(seq) => {
+                    session_write_mode_metrics::incr_session_event_persisted();
+                    seq
+                }
+                Err(err) => {
+                    session_write_mode_metrics::incr_session_apply_failed();
+                    if self.append_degraded.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            error = %err,
+                            "session event append still failing in degraded mode; broadcast continues"
+                        );
+                    } else {
+                        tracing::error!(
+                            error = %err,
+                            "failed to append session event to log; session persistence degraded (in-memory state and broadcast continue)"
+                        );
+                    }
+                    version
+                }
             }
         };
 
-        if self.log.needs_snapshot() {
+        if !read_only && self.log.needs_snapshot() {
             let guard = self.state.read();
             if let Err(err) = self.log.write_snapshot(&guard) {
                 session_write_mode_metrics::incr_session_apply_failed();
@@ -406,11 +484,21 @@ impl SessionActor {
             version,
             seq,
         };
-        self.hub.publish(&session_id, delta.clone());
+        if forward_transport {
+            self.hub.publish(&session_id, delta.clone());
+        } else {
+            self.hub.publish_local(&session_id, &delta);
+        }
         delta
     }
 
     pub fn flush(&self) -> std::io::Result<()> {
+        if self.replay_readonly.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "session replay failed during open; persistence is read-only to avoid clobbering on-disk history",
+            ));
+        }
         let guard = self.state.read();
         self.log.write_snapshot(&guard)
     }
@@ -420,32 +508,93 @@ impl SessionActor {
     }
 
     pub fn apply_remote(&self, remote: RemoteDelta) -> SessionDelta {
+        session_write_mode_metrics::incr_session_rpc_recv();
+        {
+            let mut seen = self.remote_versions.lock();
+            let last_applied = seen
+                .get(&remote.source_session_id)
+                .copied()
+                .unwrap_or(0);
+            if remote.delta.version <= last_applied {
+                tracing::debug!(
+                    target: "session.rpc",
+                    source = %remote.source_session_id,
+                    remote_version = remote.delta.version,
+                    last_applied_version = last_applied,
+                    "dropping duplicate or stale remote delta; already merged into local state"
+                );
+                return remote.delta.clone();
+            }
+            seen.insert(remote.source_session_id.clone(), remote.delta.version);
+        }
         let local_version = self.state.read().version;
         if remote.last_seen_seq < local_version {
             let conflicts = self.conflict_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let event_kind = serde_json::to_value(&remote.delta.event.kind)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let record = SessionConflictRecord {
+                source_session_id: remote.source_session_id.clone(),
+                remote_seq: remote.delta.seq,
+                remote_version: remote.delta.version,
+                remote_last_seen_seq: remote.last_seen_seq,
+                local_version,
+                event_kind: event_kind.clone(),
+                detected_at: Utc::now(),
+            };
+            {
+                let mut journal = self.conflict_journal.lock();
+                if journal.len() >= CONFLICT_JOURNAL_CAP {
+                    let overflow = journal.len() + 1 - CONFLICT_JOURNAL_CAP;
+                    journal.drain(0..overflow);
+                }
+                journal.push(record);
+            }
             tracing::warn!(
                 target: "session.rpc",
                 source = %remote.source_session_id,
                 remote_last_seen_seq = remote.last_seen_seq,
+                remote_seq = remote.delta.seq,
+                remote_version = remote.delta.version,
                 local_version = local_version,
+                event_kind = %event_kind,
                 total_conflicts = conflicts,
-                "cross-process delta conflict detected; applying with last-writer-wins"
+                "cross-process delta conflict detected; preserving local state and journaling the remote delta before non-destructive merge"
             );
             session_write_mode_metrics::incr_session_rpc_conflict_resolved();
         }
-        session_write_mode_metrics::incr_session_rpc_recv();
-        self.apply(&remote.delta.event)
+        self.apply_event(&remote.delta.event, false)
     }
 
     pub fn conflict_count(&self) -> u64 {
         self.conflict_count.load(Ordering::Relaxed)
+    }
+
+    pub fn conflict_journal(&self) -> Vec<SessionConflictRecord> {
+        self.conflict_journal.lock().clone()
+    }
+
+    pub fn persistence_degraded(&self) -> bool {
+        self.append_degraded.load(Ordering::Relaxed)
+            || self.log.is_read_only()
+            || self.log.is_degraded()
     }
 }
 
 impl Drop for SessionActor {
     fn drop(&mut self) {
         let state = self.state.read();
-        if let Err(err) = self.log.write_snapshot(&state) {
+        if self.replay_readonly.load(Ordering::Relaxed) {
+            tracing::warn!(
+                session_id = %state.id,
+                "skip final snapshot: session in replay-readonly mode to avoid overwriting on-disk history"
+            );
+        } else if let Err(err) = self.log.write_snapshot(&state) {
             tracing::warn!(
                 session_id = %state.id,
                 error = %err,
@@ -453,6 +602,7 @@ impl Drop for SessionActor {
             );
         }
         self.hub.deregister(&state.id);
+        deregister_session_actor(&state.id);
     }
 }
 

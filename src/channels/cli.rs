@@ -54,7 +54,7 @@ impl Channel for CliChannel {
                 attachments: vec![],
             };
 
-            if tx.send(msg).await.is_err() {
+            if crate::channels::forward_channel_message("cli", &tx, msg).is_closed() {
                 break;
             }
         }

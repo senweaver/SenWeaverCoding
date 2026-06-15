@@ -113,8 +113,69 @@ const BOOTSTRAP_MAX_CHARS: usize = 20_000;
 const MIN_CHANNEL_MESSAGE_TIMEOUT_SECS: u64 = 30;
 
 const CHANNEL_MESSAGE_TIMEOUT_SCALE_CAP: u64 = 4;
-const CHANNEL_MAX_IN_FLIGHT_MESSAGES: usize = 64;
+const CHANNEL_MAX_IN_FLIGHT_MESSAGES: usize = 256;
 const MODEL_CACHE_FILE: &str = "models_cache.json";
+
+static CHANNEL_DROPPED_MESSAGES: std::sync::LazyLock<
+    parking_lot::Mutex<HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+pub(crate) fn reconnect_backoff_delay(
+    attempt: u32,
+    initial_secs: u64,
+    max_secs: u64,
+    max_jitter_ms: u64,
+) -> std::time::Duration {
+    let multiplier = 1_u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    let backoff_secs = initial_secs.saturating_mul(multiplier).min(max_secs);
+    let jitter_ms = if max_jitter_ms == 0 {
+        0
+    } else {
+        rand::random::<u64>() % (max_jitter_ms + 1)
+    };
+    std::time::Duration::from_secs(backoff_secs) + std::time::Duration::from_millis(jitter_ms)
+}
+
+pub(crate) fn record_channel_message_drop(channel_name: &str) -> u64 {
+    let mut map = CHANNEL_DROPPED_MESSAGES.lock();
+    let counter = map.entry(channel_name.to_string()).or_insert(0);
+    *counter += 1;
+    *counter
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForwardOutcome {
+    Delivered,
+    Dropped,
+    Closed,
+}
+
+impl ForwardOutcome {
+    pub(crate) fn is_closed(self) -> bool {
+        matches!(self, ForwardOutcome::Closed)
+    }
+}
+
+pub(crate) fn forward_channel_message(
+    channel_name: &str,
+    tx: &tokio::sync::mpsc::Sender<traits::ChannelMessage>,
+    msg: traits::ChannelMessage,
+) -> ForwardOutcome {
+    match tx.try_send(msg) {
+        Ok(()) => ForwardOutcome::Delivered,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(dropped)) => {
+            let total = record_channel_message_drop(channel_name);
+            tracing::warn!(
+                channel = channel_name,
+                dropped_total = total,
+                message_id = %dropped.id,
+                "channel message queue full; dropping incoming message (cursor not advanced; will retry next poll)"
+            );
+            ForwardOutcome::Dropped
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => ForwardOutcome::Closed,
+    }
+}
 const MODEL_CACHE_PREVIEW_LIMIT: usize = 10;
 const MEMORY_CONTEXT_MAX_ENTRIES: usize = 4;
 const MEMORY_CONTEXT_ENTRY_MAX_CHARS: usize = 800;
@@ -2127,8 +2188,56 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         runtime::spawn_supervised(
             format!("channel-listener-{}", ch.name()),
             async move {
-                if let Err(e) = ch.listen(tx).await {
-                    tracing::warn!("Channel listener '{}' stopped: {e}", ch.name());
+                let component = format!("channel.{}", ch.name());
+                let mut restart_attempt: u32 = 0;
+                loop {
+                    if tx.is_closed() {
+                        tracing::info!(
+                            "Channel listener '{}' stopping: message channel closed",
+                            ch.name()
+                        );
+                        break;
+                    }
+
+                    crate::health::mark_component_ok(&component);
+                    let started = std::time::Instant::now();
+                    match ch.listen(tx.clone()).await {
+                        Ok(()) => {
+                            crate::health::mark_component_error(
+                                &component,
+                                "listener returned; restarting",
+                            );
+                            tracing::warn!(
+                                "Channel listener '{}' exited; scheduling restart",
+                                ch.name()
+                            );
+                        }
+                        Err(e) => {
+                            crate::health::mark_component_error(&component, e.to_string());
+                            tracing::warn!("Channel listener '{}' stopped: {e}", ch.name());
+                        }
+                    }
+
+                    if tx.is_closed() {
+                        tracing::info!(
+                            "Channel listener '{}' stopping: message channel closed",
+                            ch.name()
+                        );
+                        break;
+                    }
+
+                    if started.elapsed() >= std::time::Duration::from_secs(60) {
+                        restart_attempt = 0;
+                    }
+                    let wait = reconnect_backoff_delay(restart_attempt, 2, 60, 500);
+                    tracing::warn!(
+                        "Channel listener '{}' restarting in {:.3}s (attempt #{})",
+                        ch.name(),
+                        wait.as_secs_f64(),
+                        restart_attempt.saturating_add(1),
+                    );
+                    restart_attempt = restart_attempt.saturating_add(1);
+                    tokio::time::sleep(wait).await;
                 }
             },
         );

@@ -7,7 +7,11 @@ import { wsManager } from '../api/websocket'
 import { sessionsApi } from '../api/sessions'
 import { useTeamStore } from './teamStore'
 import { useSessionStore } from './sessionStore'
-import { useWorkspaceQueueStore } from './workspaceQueueStore'
+import {
+  useWorkspaceQueueStore,
+  workspaceKeyFor,
+  tryDrainWorkspace,
+} from './workspaceQueueStore'
 import { useSessionRunStateStore } from './sessionRunStateStore'
 import { useCLITaskStore } from './cliTaskStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
@@ -16,6 +20,7 @@ import { useTabStore } from './tabStore'
 import { useUsageStore } from './usageStore'
 import { useWorkersStore } from './workersStore'
 import { useBrowserPanelStore } from './browserPanelStore'
+import { useDesignerCanvasStore } from './designerCanvasStore'
 import { useLspStore } from './lspStore'
 import { useUIStore } from './uiStore'
 import { t } from '../i18n'
@@ -119,6 +124,12 @@ export type PerSessionState = {
   providerRetry: ProviderRetryNotice | null
 
   historyLoaded?: boolean
+
+  historyHasMore?: boolean
+
+  historyFirstIndex?: number
+
+  historyLoadingOlder?: boolean
 }
 
 export type ProviderRetryNotice = {
@@ -261,10 +272,11 @@ type PendingSessionCodingMode = {
 type ChatStore = {
   sessions: Record<string, PerSessionState>
   sessionCodingMode: Record<string, CodingModeId>
+  sessionAutoResolvedMode: Record<string, CodingModeId>
   pendingSessionCodingMode: PendingSessionCodingMode | null
 
   getSession: (sessionId: string) => PerSessionState
-  connectToSession: (sessionId: string) => void
+  connectToSession: (sessionId: string, options?: { force?: boolean }) => void
   connectToWorker: (workerId: string) => void
   disconnectSession: (sessionId: string) => void
   suspendSession: (sessionId: string) => void
@@ -272,7 +284,18 @@ type ChatStore = {
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
-    options?: { displayContent?: string; __internalDrain?: boolean },
+    options?: {
+      displayContent?: string
+      __internalDrain?: boolean
+      designGeneration?: {
+        submode: string
+        params: Record<string, unknown>
+        refArtifact?: string
+        refArtifactName?: string
+        refElement?: string
+        refElementLabel?: string
+      }
+    },
   ) => void
   respondToPermission: (
     sessionId: string,
@@ -298,6 +321,7 @@ type ChatStore = {
   reconcileStuckSession: (sessionId: string) => void
   loadHistory: (sessionId: string) => Promise<void>
   reloadHistory: (sessionId: string) => Promise<void>
+  loadOlderHistory: (sessionId: string) => Promise<void>
   queueComposerPrefill: (
     sessionId: string,
     prefill: { text: string; attachments?: UIAttachment[] },
@@ -928,12 +952,12 @@ function collectPlanAnswerItems(
   return out
 }
 
-function syncTasksAfterTurnEnd(sessionId: string) {
+function syncTasksAfterTurnEnd(sessionId: string, stopped: boolean) {
   void useCLITaskStore
     .getState()
     .refreshTasks(sessionId)
     .finally(() => {
-      useCLITaskStore.getState().finalizeTasksOnTurnEnd(sessionId)
+      useCLITaskStore.getState().finalizeTasksOnTurnEnd(sessionId, stopped)
     })
 }
 
@@ -1010,6 +1034,35 @@ function extractBrowserToolUrl(input: unknown): string | null {
     if (typeof v === 'string' && v.trim()) return v.trim()
   }
   return null
+}
+
+function isExternalWebUrl(url: string | null): boolean {
+  if (!url) return false
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+  const host = parsed.hostname.toLowerCase()
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host.endsWith('.localhost')
+  ) {
+    return false
+  }
+  return true
+}
+
+function isDesignerSession(sessionId: string): boolean {
+  const mode =
+    useChatStore.getState().sessionCodingMode[sessionId] ??
+    useSettingsStore.getState().codingMode
+  return mode === 'designer'
 }
 
 function subagentChunkToEntry(
@@ -1170,6 +1223,7 @@ const KNOWN_SYSTEM_NOTIFICATION_SUBTYPES = new Set<string>([
   'runtime_config_persist_failed',
   'coding_mode_confirm_required',
   'coding_mode_updated',
+  'coding_mode_auto_resolved',
   'permission_mode_updated',
   'pii_config_updated',
   'slash_commands',
@@ -1202,8 +1256,21 @@ function stripNoModelErrorMessages(messages: UIMessage[]): UIMessage[] {
   return mutated ? next : messages
 }
 
-function emitNoModelWarning(): void {
-  return
+let lastNoModelToastAt = 0
+function emitNoModelWarning(sessionId?: string): void {
+  const now = Date.now()
+  if (now - lastNoModelToastAt < 3000) return
+  lastNoModelToastAt = now
+  useUIStore.getState().addToast({
+    type: 'warning',
+    message: t('chat.noModel.warning'),
+    duration: 8000,
+    sessionId,
+    action: {
+      label: t('chat.noModel.openSettings'),
+      onClick: () => useUIStore.getState().openSettingsOverlay('providers'),
+    },
+  })
 }
 
 const pendingDeltaBySession = new Map<string, string>()
@@ -1212,8 +1279,83 @@ const pendingThinkingBySession = new Map<string, string>()
 const thinkingFlushTimerBySession = new Map<string, number>()
 const pendingDeltaFirstAt = new Map<string, number>()
 const pendingThinkingFirstAt = new Map<string, number>()
+const lastStreamActivityAtBySession = new Map<string, number>()
 const FLUSH_HIGH_WATER_CHARS = 96
 const FLUSH_HIGH_WATER_MS = 80
+
+const runtimeSyncFailureToastSessions = new Set<string>()
+const runtimeSyncRetrySessions = new Set<string>()
+
+const STUCK_RECONCILE_QUIET_MS = 2000
+const stuckReconcileDeferTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+const resyncingSessions = new Set<string>()
+
+function drainQueuedForSession(sessionId: string): void {
+  const session =
+    useSessionStore.getState().sessions.find((s) => s.id === sessionId) ?? null
+  const wsKey = workspaceKeyFor(session, sessionId)
+  const queueLen = useWorkspaceQueueStore.getState().queues[wsKey]?.length ?? 0
+  if (queueLen === 0) return
+  void tryDrainWorkspace(wsKey)
+}
+
+function handleRuntimeSyncFailure(sessionId: string, err: unknown): void {
+  console.error(`[chatStore] runtime sync failed for session ${sessionId}`, err)
+  runtimeSyncRetrySessions.add(sessionId)
+  if (!runtimeSyncFailureToastSessions.has(sessionId)) {
+    runtimeSyncFailureToastSessions.add(sessionId)
+    useUIStore.getState().addToast({
+      type: 'warning',
+      message: t('runtime.syncFailed'),
+      duration: 6000,
+      sessionId,
+    })
+  }
+}
+
+let elapsedTickerId: ReturnType<typeof setInterval> | null = null
+const BACKGROUND_ELAPSED_TICK_SECONDS = 5
+const elapsedLastTickAtBySession = new Map<string, number>()
+
+function ensureElapsedTicker() {
+  if (elapsedTickerId !== null) return
+  elapsedTickerId = setInterval(() => {
+    const activeTabId = useTabStore.getState().activeTabId
+    const now = Date.now()
+    useChatStore.setState((s) => {
+      let changed = false
+      let anyRunning = false
+      const next: typeof s.sessions = { ...s.sessions }
+      for (const [id, sess] of Object.entries(s.sessions)) {
+        if (sess.chatState === 'idle') {
+          elapsedLastTickAtBySession.delete(id)
+          continue
+        }
+        anyRunning = true
+        const lastAt = elapsedLastTickAtBySession.get(id)
+        if (lastAt === undefined) {
+          elapsedLastTickAtBySession.set(id, now)
+          continue
+        }
+        const elapsedMs = now - lastAt
+        if (id !== activeTabId && elapsedMs < BACKGROUND_ELAPSED_TICK_SECONDS * 1000) {
+          continue
+        }
+        const deltaSeconds = Math.max(1, Math.round(elapsedMs / 1000))
+        elapsedLastTickAtBySession.set(id, lastAt + deltaSeconds * 1000)
+        next[id] = { ...sess, elapsedSeconds: sess.elapsedSeconds + deltaSeconds }
+        changed = true
+      }
+      if (!anyRunning && elapsedTickerId !== null) {
+        clearInterval(elapsedTickerId)
+        elapsedTickerId = null
+        elapsedLastTickAtBySession.clear()
+      }
+      return changed ? { sessions: next } : s
+    })
+  }, 1000)
+}
 
 function nowMs(): number {
   if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') {
@@ -1234,6 +1376,13 @@ function cancelScheduledFlush(id: number): void {
     window.cancelAnimationFrame(id)
   }
   clearTimeout(id as unknown as ReturnType<typeof setTimeout>)
+}
+
+const pendingDesignCanvasReveal = new Set<string>()
+
+function revealDesignCanvasIfPending(sessionId: string) {
+  if (!pendingDesignCanvasReveal.delete(sessionId)) return
+  useDesignerCanvasStore.getState().setVisible(sessionId, true)
 }
 
 function consumePendingDelta(sessionId: string): string {
@@ -1343,6 +1492,12 @@ function clearSessionStreamBuffers(sessionId: string): void {
   }
   pendingThinkingBySession.delete(sessionId)
   pendingThinkingFirstAt.delete(sessionId)
+  lastStreamActivityAtBySession.delete(sessionId)
+}
+
+function hasPendingThinking(sessionId: string): boolean {
+  const buf = pendingThinkingBySession.get(sessionId)
+  return buf !== undefined && buf.length > 0
 }
 
 function hasPendingDelta(sessionId: string): boolean {
@@ -1544,8 +1699,47 @@ async function hydrateCumulativeTokensFromUsage(sessionId: string): Promise<void
   }
 }
 
+const HISTORY_PAGE_SIZE = 200
+
+function stripAttachmentMarkersForDisplay(content: string): string {
+  if (!content.includes('[IMAGE:') && !content.includes('[Attached file:')) return content
+  const kept = content.split('\n').filter((line) => {
+    const t = line.trim()
+    if (t.startsWith('[IMAGE:') && t.endsWith(']')) return false
+    if (t.startsWith('[Attached file:') && t.endsWith(']')) return false
+    return true
+  })
+  const result = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  return result.length > 0 ? result : content
+}
+
+function extractDisplayBriefFromTaskEnvelope(content: string): string | null {
+  const trimmed = content.trimStart()
+  if (!trimmed.startsWith('[Design task')) return null
+  if (!trimmed.includes('EXCLUSIVE TASK FOR THIS TURN]')) return null
+  const briefIdx = trimmed.indexOf('\nBrief:')
+  if (briefIdx < 0) return null
+  const after = trimmed.slice(briefIdx + '\nBrief:'.length)
+  const terminators = [
+    '\n\nSelected parameters',
+    '\n\nSubject fidelity',
+    '\n\nWrite every produced asset',
+    '\n\nOutput',
+  ]
+  let end = after.length
+  for (const term of terminators) {
+    const idx = after.indexOf(term)
+    if (idx >= 0 && idx < end) end = idx
+  }
+  const brief = after.slice(0, end).trim()
+  return brief.length > 0 ? brief : null
+}
+
 async function fetchAndMapSessionHistory(sessionId: string) {
-  const { messages, pendingRewind } = await sessionsApi.getMessages(sessionId)
+  const { messages, pendingRewind, firstIndex, hasMore } = await sessionsApi.getMessages(
+    sessionId,
+    { limit: HISTORY_PAGE_SIZE },
+  )
   return {
     rawMessages: messages,
     uiMessages: mapHistoryMessagesToUiMessages(messages),
@@ -1554,6 +1748,8 @@ async function fetchAndMapSessionHistory(sessionId: string) {
     hasMessagesAfterTaskCompletion: hasUserMessagesAfterTaskCompletion(messages),
     restoredSubagentTimelines: reconstructSubagentTimelines(messages),
     pendingRewind: pendingRewind ?? null,
+    historyFirstIndex: firstIndex ?? 0,
+    historyHasMore: hasMore === true,
   }
 }
 
@@ -1732,59 +1928,118 @@ function reconstructSubagentTimelines(
 export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: {},
   sessionCodingMode: {},
+  sessionAutoResolvedMode: {},
   pendingSessionCodingMode: null,
 
   getSession: (sessionId) => get().sessions[sessionId] ?? createDefaultSessionState(),
 
-  connectToSession: (sessionId) => {
+  connectToSession: (sessionId, options) => {
     void useCLITaskStore.getState().fetchSessionTasks(sessionId)
 
     const existing = get().sessions[sessionId]
-    if (existing && existing.connectionState !== 'disconnected') {
+    if (existing && existing.connectionState !== 'disconnected' && !options?.force) {
       void useWorkersStore.getState().fetchByParent(sessionId)
       return
+    }
+    if (options?.force) {
+      wsManager.clearHandlers(sessionId)
+      wsManager.disconnect(sessionId)
+      if (hasPendingDelta(sessionId) || hasPendingThinking(sessionId)) {
+        set((s) => {
+          const cur = s.sessions[sessionId]
+          if (!cur) return s
+          const merged = flushPendingDeltaIntoStreaming(sessionId, cur.streamingText)
+          const patch = mergePendingThinkingIntoActive(cur, sessionId)
+          return {
+            sessions: updateSessionIn(s.sessions, sessionId, () => ({
+              streamingText: merged,
+              activeThinkingId: patch.activeThinkingId,
+              activeThinkingContent: patch.activeThinkingContent,
+              activeThinkingStartedAt: patch.activeThinkingStartedAt,
+              activeThinkingLastChunkAt: patch.activeThinkingLastChunkAt,
+            })),
+          }
+        })
+      }
     }
 
     clearSessionStreamBuffers(sessionId)
 
-    set((s) => ({
-      sessions: {
-        ...s.sessions,
-        [sessionId]: {
-          ...createDefaultSessionState(),
-          connectionState: 'connecting',
-          messages: existing?.messages ?? [],
-          historyLoaded: existing?.historyLoaded === true,
-          pendingPermission: existing?.pendingPermission ?? null,
+    set((s) => {
+      const prev = s.sessions[sessionId]
+      const base = prev ?? createDefaultSessionState()
+      return {
+        sessions: {
+          ...s.sessions,
+          [sessionId]: {
+            ...base,
+            connectionState: 'connecting',
+          },
         },
-      },
-    }))
+      }
+    })
 
     wsManager.clearHandlers(sessionId)
     wsManager.connect(sessionId)
     useSessionStore.getState().recordBrowseSessionWorkDir(sessionId)
     wsManager.onMessage(sessionId, (msg) => {
       if (msg.type === 'connected') {
+        const prevSession = get().sessions[sessionId]
+        const isReconnect =
+          prevSession?.connectionState === 'reconnecting' ||
+          (prevSession?.connectionState === 'connecting' &&
+            prevSession?.historyLoaded === true)
         set((s) => ({
           sessions: updateSessionIn(s.sessions, sessionId, () => ({
             connectionState: 'connected',
-            pendingResourceWaits: [],
           })),
         }))
+        if (isReconnect) {
+          const cur = get().sessions[sessionId]
+          const uiActive =
+            cur?.chatState === 'thinking' ||
+            cur?.chatState === 'tool_executing' ||
+            cur?.chatState === 'streaming' ||
+            cur?.chatState === 'permission_pending'
+          if (!uiActive) {
+            void get().reloadHistory(sessionId)
+          } else {
+            const stillRunning = useSessionRunStateStore
+              .getState()
+              .running.has(sessionId)
+            if (stillRunning) {
+              get().reconcileStuckSession(sessionId)
+            } else {
+              resyncingSessions.add(sessionId)
+              void get()
+                .reloadHistory(sessionId)
+                .finally(() => {
+                  resyncingSessions.delete(sessionId)
+                  drainQueuedForSession(sessionId)
+                })
+            }
+          }
+        }
       }
       get().handleServerMessage(sessionId, msg)
     })
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
-    void ensureSessionRuntimeSynced(sessionId, { persist: false }).catch(() => {
-      if (runtimeSelection) {
-        wsManager.send(sessionId, {
-          type: 'set_runtime_config',
-          persist: false,
-          ...runtimeSelection,
-        })
-      }
-    })
+    void ensureSessionRuntimeSynced(sessionId, { persist: false })
+      .then(() => {
+        runtimeSyncFailureToastSessions.delete(sessionId)
+        runtimeSyncRetrySessions.delete(sessionId)
+      })
+      .catch((err) => {
+        handleRuntimeSyncFailure(sessionId, err)
+        if (runtimeSelection) {
+          wsManager.send(sessionId, {
+            type: 'set_runtime_config',
+            persist: false,
+            ...runtimeSelection,
+          })
+        }
+      })
     if (!sessionId.startsWith('__') && !useTeamStore.getState().getMemberBySessionId(sessionId)) {
       wsManager.send(sessionId, { type: 'prewarm_session' })
     }
@@ -1812,6 +2067,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const existing = get().sessions[workerId]
     if (existing && existing.connectionState !== 'disconnected') return
 
+    clearSessionStreamBuffers(workerId)
+
     set((s) => ({
       sessions: {
         ...s.sessions,
@@ -1824,7 +2081,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }))
 
     wsManager.clearHandlers(workerId)
-    wsManager.connect(workerId, { pathPrefix: '/ws/worker' })
+    wsManager.connect(workerId, { pathPrefix: '/ws/worker', force: true })
     wsManager.onMessage(workerId, (msg) => {
       if (msg.type === 'connected') {
         set((s) => ({
@@ -1919,7 +2176,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     if (!isMemberSession && !options?.__internalDrain) {
       if (!hasUsableModelForSession(sessionId)) {
-        emitNoModelWarning()
+        emitNoModelWarning(sessionId)
         set((s) => {
           const session = s.sessions[sessionId]
           if (!session) return s
@@ -1936,20 +2193,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     }
 
-    if (!isMemberSession && !options?.__internalDrain) {
-      const queueState = useWorkspaceQueueStore.getState()
-      const sameSessionRunning = useSessionRunStateStore
-        .getState()
-        .running.has(sessionId)
-      const ownQueueLen = queueState.getQueueForSession(sessionId).length
-      if (sameSessionRunning || ownQueueLen > 0) {
-        const passthroughOptions = options
-          ? { displayContent: options.displayContent }
-          : undefined
-        queueState.enqueue(sessionId, content, attachments, passthroughOptions)
-        return
-      }
-    }
     const uiAttachments: UIAttachment[] | undefined =
       attachments && attachments.length > 0
         ? attachments.map((a) => ({
@@ -1959,6 +2202,61 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             mimeType: a.mimeType,
           }))
         : undefined
+
+    if (!isMemberSession && !options?.__internalDrain) {
+      const queueState = useWorkspaceQueueStore.getState()
+      const sameSessionRunning = useSessionRunStateStore
+        .getState()
+        .running.has(sessionId)
+      const ownQueueLen = queueState.getQueueForSession(sessionId).length
+      if (sameSessionRunning || ownQueueLen > 0 || resyncingSessions.has(sessionId)) {
+        set((s) => {
+          const session = s.sessions[sessionId] ?? createDefaultSessionState()
+          return {
+            sessions: {
+              ...s.sessions,
+              [sessionId]: {
+                ...session,
+                messages: [
+                  ...session.messages,
+                  {
+                    id: nextId(),
+                    type: 'user_text',
+                    content: userFacingContent,
+                    attachments: uiAttachments,
+                    timestamp: Date.now(),
+                    pending: true,
+                  },
+                ],
+              },
+            },
+          }
+        })
+        const passthroughOptions = options
+          ? {
+              displayContent: options.displayContent,
+              designGeneration: options.designGeneration,
+            }
+          : undefined
+        queueState.enqueue(sessionId, content, attachments, passthroughOptions)
+        return
+      }
+    }
+    if (!isMemberSession && !options?.__internalDrain && wsManager.isAbandoned(sessionId)) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('chat.connectionLost'),
+        duration: 10000,
+        sessionId,
+        action: {
+          label: t('chat.reconnect'),
+          onClick: () => {
+            get().connectToSession(sessionId, { force: true })
+          },
+        },
+      })
+      return
+    }
 
     const taskStore = useCLITaskStore.getState()
     const sessionTasks = taskStore.tasksBySessionId[sessionId] ?? []
@@ -1987,22 +2285,45 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           timestamp: Date.now(),
         })
       }
-      newMessages.push({
+      const userMessage: UIMessage = {
         id: nextId(),
         type: 'user_text',
         content: userFacingContent,
         attachments: isMemberSession ? undefined : uiAttachments,
         timestamp: Date.now(),
+        ...(options?.designGeneration?.refArtifact
+          ? {
+              designRef: options.designGeneration.refArtifact,
+              ...(options.designGeneration.refArtifactName
+                ? { designRefName: options.designGeneration.refArtifactName }
+                : {}),
+              ...(options.designGeneration.refElement
+                ? {
+                    designRefElement: options.designGeneration.refElement,
+                    designRefElementLabel:
+                      options.designGeneration.refElementLabel ??
+                      options.designGeneration.refElement,
+                  }
+                : {}),
+            }
+          : {}),
         ...(isMemberSession ? { pending: true } : {}),
-      })
+      }
+      const queuedIdx = options?.__internalDrain
+        ? newMessages.findIndex(
+            (m) =>
+              m.type === 'user_text' &&
+              m.pending === true &&
+              m.content === userFacingContent,
+          )
+        : -1
+      if (queuedIdx >= 0) {
+        newMessages[queuedIdx] = { ...userMessage, id: newMessages[queuedIdx]!.id }
+      } else {
+        newMessages.push(userMessage)
+      }
 
       if (!isMemberSession && session.elapsedTimer) clearInterval(session.elapsedTimer)
-
-      const timer = !isMemberSession
-        ? setInterval(() => {
-            set((st) => ({ sessions: updateSessionIn(st.sessions, sessionId, (sess) => ({ elapsedSeconds: sess.elapsedSeconds + 1 })) }))
-          }, 1000)
-        : null
 
       return {
         sessions: {
@@ -2015,12 +2336,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             elapsedSeconds: 0,
             streamingText: '',
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
-            elapsedTimer: timer,
+            elapsedTimer: null,
             connectionState: isMemberSession ? 'connected' : session.connectionState,
           },
         },
       }
     })
+
+    if (!isMemberSession) {
+      elapsedLastTickAtBySession.set(sessionId, Date.now())
+      ensureElapsedTicker()
+    }
 
     if (isMemberSession) {
       void useTeamStore.getState().sendMessageToMember(sessionId, userFacingContent)
@@ -2044,8 +2370,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
+    if (runtimeSyncRetrySessions.has(sessionId)) {
+      runtimeSyncRetrySessions.delete(sessionId)
+      void ensureSessionRuntimeSynced(sessionId, { persist: false })
+        .then(() => {
+          runtimeSyncFailureToastSessions.delete(sessionId)
+        })
+        .catch((err) => {
+          handleRuntimeSyncFailure(sessionId, err)
+        })
+    }
     queueSessionRuntimeSync(sessionId, { persist: false })
-    wsManager.send(sessionId, { type: 'user_message', content, attachments })
+    if (options?.designGeneration) {
+      pendingDesignCanvasReveal.add(sessionId)
+      wsManager.send(sessionId, {
+        type: 'start_design_generation',
+        submode: options.designGeneration.submode,
+        params: options.designGeneration.params,
+        brief: content,
+        refArtifact: options.designGeneration.refArtifact,
+        refArtifactName: options.designGeneration.refArtifactName,
+        refElement: options.designGeneration.refElement,
+        refElementLabel: options.designGeneration.refElementLabel,
+      })
+    } else {
+      wsManager.send(sessionId, { type: 'user_message', content, attachments })
+    }
   },
 
   respondToPermission: (sessionId, requestId, allowed, options) => {
@@ -2058,7 +2408,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         action: {
           label: t('chat.reconnect'),
           onClick: () => {
-            get().connectToSession(sessionId)
+            get().connectToSession(sessionId, { force: true })
           },
         },
       })
@@ -2165,6 +2515,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       session.chatState === 'tool_executing' ||
       session.chatState === 'streaming'
     if (!isStuckActive) {
+      const deferTimer = stuckReconcileDeferTimers.get(sessionId)
+      if (deferTimer) {
+        clearTimeout(deferTimer)
+        stuckReconcileDeferTimers.delete(sessionId)
+      }
       if (session.stopRequested) {
         set((s) => ({
           sessions: updateSessionIn(s.sessions, sessionId, () => ({
@@ -2174,11 +2529,65 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       return
     }
-    set((s) => ({
-      sessions: updateSessionIn(s.sessions, sessionId, () => ({
-        stopRequested: false,
-      })),
-    }))
+    const lastActivityAt = lastStreamActivityAtBySession.get(sessionId) ?? 0
+    const sinceLastActivity = Date.now() - lastActivityAt
+    const hasBufferedStream =
+      hasPendingDelta(sessionId) || hasPendingThinking(sessionId)
+    if (hasBufferedStream || sinceLastActivity < STUCK_RECONCILE_QUIET_MS) {
+      const existingTimer = stuckReconcileDeferTimers.get(sessionId)
+      if (existingTimer) clearTimeout(existingTimer)
+      stuckReconcileDeferTimers.set(
+        sessionId,
+        setTimeout(() => {
+          stuckReconcileDeferTimers.delete(sessionId)
+          if (useSessionRunStateStore.getState().running.has(sessionId)) return
+          get().reconcileStuckSession(sessionId)
+        }, STUCK_RECONCILE_QUIET_MS),
+      )
+      if (hasBufferedStream) {
+        set((s) => {
+          const cur = s.sessions[sessionId]
+          if (!cur) return s
+          const merged = flushPendingDeltaIntoStreaming(sessionId, cur.streamingText)
+          const patch = mergePendingThinkingIntoActive(cur, sessionId)
+          return {
+            sessions: updateSessionIn(s.sessions, sessionId, () => ({
+              streamingText: merged,
+              activeThinkingId: patch.activeThinkingId,
+              activeThinkingContent: patch.activeThinkingContent,
+              activeThinkingStartedAt: patch.activeThinkingStartedAt,
+              activeThinkingLastChunkAt: patch.activeThinkingLastChunkAt,
+            })),
+          }
+        })
+      }
+      return
+    }
+    const deferTimer = stuckReconcileDeferTimers.get(sessionId)
+    if (deferTimer) {
+      clearTimeout(deferTimer)
+      stuckReconcileDeferTimers.delete(sessionId)
+    }
+    set((s) => {
+      const cur = s.sessions[sessionId]
+      if (!cur) return s
+      const merged = flushPendingDeltaIntoStreaming(sessionId, cur.streamingText)
+      let baseMessages = sealThinkingForSession(sessionId, cur)
+      if (merged.trim()) {
+        baseMessages = appendAssistantTextMessage(baseMessages, merged, Date.now())
+      }
+      return {
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({
+          messages: baseMessages,
+          streamingText: '',
+          stopRequested: false,
+          activeThinkingId: null,
+          activeThinkingContent: '',
+          activeThinkingStartedAt: null,
+          activeThinkingLastChunkAt: null,
+        })),
+      }
+    })
     void get().reloadHistory(sessionId)
   },
 
@@ -2212,6 +2621,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingContent: '',
             activeThinkingStartedAt: null,
             activeThinkingLastChunkAt: null,
+            activeToolUseId: null,
+            activeToolName: null,
+            activeTaskToolUseId: null,
             elapsedTimer: null,
             pendingResourceWaits: [],
             providerRetry: null,
@@ -2230,6 +2642,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMessagesAfterTaskCompletion,
         restoredSubagentTimelines,
         pendingRewind,
+        historyFirstIndex,
+        historyHasMore,
       } = await fetchAndMapSessionHistory(sessionId)
       const taggedMessages = applySupersededFromPendingRewind(uiMessages, pendingRewind)
       set((state) => {
@@ -2257,6 +2671,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             },
             pendingRewind,
             historyLoaded: true,
+            historyFirstIndex,
+            historyHasMore,
           })),
         }
       })
@@ -2289,6 +2705,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMessagesAfterTaskCompletion,
         restoredSubagentTimelines,
         pendingRewind,
+        historyFirstIndex,
+        historyHasMore,
       } = await fetchAndMapSessionHistory(sessionId)
       const taggedMessages = applySupersededFromPendingRewind(uiMessages, pendingRewind)
 
@@ -2297,21 +2715,45 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (!session) return state
         if (session.elapsedTimer) clearInterval(session.elapsedTimer)
         return {
-          sessions: updateSessionIn(state.sessions, sessionId, () => ({
-            messages: taggedMessages,
-            agentTaskNotifications: restoredNotifications,
-            subagentTimelines: restoredSubagentTimelines,
-            chatState: 'idle',
-            activeThinkingId: null,
-            activeToolUseId: null,
-            activeToolName: null,
-            streamingText: '',
-            pendingPermission: null,
-            elapsedTimer: null,
-            statusVerb: '',
-            pendingRewind,
-            historyLoaded: true,
-          })),
+          sessions: updateSessionIn(state.sessions, sessionId, (s) => {
+            const keepPermission =
+              s.chatState === 'permission_pending' && s.pendingPermission != null
+            const knownIds = new Set<string>()
+            for (const m of taggedMessages) {
+              if (m && m.id) knownIds.add(m.id)
+            }
+            const livePermissionMessages = keepPermission
+              ? s.messages.filter(
+                  (m) => m.type === 'permission_request' && !knownIds.has(m.id),
+                )
+              : []
+            return {
+              messages:
+                livePermissionMessages.length > 0
+                  ? [...taggedMessages, ...livePermissionMessages]
+                  : taggedMessages,
+              agentTaskNotifications: {
+                ...s.agentTaskNotifications,
+                ...restoredNotifications,
+              },
+              subagentTimelines: {
+                ...s.subagentTimelines,
+                ...restoredSubagentTimelines,
+              },
+              chatState: keepPermission ? s.chatState : 'idle',
+              activeThinkingId: null,
+              activeToolUseId: null,
+              activeToolName: null,
+              streamingText: '',
+              pendingPermission: keepPermission ? s.pendingPermission : null,
+              elapsedTimer: null,
+              statusVerb: keepPermission ? s.statusVerb : '',
+              pendingRewind,
+              historyLoaded: true,
+              historyFirstIndex,
+              historyHasMore,
+            }
+          }),
         }
       })
 
@@ -2330,6 +2772,46 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         message: t('chat.loadHistoryFailed'),
         duration: 5000,
       })
+    }
+  },
+
+  loadOlderHistory: async (sessionId) => {
+    const session = get().sessions[sessionId]
+    if (!session || session.historyLoadingOlder === true) return
+    if (session.historyHasMore !== true) return
+    const before = session.historyFirstIndex ?? 0
+    if (before <= 0) return
+    set((state) => ({
+      sessions: updateSessionIn(state.sessions, sessionId, () => ({
+        historyLoadingOlder: true,
+      })),
+    }))
+    try {
+      const { messages, firstIndex, hasMore } = await sessionsApi.getMessages(sessionId, {
+        limit: HISTORY_PAGE_SIZE,
+        before,
+      })
+      const olderUi = mapHistoryMessagesToUiMessages(messages)
+      set((state) => {
+        const current = state.sessions[sessionId]
+        if (!current) return state
+        const knownIds = new Set(current.messages.map((m) => m.id))
+        const prepend = olderUi.filter((m) => !knownIds.has(m.id))
+        return {
+          sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
+            messages: prepend.length === 0 ? s.messages : [...prepend, ...s.messages],
+            historyFirstIndex: firstIndex ?? 0,
+            historyHasMore: hasMore === true,
+            historyLoadingOlder: false,
+          })),
+        }
+      })
+    } catch {
+      set((state) => ({
+        sessions: updateSessionIn(state.sessions, sessionId, () => ({
+          historyLoadingOlder: false,
+        })),
+      }))
     }
   },
 
@@ -2669,6 +3151,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, updater) }))
     }
 
+    const turnWasStopped = get().sessions[sessionId]?.stopRequested === true
+
     {
       const guardSession = get().sessions[sessionId]
       if (guardSession?.stopRequested) {
@@ -2753,7 +3237,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             clearInterval(session.elapsedTimer)
             update(() => ({ elapsedTimer: null }))
           }
-          syncTasksAfterTurnEnd(sessionId)
+          syncTasksAfterTurnEnd(sessionId, turnWasStopped)
+          revealDesignCanvasIfPending(sessionId)
         }
 
         useTabStore.getState().updateTabStatus(sessionId, msg.state === 'idle' ? 'idle' : 'running')
@@ -2795,7 +3280,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
           })
 
-          if (msg.toolName && isBrowserFamilyTool(msg.toolName)) {
+          if (msg.toolName && isBrowserFamilyTool(msg.toolName) && !isDesignerSession(sessionId)) {
             void useBrowserPanelStore.getState().openForTool(sessionId, {
               source: 'tool',
               url: null,
@@ -2808,6 +3293,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'content_delta':
         if (msg.text !== undefined) {
+          lastStreamActivityAtBySession.set(sessionId, Date.now())
           const prev = pendingDeltaBySession.get(sessionId) ?? ''
           const next = prev + msg.text
           pendingDeltaBySession.set(sessionId, next)
@@ -2864,6 +3350,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'thinking':
         if (msg.text !== undefined) {
+          lastStreamActivityAtBySession.set(sessionId, Date.now())
           const prev = pendingThinkingBySession.get(sessionId) ?? ''
           const next = prev + msg.text
           pendingThinkingBySession.set(sessionId, next)
@@ -3164,11 +3651,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (isBrowserFamilyTool(toolName)) {
 
           const targetUrl = extractBrowserToolUrl(input)
-          void useBrowserPanelStore.getState().openForTool(sessionId, {
-            source: 'tool',
-            url: targetUrl,
-            presentOnly: true,
-          })
+          if (!isDesignerSession(sessionId) || isExternalWebUrl(targetUrl)) {
+            void useBrowserPanelStore.getState().openForTool(sessionId, {
+              source: 'tool',
+              url: targetUrl,
+              presentOnly: true,
+            })
+          }
         }
         if (isSubagentParentTool(toolName) && toolUseId) {
 
@@ -3411,7 +3900,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }))
 
         void useUsageStore.getState().fetch()
-        syncTasksAfterTurnEnd(sessionId)
+        syncTasksAfterTurnEnd(sessionId, turnWasStopped)
+        revealDesignCanvasIfPending(sessionId)
         break
       }
 
@@ -3538,13 +4028,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'error': {
         const isConfigError = isNoModelConfiguredError(msg.message, msg.code)
+        const isCancelled = msg.code === 'CANCELLED'
         update((s) => {
           const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
           let newMessages = sealThinkingForSession(sessionId, s)
           if (pendingText.trim()) {
             newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
           }
-          if (!isConfigError) {
+          if (!isConfigError && !isCancelled) {
             newMessages = [...newMessages, {
               id: nextId(),
               type: 'error',
@@ -3561,14 +4052,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingContent: '',
             activeThinkingStartedAt: null,
             activeThinkingLastChunkAt: null,
+            activeToolUseId: null,
+            activeToolName: null,
+            activeTaskToolUseId: null,
             streamingText: '',
             pendingPermission: null,
             pendingResourceWaits: [],
             providerRetry: null,
           }
         })
-        if (isConfigError) {
-          emitNoModelWarning()
+        if (isConfigError || isCancelled) {
+          if (isConfigError) emitNoModelWarning(sessionId)
           useTabStore.getState().updateTabStatus(sessionId, 'idle')
         } else {
           useTabStore.getState().updateTabStatus(sessionId, 'error')
@@ -3580,6 +4074,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             update(() => ({ elapsedTimer: null }))
           }
         }
+        revealDesignCanvasIfPending(sessionId)
         break
       }
 
@@ -3729,7 +4224,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             action: {
               label: t('chat.reconnect'),
               onClick: () => {
-                get().connectToSession(sessionId)
+                get().connectToSession(sessionId, { force: true })
               },
             },
           })
@@ -3794,12 +4289,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             typeof data.scope === 'string' ? (data.scope as string) : undefined
           const targetSessionId = explicitSessionId ?? sessionId
           if (mode && targetSessionId) {
-            set((s) => ({
-              sessionCodingMode: {
-                ...s.sessionCodingMode,
-                [targetSessionId]: mode as CodingModeId,
-              },
-            }))
+            set((s) => {
+              const nextResolved = { ...s.sessionAutoResolvedMode }
+              if (mode !== 'auto') {
+                delete nextResolved[targetSessionId]
+              }
+              return {
+                sessionCodingMode: {
+                  ...s.sessionCodingMode,
+                  [targetSessionId]: mode as CodingModeId,
+                },
+                sessionAutoResolvedMode: nextResolved,
+              }
+            })
           }
           if (mode && perm && scope === 'global') {
             import('../stores/settingsStore').then(({ useSettingsStore }) => {
@@ -3807,6 +4309,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 .getState()
                 .applyCodingMode(mode as CodingModeId, perm as PermissionMode)
             }).catch(() => {})
+          }
+        }
+        if (
+          msg.subtype === 'coding_mode_auto_resolved' &&
+          msg.data &&
+          typeof msg.data === 'object'
+        ) {
+          const data = msg.data as Record<string, unknown>
+          const resolved = typeof data.mode === 'string' ? (data.mode as CodingModeId) : undefined
+          if (resolved) {
+            set((s) => ({
+              sessionAutoResolvedMode: {
+                ...s.sessionAutoResolvedMode,
+                [sessionId]: resolved,
+              },
+            }))
           }
         }
         if (msg.subtype === 'permission_mode_updated') {
@@ -4078,6 +4596,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'lsp_server_status':
         useLspStore.getState().handleBroadcastEvent(msg as LspBroadcastEvent)
         break
+      case 'persist_lag': {
+        useUIStore.getState().addToast({
+          type: 'error',
+          message: t('chat.persistLag'),
+          duration: 8000,
+          sessionId,
+        })
+        break
+      }
       default: {
         if (import.meta.env?.DEV) {
           console.debug(
@@ -4127,6 +4654,9 @@ type AssistantHistoryBlock = {
 
   title?: string
   todos?: unknown
+
+  message?: string
+  code?: string
 
   timestamp_ms?: number
 }
@@ -4355,11 +4885,18 @@ export function mapHistoryMessagesToUiMessages(
         })
         continue
       }
+      const legacyBrief = extractDisplayBriefFromTaskEnvelope(msg.content)
       uiMessages.push({
         id: msg.id || nextId(),
         type: 'user_text',
-        content: msg.content,
+        content: legacyBrief ?? stripAttachmentMarkersForDisplay(msg.content),
         timestamp,
+        ...(msg.designRef ? { designRef: msg.designRef } : {}),
+        ...(msg.designRefName ? { designRefName: msg.designRefName } : {}),
+        ...(msg.designRefElement ? { designRefElement: msg.designRefElement } : {}),
+        ...(msg.designRefElementLabel
+          ? { designRefElementLabel: msg.designRefElementLabel }
+          : {}),
         ...(tombstoned ? {} : { userMessageIndex: liveUserCount }),
         ...sup,
       })
@@ -4527,6 +5064,19 @@ export function mapHistoryMessagesToUiMessages(
               todos: block.todos,
               timestamp,
             }),
+            ...sup,
+          })
+        }
+        else if (block.type === 'error' && typeof block.message === 'string') {
+          uiMessages.push({
+            id: nextId(),
+            type: 'error',
+            message: block.message,
+            code: typeof block.code === 'string' ? block.code : 'TURN_FAILED',
+            timestamp:
+              typeof block.timestamp_ms === 'number' && Number.isFinite(block.timestamp_ms)
+                ? block.timestamp_ms
+                : timestamp,
             ...sup,
           })
         }

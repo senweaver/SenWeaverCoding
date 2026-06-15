@@ -330,23 +330,42 @@ impl Channel for NotionChannel {
                             .unwrap_or_default()
                             .as_secs();
 
-                        if tx
-                            .send(ChannelMessage {
+                        let outcome = crate::channels::forward_channel_message(
+                            "notion",
+                            &tx,
+                            ChannelMessage {
                                 id: page_id.clone(),
                                 sender: "notion".into(),
-                                reply_target: page_id,
+                                reply_target: page_id.clone(),
                                 content: input_text,
                                 channel: "notion".into(),
                                 timestamp,
                                 thread_ts: None,
                                 interruption_scope_id: None,
                                 attachments: vec![],
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::info!("Notion channel shutting down");
-                            return Ok(());
+                            },
+                        );
+                        match outcome {
+                            crate::channels::ForwardOutcome::Delivered => {}
+                            crate::channels::ForwardOutcome::Dropped => {
+                                if let Err(e) = self.set_status(&page_id, "pending").await {
+                                    tracing::warn!(
+                                        "Notion: failed to reset dropped task to pending: {e}"
+                                    );
+                                }
+                                self.release_task(&page_id).await;
+                                continue;
+                            }
+                            crate::channels::ForwardOutcome::Closed => {
+                                if let Err(e) = self.set_status(&page_id, "pending").await {
+                                    tracing::warn!(
+                                        "Notion: failed to reset task to pending on shutdown: {e}"
+                                    );
+                                }
+                                self.release_task(&page_id).await;
+                                tracing::info!("Notion channel shutting down");
+                                return Ok(());
+                            }
                         }
                     }
                 }

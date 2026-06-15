@@ -36,6 +36,8 @@ struct OAuthTokenState {
     client_secret: Option<String>,
 
     expiry_millis: Option<i64>,
+
+    refreshing: bool,
 }
 
 enum GeminiAuth {
@@ -681,6 +683,7 @@ impl GeminiProvider {
             client_id,
             client_secret,
             expiry_millis,
+            refreshing: false,
         })
     }
 
@@ -714,51 +717,87 @@ impl GeminiProvider {
         }
     }
 
-    async fn get_valid_oauth_token(
-        state: &Arc<tokio::sync::Mutex<OAuthTokenState>>,
-    ) -> anyhow::Result<String> {
-        let now_millis = std::time::SystemTime::now()
+    fn oauth_now_millis() -> i64 {
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .unwrap_or(i64::MAX);
+            .unwrap_or(i64::MAX)
+    }
 
-        let (needs_refresh, refresh_token, client_id, client_secret, current_token) = {
-            let guard = state.lock().await;
-            let needs_refresh = guard
-                .expiry_millis
-                .map_or(true, |exp| exp <= now_millis.saturating_add(60_000));
-            (
-                needs_refresh,
-                guard.refresh_token.clone(),
-                guard.client_id.clone(),
-                guard.client_secret.clone(),
-                guard.access_token.clone(),
+    async fn get_valid_oauth_token(
+        state: &Arc<tokio::sync::Mutex<OAuthTokenState>>,
+    ) -> anyhow::Result<String> {
+        const WAIT_SLICE_MS: u64 = 50;
+        const TAKEOVER_AFTER_MS: u64 = 30_000;
+        const MAX_TAKEOVERS: u32 = 2;
+
+        let mut waited_ms: u64 = 0;
+        let mut takeovers: u32 = 0;
+
+        loop {
+            let (refresh_token, client_id, client_secret) = {
+                let mut guard = state.lock().await;
+
+                let needs_refresh = guard
+                    .expiry_millis
+                    .map_or(true, |exp| exp <= Self::oauth_now_millis().saturating_add(60_000));
+                if !needs_refresh {
+                    return Ok(guard.access_token.clone());
+                }
+
+                if guard.refreshing {
+                    if waited_ms >= TAKEOVER_AFTER_MS {
+                        if takeovers >= MAX_TAKEOVERS {
+                            drop(guard);
+                            anyhow::bail!(
+                                "Gemini CLI OAuth token refresh did not complete within timeout (refresher may have panicked or been cancelled); aborting to avoid spinning"
+                            );
+                        }
+                        guard.refreshing = false;
+                        waited_ms = 0;
+                        takeovers = takeovers.saturating_add(1);
+                        drop(guard);
+                        tracing::warn!(
+                            "Gemini OAuth: refresh wait exceeded {TAKEOVER_AFTER_MS}ms; reclaiming refresh slot (possible refresher panic/cancel)"
+                        );
+                        continue;
+                    }
+                    drop(guard);
+                    tokio::time::sleep(std::time::Duration::from_millis(WAIT_SLICE_MS)).await;
+                    waited_ms = waited_ms.saturating_add(WAIT_SLICE_MS);
+                    continue;
+                }
+
+                let Some(refresh_token) = guard.refresh_token.clone() else {
+                    anyhow::bail!(
+                        "Gemini CLI OAuth token expired and no refresh_token available  - re-run `gemini` to authenticate"
+                    );
+                };
+
+                guard.refreshing = true;
+                (
+                    refresh_token,
+                    guard.client_id.clone(),
+                    guard.client_secret.clone(),
+                )
+            };
+
+            let result = refresh_gemini_cli_token_async(
+                &refresh_token,
+                client_id.as_deref(),
+                client_secret.as_deref(),
             )
-        };
+            .await;
 
-        if !needs_refresh {
-            return Ok(current_token);
+            let mut guard = state.lock().await;
+            guard.refreshing = false;
+            let refreshed = result?;
+            tracing::info!("Gemini CLI OAuth token refreshed successfully (runtime)");
+            guard.access_token = refreshed.access_token.clone();
+            guard.expiry_millis = refreshed.expiry_millis;
+            return Ok(refreshed.access_token);
         }
-
-        let Some(refresh_token) = refresh_token else {
-            anyhow::bail!(
-                "Gemini CLI OAuth token expired and no refresh_token available  - re-run `gemini` to authenticate"
-            );
-        };
-
-        let refreshed = refresh_gemini_cli_token_async(
-            &refresh_token,
-            client_id.as_deref(),
-            client_secret.as_deref(),
-        )
-        .await?;
-        tracing::info!("Gemini CLI OAuth token refreshed successfully (runtime)");
-
-        let mut guard = state.lock().await;
-        guard.access_token = refreshed.access_token.clone();
-        guard.expiry_millis = refreshed.expiry_millis;
-        Ok(refreshed.access_token)
     }
 
     async fn rotate_oauth_credential(
@@ -1494,30 +1533,7 @@ impl Provider for GeminiProvider {
             0,
             None,
         );
-        let mut system_parts: Vec<&str> = Vec::new();
-        let mut contents: Vec<Content> = Vec::new();
-
-        for msg in &sanitized {
-            match msg.role.as_str() {
-                "system" => {
-                    system_parts.push(&msg.content);
-                }
-                "user" => {
-                    contents.push(Content {
-                        role: Some("user".to_string()),
-                        parts: build_parts(&msg.content),
-                    });
-                }
-                "assistant" => {
-
-                    contents.push(Content {
-                        role: Some("model".to_string()),
-                        parts: vec![Part::text(&msg.content)],
-                    });
-                }
-                _ => {}
-            }
-        }
+        let (system_parts, contents) = Self::convert_messages_native(&sanitized);
 
         let system_instruction = if system_parts.is_empty() {
             None
@@ -1542,22 +1558,7 @@ impl Provider for GeminiProvider {
         temperature: f64,
     ) -> anyhow::Result<crate::providers::traits::StructuredResponse> {
 
-        let mut system_parts: Vec<&str> = Vec::new();
-        let mut contents: Vec<Content> = Vec::new();
-        for msg in messages {
-            match msg.role.as_str() {
-                "system" => system_parts.push(&msg.content),
-                "user" => contents.push(Content {
-                    role: Some("user".to_string()),
-                    parts: build_parts(&msg.content),
-                }),
-                "assistant" => contents.push(Content {
-                    role: Some("model".to_string()),
-                    parts: vec![Part::text(&msg.content)],
-                }),
-                _ => {}
-            }
-        }
+        let (system_parts, contents) = Self::convert_messages_native(messages);
 
         let system_instruction = if system_parts.is_empty() {
             None

@@ -45,7 +45,7 @@ impl StdioTransport {
             .envs(&config.env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
@@ -130,6 +130,8 @@ impl McpTransportConn for StdioTransport {
 
     async fn close(&mut self) -> Result<()> {
         let _ = self.stdin.shutdown().await;
+        let _ = self._child.start_kill();
+        let _ = timeout(Duration::from_secs(3), self._child.wait()).await;
         Ok(())
     }
 }

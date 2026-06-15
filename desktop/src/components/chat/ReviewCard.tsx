@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
@@ -11,11 +12,21 @@ import {
   splitPathForDisplay,
 } from '../../utils/toolFormatters'
 
+const EMPTY_PENDING_EDITS: ReturnType<
+  typeof useChatStore.getState
+>['sessions'][string]['pendingEdits'] = []
+
 export function ReviewCard() {
   const t = useTranslation()
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const sessionState = useChatStore((s) =>
-    activeTabId ? s.sessions[activeTabId] : undefined,
+  const sessionView = useChatStore(
+    useShallow((s) => {
+      const st = activeTabId ? s.sessions[activeTabId] : undefined
+      return {
+        pendingEdits: st?.pendingEdits,
+        chatState: st?.chatState ?? 'idle',
+      }
+    }),
   )
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const clearPendingEdits = useChatStore((s) => s.clearPendingEdits)
@@ -25,8 +36,8 @@ export function ReviewCard() {
   const [undoing, setUndoing] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
-  const pendingEdits = sessionState?.pendingEdits ?? []
-  const chatState = sessionState?.chatState ?? 'idle'
+  const pendingEdits = sessionView.pendingEdits ?? EMPTY_PENDING_EDITS
+  const chatState = sessionView.chatState
   const isActive = chatState !== 'idle'
 
   if (!activeTabId) return null

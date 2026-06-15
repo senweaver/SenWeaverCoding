@@ -263,9 +263,23 @@ pub async fn handle_api_config_put(
             .into_response();
     }
 
+    let provider_relevant_changed = new_config.default_provider != current_config.default_provider
+        || new_config.default_model != current_config.default_model
+        || new_config.api_key != current_config.api_key
+        || new_config.api_url != current_config.api_url
+        || new_config.api_path != current_config.api_path
+        || serde_json::to_value(&new_config.model_providers).ok()
+            != serde_json::to_value(&current_config.model_providers).ok()
+        || serde_json::to_value(&new_config.model_routes).ok()
+            != serde_json::to_value(&current_config.model_routes).ok()
+        || serde_json::to_value(&new_config.reliability).ok()
+            != serde_json::to_value(&current_config.reliability).ok();
+
     *state.config.lock() = new_config.clone();
     state.push_live_config(new_config);
-    state.rebuild_runtime_from_config_async().await;
+    if provider_relevant_changed {
+        state.rebuild_runtime_from_config_async().await;
+    }
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -1810,12 +1824,59 @@ fn message_entry(
     let entry_id = format!("{session_id}-{index:04}");
     let ty = map_chat_role_to_desktop(&msg.role);
     let content = gateway_desktop_message_content(ty, &msg.content);
-    serde_json::json!({
+    let mut entry = serde_json::json!({
         "id": entry_id,
         "type": ty,
         "content": content,
         "timestamp": fallback_ts,
-    })
+    });
+    if let Some(design_ref) = msg
+        .metadata
+        .get("design_ref")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "designRef".to_string(),
+                serde_json::Value::String(design_ref.to_string()),
+            );
+            if let Some(name) = msg
+                .metadata
+                .get("design_ref_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                obj.insert(
+                    "designRefName".to_string(),
+                    serde_json::Value::String(name.to_string()),
+                );
+            }
+            if let Some(element) = msg
+                .metadata
+                .get("design_ref_element")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                obj.insert(
+                    "designRefElement".to_string(),
+                    serde_json::Value::String(element.to_string()),
+                );
+                if let Some(label) = msg
+                    .metadata
+                    .get("design_ref_element_label")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    obj.insert(
+                        "designRefElementLabel".to_string(),
+                        serde_json::Value::String(label.to_string()),
+                    );
+                }
+            }
+        }
+    }
+    entry
 }
 
 fn message_entry_with_tombstone(
@@ -1967,6 +2028,7 @@ pub async fn handle_api_session_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
@@ -1976,27 +2038,45 @@ pub async fn handle_api_session_messages(
         return Json(serde_json::json!({ "messages": [] })).into_response();
     };
 
+    let limit_param: Option<usize> = params.get("limit").and_then(|v| v.parse().ok());
+    let before_param: Option<usize> = params.get("before").and_then(|v| v.parse().ok());
+
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
-    let (loaded, last_activity) = {
+    let (loaded, first_index, total_rows, last_activity) = {
         let backend_arc = std::sync::Arc::clone(backend);
         let session_key_owned = session_key.clone();
         tokio::task::spawn_blocking(move || {
-            let loaded = backend_arc.load_with_tombstones(&session_key_owned);
             let last_activity = backend_arc
-                .list_sessions_with_metadata()
-                .into_iter()
-                .find(|m| m.key == session_key_owned)
+                .get_session_metadata(&session_key_owned)
                 .map(|m| m.last_activity.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-            (loaded, last_activity)
+            match limit_param {
+                Some(limit) => {
+                    let total = backend_arc.count_messages(&session_key_owned);
+                    let end = before_param.unwrap_or(total).min(total);
+                    let start = end.saturating_sub(limit.max(1));
+                    let loaded = backend_arc.load_with_tombstones_range(
+                        &session_key_owned,
+                        start,
+                        end - start,
+                    );
+                    (loaded, start, total, last_activity)
+                }
+                None => {
+                    let loaded = backend_arc.load_with_tombstones(&session_key_owned);
+                    let total = loaded.len();
+                    (loaded, 0, total, last_activity)
+                }
+            }
         })
         .await
-        .unwrap_or_else(|_| (Vec::new(), chrono::Utc::now().to_rfc3339()))
+        .unwrap_or_else(|_| (Vec::new(), 0, 0, chrono::Utc::now().to_rfc3339()))
     };
 
     let messages: Vec<serde_json::Value> = loaded
         .iter()
         .enumerate()
+        .map(|(i, lm)| (first_index + i, lm))
         .filter(|(_, lm)| !lm.hidden_for_ui)
         .filter(|(_, lm)| !(lm.message.role == "system" && lm.message.content.is_empty()))
         .map(|(i, lm)| {
@@ -2046,7 +2126,12 @@ pub async fn handle_api_session_messages(
         .flatten()
     };
 
-    let mut body = serde_json::json!({ "messages": messages });
+    let mut body = serde_json::json!({
+        "messages": messages,
+        "totalMessages": total_rows,
+        "firstIndex": first_index,
+        "hasMore": first_index > 0,
+    });
     if let Some(pr) = pending_rewind {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("pendingRewind".to_string(), pr);
@@ -3442,21 +3527,34 @@ pub async fn handle_api_reinforcement(
 
     let config = state.config.lock().clone();
 
-    let engine = crate::agent::reward::reinforcement::ReinforcementEngine::new(&config.reinforcement);
-    let adjustment = engine.get_policy_adjustment();
-    let baselines = engine.baselines();
-
-    Json(serde_json::json!({
-        "enabled": config.reinforcement.enabled,
-        "total_turns": engine.total_turns(),
-        "baselines": baselines,
-        "trend": format!("{:?}", adjustment.trend),
-        "confidence": adjustment.confidence,
-        "temperature_delta": adjustment.temperature_delta,
-        "model_hint": adjustment.model_hint,
-        "category_count": adjustment.category_strategies.len(),
-    }))
-    .into_response()
+    match crate::agent::reward::reinforcement::global_reinforcement_engine() {
+        Some(engine) => {
+            let adjustment = engine.get_policy_adjustment();
+            let baselines = engine.baselines();
+            Json(serde_json::json!({
+                "enabled": config.reinforcement.enabled,
+                "total_turns": engine.total_turns(),
+                "baselines": baselines,
+                "trend": format!("{:?}", adjustment.trend),
+                "confidence": adjustment.confidence,
+                "temperature_delta": adjustment.temperature_delta,
+                "model_hint": adjustment.model_hint,
+                "category_count": adjustment.category_strategies.len(),
+            }))
+            .into_response()
+        }
+        None => Json(serde_json::json!({
+            "enabled": config.reinforcement.enabled,
+            "total_turns": 0,
+            "baselines": serde_json::json!({}),
+            "trend": "InsufficientData",
+            "confidence": 0.0,
+            "temperature_delta": 0.0,
+            "model_hint": serde_json::Value::Null,
+            "category_count": 0,
+        }))
+        .into_response(),
+    }
 }
 
 pub async fn handle_api_learning_features(

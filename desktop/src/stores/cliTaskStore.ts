@@ -27,7 +27,7 @@ type CLITaskStore = {
   resetCompletedTasks: (sessionId: string) => Promise<void>
   clearTasks: (sessionId: string) => void
   toggleExpanded: (sessionId: string) => void
-  finalizeTasksOnTurnEnd: (sessionId: string) => void
+  finalizeTasksOnTurnEnd: (sessionId: string, stopped?: boolean) => void
 }
 
 function buildCompletedTaskKey(tasks: CLITask[]): string | null {
@@ -56,6 +56,21 @@ function resolveDismissState(
     completedAndDismissed: keepDismissed,
     dismissedCompletionKey: keepDismissed ? completionKey : null,
   }
+}
+
+function mergeKeepCompleted(prev: CLITask[], next: CLITask[]): CLITask[] {
+  if (prev.length === 0) return next
+  const prevById = new Map(prev.map((task) => [task.id, task]))
+  let changed = false
+  const merged = next.map((task) => {
+    const prior = prevById.get(task.id)
+    if (prior && prior.status === 'completed' && task.status !== 'completed') {
+      changed = true
+      return { ...task, status: 'completed' as TaskStatus }
+    }
+    return task
+  })
+  return changed ? merged : next
 }
 
 function mapTodosToTasks(todos: TodoItem[], sessionId: string): CLITask[] {
@@ -94,13 +109,17 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
         taskListId: sessionId,
       }))
       set((state) => {
+        const prevTasks = state.tasksBySessionId[sessionId] ?? []
+        const effective = state.completedAndDismissedBySession[sessionId]
+          ? mergeKeepCompleted(prevTasks, normalized)
+          : normalized
         const prevKey = state.dismissedCompletionKeyBySession[sessionId] ?? null
         const { completedAndDismissed, dismissedCompletionKey } = resolveDismissState(
-          normalized,
+          effective,
           prevKey,
         )
         return {
-          tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: normalized },
+          tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: effective },
           completedAndDismissedBySession: {
             ...state.completedAndDismissedBySession,
             [sessionId]: completedAndDismissed,
@@ -145,13 +164,17 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
         taskListId: sessionId,
       }))
       set((state) => {
+        const prevTasks = state.tasksBySessionId[sessionId] ?? []
+        const effective = state.completedAndDismissedBySession[sessionId]
+          ? mergeKeepCompleted(prevTasks, normalized)
+          : normalized
         const prevKey = state.dismissedCompletionKeyBySession[sessionId] ?? null
         const { completedAndDismissed, dismissedCompletionKey } = resolveDismissState(
-          normalized,
+          effective,
           prevKey,
         )
         return {
-          tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: normalized },
+          tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: effective },
           completedAndDismissedBySession: {
             ...state.completedAndDismissedBySession,
             [sessionId]: completedAndDismissed,
@@ -266,25 +289,31 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
     }))
   },
 
-  finalizeTasksOnTurnEnd: (sessionId) => {
+  finalizeTasksOnTurnEnd: (sessionId, stopped) => {
     if (!sessionId) return
     set((state) => {
       const tasks = state.tasksBySessionId[sessionId] ?? []
       if (tasks.length === 0) return state
 
-      const incomplete = tasks.filter((task) => task.status !== 'completed')
+      const hasIncomplete = tasks.some((task) => task.status !== 'completed')
 
       let nextTasks = tasks
-      if (incomplete.length === 1 && tasks.length > 1) {
+      if (hasIncomplete && !stopped) {
         nextTasks = tasks.map((task) =>
-          task.status === 'pending' || task.status === 'in_progress'
-            ? { ...task, status: 'completed' as TaskStatus }
-            : task,
+          task.status === 'completed'
+            ? task
+            : { ...task, status: 'completed' as TaskStatus },
         )
       }
 
       const completionKey = buildCompletedTaskKey(nextTasks)
-      if (!completionKey) return { ...state, tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: nextTasks } }
+      if (!completionKey) {
+        if (nextTasks === tasks) return state
+        return {
+          ...state,
+          tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: nextTasks },
+        }
+      }
 
       return {
         tasksBySessionId: { ...state.tasksBySessionId, [sessionId]: nextTasks },

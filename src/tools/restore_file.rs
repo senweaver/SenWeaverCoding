@@ -86,11 +86,30 @@ impl Tool for RestoreFileTool {
         let ws = self.security.workspace_dir();
         let workspace = full_path.parent().unwrap_or(ws.as_path());
 
-        let output = crate::util::hidden_async_command("git")
-            .args(["checkout", revision, "--", &full_path.to_string_lossy()])
+        let mut cmd = crate::util::hidden_async_command("git");
+        cmd.args(["checkout", revision, "--", &full_path.to_string_lossy()])
             .current_dir(workspace)
-            .output()
-            .await;
+            .kill_on_drop(true);
+        let timeout_secs = crate::services::try_get_services()
+            .and_then(|s| s.config().pacing.tool_timeout_secs)
+            .unwrap_or(120);
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            cmd.output(),
+        )
+        .await
+        {
+            Ok(out) => out,
+            Err(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "git checkout timed out after {timeout_secs}s while restoring {path}"
+                    )),
+                });
+            }
+        };
 
         match output {
             Ok(out) if out.status.success() => Ok(ToolResult {

@@ -6,7 +6,13 @@ import { api } from './client'
 import type { SessionListItem, MessageEntry, PendingRewindSummary } from '../types/session'
 
 type SessionsResponse = { sessions: SessionListItem[]; total: number }
-type MessagesResponse = { messages: MessageEntry[]; pendingRewind?: PendingRewindSummary | null }
+type MessagesResponse = {
+  messages: MessageEntry[]
+  pendingRewind?: PendingRewindSummary | null
+  totalMessages?: number
+  firstIndex?: number
+  hasMore?: boolean
+}
 type CreateSessionResponse = { sessionId: string }
 export type SessionRewindResponse = {
 
@@ -65,8 +71,14 @@ export const sessionsApi = {
     return api.get<SessionsResponse>(`/api/sessions${qs ? `?${qs}` : ''}`)
   },
 
-  getMessages(sessionId: string) {
-    return api.get<MessagesResponse>(`/api/sessions/${sessionId}/messages`)
+  getMessages(sessionId: string, params?: { limit?: number; before?: number }) {
+    const query = new URLSearchParams()
+    if (typeof params?.limit === 'number') query.set('limit', String(params.limit))
+    if (typeof params?.before === 'number') query.set('before', String(params.before))
+    const qs = query.toString()
+    return api.get<MessagesResponse>(
+      `/api/sessions/${sessionId}/messages${qs ? `?${qs}` : ''}`,
+    )
   },
 
   create(workDir?: string) {

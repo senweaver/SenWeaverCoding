@@ -28,9 +28,63 @@ impl BackupTool {
         self.workspace_dir.join("backups")
     }
 
+    fn validate_backup_name_strict(name: &str) -> Result<(), String> {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "Invalid backup name '{name}': only ASCII letters, digits, '_' and '-' are allowed"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_backup_name_lenient(name: &str) -> Result<(), String> {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return Err(format!(
+                "Invalid backup name '{name}': only ASCII letters, digits, '.', '_' and '-' are allowed"
+            ));
+        }
+        if name == "." || name == ".." || name.contains("..") {
+            return Err(format!(
+                "Invalid backup name '{name}': path traversal is not allowed"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn resolve_backup_dir(&self, backup_name: &str) -> Result<PathBuf, String> {
+        Self::validate_backup_name_lenient(backup_name)?;
+        let backups_root = self.backups_dir();
+        let candidate = backups_root.join(backup_name);
+        let resolved = fs::canonicalize(&candidate)
+            .await
+            .map_err(|_| format!("Backup not found: {backup_name}"))?;
+        let root_resolved = fs::canonicalize(&backups_root)
+            .await
+            .map_err(|e| format!("Backups directory unavailable: {e}"))?;
+        if !resolved.starts_with(&root_resolved) {
+            return Err(format!(
+                "Backup path escapes the backups directory: {backup_name}"
+            ));
+        }
+        if !resolved.is_dir() {
+            return Err(format!("Backup not found: {backup_name}"));
+        }
+        Ok(resolved)
+    }
+
     async fn cmd_create(&self) -> anyhow::Result<ToolResult> {
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let name = format!("backup-{ts}");
+        Self::validate_backup_name_strict(&name)
+            .map_err(|e| anyhow::anyhow!(e))?;
         let backup_dir = self.backups_dir().join(&name);
         fs::create_dir_all(&backup_dir).await?;
 
@@ -125,14 +179,16 @@ impl BackupTool {
     }
 
     async fn cmd_verify(&self, backup_name: &str) -> anyhow::Result<ToolResult> {
-        let backup_dir = self.backups_dir().join(backup_name);
-        if !backup_dir.is_dir() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Backup not found: {backup_name}")),
-            });
-        }
+        let backup_dir = match self.resolve_backup_dir(backup_name).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e),
+                });
+            }
+        };
         let manifest_path = backup_dir.join("manifest.json");
         let data = fs::read_to_string(&manifest_path).await?;
         let expected: HashMap<String, String> = serde_json::from_str(&data)?;
@@ -172,20 +228,25 @@ impl BackupTool {
     }
 
     async fn cmd_restore(&self, backup_name: &str, confirm: bool) -> anyhow::Result<ToolResult> {
-        let backup_dir = self.backups_dir().join(backup_name);
-        if !backup_dir.is_dir() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Backup not found: {backup_name}")),
-            });
-        }
+        let backup_dir = match self.resolve_backup_dir(backup_name).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e),
+                });
+            }
+        };
 
         let mut restore_items: Vec<String> = Vec::new();
         let mut rd = fs::read_dir(&backup_dir).await?;
         while let Some(e) = rd.next_entry().await? {
             let name = e.file_name().to_string_lossy().to_string();
             if name == "manifest.json" {
+                continue;
+            }
+            if name.contains('/') || name.contains('\\') || name == ".." || name == "." {
                 continue;
             }
             if e.path().is_dir() {

@@ -115,7 +115,7 @@ impl Tool for ExitPlanModeTool {
             });
         }
 
-        *self.flag.write() = false;
+        self.flag.set(false);
 
         if let Some(svc) = crate::services::try_get_services() {
             svc.set_pending_plan(plan_text.to_string());

@@ -410,3 +410,16 @@ impl ReinforcementEngine {
         self.baseline_rewards.read().clone()
     }
 }
+
+static GLOBAL_REINFORCEMENT: std::sync::OnceLock<Option<ReinforcementEngine>> =
+    std::sync::OnceLock::new();
+
+pub fn global_reinforcement_engine() -> Option<&'static ReinforcementEngine> {
+    if let Some(cached) = GLOBAL_REINFORCEMENT.get() {
+        return cached.as_ref();
+    }
+    let config = crate::services::try_get_services().map(|svc| svc.config().reinforcement.clone())?;
+    GLOBAL_REINFORCEMENT
+        .get_or_init(|| config.enabled.then(|| ReinforcementEngine::new(&config)))
+        .as_ref()
+}

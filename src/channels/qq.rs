@@ -416,10 +416,19 @@ impl QQChannel {
             return false;
         }
 
+        let dedup = self.dedup.read().await;
+        dedup.contains(msg_id)
+    }
+
+    async fn mark_processed(&self, msg_id: &str) {
+        if msg_id.is_empty() {
+            return;
+        }
+
         let mut dedup = self.dedup.write().await;
 
         if dedup.contains(msg_id) {
-            return true;
+            return;
         }
 
         if dedup.len() >= DEDUP_CAPACITY {
@@ -430,7 +439,6 @@ impl QQChannel {
         }
 
         dedup.insert(msg_id.to_string());
-        false
     }
 
     fn upload_cache_key(
@@ -893,6 +901,16 @@ impl Channel for QQChannel {
 
     #[allow(clippy::too_many_lines)]
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        let mut reconnect_attempt: u32 = 0;
+
+        loop {
+            if tx.is_closed() {
+                tracing::info!("QQ: message channel closed; stopping listener");
+                return Ok(());
+            }
+
+            let session_started = std::time::Instant::now();
+            let session: anyhow::Result<bool> = async {
         tracing::info!("QQ: authenticating...");
         let token = self.get_token().await?;
 
@@ -955,6 +973,8 @@ impl Channel for QQChannel {
 
         let mut sequence: i64 = stored_seq.unwrap_or(-1);
 
+        let mut resume_sequence: i64 = sequence;
+
         const MAX_MISSED_ACKS: u32 = 3;
         let mut missed_ack_count: u32 = 0;
 
@@ -983,6 +1003,7 @@ impl Channel for QQChannel {
             HeartbeatTimeout,
             WriteFailed,
             ChannelClosed,
+            Backpressure,
         }
 
         let exit_reason;
@@ -1143,10 +1164,24 @@ impl Channel for QQChannel {
                     attachments: vec![],
                             };
 
-                            if tx.send(channel_msg).await.is_err() {
-                                tracing::warn!("QQ: message channel closed");
-                                exit_reason = ExitReason::ChannelClosed;
-                                break 'outer;
+                            match crate::channels::forward_channel_message("qq", &tx, channel_msg) {
+                                crate::channels::ForwardOutcome::Delivered => {
+                                    self.mark_processed(msg_id).await;
+                                    resume_sequence = sequence;
+                                }
+                                crate::channels::ForwardOutcome::Dropped => {
+                                    tracing::warn!(
+                                        "QQ: message queue full; dropping connection to resume \
+                                         from last delivered sequence and replay this message"
+                                    );
+                                    exit_reason = ExitReason::Backpressure;
+                                    break 'outer;
+                                }
+                                crate::channels::ForwardOutcome::Closed => {
+                                    tracing::warn!("QQ: message channel closed");
+                                    exit_reason = ExitReason::ChannelClosed;
+                                    break 'outer;
+                                }
                             }
                         }
                         "GROUP_AT_MESSAGE_CREATE" => {
@@ -1184,10 +1219,24 @@ impl Channel for QQChannel {
                     attachments: vec![],
                             };
 
-                            if tx.send(channel_msg).await.is_err() {
-                                tracing::warn!("QQ: message channel closed");
-                                exit_reason = ExitReason::ChannelClosed;
-                                break 'outer;
+                            match crate::channels::forward_channel_message("qq", &tx, channel_msg) {
+                                crate::channels::ForwardOutcome::Delivered => {
+                                    self.mark_processed(msg_id).await;
+                                    resume_sequence = sequence;
+                                }
+                                crate::channels::ForwardOutcome::Dropped => {
+                                    tracing::warn!(
+                                        "QQ: message queue full; dropping connection to resume \
+                                         from last delivered sequence and replay this message"
+                                    );
+                                    exit_reason = ExitReason::Backpressure;
+                                    break 'outer;
+                                }
+                                crate::channels::ForwardOutcome::Closed => {
+                                    tracing::warn!("QQ: message channel closed");
+                                    exit_reason = ExitReason::ChannelClosed;
+                                    break 'outer;
+                                }
                             }
                         }
                         _ => {}
@@ -1196,7 +1245,11 @@ impl Channel for QQChannel {
             }
         }
 
-        *self.last_sequence.write().await = if sequence >= 0 { Some(sequence) } else { None };
+        *self.last_sequence.write().await = if resume_sequence >= 0 {
+            Some(resume_sequence)
+        } else {
+            None
+        };
 
         match exit_reason {
             ExitReason::InvalidSession => {
@@ -1247,8 +1300,43 @@ impl Channel for QQChannel {
                 anyhow::bail!("QQ WebSocket connection closed: write failed")
             }
             ExitReason::ChannelClosed => {
-                anyhow::bail!("QQ WebSocket connection closed: internal message channel closed")
+                tracing::info!("QQ: message channel closed; stopping listener");
+                Ok(true)
             }
+            ExitReason::Backpressure => {
+                tracing::warn!(
+                    "QQ: message queue full (backpressure); resume from last delivered \
+                     sequence so the gateway replays undelivered messages on reconnect"
+                );
+                anyhow::bail!(
+                    "QQ WebSocket connection closed: message queue full (resume will be attempted)"
+                )
+            }
+        }
+            }
+            .await;
+
+            match session {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    tracing::warn!("QQ: gateway connection lost");
+                }
+                Err(e) => {
+                    tracing::warn!("QQ: gateway session error: {e:#}");
+                }
+            }
+
+            if session_started.elapsed() >= std::time::Duration::from_secs(60) {
+                reconnect_attempt = 0;
+            }
+            let wait = crate::channels::reconnect_backoff_delay(reconnect_attempt, 2, 60, 500);
+            tracing::warn!(
+                "QQ: reconnecting in {:.3}s (attempt #{})",
+                wait.as_secs_f64(),
+                reconnect_attempt.saturating_add(1),
+            );
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            tokio::time::sleep(wait).await;
         }
     }
 

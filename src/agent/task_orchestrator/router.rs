@@ -211,6 +211,8 @@ pub struct TaskRouter {
     success_windows: Arc<RwLock<HashMap<String, VecDeque<bool>>>>,
 
     capability_groups: CapabilityGroups,
+
+    health_subscriber_started: std::sync::atomic::AtomicBool,
 }
 
 impl TaskRouter {
@@ -221,6 +223,7 @@ impl TaskRouter {
             health_penalties: Arc::new(RwLock::new(HashMap::new())),
             success_windows: Arc::new(RwLock::new(HashMap::new())),
             capability_groups: CapabilityGroups::defaults(),
+            health_subscriber_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -265,15 +268,23 @@ impl TaskRouter {
     pub fn spawn_health_subscriber(
         &self,
         broadcaster: &HealthBroadcaster,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if self
+            .health_subscriber_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
         let map = self.health_penalties.clone();
         let mut rx = broadcaster.subscribe();
-        crate::runtime::spawn_supervised("task_router.health_subscriber", async move {
-            while let Ok(signal) = rx.recv().await {
-                apply_signal(&map, &signal);
-            }
-        })
-        .into_inner()
+        Some(
+            crate::runtime::spawn_supervised("task_router.health_subscriber", async move {
+                while let Ok(signal) = rx.recv().await {
+                    apply_signal(&map, &signal);
+                }
+            })
+            .into_inner(),
+        )
     }
 }
 
@@ -333,10 +344,29 @@ impl TaskRouter {
             .map(|a| self.estimate_load(a))
             .unwrap_or_default();
 
+        let reason = self.build_reason(&best, task);
+
+        crate::event_bus::integration::publish_task_delegation_now(
+            "task_router",
+            &task.id,
+            crate::event_bus::types::TaskDelegationAction::Assigned,
+            &reason,
+        );
+        crate::event_bus::integration::publish_coordination_now(
+            &best.agent_id,
+            crate::event_bus::types::CoordinationAction::Propose,
+            &task.id,
+            Some(serde_json::json!({
+                "agent_id": best.agent_id,
+                "confidence": best.score,
+                "candidates": candidates.len(),
+            })),
+        );
+
         Ok(RoutingDecision {
             agent_id: best.agent_id.clone(),
             confidence: best.score,
-            reason: self.build_reason(&best, task),
+            reason,
             estimated_load: picked_load,
             all_candidates: candidates,
         })

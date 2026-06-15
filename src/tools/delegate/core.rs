@@ -445,8 +445,21 @@ impl DelegateTool {
 
         let temperature = agent_config.temperature.unwrap_or(0.7);
 
+        let timeout_secs = agent_config
+            .timeout_secs
+            .unwrap_or(self.delegate_config.timeout_secs);
+        let request_id = uuid::Uuid::new_v4().to_string();
+        crate::event_bus::integration::publish_agent_request_now(
+            "delegate",
+            agent_name,
+            &request_id,
+            agent_name,
+            &full_prompt,
+            timeout_secs,
+        );
+
         if agent_config.agentic {
-            return self
+            let agentic_result = self
                 .execute_agentic(
                     agent_name,
                     &agent_config,
@@ -455,6 +468,29 @@ impl DelegateTool {
                     temperature,
                 )
                 .await;
+            match &agentic_result {
+                Ok(tool_result) => {
+                    crate::event_bus::integration::publish_agent_response_now(
+                        agent_name,
+                        "delegate",
+                        &request_id,
+                        tool_result.success,
+                        &tool_result.output,
+                        tool_result.error.clone(),
+                    );
+                }
+                Err(e) => {
+                    crate::event_bus::integration::publish_agent_response_now(
+                        agent_name,
+                        "delegate",
+                        &request_id,
+                        false,
+                        "",
+                        Some(e.to_string()),
+                    );
+                }
+            }
+            return agentic_result;
         }
 
         let ws_root = self.workspace_snapshot();
@@ -462,9 +498,6 @@ impl DelegateTool {
             self.build_enriched_system_prompt(&agent_config, &[], ws_root.as_path());
         let system_prompt_ref = enriched_system_prompt.as_deref();
 
-        let timeout_secs = agent_config
-            .timeout_secs
-            .unwrap_or(self.delegate_config.timeout_secs);
         let result = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             provider.chat_with_system(
@@ -479,12 +512,19 @@ impl DelegateTool {
         let result = match result {
             Ok(inner) => inner,
             Err(_elapsed) => {
+                let timeout_msg = format!("Agent '{agent_name}' timed out after {timeout_secs}s");
+                crate::event_bus::integration::publish_agent_response_now(
+                    agent_name,
+                    "delegate",
+                    &request_id,
+                    false,
+                    "",
+                    Some(timeout_msg.clone()),
+                );
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!(
-                        "Agent '{agent_name}' timed out after {timeout_secs}s"
-                    )),
+                    error: Some(timeout_msg),
                 });
             }
         };
@@ -497,6 +537,14 @@ impl DelegateTool {
                 }
 
                 crate::agent::profile::runtime_hooks::track_delegate_complete(agent_name, true);
+                crate::event_bus::integration::publish_agent_response_now(
+                    agent_name,
+                    "delegate",
+                    &request_id,
+                    true,
+                    &rendered,
+                    None,
+                );
 
                 Ok(ToolResult {
                     success: true,
@@ -511,6 +559,14 @@ impl DelegateTool {
             Err(e) => {
 
                 crate::agent::profile::runtime_hooks::track_delegate_complete(agent_name, false);
+                crate::event_bus::integration::publish_agent_response_now(
+                    agent_name,
+                    "delegate",
+                    &request_id,
+                    false,
+                    "",
+                    Some(e.to_string()),
+                );
                 Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -610,6 +666,13 @@ impl DelegateTool {
         let json_bytes = serde_json::to_vec_pretty(&initial_result)?;
         tokio::fs::write(&result_path, &json_bytes).await?;
 
+        crate::event_bus::integration::publish_task_delegation_now(
+            "delegate",
+            &task_id,
+            crate::event_bus::types::TaskDelegationAction::Assigned,
+            &full_prompt,
+        );
+
         let agents = Arc::clone(&self.agents);
         let security = Arc::clone(&self.security);
         let fallback_credential = self.fallback_credential.clone();
@@ -695,6 +758,27 @@ impl DelegateTool {
                 if let Ok(bytes) = serde_json::to_vec_pretty(&final_result) {
                     let _ = tokio::fs::write(&result_path, &bytes).await;
                 }
+
+                let (delegation_action, delegation_desc) = match final_result.status {
+                    BackgroundTaskStatus::Completed => (
+                        crate::event_bus::types::TaskDelegationAction::Completed,
+                        final_result.output.clone().unwrap_or_default(),
+                    ),
+                    BackgroundTaskStatus::Cancelled => (
+                        crate::event_bus::types::TaskDelegationAction::Failed,
+                        "cancelled by parent session".to_string(),
+                    ),
+                    _ => (
+                        crate::event_bus::types::TaskDelegationAction::Failed,
+                        final_result.error.clone().unwrap_or_default(),
+                    ),
+                };
+                crate::event_bus::integration::publish_task_delegation_now(
+                    &final_result.agent,
+                    &task_id_clone,
+                    delegation_action,
+                    &delegation_desc,
+                );
 
                 if let (Some(tool_use_id), Some(session_id)) =
                     (notify_tool_use_id, notify_session_id)
@@ -1000,6 +1084,13 @@ impl DelegateTool {
         result.finished_at = Some(chrono::Utc::now().to_rfc3339());
         let bytes = serde_json::to_vec_pretty(&result)?;
         tokio::fs::write(&result_path, &bytes).await?;
+
+        crate::event_bus::integration::publish_task_delegation_now(
+            "delegate",
+            task_id,
+            crate::event_bus::types::TaskDelegationAction::Progress,
+            "cancellation requested",
+        );
 
         Ok(ToolResult {
             success: true,

@@ -61,18 +61,61 @@ impl WorkerEventLog {
     }
 
     pub fn append(&self, evt: &SessionEvent) -> std::io::Result<u64> {
-        if let Some(tx) = self
+        let mut guard = self
             .writer
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_ref()
-        {
-            if tx.send(evt.clone()).is_err() {
-                tracing::warn!("worker event log writer thread is gone; append dropped");
+            .unwrap_or_else(|poison| poison.into_inner());
+        let needs_rebuild = match guard.as_ref() {
+            Some(tx) => tx.send(evt.clone()).is_err(),
+            None => true,
+        };
+        if needs_rebuild {
+            tracing::warn!("worker event log writer thread is gone; rebuilding writer");
+            match self.rebuild_writer() {
+                Ok((tx, handle)) => {
+                    if tx.send(evt.clone()).is_err() {
+                        tracing::error!(
+                            "worker event log writer rebuild produced a dead channel; append dropped"
+                        );
+                        *guard = None;
+                    } else {
+                        *guard = Some(tx);
+                        let mut handle_guard = self
+                            .handle
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner());
+                        if let Some(old) = handle_guard.take() {
+                            let _ = old.join();
+                        }
+                        *handle_guard = Some(handle);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "worker event log writer rebuild failed; append dropped"
+                    );
+                    *guard = None;
+                }
             }
         }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(seq)
+    }
+
+    fn rebuild_writer(
+        &self,
+    ) -> std::io::Result<(mpsc::Sender<SessionEvent>, std::thread::JoinHandle<()>)> {
+        let events_path = self.root.join(EVENTS_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_path)?;
+        let (tx, rx) = mpsc::channel::<SessionEvent>();
+        let handle = std::thread::Builder::new()
+            .name("worker-event-log".to_string())
+            .spawn(move || worker_writer_loop(file, rx))?;
+        Ok((tx, handle))
     }
 
     pub fn replay(&self) -> std::io::Result<Vec<SessionEvent>> {

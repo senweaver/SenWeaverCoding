@@ -84,11 +84,28 @@ impl Tool for WorktreeExitTool {
             }
             cmd_args.push(worktree_path);
 
-            let output = crate::util::hidden_async_command("git")
-                .args(&cmd_args)
+            let mut cmd = crate::util::hidden_async_command("git");
+            cmd.args(&cmd_args)
                 .current_dir(self.security.workspace_dir())
-                .output()
-                .await;
+                .kill_on_drop(true);
+            let timeout_secs = crate::services::try_get_services()
+                .and_then(|s| s.config().pacing.tool_timeout_secs)
+                .unwrap_or(120);
+            let output = match tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                cmd.output(),
+            )
+            .await
+            {
+                Ok(out) => out,
+                Err(_) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("git worktree remove timed out after {timeout_secs}s")),
+                    });
+                }
+            };
 
             match output {
                 Ok(out) if out.status.success() => Ok(ToolResult {

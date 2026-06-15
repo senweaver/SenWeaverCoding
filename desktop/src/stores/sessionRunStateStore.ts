@@ -81,8 +81,11 @@ function openStream() {
         const ids = parsed.running.filter((x): x is string => typeof x === 'string')
         useSessionRunStateStore.getState().setSnapshot(ids)
       }
-    } catch {
-
+    } catch (err) {
+      console.warn('[sessionRunState] snapshot parse failed; reconnecting', err)
+      useSessionRunStateStore.setState({ esConnected: false })
+      closeEventSource()
+      scheduleReconnect()
     }
   })
 
@@ -93,8 +96,11 @@ function openStream() {
       if (typeof parsed.sessionId === 'string' && typeof parsed.running === 'boolean') {
         useSessionRunStateStore.getState().applyDelta(parsed.sessionId, parsed.running)
       }
-    } catch {
-
+    } catch (err) {
+      console.warn('[sessionRunState] run_state parse failed; reconnecting', err)
+      useSessionRunStateStore.setState({ esConnected: false })
+      closeEventSource()
+      scheduleReconnect()
     }
   })
 

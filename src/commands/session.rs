@@ -54,7 +54,7 @@ async fn demo() -> CommandResult {
     });
 
     crate::runtime::spawn_supervised("cli.session.submit_turn", async move {
-        session.submit("demo input").await;
+        let _ = session.submit("demo input").await;
     });
 
     let mut output = String::new();

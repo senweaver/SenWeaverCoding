@@ -65,10 +65,41 @@ async fn run_workflow(path: &std::path::Path) -> CommandResult {
 
     let runtime = TaskSchedulerRuntime::new(scheduler);
 
-    let exec: TaskExecutor = std::sync::Arc::new(|task, _ct| {
-        let id = task.id.clone();
+    let config = match crate::config::Config::load_or_init().await {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult::err(format!(
+                "Failed to load config for workflow execution: {e}"
+            ));
+        }
+    };
+    let temperature = config.default_temperature;
+
+    let exec: TaskExecutor = std::sync::Arc::new(move |task, ct| {
         let prompt = task.prompt.clone();
-        Box::pin(async move { Ok(format!("[{id}] {prompt}")) })
+        let cfg = config.clone();
+        Box::pin(async move {
+            if ct.is_cancelled() {
+                return Err("task cancelled before execution".to_string());
+            }
+            match Box::pin(crate::agent::run(
+                cfg,
+                Some(prompt),
+                None,
+                None,
+                temperature,
+                Vec::new(),
+                false,
+                None,
+                None,
+                None,
+            ))
+            .await
+            {
+                Ok(output) => Ok(output),
+                Err(e) => Err(format!("{e:#}")),
+            }
+        })
     });
 
     let started = std::time::Instant::now();

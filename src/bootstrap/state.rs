@@ -264,7 +264,13 @@ pub fn reset_state(cwd: PathBuf) {
 }
 
 pub fn get_session_id() -> SessionId {
-    get_state().read(|s| s.session_id.clone())
+    match try_get_state() {
+        Some(bs) => bs.read(|s| s.session_id.clone()),
+        None => {
+            tracing::debug!("bootstrap state not initialised; generating ephemeral session id");
+            SessionId::new()
+        }
+    }
 }
 
 pub fn get_project_root() -> PathBuf {
@@ -272,11 +278,22 @@ pub fn get_project_root() -> PathBuf {
 }
 
 pub fn get_cwd() -> PathBuf {
-    get_state().read(|s| s.cwd.clone())
+    match try_get_state() {
+        Some(bs) => bs.read(|s| s.cwd.clone()),
+        None => std::env::current_dir().unwrap_or_default(),
+    }
 }
 
 pub fn set_cwd(cwd: PathBuf) {
-    get_state().write(|s| {
-        s.cwd = cwd;
-    });
+    match try_get_state() {
+        Some(bs) => bs.write(|s| {
+            s.cwd = cwd;
+        }),
+        None => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "bootstrap state not initialised; set_cwd ignored"
+            );
+        }
+    }
 }

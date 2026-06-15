@@ -144,10 +144,12 @@ impl Tool for LspFormatTool {
         }
 
         let file_for_apply = file_path.clone();
-        let edits_applied = tokio::task::spawn_blocking(move || apply_text_edits(&file_for_apply, &resp))
-            .await
-            .unwrap_or(Ok(0))
-            .map_err(|e| anyhow::anyhow!("Failed to apply formatting edits: {e}"))?;
+        let security = self.security.clone();
+        let edits_applied =
+            tokio::task::spawn_blocking(move || apply_text_edits(&security, &file_for_apply, &resp))
+                .await
+                .unwrap_or(Ok(0))
+                .map_err(|e| anyhow::anyhow!("Failed to apply formatting edits: {e}"))?;
 
         Ok(ToolResult {
             success: true,
@@ -161,13 +163,33 @@ impl Tool for LspFormatTool {
     }
 }
 
-fn apply_text_edits(file_path: &PathBuf, resp: &serde_json::Value) -> std::io::Result<usize> {
+fn apply_text_edits(
+    security: &SecurityPolicy,
+    file_path: &PathBuf,
+    resp: &serde_json::Value,
+) -> std::io::Result<usize> {
     let edits = match resp.as_array() {
         Some(arr) if !arr.is_empty() => arr,
         _ => return Ok(0),
     };
 
-    let content = std::fs::read_to_string(file_path)?;
+    if let Ok(meta) = std::fs::symlink_metadata(file_path) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Refusing to write through symlink: {}", file_path.display()),
+            ));
+        }
+    }
+    let resolved = std::fs::canonicalize(file_path)?;
+    if !security.is_resolved_path_allowed(&resolved) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            security.resolved_path_violation_message(&resolved),
+        ));
+    }
+
+    let content = std::fs::read_to_string(&resolved)?;
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
 
     let mut sorted: Vec<(usize, usize, usize, usize, String)> = edits
@@ -205,6 +227,9 @@ fn apply_text_edits(file_path: &PathBuf, resp: &serde_json::Value) -> std::io::R
             }
         } else {
             let el = el.min(lines.len().saturating_sub(1));
+            if el < sl {
+                continue;
+            }
             let start_chars: Vec<char> = lines[sl].chars().collect();
             let sc = sc.min(start_chars.len());
             let before: String = start_chars[..sc].iter().collect();
@@ -222,6 +247,6 @@ fn apply_text_edits(file_path: &PathBuf, resp: &serde_json::Value) -> std::io::R
     if content.ends_with('\n') && !output.ends_with('\n') {
         output.push('\n');
     }
-    std::fs::write(file_path, output)?;
+    crate::util::atomic_write(&resolved, output.as_bytes())?;
     Ok(applied)
 }

@@ -10,9 +10,11 @@ import { useChatStore } from './chatStore'
 import { useSettingsStore } from './settingsStore'
 import { useWorkspaceQueueStore } from './workspaceQueueStore'
 import { useTabStore } from './tabStore'
+import { useShallow } from 'zustand/react/shallow'
 import {
   buildAgentSnapshot,
   compareAgentSnapshots,
+  hasRecentError,
   summarizeAgents,
   type AgentSnapshot,
   type AgentStatusSummary,
@@ -109,7 +111,39 @@ export const useAgentMonitorStore = create<AgentMonitorStore>((set) => ({
 export function useAgentSnapshots(): AgentSnapshot[] {
   const sessions = useSessionStore((s) => s.sessions)
   const running = useSessionRunStateStore((s) => s.running)
-  const chatSessions = useChatStore((s) => s.sessions)
+  const chatSig = useChatStore(
+    useShallow((s) => {
+      const parts: Array<string | number | boolean | null> = []
+      for (const id of Object.keys(s.sessions)) {
+        const sess = s.sessions[id]!
+        const firstWait = sess.pendingResourceWaits[0]
+        const lastEdit =
+          sess.pendingEdits.length > 0
+            ? sess.pendingEdits[sess.pendingEdits.length - 1]
+            : undefined
+        parts.push(
+          id,
+          sess.chatState,
+          sess.connectionState,
+          sess.activeToolName,
+          sess.pendingPermission !== null,
+          sess.pendingResourceWaits.length,
+          firstWait
+            ? `${firstWait.kind}|${firstWait.target}|${firstWait.holderTitle}|${firstWait.holderSessionId}`
+            : null,
+          sess.pendingEdits.length,
+          lastEdit?.path ?? null,
+          sess.elapsedSeconds,
+          sess.statusVerb,
+          sess.cumulativeTokens,
+          sess.tokenUsage.input_tokens,
+          sess.tokenUsage.output_tokens,
+          hasRecentError(sess),
+        )
+      }
+      return parts
+    }),
+  )
   const sessionCodingMode = useChatStore((s) => s.sessionCodingMode)
   const queueState = useWorkspaceQueueStore((s) => s.queues)
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -117,6 +151,7 @@ export function useAgentSnapshots(): AgentSnapshot[] {
   const globalCodingMode = useSettingsStore((s) => s.codingMode)
 
   return useMemo(() => {
+    const chatSessions = useChatStore.getState().sessions
     const queueCounts: Record<string, number> = {}
     for (const list of Object.values(queueState)) {
       for (const item of list) {
@@ -160,7 +195,7 @@ export function useAgentSnapshots(): AgentSnapshot[] {
   }, [
     sessions,
     running,
-    chatSessions,
+    chatSig,
     sessionCodingMode,
     queueState,
     activeTabId,

@@ -66,6 +66,18 @@ impl SseParser {
     }
 
     pub fn finish(&mut self) {
+        if !self.buf.is_empty() && !self.skip_until_newline {
+            let buf = std::mem::take(&mut self.buf);
+            let mut line_slice = buf.as_slice();
+            if line_slice.last().copied() == Some(b'\r') {
+                line_slice = &line_slice[..line_slice.len() - 1];
+            }
+            let line = String::from_utf8_lossy(line_slice);
+            if !line.is_empty() {
+                self.process_line(line.as_ref());
+            }
+        }
+        self.skip_until_newline = false;
         if self.saw_data {
             self.dispatch_pending();
         }
@@ -87,10 +99,16 @@ impl SseParser {
                 line_slice = &line_slice[..line_slice.len() - 1];
             }
             let line = match std::str::from_utf8(line_slice) {
-                Ok(s) => s,
-                Err(_) => continue,
+                Ok(s) => std::borrow::Cow::Borrowed(s),
+                Err(_) => {
+                    tracing::debug!(
+                        target: "providers.sse",
+                        "SSE line was not valid UTF-8; decoding lossily to avoid dropping content"
+                    );
+                    String::from_utf8_lossy(line_slice)
+                }
             };
-            self.process_line(line);
+            self.process_line(line.as_ref());
         }
     }
 
@@ -120,6 +138,13 @@ impl SseParser {
                         self.pending.data.push('\n');
                         self.pending.data.push_str(value);
                     }
+                } else if !self.overflowed {
+                    self.overflowed = true;
+                    tracing::warn!(
+                        target: "providers.sse",
+                        limit = MAX_SSE_DATA_BYTES,
+                        "SSE data field exceeded size limit; further data for this event is truncated"
+                    );
                 }
                 self.saw_data = true;
             }

@@ -158,9 +158,10 @@ impl PairingGuard {
         let client_id = client_id.to_string();
         let handle = tokio::task::spawn_blocking(move || this.try_pair_blocking(&code, &client_id));
 
-        handle
-            .await
-            .expect("failed to spawn blocking task this should not happen")
+        handle.await.map_err(|err| {
+            tracing::error!(error = %err, "pairing verification task failed; asking client to retry");
+            1u64
+        })?
     }
 
     pub fn is_authenticated(&self, token: &str) -> bool {

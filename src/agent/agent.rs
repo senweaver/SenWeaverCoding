@@ -24,6 +24,13 @@ use uuid::Uuid;
 
 pub(crate) const TURN_EVENT_DRAIN_BUFFER: usize = 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardrailApprovalOutcome {
+    Approved,
+    Denied,
+    Cancelled,
+}
+
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
 
@@ -214,6 +221,7 @@ pub struct Agent {
     rbac_identity: Option<crate::security::rbac::CallerIdentity>,
     experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     plan_mode_config: crate::agent::plan_mode::PlanModeConfig,
+    intent_analysis_config: crate::agent::intent::IntentAnalysisConfig,
 
     mode_tool_filter: Option<std::collections::HashSet<String>>,
 
@@ -243,6 +251,8 @@ pub struct Agent {
     hook_runner: Option<std::sync::Arc<crate::hooks::HotHookRunner>>,
 
     cached_tools_signature: u64,
+
+    plan_mode_flag: crate::tools::PlanModeFlag,
 }
 
 pub struct AgentBuilder {
@@ -280,6 +290,7 @@ pub struct AgentBuilder {
     rbac_identity: Option<crate::security::rbac::CallerIdentity>,
     experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     plan_mode_config: Option<crate::agent::plan_mode::PlanModeConfig>,
+    intent_analysis_config: Option<crate::agent::intent::IntentAnalysisConfig>,
     shared_config: Option<crate::config::live::LiveConfig>,
 
     cached_provider: Option<String>,
@@ -287,6 +298,7 @@ pub struct AgentBuilder {
     cached_api_url: Option<String>,
     desktop_security_policy: Option<Arc<SecurityPolicy>>,
     hook_runner: Option<std::sync::Arc<crate::hooks::HotHookRunner>>,
+    plan_mode_flag: Option<crate::tools::PlanModeFlag>,
 }
 
 impl AgentBuilder {
@@ -326,13 +338,20 @@ impl AgentBuilder {
             rbac_identity: None,
             experience_replay: None,
             plan_mode_config: None,
+            intent_analysis_config: None,
             shared_config: None,
             cached_provider: None,
             cached_api_key: None,
             cached_api_url: None,
             desktop_security_policy: None,
             hook_runner: None,
+            plan_mode_flag: None,
         }
+    }
+
+    pub fn plan_mode_flag(mut self, flag: crate::tools::PlanModeFlag) -> Self {
+        self.plan_mode_flag = Some(flag);
+        self
     }
 
     pub fn provider(mut self, provider: Box<dyn Provider>) -> Self {
@@ -592,6 +611,7 @@ impl AgentBuilder {
             rbac_identity: self.rbac_identity,
             experience_replay: self.experience_replay,
             plan_mode_config: self.plan_mode_config.unwrap_or_default(),
+            intent_analysis_config: self.intent_analysis_config.unwrap_or_default(),
             mode_tool_filter: None,
             mode_filter_dirty: false,
             current_coding_mode: None,
@@ -613,6 +633,7 @@ impl AgentBuilder {
             plan_execution_armed: parking_lot::Mutex::new(None),
             hook_runner: self.hook_runner,
             cached_tools_signature: 0,
+            plan_mode_flag: self.plan_mode_flag.unwrap_or_default(),
         })
     }
 
@@ -636,6 +657,14 @@ impl AgentBuilder {
 
     pub fn plan_mode_config(mut self, cfg: crate::agent::plan_mode::PlanModeConfig) -> Self {
         self.plan_mode_config = Some(cfg);
+        self
+    }
+
+    pub fn intent_analysis_config(
+        mut self,
+        cfg: crate::agent::intent::IntentAnalysisConfig,
+    ) -> Self {
+        self.intent_analysis_config = Some(cfg);
         self
     }
 
@@ -712,28 +741,42 @@ impl Agent {
         };
         let user_message: &str = user_message_for_turn.as_str();
 
+        crate::agent::model_switch::scope_model_switch(
+            self.turn_streamed_inner(user_message, event_tx),
+        )
+        .await
+    }
+
+    async fn turn_streamed_inner(
+        &mut self,
+        user_message: &str,
+        event_tx: tokio::sync::mpsc::Sender<TurnEvent>,
+    ) -> Result<String, AgentError> {
         let mut _turn_metrics = crate::agent::executor_core::TurnMetricsGuard::start();
 
-        let _ = event_tx
-            .send(TurnEvent::ProgressTick {
-                iteration: 0,
-                max_iterations: self.config.max_tool_iterations,
-                tokens_used: 0,
-            })
-            .await;
+        let _ = event_tx.try_send(TurnEvent::ProgressTick {
+            iteration: 0,
+            max_iterations: self.config.max_tool_iterations,
+            tokens_used: 0,
+        });
 
         self.apply_turn_preamble(user_message, &event_tx).await?;
         self.apply_gui_model_switch(&event_tx).await;
+        self.apply_bootstrap_model_override(&event_tx).await;
         let mut effective_model = self.classify_model(user_message);
 
         let armed_plan_path: Option<String> = self.plan_execution_armed.lock().take();
 
+        let failed_turn_rollback_len = self.history.len().saturating_sub(1);
+
         let mut history_chat = self.tool_dispatcher.to_provider_messages(&self.history);
 
+        let mut plan_exec_focus_base_len: usize = 0;
         let plan_exec_full_history: Option<Vec<crate::providers::traits::ChatMessage>> =
             if armed_plan_path.is_some() {
                 let full = history_chat.clone();
                 history_chat = Self::focus_history_for_plan_execution(history_chat);
+                plan_exec_focus_base_len = history_chat.len();
                 Some(full)
             } else {
                 None
@@ -782,6 +825,7 @@ impl Agent {
                 .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
                 .with_experience_recorder_hook(Some(gui_hooks.clone()))
                 .with_plan_mode_nudge_hook(Some(gui_hooks.clone()))
+                .with_plan_mode_flag(Some(&self.plan_mode_flag))
                 .with_plan_execution_path(armed_plan_path.as_deref());
 
                 crate::agent::loop_::unified::UnifiedLoop::new(policy)
@@ -802,29 +846,35 @@ impl Agent {
                         continue;
                     }
                     let msg = err.to_string();
-                    let is_cancelled = matches!(
-                        err.downcast_ref::<AgentError>(),
-                        Some(AgentError::TurnCancelled)
-                    ) || crate::agent::error_classify::classify_turn_error_code(&msg)
-                        == "CANCELLED";
+                    let downcast = err.downcast_ref::<AgentError>();
+                    let is_cancelled = matches!(downcast, Some(AgentError::TurnCancelled))
+                        || crate::agent::error_classify::classify_turn_error_code(&msg)
+                            == "CANCELLED";
                     if is_cancelled {
                         let _ = event_tx
                             .send(TurnEvent::Cancelling {
                                 reason: msg.clone(),
                             })
                             .await;
-                        crate::agent::dangling_tool_repair::close_orphan_user_turns(
-                            &mut self.history,
+                        self.commit_interrupted_turn_history(
+                            plan_exec_full_history.clone(),
+                            history_chat.clone(),
+                            plan_exec_focus_base_len,
                         );
                         return Err(AgentError::TurnCancelled);
                     }
+                    let is_transport_interruption =
+                        matches!(downcast, Some(AgentError::StreamInterrupted(_)));
                     let _ = event_tx
                         .send(TurnEvent::Error {
                             message: msg.clone(),
                         })
                         .await;
 
-                    crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+                    if !is_transport_interruption {
+                        self.record_failed_turn_reinforcement(&msg);
+                    }
+                    self.rollback_failed_turn_history(failed_turn_rollback_len);
                     return Err(AgentError::ToolDispatchFailed(msg));
                 }
             }
@@ -848,6 +898,41 @@ impl Agent {
 
         _turn_metrics.mark_ok();
         Ok(final_text)
+    }
+
+    fn commit_interrupted_turn_history(
+        &mut self,
+        plan_exec_full_history: Option<Vec<crate::providers::traits::ChatMessage>>,
+        partial_history: Vec<crate::providers::traits::ChatMessage>,
+        plan_exec_focus_base_len: usize,
+    ) {
+        match plan_exec_full_history {
+            Some(mut full) => {
+                if partial_history.len() > plan_exec_focus_base_len {
+                    full.extend(
+                        partial_history[plan_exec_focus_base_len..]
+                            .iter()
+                            .cloned(),
+                    );
+                }
+                Self::replace_history_from_flat(&mut self.history, full);
+            }
+            None => Self::replace_history_from_flat(&mut self.history, partial_history),
+        }
+        crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+    }
+
+    fn rollback_failed_turn_history(&mut self, rollback_len: usize) {
+        if self.history.len() > rollback_len {
+            let dropped = self.history.len() - rollback_len;
+            self.history.truncate(rollback_len);
+            tracing::warn!(
+                target: "agent.turn",
+                dropped,
+                rollback_len,
+                "turn failed; rolled back the failed user turn from history so it does not pollute subsequent context (consistent with legacy truncate semantics; the failure is still surfaced to the session via the returned error)"
+            );
+        }
     }
 
     fn replace_history_from_flat(
@@ -1208,6 +1293,28 @@ impl Agent {
     }
 
     pub async fn apply_runtime_config_now(&mut self) -> Result<()> {
+        let config = self.shared_config.load_ref();
+        let new_provider = config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "openrouter".to_string());
+        let new_api_key = config.api_key.clone().unwrap_or_default();
+        let new_api_url = config.api_url.clone().unwrap_or_default();
+        let new_model = providers::resolve_default_model(&config).ok();
+        drop(config);
+
+        let model_unchanged = match new_model.as_deref() {
+            Some(m) => m == self.model_name,
+            None => true,
+        };
+        let unchanged = new_provider == self.cached_provider
+            && self.cached_api_key.constant_time_eq(&new_api_key)
+            && new_api_url == self.cached_api_url
+            && model_unchanged;
+        if unchanged {
+            return Ok(());
+        }
+
         self.reload_provider().await?;
         self.refresh_history_system_prompt();
         Ok(())
@@ -1571,7 +1678,7 @@ impl Agent {
     fn reload_web_tools_inner(&mut self, config: &crate::config::Config) {
 
         let want_web_search = config.web_search.enabled;
-        let has_web_search = self.tools.iter().any(|t| t.name() == "web_search");
+        let has_web_search = self.tools.iter().any(|t| t.name() == "web_search_tool");
         if want_web_search && !has_web_search {
             self.tools.push(Box::new(
                 crate::tools::WebSearchTool::new_with_config(
@@ -1585,7 +1692,7 @@ impl Agent {
                 ),
             ));
         } else if !want_web_search && has_web_search {
-            self.tools.retain(|t| t.name() != "web_search");
+            self.tools.retain(|t| t.name() != "web_search_tool");
         }
 
         let want_web_fetch = config.web_fetch.enabled;
@@ -1821,7 +1928,7 @@ impl Agent {
             _channel_map_handle,
             _ask_user_handle,
             _escalate_handle,
-            _plan_mode_flag,
+            plan_mode_flag,
         ) = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -2019,6 +2126,19 @@ impl Agent {
             tools.retain(|t| !deny_set.contains(t.name()));
         }
 
+        let loaded_skills = {
+            let skills_workspace = config.workspace_dir.clone();
+            let skills_config = config.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::skills::load_skills_with_config(&skills_workspace, &skills_config)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "skill loading task failed; continuing without skills");
+                Vec::new()
+            })
+        };
+
         Agent::builder()
             .provider(provider)
             .tools(tools)
@@ -2039,10 +2159,7 @@ impl Agent {
             .available_hints(available_hints)
             .route_model_by_hint(route_model_by_hint)
             .identity_config(config.identity.clone())
-            .skills(crate::skills::load_skills_with_config(
-                &config.workspace_dir,
-                config,
-            ))
+            .skills(loaded_skills)
             .skills_prompt_mode(config.skills.prompt_injection_mode)
             .auto_save(config.memory.auto_save)
             .security_summary(Some(security.prompt_summary()))
@@ -2054,6 +2171,7 @@ impl Agent {
             .prompt_optimizer_config(config.prompt_optimizer.clone())
             .experience_replay(experience_replay)
             .plan_mode_config(config.plan_mode.clone())
+            .intent_analysis_config(config.intent_analysis.clone())
             .shared_config(shared_config.unwrap_or_else(crate::config::live::LiveConfig::default))
             .cached_provider_config(
                 provider_name_raw.to_string(),
@@ -2061,6 +2179,7 @@ impl Agent {
                 config.api_url.clone().unwrap_or_default(),
             )
             .desktop_security_policy(Some(Arc::clone(&security)))
+            .plan_mode_flag(plan_mode_flag)
             .build()
     }
 
@@ -2109,6 +2228,8 @@ impl Agent {
         Self::collapse_empty_assistant_tool_calls(history);
 
         let mut out = Vec::with_capacity(history.len());
+        let mut recovered_tool_result_batches = 0usize;
+        let mut recovered_chat_tool_rows = 0usize;
         for msg in history.drain(..) {
             match &msg {
                 ConversationMessage::ToolResults(rows) => {
@@ -2118,7 +2239,8 @@ impl Agent {
                     if preceded {
                         out.push(msg);
                     } else {
-                        tracing::warn!(
+                        recovered_tool_result_batches += 1;
+                        tracing::debug!(
                             target: "agent.history_repair",
                             batch_len = rows.len(),
                             "recovered orphaned ToolResults as synthetic user transcript (missing assistant preamble)"
@@ -2135,7 +2257,8 @@ impl Agent {
                     if preceded {
                         out.push(msg);
                     } else {
-                        tracing::warn!(
+                        recovered_chat_tool_rows += 1;
+                        tracing::debug!(
                             target: "agent.history_repair",
                             "recovered orphaned Chat(role=tool) as synthetic user transcript (missing assistant preamble)"
                         );
@@ -2144,6 +2267,14 @@ impl Agent {
                 }
                 _ => out.push(msg),
             }
+        }
+        if recovered_tool_result_batches > 0 || recovered_chat_tool_rows > 0 {
+            tracing::info!(
+                target: "agent.history_repair",
+                tool_result_batches = recovered_tool_result_batches,
+                chat_tool_rows = recovered_chat_tool_rows,
+                "recovered orphaned tool transcript rows as synthetic user transcript"
+            );
         }
         *history = out;
         crate::agent::dangling_tool_repair::ensure_assistant_tool_replies_inplace(history);
@@ -2410,7 +2541,7 @@ impl Agent {
             return ToolExecutionResult {
                 name: call.name.clone(),
                 output: "[Cancelled by user]".to_string(),
-                success: true,
+                success: false,
                 tool_call_id: call.tool_call_id.clone(),
             };
         }
@@ -2427,15 +2558,36 @@ impl Agent {
                 };
             }
         } else if self.rbac_engine.is_some() != self.rbac_identity.is_some() {
-            tracing::warn!(
+            tracing::error!(
                 tool = call.name,
-                "RBAC partially configured (engine={}, identity={}); skipping authorization",
+                "RBAC partially configured (engine={}, identity={}); denying tool execution (fail-closed)",
                 self.rbac_engine.is_some(),
                 self.rbac_identity.is_some(),
             );
+            return ToolExecutionResult {
+                name: call.name.clone(),
+                output: format!(
+                    "RBAC denied: access control is partially configured (engine={}, identity={}); refusing to run tool '{}' without a complete RBAC setup",
+                    self.rbac_engine.is_some(),
+                    self.rbac_identity.is_some(),
+                    call.name
+                ),
+                success: false,
+                tool_call_id: call.tool_call_id.clone(),
+            };
         }
 
-        if let Some(mode) = self.current_coding_mode {
+        let effective_coding_mode = crate::agent::coding_mode::scoped_coding_mode()
+            .or_else(|| {
+                let svc = crate::services::try_get_services()?;
+                let session = crate::session::current_session_context()?;
+                svc.session_coding_mode(&format!("gw_{}", session.session_id))
+                    .or_else(|| svc.session_coding_mode(&session.session_id))
+            })
+            .or(self.current_coding_mode)
+            .or_else(|| Some(crate::agent::coding_mode::active_coding_mode()));
+
+        if let Some(mode) = effective_coding_mode {
             if let Some(allowed) = mode.allowed_tools() {
                 if !allowed.contains(call.name.as_str()) {
                     let mut listed: Vec<&str> = allowed.iter().copied().collect();
@@ -2515,7 +2667,7 @@ impl Agent {
             }
         }
 
-        let coding_label = self.current_coding_mode.map(|m| m.label().to_string());
+        let coding_label = effective_coding_mode.map(|m| m.label().to_string());
         let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
         let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
         let tool_lc = call.name.to_ascii_lowercase();
@@ -2524,15 +2676,48 @@ impl Agent {
             permission_mode: Some(&perm_mode_lc),
             tool_name: Some(&tool_lc),
         };
-        if let Err(reason) =
-            crate::guardrails::check_tool_guardrails(&call.name, Some(&guardrail_ctx))
-        {
-            return ToolExecutionResult {
-                name: call.name.clone(),
-                output: format!("Blocked by guardrails: {reason}"),
-                success: false,
-                tool_call_id: call.tool_call_id.clone(),
-            };
+        let mode_auto_approved = effective_coding_mode
+            .map(crate::agent::mode::effects::mode_auto_approves)
+            .unwrap_or(false);
+        match crate::guardrails::evaluate_tool_guardrails(&call.name, Some(&guardrail_ctx)) {
+            crate::guardrails::GuardrailDecision::Allow => {}
+            crate::guardrails::GuardrailDecision::Deny(reason) => {
+                return ToolExecutionResult {
+                    name: call.name.clone(),
+                    output: format!("Blocked by guardrails: {reason}"),
+                    success: false,
+                    tool_call_id: call.tool_call_id.clone(),
+                };
+            }
+            crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
+                let outcome = if mode_auto_approved {
+                    GuardrailApprovalOutcome::Approved
+                } else {
+                    self.request_guardrail_approval(&call.name, &call.arguments, &reason)
+                        .await
+                };
+                match outcome {
+                    GuardrailApprovalOutcome::Approved => {}
+                    GuardrailApprovalOutcome::Denied => {
+                        return ToolExecutionResult {
+                            name: call.name.clone(),
+                            output: format!(
+                                "Blocked by guardrails: approval required but not granted ({reason})"
+                            ),
+                            success: false,
+                            tool_call_id: call.tool_call_id.clone(),
+                        };
+                    }
+                    GuardrailApprovalOutcome::Cancelled => {
+                        return ToolExecutionResult {
+                            name: call.name.clone(),
+                            output: "[Cancelled by user]".to_string(),
+                            success: false,
+                            tool_call_id: call.tool_call_id.clone(),
+                        };
+                    }
+                }
+            }
         }
 
         let mut hook_call_name = call.name.clone();
@@ -2575,6 +2760,66 @@ impl Agent {
             })
         };
         let dispatch_call: &ParsedToolCall = effective_call.as_ref().unwrap_or(call);
+
+        if effective_call.is_some() {
+            let dispatch_tool_lc = dispatch_call.name.to_ascii_lowercase();
+            let renamed_ctx = crate::guardrails::GuardrailContext {
+                coding_mode: coding_label_lc.as_deref(),
+                permission_mode: Some(&perm_mode_lc),
+                tool_name: Some(&dispatch_tool_lc),
+            };
+            match crate::guardrails::evaluate_tool_guardrails(
+                &dispatch_call.name,
+                Some(&renamed_ctx),
+            ) {
+                crate::guardrails::GuardrailDecision::Allow => {}
+                crate::guardrails::GuardrailDecision::Deny(reason) => {
+                    return ToolExecutionResult {
+                        name: call.name.clone(),
+                        output: format!(
+                            "Blocked by guardrails after hook modification of '{}': {reason}",
+                            dispatch_call.name
+                        ),
+                        success: false,
+                        tool_call_id: call.tool_call_id.clone(),
+                    };
+                }
+                crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
+                    let outcome = if mode_auto_approved {
+                        GuardrailApprovalOutcome::Approved
+                    } else {
+                        self.request_guardrail_approval(
+                            &dispatch_call.name,
+                            &dispatch_call.arguments,
+                            &reason,
+                        )
+                        .await
+                    };
+                    match outcome {
+                        GuardrailApprovalOutcome::Approved => {}
+                        GuardrailApprovalOutcome::Denied => {
+                            return ToolExecutionResult {
+                                name: call.name.clone(),
+                                output: format!(
+                                    "Blocked by guardrails after hook modification of '{}': approval required but not granted ({reason})",
+                                    dispatch_call.name
+                                ),
+                                success: false,
+                                tool_call_id: call.tool_call_id.clone(),
+                            };
+                        }
+                        GuardrailApprovalOutcome::Cancelled => {
+                            return ToolExecutionResult {
+                                name: call.name.clone(),
+                                output: "[Cancelled by user]".to_string(),
+                                success: false,
+                                tool_call_id: call.tool_call_id.clone(),
+                            };
+                        }
+                    }
+                }
+            }
+        }
 
         {
             let web_search_enabled = crate::services::try_get_services()
@@ -2643,6 +2888,7 @@ impl Agent {
                     });
                     if r.success {
                         let scrubbed = crate::agent::profile::pii_sanitize::scrub_credentials(&r.output);
+                        let fallback = scrubbed.clone();
                         let call_name_owned = call.name.clone();
                         let out = tokio::task::spawn_blocking(move || {
                             crate::agent::token::optimizer::compress_output(
@@ -2651,7 +2897,14 @@ impl Agent {
                             )
                         })
                         .await
-                        .unwrap_or_else(|_| String::new());
+                        .unwrap_or_else(|join_err| {
+                            tracing::warn!(
+                                tool = %call.name,
+                                error = %join_err,
+                                "tool output compression task failed; falling back to uncompressed output"
+                            );
+                            fallback
+                        });
                         (out, true)
                     } else {
                         let reason = r.error.unwrap_or(r.output);
@@ -2687,7 +2940,7 @@ impl Agent {
             tokio::select! {
                 biased;
                 _ = cancel_handle.cancelled() => {
-                    ("[Cancelled by user]".to_string(), true)
+                    ("[Cancelled by user]".to_string(), false)
                 }
                 res = run_tool(tool.as_ref(), dispatch_call, &self.observer) => res,
             }
@@ -2697,7 +2950,7 @@ impl Agent {
                 tokio::select! {
                     biased;
                     _ = cancel_handle.cancelled() => {
-                        ("[Cancelled by user]".to_string(), true)
+                        ("[Cancelled by user]".to_string(), false)
                     }
                     res = run_tool(tool.as_ref(), dispatch_call, &self.observer) => res,
                 }
@@ -2818,6 +3071,7 @@ impl Agent {
             }
         })
         .into_inner();
+        let pre_turn_history_len = self.history.len();
         let caught =
             std::panic::AssertUnwindSafe(self.turn_streamed(user_message, tx))
                 .catch_unwind()
@@ -2833,76 +3087,12 @@ impl Agent {
                     panic = %msg,
                     "agent.turn panicked; isolated to this turn"
                 );
+                self.rollback_failed_turn_history(pre_turn_history_len);
                 Err(AgentError::ToolDispatchFailed(format!(
                     "turn panicked: {msg}"
                 )))
             }
         }
-    }
-
-    pub async fn turn_via_loop_core(&mut self, user_message: &str) -> Result<String, AgentError> {
-        use crate::agent::loop_::core::AgentLoopCore;
-        use crate::providers::traits::ChatMessage;
-
-        if self.history.is_empty() {
-            let system_prompt = self.build_system_prompt()?;
-            self.history
-                .push(ConversationMessage::Chat(ChatMessage::system(
-                    system_prompt,
-                )));
-        }
-        self.history
-            .push(ConversationMessage::Chat(ChatMessage::user(
-                user_message.to_string(),
-            )));
-
-        let mut flat_history: Vec<ChatMessage> = self
-            .history
-            .iter()
-            .filter_map(|m| match m {
-                ConversationMessage::Chat(c) => Some(c.clone()),
-                _ => None,
-            })
-            .collect();
-
-        let multimodal = crate::config::MultimodalConfig::default();
-        let pacing = crate::config::PacingConfig::default();
-        let excluded: Vec<String> = Vec::new();
-        let dedup_exempt: Vec<String> = Vec::new();
-
-        let mut metrics_guard = crate::agent::executor_core::TurnMetricsGuard::start();
-
-        let core = AgentLoopCore::bare(
-            self.provider.as_ref(),
-            &self.tools,
-            self.observer.as_ref(),
-            &self.cached_provider,
-            &self.model_name,
-            &multimodal,
-            &pacing,
-            &excluded,
-            &dedup_exempt,
-        )
-        .max_iterations(self.config.max_tool_iterations)
-        .temperature(self.temperature);
-
-        let result = core
-            .run_turn(&mut flat_history, None)
-            .await
-            .map_err(|e| e.into());
-        if result.is_ok() {
-            metrics_guard.mark_ok();
-        }
-        metrics_guard.finish();
-
-        if let Ok(ref text) = result {
-            self.history
-                .push(ConversationMessage::Chat(ChatMessage::assistant(
-                    text.clone(),
-                )));
-        }
-
-        result
     }
 
     async fn apply_turn_preamble(
@@ -2935,11 +3125,16 @@ impl Agent {
                 .push(ConversationMessage::Chat(ChatMessage::system(
                     system_prompt,
                 )));
+        } else {
+            self.refresh_history_system_prompt();
         }
 
         let plan_armed = self.plan_execution_armed.lock().is_some();
+        let is_design_trigger = user_message
+            .trim_start()
+            .starts_with(crate::agent::designer::pipeline::DESIGN_TASK_PREFIX);
 
-        let context = if plan_armed {
+        let context = if plan_armed || is_design_trigger {
             String::new()
         } else {
             self.memory_loader
@@ -2952,17 +3147,21 @@ impl Agent {
                 .unwrap_or_default()
         };
 
-        if self.auto_save && !plan_armed {
+        if self.auto_save && !plan_armed && !is_design_trigger {
             let autosave_key = format!("user_msg_{}", Uuid::new_v4());
-            let _ = self
-                .memory
-                .store(
-                    &autosave_key,
-                    user_message,
-                    MemoryCategory::Conversation,
-                    self.memory_session_id.as_deref(),
-                )
-                .await;
+            let memory = Arc::clone(&self.memory);
+            let user_message_owned = user_message.to_string();
+            let memory_session_id = self.memory_session_id.clone();
+            let _ = crate::runtime::spawn_supervised("agent.memory.autosave", async move {
+                let _ = memory
+                    .store(
+                        &autosave_key,
+                        &user_message_owned,
+                        MemoryCategory::Conversation,
+                        memory_session_id.as_deref(),
+                    )
+                    .await;
+            });
         }
 
         crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut self.history);
@@ -2995,6 +3194,37 @@ impl Agent {
                 ) {
                     enriched.push_str("\n\n");
                     enriched.push_str(web_active);
+                }
+            }
+        }
+
+        if self.intent_analysis_config.enabled && !plan_armed && !is_design_trigger {
+            let analysis = crate::agent::intent::analyze_intent(user_message);
+            if analysis.is_confident(self.intent_analysis_config.min_confidence) {
+                tracing::debug!(
+                    target: "agent.intent",
+                    intent = analysis.intent.as_str(),
+                    confidence = analysis.confidence,
+                    "intent analysis result for turn"
+                );
+                if self.intent_analysis_config.enrich_preamble {
+                    if let Some(note) = analysis.intent_note() {
+                        enriched.push_str("\n\n");
+                        enriched.push_str(note);
+                    }
+                }
+                if self.intent_analysis_config.enforce_plan_threshold
+                    && self.plan_mode_config.enabled
+                    && matches!(
+                        analysis.complexity,
+                        crate::agent::eval::ComplexityTier::Complex
+                    )
+                {
+                    enriched.push_str(&format!(
+                        "\n\nThis task likely requires more than {} steps. Create a structured \
+                         plan with the todo tool before executing, and update progress as you go.",
+                        self.plan_mode_config.auto_activate_threshold
+                    ));
                 }
             }
         }
@@ -3071,6 +3301,140 @@ impl Agent {
         }
 
         crate::agent::loop_::clear_model_switch_request();
+    }
+
+    async fn request_guardrail_approval(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        reason: &str,
+    ) -> GuardrailApprovalOutcome {
+        use crate::session::SessionEventKind;
+
+        let bus = crate::gateway::ws::gateway_approval_bus();
+        if bus.receiver_count() == 0 {
+            tracing::warn!(
+                tool = tool_name,
+                reason,
+                "guardrail requires approval but no approval surface is connected; denying"
+            );
+            return GuardrailApprovalOutcome::Denied;
+        }
+
+        let request_id = format!("guardrail_{}", uuid::Uuid::new_v4().simple());
+        let mut rx = bus.subscribe();
+        let sink = crate::gateway::ws::gateway_approval_sink_handle();
+        sink.emit_kind(SessionEventKind::ApprovalRequested {
+            id: request_id.clone(),
+            tool_name: tool_name.to_string(),
+            arguments: serde_json::json!({
+                "kind": "guardrail_approval",
+                "reason": reason,
+                "input": arguments,
+            }),
+            issued_at: chrono::Utc::now(),
+        });
+        crate::approval::register_pending_gateway_approval(request_id.clone());
+
+        const GUARDRAIL_APPROVAL_TIMEOUT_MS: u64 = 300_000;
+        let cancel_token = self.cancel_signal();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(GUARDRAIL_APPROVAL_TIMEOUT_MS);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::warn!(
+                    tool = tool_name,
+                    request_id = %request_id,
+                    "guardrail approval timed out; denying"
+                );
+                return GuardrailApprovalOutcome::Denied;
+            }
+            let received = tokio::select! {
+                () = cancel_token.cancelled() => {
+                    tracing::warn!(
+                        tool = tool_name,
+                        request_id = %request_id,
+                        "guardrail approval cancelled by user; cancelling turn"
+                    );
+                    return GuardrailApprovalOutcome::Cancelled;
+                }
+                outcome = tokio::time::timeout(remaining, rx.recv()) => outcome,
+            };
+            match received {
+                Ok(Ok(evt)) => {
+                    if let SessionEventKind::ApprovalResponded { id, decision, .. } = &evt.kind {
+                        if id == &request_id {
+                            return if matches!(
+                                decision.to_ascii_lowercase().as_str(),
+                                "yes" | "y" | "always" | "a"
+                            ) {
+                                GuardrailApprovalOutcome::Approved
+                            } else {
+                                GuardrailApprovalOutcome::Denied
+                            };
+                        }
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
+                    return GuardrailApprovalOutcome::Denied;
+                }
+            }
+        }
+    }
+
+    fn record_failed_turn_reinforcement(&self, error_message: &str) {
+        let Some(engine) = crate::agent::reward::reinforcement::global_reinforcement_engine()
+        else {
+            return;
+        };
+        let record = crate::agent::reward::reinforcement::TurnRecord {
+            turn_index: engine.total_turns(),
+            timestamp: chrono::Utc::now(),
+            reward: -1.0,
+            model_used: self.model_name.clone(),
+            temperature_used: self.temperature,
+            query_category: "turn_error".to_string(),
+            tools_used: Vec::new(),
+            response_length: error_message.len(),
+        };
+        let _ = engine.record_turn(record);
+    }
+
+    async fn apply_bootstrap_model_override(
+        &mut self,
+        event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
+    ) {
+        let Some(bs) = crate::bootstrap::try_get_state() else {
+            return;
+        };
+        let Some(requested) = bs.read(|s| s.main_loop_model_override.clone()) else {
+            return;
+        };
+        let resolved = {
+            let config = self.shared_config.load();
+            crate::agent::loop_::resolve_model_override_target(&requested, &config)
+        };
+        let Some((provider_override, target_model)) = resolved else {
+            let _ = event_tx
+                .send(TurnEvent::StatusUpdate {
+                    action: "model_override".to_string(),
+                    detail: "未找到可用的 fast 模型配置：请在 model_routes 中配置 hint=\"fast\" 的路由，或设置 agent_runtime.fast_apply_model。".to_string(),
+                })
+                .await;
+            bs.write(|s| s.main_loop_model_override = None);
+            return;
+        };
+        let target_provider = provider_override.unwrap_or_else(|| self.cached_provider.clone());
+        if target_model == self.model_name && target_provider == self.cached_provider {
+            return;
+        }
+        {
+            let switch_state = crate::agent::loop_::get_model_switch_state();
+            *switch_state.lock() = Some((target_provider, target_model));
+        }
+        self.apply_gui_model_switch(event_tx).await;
     }
 
     pub async fn run_single(&mut self, message: &str) -> Result<String> {

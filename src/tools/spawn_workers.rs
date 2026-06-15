@@ -19,6 +19,8 @@ use crate::workers::supervisor::ensure_supervisor;
 
 const TOOL_NAME: &str = "spawn_workers";
 
+const DEFAULT_WORKERS_TIMEOUT_SECS: u64 = 1800;
+
 #[derive(Debug, Deserialize)]
 struct SpawnArgs {
     #[serde(default)]
@@ -26,6 +28,9 @@ struct SpawnArgs {
 
     #[serde(default = "default_merge_strategy")]
     merge_strategy: MergeStrategy,
+
+    #[serde(default)]
+    workers_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +118,11 @@ impl Tool for SpawnWorkersTool {
                     "enum": ["concat", "summary"],
                     "default": "concat",
                     "description": "How to aggregate worker outputs back to the parent: 'concat' joins outputs with separators; 'summary' produces a short per-worker summary."
+                },
+                "workers_timeout_secs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Overall wall-clock budget in seconds for all workers to complete. When the budget elapses, still-running workers are cancelled and their partial results are returned. 0 disables the timeout. Defaults to 1800 (overridable via SEN_WORKERS_TIMEOUT_SECS)."
                 }
             },
             "required": ["tasks"]
@@ -164,6 +174,7 @@ impl Tool for SpawnWorkersTool {
             config: Arc::clone(&self.config),
             live_config: self.live_config.clone(),
             parent_workspace_dir,
+            parent_permission_mode: crate::gateway::ws::desktop::scoped_permission_mode_opt(),
         };
 
         let mut handles = Vec::with_capacity(parsed.tasks.len());
@@ -189,12 +200,27 @@ impl Tool for SpawnWorkersTool {
             waits.push(h.wait());
         }
 
+        let timeout_secs = parsed
+            .workers_timeout_secs
+            .or_else(|| {
+                crate::util::get_runtime_var("SEN_WORKERS_TIMEOUT_SECS")
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+            })
+            .unwrap_or(DEFAULT_WORKERS_TIMEOUT_SECS);
+        let deadline = (timeout_secs > 0).then(|| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs)
+        });
+
         let mut results: Vec<WorkerResult> = Vec::with_capacity(waits.len());
         for (idx, w) in waits.into_iter().enumerate() {
-            match w.await {
-                Ok(res) => results.push(res),
-                Err(_) => {
-                    let h = &handles[idx];
+            let h = &handles[idx];
+            let outcome = match deadline {
+                Some(dl) => tokio::time::timeout_at(dl, w).await,
+                None => Ok(w.await),
+            };
+            match outcome {
+                Ok(Ok(res)) => results.push(res),
+                Ok(Err(_)) => {
                     results.push(WorkerResult {
                         worker_id: h.worker_id.clone(),
                         title: h.title.clone(),
@@ -204,6 +230,24 @@ impl Tool for SpawnWorkersTool {
                         started_at: h.started_at,
                         finished_at: h.finished_at(),
                     });
+                }
+                Err(_elapsed) => {
+                    h.cancel();
+                    if let Some(snapshot) = h.result_snapshot() {
+                        results.push(snapshot);
+                    } else {
+                        results.push(WorkerResult {
+                            worker_id: h.worker_id.clone(),
+                            title: h.title.clone(),
+                            status: WorkerStatus::Stopped,
+                            output: String::new(),
+                            error: Some(format!(
+                                "worker timed out after {timeout_secs}s budget and was cancelled"
+                            )),
+                            started_at: h.started_at,
+                            finished_at: h.finished_at(),
+                        });
+                    }
                 }
             }
         }

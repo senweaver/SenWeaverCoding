@@ -763,8 +763,10 @@ impl Channel for WhatsAppWebChannel {
                                         }
                                     };
 
-                                if let Err(e) = tx_inner
-                                    .send(ChannelMessage {
+                                if crate::channels::forward_channel_message(
+                                    "whatsapp",
+                                    &tx_inner,
+                                    ChannelMessage {
                                         id: uuid::Uuid::new_v4().to_string(),
                                         channel: "whatsapp".to_string(),
                                         sender: normalized.clone(),
@@ -775,10 +777,11 @@ impl Channel for WhatsAppWebChannel {
                                         thread_ts: None,
                                         interruption_scope_id: None,
                     attachments: vec![],
-                                    })
-                                    .await
+                                    },
+                                )
+                                .is_closed()
                                 {
-                                    tracing::error!("Failed to send message to channel: {}", e);
+                                    tracing::warn!("WhatsApp Web: message channel closed");
                                 }
                             }
                             Event::Connected(_) => {

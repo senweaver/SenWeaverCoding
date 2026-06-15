@@ -14,12 +14,14 @@ pub mod classifier;
 pub mod cli_runtime;
 pub mod coding_mode;
 pub mod context;
+pub mod designer;
 pub mod coordination;
 pub mod dangling_tool_repair;
 pub mod dispatcher;
 pub mod error_classify;
 pub mod eval;
 pub mod executor_core;
+pub mod intent;
 
 pub mod flows;
 pub mod health_signal;

@@ -107,6 +107,54 @@ where
     }
 }
 
+pub fn spawn_supervised_restartable<F, Fut>(
+    name: impl Into<String>,
+    max_restarts: usize,
+    factory: F,
+) -> TaskHandle
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let name: String = name.into();
+    let loop_name = name.clone();
+    spawn_supervised(name, async move {
+        let mut attempts = 0usize;
+        loop {
+            match std::panic::AssertUnwindSafe(factory()).catch_unwind().await {
+                Ok(_) => break,
+                Err(payload) => {
+                    let msg = panic_message(&payload);
+                    attempts += 1;
+                    if attempts > max_restarts {
+                        tracing::error!(
+                            target: "task.panic",
+                            task = %loop_name,
+                            panic = %msg,
+                            restarts = attempts - 1,
+                            "supervised task panicked; restart budget exhausted"
+                        );
+                        break;
+                    }
+                    tracing::error!(
+                        target: "task.panic",
+                        task = %loop_name,
+                        panic = %msg,
+                        attempt = attempts,
+                        max_restarts,
+                        "supervised task panicked; restarting"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        200 * attempts as u64,
+                    ))
+                    .await;
+                }
+            }
+        }
+    })
+}
+
 pub fn abort_all() -> usize {
     let infos: Vec<TaskInfo> = REGISTRY.lock().clone();
     let count = infos.len();

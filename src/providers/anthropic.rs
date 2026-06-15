@@ -17,10 +17,12 @@ pub struct AnthropicProvider {
     credential: Option<String>,
     base_url: String,
     max_tokens: u32,
+    timeout_secs: u64,
     extra_headers: std::collections::HashMap<String, String>,
 }
 
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 4096;
+const DEFAULT_ANTHROPIC_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Serialize)]
 struct NativeChatRequest<'a> {
@@ -177,12 +179,18 @@ impl AnthropicProvider {
                 .map(ToString::to_string),
             base_url,
             max_tokens: DEFAULT_ANTHROPIC_MAX_TOKENS,
+            timeout_secs: DEFAULT_ANTHROPIC_TIMEOUT_SECS,
             extra_headers: std::collections::HashMap::new(),
         }
     }
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
         self
     }
 
@@ -517,14 +525,14 @@ impl AnthropicProvider {
     }
 
     fn convert_messages(messages: &[ChatMessage]) -> (Option<SystemPrompt>, Vec<NativeMessage>) {
-        let mut system_text = None;
+        let mut system_parts: Vec<String> = Vec::new();
         let mut native_messages = Vec::new();
 
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    if system_text.is_none() {
-                        system_text = Some(msg.content.clone());
+                    if !msg.content.trim().is_empty() {
+                        system_parts.push(msg.content.clone());
                     }
                 }
                 "assistant" => {
@@ -653,13 +661,15 @@ impl AnthropicProvider {
             }
         }
 
-        let system_prompt = system_text.map(|text| {
-            SystemPrompt::Blocks(vec![SystemBlock {
+        let system_prompt = if system_parts.is_empty() {
+            None
+        } else {
+            Some(SystemPrompt::Blocks(vec![SystemBlock {
                 block_type: "text".to_string(),
-                text,
+                text: system_parts.join("\n\n"),
                 cache_control: Some(CacheControl::ephemeral()),
-            }])
-        });
+            }]))
+        };
 
         (system_prompt, native_messages)
     }
@@ -739,10 +749,61 @@ impl AnthropicProvider {
             .proxy_runtime()
             .build_client_with_timeouts_and_headers(
                 "provider.anthropic",
-                120,
+                self.timeout_secs,
                 10,
                 &self.extra_headers,
             )
+    }
+
+    fn stream_http_client(&self) -> Client {
+        let read_timeout_secs = self.timeout_secs.max(300);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in &self.extra_headers {
+            match (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    headers.insert(name, val);
+                }
+                _ => {
+                    tracing::warn!(header = key, "Skipping invalid extra header name or value");
+                }
+            }
+        }
+
+        let stream_builder = || {
+            let mut builder = Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                .pool_idle_timeout(std::time::Duration::from_secs(15));
+            if !headers.is_empty() {
+                builder = builder.default_headers(headers.clone());
+            }
+            builder
+        };
+
+        let proxied = crate::services::require_services()
+            .proxy_runtime()
+            .apply_to_builder(stream_builder(), "provider.anthropic.stream");
+
+        proxied
+            .build()
+            .or_else(|error| {
+                tracing::warn!(
+                    "Failed to build proxied Anthropic stream client: {error}; retrying without proxy"
+                );
+                stream_builder().build()
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!("Failed to build Anthropic stream client: {error}");
+                Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                    .build()
+                    .unwrap_or_else(|_| Client::new())
+            })
     }
 
     fn build_streaming_request(
@@ -769,13 +830,28 @@ impl AnthropicProvider {
         let mut tool_id: Option<String> = None;
         let mut tool_name: Option<String> = None;
         let mut tool_input_json = String::new();
+        let mut made_progress = false;
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "anthropic stream read failed before completion: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
             let line = line.trim().to_string();
-            if !line.starts_with("data: ") {
+            let Some(json_str) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            else {
                 continue;
-            }
-            let json_str = &line["data: ".len()..];
+            };
 
             let event: serde_json::Value = match serde_json::from_str(json_str) {
                 Ok(v) => v,
@@ -806,6 +882,7 @@ impl AnthropicProvider {
                                 let name = tool_name.take().unwrap_or_default();
                                 let input = std::mem::take(&mut tool_input_json);
                                 let safe_input = sanitize_tool_call_arguments(input);
+                                made_progress = true;
                                 let _ = tx
                                     .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
                                         id,
@@ -835,15 +912,17 @@ impl AnthropicProvider {
                         match delta_type {
                             "text_delta" => {
                                 if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                    if !text.is_empty()
-                                        && tx
+                                    if !text.is_empty() {
+                                        made_progress = true;
+                                        if tx
                                             .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(
                                                 text.to_string(),
                                             ))))
                                             .await
                                             .is_err()
-                                    {
-                                        return;
+                                        {
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -851,15 +930,17 @@ impl AnthropicProvider {
                                 if let Some(text) =
                                     delta.get("thinking").and_then(|t| t.as_str())
                                 {
-                                    if !text.is_empty()
-                                        && tx
+                                    if !text.is_empty() {
+                                        made_progress = true;
+                                        if tx
                                             .send(Ok(StreamEvent::TextDelta(
                                                 StreamChunk::reasoning(text.to_string()),
                                             )))
                                             .await
                                             .is_err()
-                                    {
-                                        return;
+                                        {
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -883,6 +964,7 @@ impl AnthropicProvider {
                         let name = tool_name.take().unwrap_or_default();
                         let input = std::mem::take(&mut tool_input_json);
                         let safe_input = sanitize_tool_call_arguments(input);
+                        made_progress = true;
                         let _ = tx
                             .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
                                 id,
@@ -913,7 +995,22 @@ impl AnthropicProvider {
             }
         }
 
-        flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx).await;
+        if tool_id.is_some() || tool_name.is_some() || !tool_input_json.is_empty() {
+            let _ = tx
+                .send(Err(StreamError::Provider(
+                    "anthropic stream ended before message_stop while a tool_use block was still streaming; connection closed mid-response".to_string(),
+                )))
+                .await;
+            return;
+        }
+        if !made_progress {
+            let _ = tx
+                .send(Err(StreamError::Provider(
+                    "anthropic stream reached EOF without message_stop and without any text/tool output; connection closed mid-response (truncated)".to_string(),
+                )))
+                .await;
+            return;
+        }
         let _ = tx.send(Ok(StreamEvent::Final)).await;
     }
 }
@@ -1277,7 +1374,7 @@ impl Provider for AnthropicProvider {
 
         let model_owned = model.to_string();
         let max_tokens = self.max_tokens;
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let url = format!("{}/v1/messages", self.base_url);
         let is_oauth = Self::is_setup_token(&credential);
 

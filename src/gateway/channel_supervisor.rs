@@ -29,12 +29,41 @@ impl ChannelSupervisor {
         if let Some(existing) = guard.take() {
             existing.abort();
         }
-        let cfg = self.live_config.load_ref();
+        let live_config = self.live_config.clone();
         let join = crate::runtime::task_manager::spawn_supervised(
             "gateway.channels",
             async move {
-                if let Err(err) = crate::channels::start_channels((*cfg).clone()).await {
-                    tracing::warn!("channel runtime exited: {err:#}");
+                let initial_backoff_secs: u64 = 5;
+                let max_backoff_secs: u64 = 60;
+                let stable_run_secs: u64 = 300;
+                let mut backoff_secs = initial_backoff_secs;
+                loop {
+                    let cfg = live_config.load_ref();
+                    let started = std::time::Instant::now();
+                    match crate::channels::start_channels((*cfg).clone()).await {
+                        Ok(()) => {
+                            tracing::warn!("channel runtime exited unexpectedly");
+                        }
+                        Err(err) => {
+                            tracing::warn!("channel runtime exited: {err:#}");
+                        }
+                    }
+                    if crate::gateway::lifecycle::is_shutdown_requested() {
+                        tracing::info!(
+                            "channel runtime supervisor stopping: gateway shutdown requested"
+                        );
+                        break;
+                    }
+                    if started.elapsed()
+                        >= std::time::Duration::from_secs(stable_run_secs)
+                    {
+                        backoff_secs = initial_backoff_secs;
+                    }
+                    tracing::info!(
+                        "channel runtime restarting in {backoff_secs}s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = backoff_secs.saturating_mul(2).min(max_backoff_secs);
                 }
             },
         );

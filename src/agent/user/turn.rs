@@ -53,7 +53,8 @@ pub async fn prepare_user_turn(raw: String, deps: &impl UserTurnDeps) -> UserTur
         deps.workspace_dir(),
         Vec::new(),
         String::new(),
-    );
+    )
+    .await;
 
     let (thinking_level, after_thinking) = match parse_thinking_directive(&expanded) {
         Some((level, rest)) => (Some(level), rest),

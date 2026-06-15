@@ -65,7 +65,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       {showActions && (
         <div className="mt-0.5 flex w-full justify-end pr-5">
           <AssistantMessageActions
-            copyText={assistantTurnCopyText!}
+            copyText={assistantTurnCopyText ?? ''}
             sessionId={sessionId}
             workDir={workDir}
             disableFork={disableFork}

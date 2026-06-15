@@ -41,8 +41,9 @@ function initMermaid(theme: MermaidTheme) {
     securityLevel: 'strict',
     suppressErrorRendering: true,
     fontFamily: 'var(--font-sans)',
-    flowchart: { htmlLabels: false, useMaxWidth: true, curve: 'basis' },
-    class: { htmlLabels: false, useMaxWidth: true },
+    htmlLabels: false,
+    flowchart: { useMaxWidth: true, curve: 'basis' },
+    class: { useMaxWidth: true },
     sequence: { useMaxWidth: true },
     state: { useMaxWidth: true },
   })
@@ -75,11 +76,17 @@ const MERMAID_SAFE_ATTRS = [
   'requiredExtensions',
 ]
 
+const MERMAID_HTML_INTEGRATION_POINTS: Record<string, boolean> = {
+  'annotation-xml': true,
+  foreignobject: true,
+}
+
 function sanitizeMermaidSvg(svg: string): string {
   return DOMPurify.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
     ADD_TAGS: MERMAID_FOREIGN_OBJECT_TAGS,
     ADD_ATTR: MERMAID_SAFE_ATTRS,
+    HTML_INTEGRATION_POINTS: MERMAID_HTML_INTEGRATION_POINTS,
   })
 }
 
@@ -329,13 +336,22 @@ export function MermaidRenderer({ code }: Props) {
   if (error) {
     return (
       <div className="my-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-error)]/30">
-        <div className="flex items-center gap-2 border-b border-[var(--color-error)]/20 bg-[var(--color-error-container)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-error)]">
-          <span className="material-symbols-outlined text-[14px]">error</span>
-          Mermaid Error
+        <div className="flex items-center justify-between border-b border-[var(--color-error)]/20 bg-[var(--color-error-container)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-error)]">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[14px]">error</span>
+            Mermaid Error
+          </div>
+          <CopyButton
+            text={code}
+            className="rounded-md border border-[var(--color-error)]/30 px-2 py-1 text-[11px] normal-case tracking-normal text-[var(--color-error)] transition-colors hover:bg-[var(--color-error-container)]"
+          />
         </div>
         <div className="bg-[var(--color-error-container)]/30 px-3 py-2 font-[var(--font-mono)] text-[11px] text-[var(--color-error)]">
           {error}
         </div>
+        <pre className="m-0 max-h-[300px] overflow-auto border-t border-[var(--color-error)]/20 bg-[var(--color-surface-container-low)] px-3 py-2 font-[var(--font-mono)] text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+          <code>{code}</code>
+        </pre>
       </div>
     )
   }
@@ -381,7 +397,7 @@ export function MermaidRenderer({ code }: Props) {
         {}
         <div
           ref={containerRef}
-          className="flex items-center justify-center overflow-auto bg-white p-4 cursor-pointer"
+          className="flex items-center justify-center overflow-auto bg-[var(--color-surface)] p-4 cursor-pointer"
           style={{ maxHeight: 400 }}
           onClick={handlePreview}
           dangerouslySetInnerHTML={{ __html: sanitizeMermaidSvg(svg) }}
@@ -431,7 +447,7 @@ export function MermaidRenderer({ code }: Props) {
           <div
             ref={previewViewportRef}
             data-testid="mermaid-preview-viewport"
-            className="overflow-auto rounded-xl bg-white"
+            className="overflow-auto rounded-xl bg-[var(--color-surface)]"
             style={{
               maxHeight: '75vh',
               cursor: isDraggingPreview ? 'grabbing' : 'grab',

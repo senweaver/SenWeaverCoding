@@ -7,6 +7,7 @@
 import type { PermissionMode } from './settings'
 
 export type CodingModeId =
+  | 'auto'
   | 'vibe'
   | 'spec'
   | 'plan'
@@ -20,6 +21,7 @@ export type CodingModeId =
   | 'mvai'
   | 'harness'
   | 'curator'
+  | 'designer'
 
 export type CodingModeResourceProfile = {
   browser: boolean
@@ -46,10 +48,12 @@ export type CodingModeInfo = {
 export const DEFAULT_CODING_MODE: CodingModeId = 'agent'
 
 export const VISIBLE_CODING_MODES: CodingModeId[] = [
+  'auto',
   'agent',
   'spec',
   'plan',
   'curator',
+  'designer',
   'ask',
   'debug',
   'harness',
@@ -104,6 +108,13 @@ export type CodingModeAccentTokens = {
 }
 
 export const CODING_MODE_ACCENT: Partial<Record<CodingModeId, CodingModeAccentTokens>> = {
+  auto: {
+    container: 'var(--color-agent-accent-container)',
+    onContainer: 'var(--color-on-agent-accent-container)',
+    accent: 'var(--color-agent-accent)',
+    accentHover: 'var(--color-agent-accent-hover)',
+    onAccent: 'var(--color-on-agent-accent)',
+  },
   agent: {
     container: 'var(--color-agent-accent-container)',
     onContainer: 'var(--color-on-agent-accent-container)',
@@ -126,6 +137,13 @@ export const CODING_MODE_ACCENT: Partial<Record<CodingModeId, CodingModeAccentTo
     onAccent: 'var(--color-on-plan-accent)',
   },
   curator: {
+    container: 'var(--color-curator-accent-container)',
+    onContainer: 'var(--color-on-curator-accent-container)',
+    accent: 'var(--color-curator-accent)',
+    accentHover: 'var(--color-curator-accent-hover)',
+    onAccent: 'var(--color-on-curator-accent)',
+  },
+  designer: {
     container: 'var(--color-curator-accent-container)',
     onContainer: 'var(--color-on-curator-accent-container)',
     accent: 'var(--color-curator-accent)',

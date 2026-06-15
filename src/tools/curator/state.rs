@@ -138,10 +138,43 @@ pub struct CuratorActive {
     pub started_at: String,
 }
 
-pub type CuratorState = Arc<RwLock<Option<CuratorActive>>>;
+fn curator_session_key() -> String {
+    crate::session::current_session_context()
+        .map(|c| c.session_id)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+#[derive(Clone, Default)]
+pub struct CuratorState {
+    inner: Arc<RwLock<std::collections::HashMap<String, CuratorActive>>>,
+}
+
+impl CuratorState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> Option<CuratorActive> {
+        self.inner.read().get(&curator_session_key()).cloned()
+    }
+
+    pub fn set(&self, active: CuratorActive) {
+        self.inner.write().insert(curator_session_key(), active);
+    }
+
+    pub fn set_template(&self, template: CuratorTemplateKind) {
+        if let Some(active) = self.inner.write().get_mut(&curator_session_key()) {
+            active.template = template;
+        }
+    }
+
+    pub fn clear(&self) {
+        self.inner.write().remove(&curator_session_key());
+    }
+}
 
 pub fn new_curator_state() -> CuratorState {
-    Arc::new(RwLock::new(None))
+    CuratorState::new()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,8 +189,29 @@ pub struct PendingCuratorPayload {
     pub impl_blueprint_body: String,
 }
 
-pub type PendingCurator = Arc<RwLock<Option<PendingCuratorPayload>>>;
+#[derive(Clone, Default)]
+pub struct PendingCurator {
+    inner: Arc<RwLock<std::collections::HashMap<String, PendingCuratorPayload>>>,
+}
+
+impl PendingCurator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, payload: PendingCuratorPayload) {
+        self.inner.write().insert(curator_session_key(), payload);
+    }
+
+    pub fn get(&self) -> Option<PendingCuratorPayload> {
+        self.inner.read().get(&curator_session_key()).cloned()
+    }
+
+    pub fn take(&self) -> Option<PendingCuratorPayload> {
+        self.inner.write().remove(&curator_session_key())
+    }
+}
 
 pub fn new_pending_curator() -> PendingCurator {
-    Arc::new(RwLock::new(None))
+    PendingCurator::new()
 }

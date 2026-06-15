@@ -92,6 +92,30 @@ pub fn mode_blocks_tool(mode: CodingMode, tool_name: &str) -> Option<String> {
             mode.label()
         ));
     }
+
+    let profile = mode.resource_profile();
+    if !profile.may_write && is_file_mutation_tool(tool_name) {
+        return Some(format!(
+            "Tool '{tool_name}' is blocked in {} mode: this mode does not permit file writes \
+             (read-only investigation). Diagnose and explain the change without mutating files, \
+             or ask the user to switch to a write-capable mode (e.g. Agent) to apply it.",
+            mode.label()
+        ));
+    }
+    if !profile.shell && crate::security::permissions::is_shell_tool(tool_name) {
+        return Some(format!(
+            "Tool '{tool_name}' is blocked in {} mode: shell execution is disabled for this mode. \
+             Use read/search/analysis tools instead, or switch to a shell-capable mode.",
+            mode.label()
+        ));
+    }
+    if !profile.browser && crate::security::permissions::is_browser_tool(tool_name) {
+        return Some(format!(
+            "Tool '{tool_name}' is blocked in {} mode: browser access is disabled for this mode. \
+             Rely on local context, or switch to a browser-capable mode.",
+            mode.label()
+        ));
+    }
     None
 }
 
@@ -428,6 +452,19 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
              EXPLICITLY accepted a Markdown-only deliverable; doing so produces a \
              degraded Curator card and is treated as an SLA violation.",
         ),
+        CodingMode::Designer => Some(
+            "[Designer Reminder] You are producing a designed artifact, NOT refactoring the host \
+             codebase. Follow the pipeline: discovery → plan → generate → critique. \
+             (1) Resolve the selected sub-mode's parameters; ask ONE bundled `ask_question` only if a \
+             load-bearing choice is missing. \
+             (2) Outline the artifact with `todo_write`. \
+             (3) Generate: write self-contained HTML artifacts to disk for UI surfaces; call \
+             `media_generate` for image/video/audio (it reuses the configured model providers — never \
+             invent API keys). \
+             (4) Critique against the quality bar and apply one focused revision. \
+             Write the primary artifact last so the Designer preview panel auto-opens it, and end with \
+             a short summary naming the produced file(s).",
+        ),
     }
 }
 
@@ -488,18 +525,50 @@ pub fn prototype_ref_reminder(mode: CodingMode) -> Option<String> {
         return None;
     }
     let session_id = crate::session::current_session_context()?.session_id;
-    let proto_tab = crate::tools::browser::current_prototype_ref_tab(&session_id)?;
-    Some(format!(
-        "[Prototype Reference] User has bound tab #{proto_tab} as the UI prototype reference. \
-         This tab contains the target design from a prototype tool (Modao/Figma/Axure/etc.). \
-         When testing UI implementation, you MUST take a screenshot of the prototype tab \
-         (use `browser action=screenshot tab_id={proto_tab}`) and compare it against the \
-         test target tab to verify layout, spacing, colors, typography, and interactions \
-         match the prototype design. Report any deviations between the implementation and \
-         the prototype as professional QA findings. This is SEPARATE from the test target —\
-         the test target (Tab 绑定) is the page being tested, while this prototype reference \
-         is the design spec to compare against."
-    ))
+    let proto_tab = crate::tools::browser::current_prototype_ref_tab(&session_id);
+    let proto_figma = crate::tools::browser::current_prototype_ref_figma(&session_id);
+    if proto_tab.is_none() && proto_figma.is_none() {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(proto_tab) = proto_tab {
+        out.push_str(&format!(
+            "[Prototype Reference] User has bound tab #{proto_tab} as the UI prototype reference. \
+             This tab contains the target design from a prototype tool (Modao/Figma/Axure/etc.). \
+             When testing UI implementation, you MUST take a screenshot of the prototype tab \
+             (use `browser action=screenshot tab_id={proto_tab}`) and compare it against the \
+             test target tab to verify layout, spacing, colors, typography, and interactions \
+             match the prototype design. Report any deviations between the implementation and \
+             the prototype as professional QA findings. This is SEPARATE from the test target —\
+             the test target (Tab 绑定) is the page being tested, while this prototype reference \
+             is the design spec to compare against."
+        ));
+    }
+    if let Some(url) = proto_figma {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "[Prototype Reference: Figma] User has bound this Figma design as the UI prototype \
+             reference for QA comparison: {url}\n\
+             Fetch the authoritative design data with the `figma_fetch` tool (official Figma REST \
+             API — never scrape figma.com with the browser):\n\
+             1. `figma_fetch action=structure url=\"{url}\"` to list pages/frames; if the URL \
+             carries a node-id that node is the target frame.\n\
+             2. `figma_fetch action=node` with the target node_id for the exact layout tree, \
+             auto-layout spacing/padding, fills, corner radii, effects, and the palette + \
+             text-style digest. Treat these values as the design ground truth.\n\
+             3. `figma_fetch action=image` to export a PNG render of the frame into the workspace, \
+             then `view_image` it.\n\
+             4. Screenshot the test target tab with the `browser` tool and compare it against the \
+             exported Figma render and node data: layout structure, spacing, colors, typography, \
+             corner radii, and component states. Quantify deviations where possible (px gaps, hex \
+             colors, font sizes) and report each mismatch as a professional QA finding.\n\
+             If `figma_fetch` reports a missing FIGMA_TOKEN, relay its instructions to the user \
+             instead of guessing the design."
+        ));
+    }
+    Some(out)
 }
 
 pub fn web_research_active_reminder(

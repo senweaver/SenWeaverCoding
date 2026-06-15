@@ -80,6 +80,9 @@ pub struct CostRecord {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coding_mode: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl CostRecord {
@@ -91,6 +94,7 @@ impl CostRecord {
             session_id: session_id.into(),
             chat_session_id: None,
             coding_mode: None,
+            provider: None,
         }
     }
 
@@ -105,6 +109,7 @@ impl CostRecord {
             session_id: session_id.into(),
             chat_session_id: chat_session_id.map(Into::into),
             coding_mode: None,
+            provider: None,
         }
     }
 
@@ -120,6 +125,24 @@ impl CostRecord {
             session_id: session_id.into(),
             chat_session_id: chat_session_id.map(Into::into),
             coding_mode: coding_mode.map(Into::into),
+            provider: None,
+        }
+    }
+
+    pub fn with_attribution(
+        session_id: impl Into<String>,
+        chat_session_id: Option<impl Into<String>>,
+        coding_mode: Option<impl Into<String>>,
+        provider: Option<impl Into<String>>,
+        usage: TokenUsage,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            usage,
+            session_id: session_id.into(),
+            chat_session_id: chat_session_id.map(Into::into),
+            coding_mode: coding_mode.map(Into::into),
+            provider: provider.map(Into::into),
         }
     }
 }

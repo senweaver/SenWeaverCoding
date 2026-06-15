@@ -10,7 +10,7 @@ use crate::context_resolver::{
 
 pub const DEFAULT_BUDGET_TOKENS: usize = 8_192;
 
-pub fn expand_input(
+pub async fn expand_input(
     input: &str,
     workspace: &Path,
     recent_files: Vec<PathBuf>,
@@ -23,9 +23,10 @@ pub fn expand_input(
         current_selection,
         DEFAULT_BUDGET_TOKENS,
     )
+    .await
 }
 
-pub fn expand_input_with_budget(
+pub async fn expand_input_with_budget(
     input: &str,
     workspace: &Path,
     recent_files: Vec<PathBuf>,
@@ -44,13 +45,15 @@ pub fn expand_input_with_budget(
 
     let mut items: Vec<ContextItem> = Vec::with_capacity(tags.len());
     for tag in tags {
-        match crate::context_resolver::handlers::resolve_tag(
+        match crate::context_resolver::handlers::resolve_tag_async(
             &tag,
             workspace,
             &resolver.recent_files,
             &resolver.current_selection,
             &budget,
-        ) {
+        )
+        .await
+        {
             Ok(item) => items.push(item),
             Err(err) => {
                 tracing::debug!(

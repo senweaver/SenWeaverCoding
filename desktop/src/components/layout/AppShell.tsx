@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Sidebar } from './Sidebar'
 import { ContentRouter } from './ContentRouter'
 import { ToastContainer } from '../shared/Toast'
@@ -41,14 +41,22 @@ import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
 import { WorkspaceFinder } from '../workspace/WorkspaceFinder'
 import { useActiveTabWorkDir } from '../../lib/activeWorkDir'
-import { Settings } from '../../pages/Settings'
+const Settings = lazy(() =>
+  import('../../pages/Settings').then((m) => ({ default: m.Settings })),
+)
 import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
+import { DesignerCanvasPanel } from '../designer/DesignerCanvasPanel'
+import { ResizeHandleCanvas } from './ResizeHandleCanvas'
+import { useDesignerCanvasStore } from '../../stores/designerCanvasStore'
+import { DesignerDockCoordinator } from './DesignerDockCoordinator'
 import { TerminalPanel } from '../terminal/TerminalPanel'
 import { startBackgroundShellMirror } from '../../api/backgroundShell'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { dockHide, dockSetForegroundSession } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
+import { getBaseUrl, setBaseUrl } from '../../api/client'
+import { wsManager } from '../../api/websocket'
 
 export function AppShell() {
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
@@ -63,8 +71,10 @@ export function AppShell() {
   const browserPanelVisible = useBrowserPanelStore((s) =>
     activeChatTabId ? s.panels[activeChatTabId]?.visible ?? false : false,
   )
+  const designerCanvasVisible = useDesignerCanvasStore((s) =>
+    activeChatTabId ? s.panels[activeChatTabId]?.visible ?? false : false,
+  )
   const [ready, setReady] = useState(false)
-  const [settingsMounted, setSettingsMounted] = useState(false)
   const [bootElapsedSecs, setBootElapsedSecs] = useState(0)
   const [bootLastEvent, setBootLastEvent] = useState<DesktopBootEvent | null>(null)
   const [bootStatus, setBootStatus] = useState<ServerStatusSnapshot | null>(null)
@@ -109,10 +119,6 @@ export function AppShell() {
       setBootFailed(true)
     }
   }, [bootStatus, ready])
-
-  useEffect(() => {
-    if (settingsOverlayOpen) setSettingsMounted(true)
-  }, [settingsOverlayOpen])
 
   useEffect(() => {
     let lastShownAt = 0
@@ -240,17 +246,33 @@ export function AppShell() {
   }, [])
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined
-    import(/* @vite-ignore */ '@tauri-apps/api/event')
-      .then(({ listen }) =>
-        listen<string>('native-menu-navigate', () => {
-          useUIStore.getState().toggleSettingsOverlay()
-        }),
-      )
-      .then((fn) => { unlisten = fn })
-      .catch(() => {})
-    return () => { unlisten?.() }
-  }, [])
+    if (!ready) return
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const off = await subscribeServerStatus((snap) => {
+        if (snap.state !== 'ready') return
+        const url = snap.url?.trim()
+        if (!url) return
+        const normalized = url.replace(/\/$/, '')
+        if (normalized === getBaseUrl().replace(/\/$/, '')) return
+        setBaseUrl(normalized)
+        useSessionRunStateStore.getState().stop()
+        useSessionRunStateStore.getState().start()
+        wsManager.forceReconnectAll()
+      })
+      if (disposed) {
+        off()
+      } else {
+        unlisten = off
+      }
+    })()
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [ready])
 
   useEffect(() => {
     const dispose = startAiWriteWatcher()
@@ -484,6 +506,7 @@ export function AppShell() {
   return (
 
     <>
+      <DesignerDockCoordinator />
       <div
         className="app-window-backdrop"
         data-maximized={isMaximized ? 'true' : 'false'}
@@ -514,16 +537,11 @@ export function AppShell() {
               <TabBar />
               <ContentRouter />
             </main>
-            {settingsMounted && (
-              <div
-                aria-hidden={!settingsOverlayOpen}
-                className={
-                  settingsOverlayOpen
-                    ? 'absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]'
-                    : 'hidden'
-                }
-              >
-                <Settings />
+            {settingsOverlayOpen && (
+              <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
+                <Suspense fallback={null}>
+                  <Settings />
+                </Suspense>
               </div>
             )}
           </div>
@@ -531,6 +549,12 @@ export function AppShell() {
             <>
               <ResizeHandleBrowser />
               <EmbeddedBrowserPanel />
+            </>
+          )}
+          {designerCanvasVisible && (
+            <>
+              <ResizeHandleCanvas />
+              <DesignerCanvasPanel />
             </>
           )}
           <div

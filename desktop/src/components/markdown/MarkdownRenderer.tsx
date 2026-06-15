@@ -2,12 +2,16 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useMemo, useCallback } from 'react'
+import { useMemo, useCallback, useState, useEffect, lazy, Suspense } from 'react'
 import DOMPurify from 'dompurify'
-import katex from 'katex'
-import { marked, type Tokens } from 'marked'
 import { CodeViewer } from '../chat/CodeViewer'
-import { MermaidRenderer } from '../chat/MermaidRenderer'
+import { isMermaidBlock } from '../../lib/mermaidDetect'
+import type { CodeBlock, ParsedMarkdown } from '../../lib/markdownParse'
+import { getCachedMarkdown, parseMarkdownAsync } from '../../lib/markdownWorkerClient'
+
+const MermaidRenderer = lazy(() =>
+  import('../chat/MermaidRenderer').then((m) => ({ default: m.MermaidRenderer })),
+)
 
 type Props = {
   content: string
@@ -17,131 +21,9 @@ type Props = {
   scale?: 'default' | 'chat'
 }
 
-type CodeBlock = {
-  id: string
-  code: string
-  language: string | undefined
-}
-
-const MERMAID_LANGUAGE = 'mermaid'
-const PLAINTEXT_LANGUAGES = new Set(['', 'text', 'plaintext', 'plain'])
-const MERMAID_DIAGRAM_START = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|requirementDiagram|quadrantChart|xychart-beta|sankey-beta|block-beta|packet-beta|architecture|kanban)\b/i
-
-function normalizeCodeLanguage(language: string | undefined): string | undefined {
-  const normalized = language?.trim().split(/\s+/)[0]?.toLowerCase()
-  return normalized || undefined
-}
-
-function looksLikeMermaid(code: string): boolean {
-  const firstMeaningfulLine = code
-    .split('\n')
-    .map((line) => line.trim())
-    .find(Boolean)
-
-  return firstMeaningfulLine ? MERMAID_DIAGRAM_START.test(firstMeaningfulLine) : false
-}
-
 function shouldRenderAsMermaid(block: CodeBlock): boolean {
-  const normalizedLanguage = normalizeCodeLanguage(block.language)
-
-  if (normalizedLanguage === MERMAID_LANGUAGE) {
-    return true
-  }
-
-  if (!PLAINTEXT_LANGUAGES.has(normalizedLanguage ?? '')) {
-    return false
-  }
-
-  return looksLikeMermaid(block.code)
+  return isMermaidBlock(block.language, block.code)
 }
-
-const renderer = new marked.Renderer()
-
-let pendingCodeBlocks: CodeBlock[] = []
-
-renderer.code = function ({ text, lang }: Tokens.Code) {
-  const id = `cb-${pendingCodeBlocks.length}`
-  pendingCodeBlocks.push({
-    id,
-    code: text,
-    language: normalizeCodeLanguage(lang || undefined),
-  })
-  return `<div data-codeblock-id="${id}"></div>`
-}
-
-function renderKatex(source: string, displayMode: boolean): string {
-  try {
-    return katex.renderToString(source, {
-      throwOnError: false,
-      displayMode,
-      trust: false,
-      output: 'html',
-      strict: 'warn',
-    })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    const safe = message.replace(/[<&]/g, (ch) => (ch === '<' ? '&lt;' : '&amp;'))
-    return `<span class="katex-error" title="${safe}">${safe}</span>`
-  }
-}
-
-const BLOCK_MATH_RE = /^\$\$([\s\S]+?)\$\$(?:\n|$)/
-const INLINE_MATH_RE = /^\$((?:\\.|[^$\\])+?)\$/
-
-const blockMathExtension = {
-  name: 'blockMath',
-  level: 'block' as const,
-  start(src: string) {
-    const idx = src.indexOf('$$')
-    return idx >= 0 ? idx : undefined
-  },
-  tokenizer(src: string) {
-    const match = BLOCK_MATH_RE.exec(src)
-    if (!match) return undefined
-    const text = match[1]?.trim() ?? ''
-    return {
-      type: 'blockMath',
-      raw: match[0],
-      text,
-    }
-  },
-  renderer(token: { text: string }) {
-    return `<div class="md-math-block">${renderKatex(token.text, true)}</div>`
-  },
-}
-
-const inlineMathExtension = {
-  name: 'inlineMath',
-  level: 'inline' as const,
-  start(src: string) {
-    const idx = src.indexOf('$')
-    return idx >= 0 ? idx : undefined
-  },
-  tokenizer(src: string) {
-    if (src.startsWith('$$')) return undefined
-    const match = INLINE_MATH_RE.exec(src)
-    if (!match) return undefined
-    const text = match[1]?.trim() ?? ''
-    if (!text) return undefined
-    return {
-      type: 'inlineMath',
-      raw: match[0],
-      text,
-    }
-  },
-  renderer(token: { text: string }) {
-    return `<span class="md-math-inline">${renderKatex(token.text, false)}</span>`
-  },
-}
-
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-})
-marked.use({ renderer })
-marked.use({
-  extensions: [blockMathExtension, inlineMathExtension],
-})
 
 function enhanceMarkdownHtml(html: string): string {
   const cleanHtml = DOMPurify.sanitize(html, {
@@ -170,14 +52,6 @@ function enhanceMarkdownHtml(html: string): string {
   })
 
   return container.innerHTML
-}
-
-function parseMarkdown(content: string): { html: string; codeBlocks: CodeBlock[] } {
-  pendingCodeBlocks = []
-  const html = marked.parse(content) as string
-  const codeBlocks = [...pendingCodeBlocks]
-  pendingCodeBlocks = []
-  return { html, codeBlocks }
 }
 
 const BASE_PROSE_CLASSES = `markdown-prose prose prose-sm max-w-none text-[var(--color-text-primary)]
@@ -263,7 +137,31 @@ function getProseClasses(
 }
 
 export function MarkdownRenderer({ content, variant = 'default', className, scale = 'default' }: Props) {
-  const { html, codeBlocks } = useMemo(() => parseMarkdown(content), [content])
+  const [parsed, setParsed] = useState<{ source: string; result: ParsedMarkdown } | null>(() => {
+    const cached = getCachedMarkdown(content)
+    return cached ? { source: content, result: cached } : null
+  })
+
+  useEffect(() => {
+    const cached = getCachedMarkdown(content)
+    if (cached) {
+      setParsed((prev) =>
+        prev && prev.source === content ? prev : { source: content, result: cached },
+      )
+      return
+    }
+    let stale = false
+    void parseMarkdownAsync(content).then((result) => {
+      if (!stale) setParsed({ source: content, result })
+    })
+    return () => {
+      stale = true
+    }
+  }, [content])
+
+  const active = parsed && parsed.source === content ? parsed.result : null
+  const html = active?.html ?? ''
+  const codeBlocks = useMemo(() => active?.codeBlocks ?? [], [active])
   const proseClasses = useMemo(
     () => getProseClasses(variant, className, scale),
     [variant, className, scale],
@@ -317,6 +215,14 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
     }
   }, [])
 
+  if (!active) {
+    return (
+      <div className={proseClasses}>
+        <p style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content}</p>
+      </div>
+    )
+  }
+
   if (codeBlocks.length === 0) {
     const cleanHtml = enhanceMarkdownHtml(html)
     return (
@@ -334,7 +240,16 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
         part.type === 'html' ? (
           <div key={i} dangerouslySetInnerHTML={{ __html: enhanceMarkdownHtml(part.content) }} />
         ) : shouldRenderAsMermaid(part.block) ? (
-          <MermaidRenderer key={part.block.id} code={part.block.code} />
+          <Suspense
+            key={part.block.id}
+            fallback={
+              <pre className="my-4 overflow-x-auto rounded bg-[var(--color-surface-2,rgba(0,0,0,0.04))] p-3 text-xs">
+                {part.block.code}
+              </pre>
+            }
+          >
+            <MermaidRenderer code={part.block.code} />
+          </Suspense>
         ) : (
           <div key={part.block.id} className="my-4">
             <CodeViewer

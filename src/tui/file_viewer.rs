@@ -119,6 +119,9 @@ enum ScanRequest {
         generation: u64,
         path: PathBuf,
     },
+    CheckMtime {
+        dir: PathBuf,
+    },
 }
 
 enum ScanResult {
@@ -131,6 +134,10 @@ enum ScanResult {
     Preview {
         generation: u64,
         text: String,
+    },
+    Mtime {
+        dir: PathBuf,
+        mtime: Option<std::time::SystemTime>,
     },
 }
 
@@ -214,6 +221,13 @@ impl FileViewerState {
                                 break;
                             }
                         }
+                        ScanRequest::CheckMtime { dir } => {
+                            let mtime =
+                                std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+                            if res_tx.send(ScanResult::Mtime { dir, mtime }).is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
             });
@@ -258,6 +272,7 @@ impl FileViewerState {
     pub fn poll(&mut self) {
         let mut latest_scan: Option<(PathBuf, Vec<Entry>, Option<std::time::SystemTime>)> = None;
         let mut latest_preview: Option<String> = None;
+        let mut latest_mtime: Option<(PathBuf, Option<std::time::SystemTime>)> = None;
         if let Some(rx) = &self.res_rx {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
@@ -276,7 +291,23 @@ impl FileViewerState {
                             latest_preview = Some(text);
                         }
                     }
+                    ScanResult::Mtime { dir, mtime } => {
+                        latest_mtime = Some((dir, mtime));
+                    }
                 }
+            }
+        }
+
+        if let Some((dir, mtime)) = latest_mtime {
+            let target = self
+                .current_dir
+                .clone()
+                .or_else(|| self.requested_dir.clone());
+            if Some(&dir) == target.as_ref()
+                && mtime != self.current_dir_mtime
+                && !self.loading
+            {
+                self.send_scan(dir);
             }
         }
 
@@ -317,9 +348,9 @@ impl FileViewerState {
             .map_or(true, |t| now.duration_since(t) >= std::time::Duration::from_secs(1));
         if due && !self.loading {
             self.last_mtime_check = Some(now);
-            let current_mtime = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
-            if current_mtime != self.current_dir_mtime {
-                self.send_scan(target);
+            self.ensure_worker();
+            if let Some(tx) = &self.req_tx {
+                let _ = tx.send(ScanRequest::CheckMtime { dir: target });
             }
         }
     }
@@ -508,11 +539,10 @@ fn draw_browse(f: &mut Frame, state: &mut FileViewerState, root: &Path, area: Re
             };
 
             if show_filtered && !query_lower.is_empty() {
-                let name_lower = name.to_lowercase();
-                if let Some(pos) = name_lower.find(&query_lower) {
-                    let before = name[..pos].to_string();
-                    let matched = name[pos..pos + query_lower.len()].to_string();
-                    let after = name[pos + query_lower.len()..].to_string();
+                if let Some((start, end)) = case_insensitive_match(&name, &query_lower) {
+                    let before = name[..start].to_string();
+                    let matched = name[start..end].to_string();
+                    let after = name[end..].to_string();
                     let hi_style = if is_selected {
                         Style::default()
                             .fg(Color::Black)
@@ -548,6 +578,26 @@ fn draw_browse(f: &mut Frame, state: &mut FileViewerState, root: &Path, area: Re
         );
         f.render_widget(para, sa);
     }
+}
+
+fn case_insensitive_match(name: &str, query_lower: &str) -> Option<(usize, usize)> {
+    if query_lower.is_empty() {
+        return None;
+    }
+    for (start, _) in name.char_indices() {
+        for (offset, ch) in name[start..].char_indices() {
+            let end = start + offset + ch.len_utf8();
+            let candidate = name[start..end].to_lowercase();
+            if candidate.len() < query_lower.len() {
+                continue;
+            }
+            if candidate.starts_with(query_lower) {
+                return Some((start, end));
+            }
+            break;
+        }
+    }
+    None
 }
 
 fn draw_preview(f: &mut Frame, state: &FileViewerState, area: Rect) {
@@ -636,7 +686,7 @@ pub fn handle_key(
                 state.send_preview();
             }
             KeyCode::Backspace => {
-                state.search_query.pop();
+                crate::tui::pop_last_char(&mut state.search_query);
                 state.rebuild_filter();
                 state.send_preview();
             }

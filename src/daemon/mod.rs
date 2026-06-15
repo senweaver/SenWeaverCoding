@@ -11,6 +11,8 @@ use tokio::time::Duration;
 
 const STATUS_FLUSH_SECONDS: u64 = 5;
 
+const SHUTDOWN_GRACE_SECS: u64 = 10;
+
 async fn wait_for_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
@@ -127,15 +129,10 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
                 let cfg = rpc_config.clone();
                 async move {
                     let server: crate::rpc::RpcServer = crate::rpc::RpcServer::new(&cfg).await?;
-                    crate::runtime::task_manager::spawn_supervised(
-                        "daemon.rpc_server",
-                        server.run(),
-                    );
-                    Ok(())
+                    server.run().await
                 }
             },
         ));
-        crate::health::mark_component_ok("rpc");
     } else {
         crate::health::mark_component_ok("rpc");
     }
@@ -221,6 +218,18 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
 
     crate::health::mark_component_error("daemon", "shutdown requested");
 
+    if crate::gateway::request_shutdown() {
+        let grace = Duration::from_secs(SHUTDOWN_GRACE_SECS);
+        if crate::gateway::wait_embedded_stopped(grace).await {
+            tracing::info!("Gateway stopped gracefully; aborting remaining components");
+        } else {
+            tracing::warn!(
+                grace_secs = SHUTDOWN_GRACE_SECS,
+                "Gateway did not stop within grace period; forcing component shutdown"
+            );
+        }
+    }
+
     for handle in &handles {
         handle.abort();
     }
@@ -279,11 +288,11 @@ where
 
         loop {
             crate::health::mark_component_ok(name);
+            let started = std::time::Instant::now();
             match run_component().await {
                 Ok(()) => {
                     crate::health::mark_component_error(name, "component exited unexpectedly");
                     tracing::warn!("Daemon component '{name}' exited unexpectedly");
-                    backoff = initial_backoff_secs.max(1);
                 }
                 Err(e) => {
                     crate::health::mark_component_error(name, e.to_string());
@@ -291,7 +300,11 @@ where
                 }
             }
 
+            let stable_run = started.elapsed() >= Duration::from_secs(60);
             crate::health::bump_component_restart(name);
+            if stable_run {
+                backoff = initial_backoff_secs.max(1);
+            }
             tokio::time::sleep(Duration::from_secs(backoff)).await;
             backoff = backoff.saturating_mul(2).min(max_backoff);
         }

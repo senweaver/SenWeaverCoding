@@ -7,8 +7,31 @@ use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[derive(Default)]
+struct WorkspaceEditOutcome {
+    applied: usize,
+    errors: Vec<String>,
+}
+
+fn secure_resolve_target(security: &SecurityPolicy, file: &Path) -> Result<PathBuf, String> {
+    if let Ok(meta) = std::fs::symlink_metadata(file) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to write through symlink: {}",
+                file.display()
+            ));
+        }
+    }
+    let resolved = std::fs::canonicalize(file)
+        .map_err(|e| format!("Failed to resolve {}: {e}", file.display()))?;
+    if !security.is_resolved_path_allowed(&resolved) {
+        return Err(security.resolved_path_violation_message(&resolved));
+    }
+    Ok(resolved)
+}
 
 pub struct LspRenameTool {
     security: Arc<SecurityPolicy>,
@@ -39,6 +62,18 @@ impl LspRenameTool {
             anyhow::bail!("Path not allowed by security policy: {file_path}");
         }
         Ok(())
+    }
+
+    async fn secure_write(&self, file_path: &Path, content: &str) -> Result<(), String> {
+        let security = self.security.clone();
+        let probe = file_path.to_path_buf();
+        let resolved =
+            tokio::task::spawn_blocking(move || secure_resolve_target(&security, &probe))
+                .await
+                .map_err(|e| format!("Path resolution task failed: {e}"))??;
+        crate::util::atomic_write_async(resolved, content.as_bytes().to_vec())
+            .await
+            .map_err(|e| format!("Failed to write {}: {e}", file_path.display()))
     }
 
     async fn text_rename(
@@ -103,7 +138,13 @@ impl LspRenameTool {
             }
 
             let new_content = re.replace_all(&content, new_name).to_string();
-            tokio::fs::write(file_path, &new_content).await?;
+            if let Err(e) = self.secure_write(file_path, &new_content).await {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e),
+                });
+            }
 
             Ok(ToolResult {
                 success: true,
@@ -188,7 +229,7 @@ impl LspRenameTool {
                 }
 
                 let new_content = re.replace_all(&content, new_name).to_string();
-                if let Err(e) = tokio::fs::write(path, &new_content).await {
+                if let Err(e) = self.secure_write(path, &new_content).await {
                     results.push(format!("  Error writing {}: {}", path.display(), e));
                     continue;
                 }
@@ -381,19 +422,33 @@ impl LspRenameTool {
             .await
         {
             Ok(resp) => {
-
-                let edits_applied = tokio::task::spawn_blocking(move || apply_workspace_edit(&resp))
-                    .await
-                    .unwrap_or(0);
-                if edits_applied > 0 {
+                let security = self.security.clone();
+                let outcome =
+                    tokio::task::spawn_blocking(move || apply_workspace_edit(&resp, &security))
+                        .await
+                        .unwrap_or_default();
+                if outcome.applied > 0 {
+                    let mut output = format!(
+                        "LSP rename: '{}' -> '{}' ({} edits applied via language server)",
+                        symbol_name, new_name, outcome.applied
+                    );
+                    if !outcome.errors.is_empty() {
+                        output.push_str(&format!(
+                            "\nSkipped {} file(s):\n{}",
+                            outcome.errors.len(),
+                            outcome.errors.join("\n")
+                        ));
+                    }
                     Ok(ToolResult {
                         success: true,
-                        output: format!(
-                            "LSP rename: '{}' -> '{}' ({} edits applied via language server)",
-                            symbol_name, new_name, edits_applied
-                        ),
+                        output,
                         error: None,
                     })
+                } else if !outcome.errors.is_empty() {
+                    Err(anyhow::anyhow!(
+                        "LSP rename blocked by security policy: {}",
+                        outcome.errors.join("; ")
+                    ))
                 } else {
                     Err(anyhow::anyhow!("LSP rename returned no edits"))
                 }
@@ -403,8 +458,8 @@ impl LspRenameTool {
     }
 }
 
-fn apply_workspace_edit(resp: &serde_json::Value) -> usize {
-    let mut edits_applied = 0;
+fn apply_workspace_edit(resp: &serde_json::Value, security: &SecurityPolicy) -> WorkspaceEditOutcome {
+    let mut outcome = WorkspaceEditOutcome::default();
     let changes = resp.get("changes").and_then(|v| v.as_object());
     if let Some(changes) = changes {
         for (uri, edits_val) in changes {
@@ -412,7 +467,15 @@ fn apply_workspace_edit(resp: &serde_json::Value) -> usize {
                 .trim_start_matches("file:///")
                 .trim_start_matches("file://")
                 .replace('/', std::path::MAIN_SEPARATOR_STR);
-            if let Ok(content) = std::fs::read_to_string(&file) {
+            let file_path = PathBuf::from(&file);
+            let resolved = match secure_resolve_target(security, &file_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    outcome.errors.push(e);
+                    continue;
+                }
+            };
+            if let Ok(content) = std::fs::read_to_string(&resolved) {
                 if let Some(edits) = edits_val.as_array() {
                     let mut lines: Vec<String> = content.lines().map(String::from).collect();
                     let mut sorted: Vec<_> = edits
@@ -438,14 +501,19 @@ fn apply_workspace_edit(resp: &serde_json::Value) -> usize {
                                 let before: String = chars[..sc].iter().collect();
                                 let after: String = chars[ec..].iter().collect();
                                 *line = format!("{before}{new_text}{after}");
-                                edits_applied += 1;
+                                outcome.applied += 1;
                             }
                         }
                     }
-                    let _ = std::fs::write(&file, lines.join("\n"));
+                    if let Err(e) = crate::util::atomic_write(&resolved, lines.join("\n").as_bytes())
+                    {
+                        outcome
+                            .errors
+                            .push(format!("Failed to write {}: {e}", resolved.display()));
+                    }
                 }
             }
         }
     }
-    edits_applied
+    outcome
 }

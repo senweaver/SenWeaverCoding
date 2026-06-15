@@ -29,9 +29,19 @@ export type ClientMessage =
       resume?: boolean
       kind?: 'plan' | 'curator'
     }
+  | {
+      type: 'start_design_generation'
+      submode: string
+      params: Record<string, unknown>
+      brief: string
+      refArtifact?: string
+      refArtifactName?: string
+      refElement?: string
+      refElementLabel?: string
+    }
   | { type: 'debug_bind_tab'; tab_id: number }
   | { type: 'debug_unbind_tab'; tab_id: number }
-  | { type: 'debug_bind_prototype_ref'; tab_id: number }
+  | { type: 'debug_bind_prototype_ref'; tab_id?: number; figma_url?: string }
   | { type: 'debug_unbind_prototype_ref' }
   | { type: 'ping' }
 
@@ -135,6 +145,7 @@ export type ServerMessage =
       }>
     }
   | { type: 'session_title_updated'; sessionId: string; title: string }
+  | { type: 'persist_lag'; sessionId: string }
   | {
       type: 'worker_spawned'
       sessionId?: string
@@ -263,7 +274,7 @@ export type UIMessageCommon = {
 }
 
 export type UIMessage =
-  | (UIMessageCommon & { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: UIAttachment[]; pending?: boolean; userMessageIndex?: number })
+  | (UIMessageCommon & { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: UIAttachment[]; pending?: boolean; userMessageIndex?: number; designRef?: string; designRefName?: string; designRefElement?: string; designRefElementLabel?: string })
   | (UIMessageCommon & { id: string; type: 'assistant_text'; content: string; timestamp: number; model?: string })
   | (UIMessageCommon & {
       id: string

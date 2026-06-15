@@ -215,6 +215,27 @@ impl StreamToolCallAccumulator {
         0
     }
 
+    fn is_empty_slot(&self) -> bool {
+        self.id.is_none() && self.name.is_none() && self.arguments.is_empty()
+    }
+
+    fn is_complete(&self) -> bool {
+        if self.arguments_overflow {
+            return false;
+        }
+        let Some(name) = self.name.as_deref() else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        let arguments = self.arguments.trim();
+        if arguments.is_empty() {
+            return true;
+        }
+        serde_json::from_str::<serde_json::Value>(arguments).is_ok()
+    }
+
     pub fn into_provider_tool_call(self) -> Option<ProviderToolCall> {
         let name = self.name?;
         let arguments = if self.arguments.trim().is_empty() {
@@ -236,10 +257,23 @@ impl StreamToolCallAccumulator {
             );
             repaired
         } else {
-            tracing::warn!(
+            tracing::error!(
                 function = %name,
                 arguments = %arguments,
                 "Invalid JSON in streamed native tool-call arguments, using empty object"
+            );
+            crate::observability::runtime_trace::record_event(
+                "tool_args_degraded",
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                Some("streamed tool-call arguments unparseable; degraded to empty object"),
+                serde_json::json!({
+                    "function": name,
+                    "arguments_len": arguments.len(),
+                }),
             );
             "{}".to_string()
         };
@@ -438,6 +472,8 @@ pub fn sse_bytes_to_events(
             let mut total_tool_args_bytes: usize = 0;
             let mut saw_terminator = false;
             let mut made_progress = false;
+            let mut saw_text_content = false;
+            let mut saw_reasoning_content = false;
 
             match response.error_for_status_ref() {
                 Ok(_) => {}
@@ -448,9 +484,10 @@ pub fn sse_bytes_to_events(
             }
 
             let mut bytes_stream = response.bytes_stream();
-            while let Some(item) = bytes_stream.next().await {
-                match item {
-                    Ok(bytes) => {
+            let mut stream_ended = false;
+            while !stream_ended {
+                match bytes_stream.next().await {
+                    Some(Ok(bytes)) => {
                         sse.push(&bytes);
                         if sse.overflowed() {
                             let _ = tx
@@ -460,7 +497,18 @@ pub fn sse_bytes_to_events(
                                 .await;
                             return;
                         }
-                        while let Some(ev) = sse.next_event() {
+                    }
+                    Some(Err(e)) => {
+                        let _ = tx.send(Err(StreamError::Http(e))).await;
+                        return;
+                    }
+                    None => {
+                        sse.finish();
+                        stream_ended = true;
+                    }
+                }
+
+                while let Some(ev) = sse.next_event() {
                             if ev.is_done() {
                                 saw_terminator = true;
                                 continue;
@@ -502,6 +550,7 @@ pub fn sse_bytes_to_events(
                                 if let Some(content) = &choice.delta.content {
                                     if !content.is_empty() {
                                         made_progress = true;
+                                        saw_text_content = true;
                                         let mut text_chunk = StreamChunk::delta(content.clone());
                                         if count_tokens {
                                             text_chunk = text_chunk.with_token_estimate();
@@ -518,6 +567,7 @@ pub fn sse_bytes_to_events(
                                 if let Some(reasoning) = &choice.delta.reasoning_content {
                                     if !reasoning.is_empty() {
                                         made_progress = true;
+                                        saw_reasoning_content = true;
                                         let reasoning_chunk =
                                             StreamChunk::reasoning(reasoning.clone());
                                         if tx
@@ -575,12 +625,30 @@ pub fn sse_bytes_to_events(
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(StreamError::Http(e))).await;
-                        return;
-                    }
-                }
+            }
+
+            let tool_calls_fully_received = match tool_calls
+                .iter()
+                .rposition(|acc| !acc.is_empty_slot())
+            {
+                Some(last) => tool_calls[..=last]
+                    .iter()
+                    .all(StreamToolCallAccumulator::is_complete),
+                None => false,
+            };
+            let no_pending_tool_calls = tool_calls.is_empty() || tool_calls_fully_received;
+
+            if !saw_terminator
+                && !emitted_tool_calls
+                && !tool_calls.is_empty()
+                && !tool_calls_fully_received
+            {
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "upstream stream closed before completion (no [DONE]/finish_reason) while tool_call arguments were still streaming; connection closed mid-response".to_string(),
+                    )))
+                    .await;
+                return;
             }
 
             if !emitted_tool_calls {
@@ -595,10 +663,23 @@ pub fn sse_bytes_to_events(
                 }
             }
 
-            if made_progress && !saw_terminator {
+            if !made_progress && !saw_terminator {
                 let _ = tx
                     .send(Err(StreamError::Provider(
                         "upstream stream closed before completion (no [DONE]/finish_reason); connection closed mid-response".to_string(),
+                    )))
+                    .await;
+                return;
+            }
+
+            let clean_non_text_finish = !saw_text_content
+                && no_pending_tool_calls
+                && (saw_reasoning_content || tool_calls_fully_received);
+
+            if made_progress && !saw_terminator && !clean_non_text_finish {
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "upstream stream closed without [DONE]/finish_reason after partial output; connection closed mid-response (truncated)".to_string(),
                     )))
                     .await;
                 return;

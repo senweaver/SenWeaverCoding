@@ -3,11 +3,12 @@
 // Licensed under the MIT License.
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, StructuredResponse, TokenUsage, ToolCall as ProviderToolCall,
-    parse_first_json_object,
+    Provider, StreamChunk, StreamError, StreamEvent, StreamOptions, StreamResult,
+    StructuredResponse, TokenUsage, ToolCall as ProviderToolCall, parse_first_json_object,
 };
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
+use futures_util::stream::{self, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +16,11 @@ pub struct OpenAiProvider {
     base_url: String,
     credential: Option<String>,
     max_tokens: Option<u32>,
+    timeout_secs: u64,
     extra_headers: std::collections::HashMap<String, String>,
 }
+
+const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -25,6 +29,15 @@ struct ChatRequest {
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptionsField>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+struct StreamOptionsField {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +85,10 @@ struct NativeChatRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptionsField>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,12 +208,18 @@ impl OpenAiProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             credential: credential.map(ToString::to_string),
             max_tokens: None,
+            timeout_secs: DEFAULT_OPENAI_TIMEOUT_SECS,
             extra_headers: std::collections::HashMap::new(),
         }
     }
 
     pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
         self
     }
 
@@ -502,10 +525,141 @@ impl OpenAiProvider {
             .proxy_runtime()
             .build_client_with_timeouts_and_headers(
                 "provider.openai",
-                120,
+                self.timeout_secs,
                 10,
                 &self.extra_headers,
             )
+    }
+
+    fn stream_http_client(&self) -> Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in &self.extra_headers {
+            match (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    headers.insert(name, val);
+                }
+                _ => {
+                    tracing::warn!(header = key, "Skipping invalid extra header name or value");
+                }
+            }
+        }
+
+        let read_timeout_secs = self.timeout_secs.max(300);
+        let stream_builder = || {
+            let mut builder = Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                .pool_idle_timeout(std::time::Duration::from_secs(15));
+            if !headers.is_empty() {
+                builder = builder.default_headers(headers.clone());
+            }
+            builder
+        };
+
+        let proxied = crate::services::require_services()
+            .proxy_runtime()
+            .apply_to_builder(stream_builder(), "provider.openai.stream");
+
+        proxied
+            .build()
+            .or_else(|error| {
+                tracing::warn!(
+                    "Failed to build proxied OpenAI stream client: {error}; retrying without proxy"
+                );
+                stream_builder().build()
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!("Failed to build OpenAI stream client: {error}");
+                Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                    .build()
+                    .unwrap_or_else(|_| Client::new())
+            })
+    }
+
+    fn stream_chunks_for_messages(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let credential = match self.credential.as_ref() {
+            Some(value) => value.clone(),
+            None => {
+                return stream::once(async {
+                    Err(StreamError::Provider(
+                        "OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml."
+                            .to_string(),
+                    ))
+                })
+                .boxed();
+            }
+        };
+
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages,
+            temperature: Self::adjust_temperature_for_model(model, temperature),
+            max_tokens: self.max_tokens,
+            stream: Some(options.enabled),
+            stream_options: options
+                .enabled
+                .then_some(StreamOptionsField { include_usage: true }),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let client = self.stream_http_client();
+        let count_tokens = options.count_tokens;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        let _ = crate::runtime::spawn_supervised("providers.openai.stream_chunks", async move {
+            let response = match client
+                .post(&url)
+                .header("Authorization", format!("Bearer {credential}"))
+                .header("Accept", "text/event-stream")
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(StreamError::Http(e))).await;
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_body = match response.text().await {
+                    Ok(text) => text,
+                    Err(_) => format!("HTTP error: {status}"),
+                };
+                let sanitized = super::super::sanitize_api_error(&error_body);
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                    .await;
+                return;
+            }
+
+            let mut chunk_stream =
+                crate::providers::core::openai_sse::sse_bytes_to_chunks(response, count_tokens);
+            while let Some(chunk) = chunk_stream.next().await {
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|chunk| (chunk, rx))
+        })
+        .boxed()
     }
 }
 
@@ -543,6 +697,8 @@ impl Provider for OpenAiProvider {
             messages,
             temperature: adjusted_temperature,
             max_tokens: self.max_tokens,
+            stream: None,
+            stream_options: None,
         };
 
         let response = self
@@ -595,6 +751,8 @@ impl Provider for OpenAiProvider {
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
+            stream: None,
+            stream_options: None,
         };
 
         let response = self
@@ -676,6 +834,8 @@ impl Provider for OpenAiProvider {
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
             max_tokens: self.max_tokens,
+            stream: None,
+            stream_options: None,
         };
 
         let response = self
@@ -782,6 +942,148 @@ impl Provider for OpenAiProvider {
             raw_text: raw,
             usage,
         })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming_tool_events(&self) -> bool {
+        true
+    }
+
+    fn stream_chat(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
+        let credential = match self.credential.as_ref() {
+            Some(value) => value.clone(),
+            None => {
+                return stream::once(async {
+                    Err(StreamError::Provider(
+                        "OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml."
+                            .to_string(),
+                    ))
+                })
+                .boxed();
+            }
+        };
+
+        let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
+        let sanitized_messages =
+            crate::providers::sanitize::sanitize_messages_before_send_for_provider(
+                request.messages.to_vec(),
+                model,
+                self.max_tokens.unwrap_or(0) as usize,
+                None,
+                crate::providers::sanitize::ProviderKind::OpenAi,
+            );
+        let tools = Self::convert_tools(request.tools);
+        let native_request = NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages(&sanitized_messages),
+            temperature: adjusted_temperature,
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+            max_tokens: self.max_tokens,
+            stream: Some(options.enabled),
+            stream_options: options
+                .enabled
+                .then_some(StreamOptionsField { include_usage: true }),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let client = self.stream_http_client();
+        let count_tokens = options.count_tokens;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
+
+        let _ = crate::runtime::spawn_supervised("providers.openai.stream_chat", async move {
+            let response = match client
+                .post(&url)
+                .header("Authorization", format!("Bearer {credential}"))
+                .header("Accept", "text/event-stream")
+                .json(&native_request)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(StreamError::Http(e))).await;
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_body = match response.text().await {
+                    Ok(text) => text,
+                    Err(_) => format!("HTTP error: {status}"),
+                };
+                let sanitized = super::super::sanitize_api_error(&error_body);
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                    .await;
+                return;
+            }
+
+            let mut event_stream =
+                crate::providers::core::openai_sse::sse_bytes_to_events(response, count_tokens);
+            while let Some(event) = event_stream.next().await {
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed()
+    }
+
+    fn stream_chat_with_system(
+        &self,
+        system_prompt: Option<&str>,
+        message: &str,
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let mut messages = Vec::new();
+        if let Some(sys) = system_prompt {
+            messages.push(Message {
+                role: "system".to_string(),
+                content: sys.to_string(),
+            });
+        }
+        messages.push(Message {
+            role: "user".to_string(),
+            content: message.to_string(),
+        });
+
+        self.stream_chunks_for_messages(messages, model, temperature, options)
+    }
+
+    fn stream_chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let api_messages: Vec<Message> = messages
+            .iter()
+            .map(|m| Message {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        self.stream_chunks_for_messages(api_messages, model, temperature, options)
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {

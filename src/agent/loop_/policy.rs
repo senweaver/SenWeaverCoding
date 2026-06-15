@@ -290,18 +290,139 @@ impl<'a> PolicyBundle<'a> {
             self.on_delta = Some(draft);
             self.event_sink = sink;
         } else if let Some(turn) = sink.turn_sender() {
-            let (draft_tx, mut draft_rx) =
+            let (draft_tx, draft_rx) =
                 tokio::sync::mpsc::channel::<DraftEvent>(256);
+            let draft_rx = Arc::new(tokio::sync::Mutex::new(draft_rx));
             let forward_turn = turn.clone();
-            let _ = crate::runtime::spawn_supervised(
+            let _ = crate::runtime::spawn_supervised_restartable(
                 "agent.policy.event_sink_bridge",
-                async move {
-                    while let Some(ev) = draft_rx.recv().await {
-                        if let Some(t) = crate::agent::event_sink::draft_to_turn(ev) {
-                            if forward_turn.send(t).await.is_err() {
-                                break;
+                3,
+                move || {
+                    let draft_rx = Arc::clone(&draft_rx);
+                    let forward_turn = forward_turn.clone();
+                    async move {
+                    let mut draft_rx = draft_rx.lock().await;
+                    use crate::agent::TurnEvent;
+                    use std::collections::VecDeque;
+
+                    const MAX_BRIDGE_QUEUE_EVENTS: usize = 1024;
+
+                    fn compact_text_events(queue: &mut VecDeque<TurnEvent>) {
+                        let mut compacted: VecDeque<TurnEvent> =
+                            VecDeque::with_capacity(queue.len());
+                        for event in queue.drain(..) {
+                            match event {
+                                TurnEvent::Chunk { delta } => {
+                                    if let Some(TurnEvent::Chunk { delta: tail }) =
+                                        compacted.back_mut()
+                                    {
+                                        tail.push_str(&delta);
+                                    } else {
+                                        compacted.push_back(TurnEvent::Chunk { delta });
+                                    }
+                                }
+                                TurnEvent::Thinking { delta } => {
+                                    if let Some(TurnEvent::Thinking { delta: tail }) =
+                                        compacted.back_mut()
+                                    {
+                                        tail.push_str(&delta);
+                                    } else {
+                                        compacted.push_back(TurnEvent::Thinking { delta });
+                                    }
+                                }
+                                other => compacted.push_back(other),
                             }
                         }
+                        *queue = compacted;
+                    }
+
+                    fn enqueue(queue: &mut VecDeque<TurnEvent>, event: TurnEvent) {
+                        match event {
+                            TurnEvent::Chunk { delta } => {
+                                if let Some(TurnEvent::Chunk { delta: tail }) = queue.back_mut() {
+                                    tail.push_str(&delta);
+                                } else {
+                                    queue.push_back(TurnEvent::Chunk { delta });
+                                }
+                            }
+                            TurnEvent::Thinking { delta } => {
+                                if let Some(TurnEvent::Thinking { delta: tail }) =
+                                    queue.back_mut()
+                                {
+                                    tail.push_str(&delta);
+                                } else {
+                                    queue.push_back(TurnEvent::Thinking { delta });
+                                }
+                            }
+                            other => queue.push_back(other),
+                        }
+                        if queue.len() > MAX_BRIDGE_QUEUE_EVENTS {
+                            compact_text_events(queue);
+                            if queue.len() > MAX_BRIDGE_QUEUE_EVENTS {
+                                tracing::warn!(
+                                    target: "agent.event_bridge",
+                                    queue_len = queue.len(),
+                                    cap = MAX_BRIDGE_QUEUE_EVENTS,
+                                    "turn event bridge queue exceeds cap even after text compaction; event consumer is slow"
+                                );
+                            }
+                        }
+                    }
+
+                    let mut queue: VecDeque<TurnEvent> = VecDeque::new();
+                    let mut closed = false;
+                    loop {
+                        if queue.is_empty() {
+                            if closed {
+                                break;
+                            }
+                            match draft_rx.recv().await {
+                                Some(ev) => {
+                                    if let Some(t) = crate::agent::event_sink::draft_to_turn(ev) {
+                                        enqueue(&mut queue, t);
+                                    }
+                                }
+                                None => break,
+                            }
+                            while let Ok(ev) = draft_rx.try_recv() {
+                                if let Some(t) = crate::agent::event_sink::draft_to_turn(ev) {
+                                    enqueue(&mut queue, t);
+                                }
+                            }
+                        } else {
+                            tokio::select! {
+                                maybe_ev = draft_rx.recv(), if !closed => {
+                                    match maybe_ev {
+                                        Some(ev) => {
+                                            if let Some(t) =
+                                                crate::agent::event_sink::draft_to_turn(ev)
+                                            {
+                                                enqueue(&mut queue, t);
+                                            }
+                                            while let Ok(ev) = draft_rx.try_recv() {
+                                                if let Some(t) =
+                                                    crate::agent::event_sink::draft_to_turn(ev)
+                                                {
+                                                    enqueue(&mut queue, t);
+                                                }
+                                            }
+                                        }
+                                        None => closed = true,
+                                    }
+                                }
+                                permit = forward_turn.reserve() => {
+                                    match permit {
+                                        Ok(permit) => {
+                                            if let Some(front) = queue.pop_front() {
+                                                permit.send(front);
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
+                    }
                     }
                 },
             );

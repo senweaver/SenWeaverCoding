@@ -32,14 +32,20 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
     targetSessionId ? s.sessions[targetSessionId]?.cumulativeTokens ?? 0 : 0,
   )
 
-  const runtimeSelection = useSessionRuntimeStore((s) =>
-    targetSessionId
-      ? s.selections[targetSessionId] ?? s.selections[DRAFT_RUNTIME_SELECTION_KEY]
-      : s.selections[DRAFT_RUNTIME_SELECTION_KEY],
-  )
+  const runtimeSelection = useSessionRuntimeStore((s) => {
+    if (!targetSessionId) return s.selections[DRAFT_RUNTIME_SELECTION_KEY]
+    const own = s.selections[targetSessionId]
+    if (own) return own
+    const allowDraftFallback = targetSessionId.startsWith('__')
+    return allowDraftFallback ? s.selections[DRAFT_RUNTIME_SELECTION_KEY] : undefined
+  })
   const settingsModel = useSettingsStore((s) => s.currentModel?.id ?? null)
   const modelId = runtimeSelection?.modelId ?? settingsModel ?? null
-  const codingMode = useSettingsStore((s) => s.codingMode)
+  const globalCodingMode = useSettingsStore((s) => s.codingMode)
+  const sessionCodingMode = useChatStore((s) =>
+    targetSessionId ? s.sessionCodingMode[targetSessionId] : undefined,
+  )
+  const codingMode = sessionCodingMode ?? globalCodingMode
   const accent = CODING_MODE_ACCENT[codingMode]
 
   const providerId = runtimeSelection?.providerId ?? null

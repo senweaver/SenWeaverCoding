@@ -170,7 +170,7 @@ pub fn ensure_assistant_tool_replies_inplace(history: &mut Vec<ConversationMessa
             continue;
         }
 
-        tracing::warn!(
+        tracing::debug!(
             target: "agent.dangling_tool_repair",
             missing = ?missing,
             "injecting synthetic tool replies after incomplete assistant.tool_calls batch"

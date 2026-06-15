@@ -91,6 +91,10 @@ impl EventBus {
     }
 
     pub async fn publish(&self, event: Event) {
+        self.publish_now(event);
+    }
+
+    pub fn publish_now(&self, event: Event) {
         trace!(event_id = %event.id, target = ?event.target, "publishing event");
 
         self.history.write().push(event.clone());
@@ -248,7 +252,11 @@ impl EventBusHandle {
     }
 
     pub async fn publish(&self, event: Event) {
-        self.inner.publish(event).await;
+        self.inner.publish_now(event);
+    }
+
+    pub fn publish_now(&self, event: Event) {
+        self.inner.publish_now(event);
     }
 
     pub fn subscribe_all(&self) -> broadcast::Receiver<Event> {

@@ -221,6 +221,7 @@ impl Tool for TextBrowserTool {
             timeout,
             crate::util::hidden_async_command(&browser)
                 .args(&dump_args)
+                .kill_on_drop(true)
                 .output(),
         )
         .await;

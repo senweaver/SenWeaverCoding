@@ -870,7 +870,19 @@ impl RpcCtx {
                 .ok_or_else(|| RpcError::session_not_found(session_id))?
         };
 
-        let result = session.agent.execute_tool(tool_name, args).await;
+        let scoped_mode = session
+            .agent
+            .current_coding_mode()
+            .or_else(|| {
+                crate::services::try_get_services()
+                    .and_then(|svc| svc.session_coding_mode(session_id))
+            })
+            .unwrap_or_default();
+        let result = crate::agent::coding_mode::scope_coding_mode(
+            scoped_mode,
+            session.agent.execute_tool(tool_name, args),
+        )
+        .await;
         session.last_active = Instant::now();
         let mut sessions = state.sessions.lock().await;
         sessions.insert(session_id.to_string(), session);

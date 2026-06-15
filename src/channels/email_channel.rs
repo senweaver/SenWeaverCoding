@@ -433,14 +433,14 @@ impl EmailChannel {
                 continue;
             }
 
-            let is_new = {
-                let mut seen = self.seen_messages.lock().await;
-                seen.insert(email.msg_id.clone())
-            };
-            if !is_new {
-                continue;
+            {
+                let seen = self.seen_messages.lock().await;
+                if seen.contains(&email.msg_id) {
+                    continue;
+                }
             }
 
+            let msg_id = email.msg_id.clone();
             let msg = ChannelMessage {
                 id: email.msg_id,
                 reply_target: email.sender.clone(),
@@ -453,9 +453,17 @@ impl EmailChannel {
                 attachments: vec![],
             };
 
-            if tx.send(msg).await.is_err() {
-
-                return Ok(());
+            match crate::channels::forward_channel_message("email", &tx, msg) {
+                crate::channels::ForwardOutcome::Delivered => {
+                    let mut seen = self.seen_messages.lock().await;
+                    seen.insert(msg_id);
+                }
+                crate::channels::ForwardOutcome::Dropped => {
+                    break;
+                }
+                crate::channels::ForwardOutcome::Closed => {
+                    return Ok(());
+                }
             }
         }
 

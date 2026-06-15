@@ -35,7 +35,7 @@ export function RightSidebarShell({
   void _sessionId
   const t = useTranslation()
   const setRoot = useWorkspaceFilesStore((s) => s.setRoot)
-  const refreshRoot = useWorkspaceFilesStore((s) => s.refreshRoot)
+  const refreshAll = useWorkspaceFilesStore((s) => s.refreshAll)
   const selectFile = useWorkspaceFilesStore((s) => s.selectFile)
   const activeTab = useWorkspaceFilesStore((s) => s.activeTab)
   const requestNavigation = useWorkspaceFilesStore((s) => s.requestNavigation)
@@ -102,7 +102,7 @@ export function RightSidebarShell({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <Header workDir={workDir} onClose={onClose} onRefresh={refreshRoot} />
+      <Header workDir={workDir} onClose={onClose} onRefresh={() => void refreshAll()} />
       <WorkspaceSearchBar workDir={workDir} onSelect={handleSearchSelect} />
       <WorkspaceSplit
         left={

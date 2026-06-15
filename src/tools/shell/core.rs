@@ -94,6 +94,62 @@ impl ShellTool {
     }
 }
 
+const BACKGROUND_STREAM_CAP: usize = 1_048_576;
+
+async fn stream_background_output<R>(
+    reader: R,
+    id: String,
+    stream: super::super::background_registry::BgStream,
+    session_id: Option<String>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut buffered = BufReader::new(reader);
+    let mut line_bytes: Vec<u8> = Vec::new();
+    let mut emitted = 0usize;
+    let mut truncated = false;
+    loop {
+        line_bytes.clear();
+        match buffered.read_until(b'\n', &mut line_bytes).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if truncated {
+                    continue;
+                }
+                emitted = emitted.saturating_add(n);
+                if emitted > BACKGROUND_STREAM_CAP {
+                    truncated = true;
+                    super::super::background_registry::publish(
+                        super::super::background_registry::BackgroundShellSignal::Chunk {
+                            id: id.clone(),
+                            stream,
+                            line:
+                                "... [background output truncated at 1MB; process still running]"
+                                    .to_string(),
+                            session_id: session_id.clone(),
+                        },
+                    );
+                    continue;
+                }
+                let mut text = crate::util::decode_subprocess_bytes(&line_bytes);
+                while text.ends_with('\n') || text.ends_with('\r') {
+                    text.pop();
+                }
+                super::super::background_registry::publish(
+                    super::super::background_registry::BackgroundShellSignal::Chunk {
+                        id: id.clone(),
+                        stream,
+                        line: text,
+                        session_id: session_id.clone(),
+                    },
+                );
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 async fn spawn_background(
     mut cmd: tokio::process::Command,
     command_text: &str,
@@ -129,53 +185,50 @@ async fn spawn_background(
         session_id.clone(),
     );
 
-    if let Some(mut out) = stdout {
+    if let Some(out) = stdout {
         let id_clone = id.clone();
         let sid_clone = session_id.clone();
         crate::runtime::spawn_supervised("tools.shell.bg.stdout", async move {
-            use tokio::io::AsyncReadExt;
-            let mut raw = Vec::new();
-            let _ = out.read_to_end(&mut raw).await;
-            let text = crate::util::decode_subprocess_bytes(&raw);
-            for line in text.lines() {
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Chunk {
-                        id: id_clone.clone(),
-                        stream: super::super::background_registry::BgStream::Stdout,
-                        line: line.to_string(),
-                        session_id: sid_clone.clone(),
-                    },
-                );
-            }
+            stream_background_output(
+                out,
+                id_clone,
+                super::super::background_registry::BgStream::Stdout,
+                sid_clone,
+            )
+            .await;
         });
     }
-    if let Some(mut err) = stderr {
+    if let Some(err) = stderr {
         let id_clone = id.clone();
         let sid_clone = session_id.clone();
         crate::runtime::spawn_supervised("tools.shell.bg.stderr", async move {
-            use tokio::io::AsyncReadExt;
-            let mut raw = Vec::new();
-            let _ = err.read_to_end(&mut raw).await;
-            let text = crate::util::decode_subprocess_bytes(&raw);
-            for line in text.lines() {
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Chunk {
-                        id: id_clone.clone(),
-                        stream: super::super::background_registry::BgStream::Stderr,
-                        line: line.to_string(),
-                        session_id: sid_clone.clone(),
-                    },
-                );
-            }
+            stream_background_output(
+                err,
+                id_clone,
+                super::super::background_registry::BgStream::Stderr,
+                sid_clone,
+            )
+            .await;
         });
     }
 
     let id_for_watchdog = id.clone();
     let sid_for_watchdog = session_id.clone();
+    let max_lifetime_secs = std::env::var("SEN_BACKGROUND_SHELL_MAX_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0);
     crate::runtime::spawn_supervised("tools.shell.bg.watchdog", async move {
         let started = std::time::Instant::now();
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.tick().await;
+        let lifetime_cap = async {
+            match max_lifetime_secs {
+                Some(secs) => tokio::time::sleep(Duration::from_secs(secs)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(lifetime_cap);
         let exit_status = loop {
             tokio::select! {
                 _ = tick.tick() => {
@@ -188,6 +241,17 @@ async fn spawn_background(
                     );
                 }
                 _ = &mut kill_rx => {
+                    let _ = child.kill().await;
+                    let status = child.wait().await.ok();
+                    break status;
+                }
+                _ = &mut lifetime_cap => {
+                    tracing::warn!(
+                        target: "tools.shell.bg",
+                        id = %id_for_watchdog,
+                        max_secs = max_lifetime_secs.unwrap_or(0),
+                        "background shell exceeded configured max lifetime; terminating"
+                    );
                     let _ = child.kill().await;
                     let status = child.wait().await.ok();
                     break status;

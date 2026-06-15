@@ -363,7 +363,11 @@ impl ToolSearchTool {
         output.push_str("</functions>\n");
 
         if !not_found.is_empty() {
-            let _ = write!(output, "\nNot found: {}", not_found.join(", "));
+            let _ = write!(
+                output,
+                "\nNot found: {}. These tools are not registered in this build; they may belong to a disabled cargo feature (e.g. tool-cron, tool-sop, tool-team, tool-reports, tool-cloud-ops, tool-linkedin, tool-pushover, tool-search-social, tool-productivity, tool-utility-misc, tool-image, tool-workspace-deep, tool-curator) or the names are invalid.",
+                not_found.join(", ")
+            );
         }
 
         tracing::debug!(

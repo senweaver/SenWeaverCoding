@@ -61,14 +61,7 @@ pub(crate) fn lookup_model_pricing<'a>(
     provider_name: &str,
     model: &str,
 ) -> Option<&'a ModelPricing> {
-    prices
-        .get(model)
-        .or_else(|| prices.get(&format!("{provider_name}/{model}")))
-        .or_else(|| {
-            model
-                .rsplit_once('/')
-                .and_then(|(_, suffix)| prices.get(suffix))
-        })
+    crate::cost::pricing::lookup_model_pricing(prices, provider_name, model)
 }
 
 pub(crate) fn record_tool_loop_cost_usage(
@@ -86,8 +79,27 @@ pub(crate) fn record_tool_loop_cost_usage(
     let ctx = TOOL_LOOP_COST_TRACKING_CONTEXT
         .try_with(Clone::clone)
         .ok()
-        .flatten()?;
-    let pricing = lookup_model_pricing(&ctx.prices, provider_name, model);
+        .flatten();
+    let (tracker, prices, chat_session_id, coding_mode) = match ctx {
+        Some(ctx) => (
+            ctx.tracker,
+            ctx.prices,
+            ctx.chat_session_id,
+            ctx.coding_mode,
+        ),
+        None => {
+            let tracker = CostTracker::try_get_global()?;
+            let prices = crate::services::try_get_services()
+                .map(|svc| {
+                    let config = svc.config();
+                    Arc::new(crate::cost::pricing::effective_model_prices(config.as_ref()))
+                })
+                .unwrap_or_default();
+            (tracker, prices, None, None)
+        }
+    };
+
+    let pricing = lookup_model_pricing(&prices, provider_name, model);
     let cost_usage = CostTokenUsage::new(
         model,
         input_tokens,
@@ -104,9 +116,10 @@ pub(crate) fn record_tool_loop_cost_usage(
         );
     }
 
-    if let Err(error) = ctx.tracker.record_usage_for_session_with_mode(
-        ctx.chat_session_id.as_deref(),
-        ctx.coding_mode.as_deref(),
+    if let Err(error) = tracker.record_usage_with_attribution(
+        chat_session_id.as_deref(),
+        coding_mode.as_deref(),
+        Some(provider_name),
         cost_usage.clone(),
     ) {
         tracing::warn!(

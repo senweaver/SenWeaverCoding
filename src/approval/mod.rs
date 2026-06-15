@@ -12,6 +12,9 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
+
+pub const SESSION_APPROVAL_TIMEOUT_MS: u64 = 300_000;
 
 const PENDING_APPROVAL_TTL_SECS: u64 = 30 * 60;
 
@@ -95,6 +98,72 @@ pub fn claim_pending_gateway_approval(id: &str) -> bool {
     pending_gateway_approvals().lock().claim(id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionApprovalVerdict {
+    Decision(ApprovalResponse),
+    Cancelled,
+    TimedOut,
+}
+
+static SESSION_SURFACE_APPROVAL_MANAGER: OnceLock<ApprovalManager> = OnceLock::new();
+
+pub fn install_session_surface_approval_manager(
+    config: &AutonomyConfig,
+    audit_log_path: Option<PathBuf>,
+) {
+    let _ = SESSION_SURFACE_APPROVAL_MANAGER.get_or_init(|| {
+        let mgr = ApprovalManager::from_config(config)
+            .with_session_sink(crate::gateway::ws::gateway_approval_sink_handle());
+        mgr.set_audit_log_path(audit_log_path);
+        mgr
+    });
+}
+
+pub fn session_surface_approval_manager() -> Option<&'static ApprovalManager> {
+    SESSION_SURFACE_APPROVAL_MANAGER.get()
+}
+
+pub async fn wait_for_session_decision(
+    request_id: &str,
+    rx: &mut tokio::sync::broadcast::Receiver<crate::session::SessionEvent>,
+    cancellation_token: Option<&CancellationToken>,
+) -> SessionApprovalVerdict {
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(SESSION_APPROVAL_TIMEOUT_MS);
+    loop {
+        let recv_with_deadline = tokio::time::timeout_at(deadline, rx.recv());
+        let received = if let Some(token) = cancellation_token {
+            tokio::select! {
+                () = token.cancelled() => return SessionApprovalVerdict::Cancelled,
+                outcome = recv_with_deadline => outcome,
+            }
+        } else {
+            recv_with_deadline.await
+        };
+        match received {
+            Ok(Ok(event)) => {
+                if let crate::session::SessionEventKind::ApprovalResponded {
+                    id, decision, ..
+                } = &event.kind
+                {
+                    if id == request_id {
+                        let response = match decision.to_ascii_lowercase().as_str() {
+                            "yes" | "y" => ApprovalResponse::Yes,
+                            "always" | "a" => ApprovalResponse::Always,
+                            _ => ApprovalResponse::No,
+                        };
+                        return SessionApprovalVerdict::Decision(response);
+                    }
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
+                return SessionApprovalVerdict::TimedOut;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub tool_name: String,
@@ -131,6 +200,8 @@ pub struct ApprovalManager {
 
     non_interactive: bool,
 
+    allow_shell_in_non_interactive: bool,
+
     session_allowlist: Mutex<HashSet<String>>,
 
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
@@ -148,6 +219,7 @@ impl ApprovalManager {
             always_ask: config.always_ask.iter().cloned().collect(),
             autonomy_level: config.level,
             non_interactive: false,
+            allow_shell_in_non_interactive: config.allow_shell_in_non_interactive,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
             audit_log_path: Mutex::new(None),
@@ -156,14 +228,17 @@ impl ApprovalManager {
     }
 
     pub fn for_non_interactive(config: &AutonomyConfig) -> Self {
-        if !matches!(
-            config.level,
-            AutonomyLevel::Full | AutonomyLevel::ReadOnly
-        ) && !config.always_ask.iter().any(|t| t == "shell" || t == "*")
+        if config.allow_shell_in_non_interactive
+            && !matches!(
+                config.level,
+                AutonomyLevel::Full | AutonomyLevel::ReadOnly
+            )
+            && !config.always_ask.iter().any(|t| t == "shell" || t == "*")
         {
             tracing::warn!(
                 "ApprovalManager: non-interactive mode auto-approves the `shell` tool \
-                 (autonomy_level={:?}); add `shell` to [autonomy] always_ask to require approval, \
+                 (autonomy_level={:?}); add `shell` to [autonomy] always_ask or set \
+                 [autonomy] allow_shell_in_non_interactive = false to require approval, \
                  or run in interactive mode.",
                 config.level
             );
@@ -173,6 +248,7 @@ impl ApprovalManager {
             always_ask: config.always_ask.iter().cloned().collect(),
             autonomy_level: config.level,
             non_interactive: true,
+            allow_shell_in_non_interactive: config.allow_shell_in_non_interactive,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
             audit_log_path: Mutex::new(None),
@@ -216,39 +292,6 @@ impl ApprovalManager {
         Some(id)
     }
 
-    pub async fn poll_response_via_session(
-        &self,
-        approval_id: &str,
-        mut session_rx: tokio::sync::broadcast::Receiver<crate::session::SessionEvent>,
-        timeout_ms: u64,
-    ) -> ApprovalResponse {
-        use crate::session::SessionEventKind;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return ApprovalResponse::No;
-            }
-            match tokio::time::timeout(remaining, session_rx.recv()).await {
-                Ok(Ok(evt)) => {
-                    if let SessionEventKind::ApprovalResponded { id, decision, .. } = &evt.kind {
-                        if id == approval_id {
-                            return match decision.to_ascii_lowercase().as_str() {
-                                "yes" | "y" => ApprovalResponse::Yes,
-                                "always" | "a" => ApprovalResponse::Always,
-                                _ => ApprovalResponse::No,
-                            };
-                        }
-                    }
-                }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
-                    return ApprovalResponse::No;
-                }
-            }
-        }
-    }
-
     pub fn is_non_interactive(&self) -> bool {
         self.non_interactive
     }
@@ -267,7 +310,7 @@ impl ApprovalManager {
             return true;
         }
 
-        if self.non_interactive && tool_name == "shell" {
+        if self.non_interactive && tool_name == "shell" && self.allow_shell_in_non_interactive {
             return false;
         }
 

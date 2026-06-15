@@ -106,13 +106,21 @@ impl Tool for AskUserTool {
             });
         }
 
-        let question = args
+        let question = match args
             .get("question")
             .and_then(|v| v.as_str())
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'question' parameter"))?
-            .to_string();
+        {
+            Some(q) => q.to_string(),
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("Missing 'question' parameter".to_string()),
+                });
+            }
+        };
 
         let choices: Option<Vec<String>> = args.get("choices").and_then(|v| {
             v.as_array().map(|arr| {
@@ -143,20 +151,35 @@ impl Tool for AskUserTool {
                 });
             }
             if let Some(ref name) = requested_channel {
-                let ch = channels.get(name.as_str()).cloned().ok_or_else(|| {
-                    let available: Vec<String> = channels.keys().cloned().collect();
-                    anyhow::anyhow!(
-                        "Channel '{}' not found. Available: {}",
-                        name,
-                        available.join(", ")
-                    )
-                })?;
-                (name.clone(), ch)
+                match channels.get(name.as_str()).cloned() {
+                    Some(ch) => (name.clone(), ch),
+                    None => {
+                        let available: Vec<String> = channels.keys().cloned().collect();
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "Channel '{}' not found. Available: {}",
+                                name,
+                                available.join(", ")
+                            )),
+                        });
+                    }
+                }
             } else {
-                let (name, ch) = channels.iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("No channels available. Configure at least one channel.")
-                })?;
-                (name.clone(), ch.clone())
+                match channels.iter().next() {
+                    Some((name, ch)) => (name.clone(), ch.clone()),
+                    None => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(
+                                "No channels available. Configure at least one channel."
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                }
             }
         };
 

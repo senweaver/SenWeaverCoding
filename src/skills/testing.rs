@@ -279,6 +279,10 @@ fn truncate_output(s: &str, max: usize) -> String {
     if trimmed.len() <= max {
         trimmed.replace('\n', " ")
     } else {
-        format!("{}...", &trimmed[..max].replace('\n', " "))
+        let mut end = max;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &trimmed[..end].replace('\n', " "))
     }
 }

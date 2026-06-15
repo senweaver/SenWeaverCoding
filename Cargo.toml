@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading"] }
 
 [lints.rust]
 unsafe_code = "allow"
@@ -79,6 +79,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 prometheus = { version = "0.14", default-features = false, optional = true }
 
 base64 = "0.22"
+include_dir = "0.7"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
 
 urlencoding = "2.1"
@@ -182,6 +183,7 @@ tokio-serial = { version = "5", default-features = false, optional = true }
 ordered-float = "5.3.0"
 arc-swap = "1.9.1"
 zeroize = { version = "1.8.2", features = ["derive"] }
+serde_ignored = "0.1.14"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 nusb = { version = "0.2", default-features = false, optional = true }

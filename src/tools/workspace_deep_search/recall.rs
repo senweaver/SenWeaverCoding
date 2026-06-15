@@ -160,6 +160,7 @@ async fn rg_search(
         .is_err()
     {
         let _ = child.start_kill();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
         anyhow::bail!("ripgrep search timed out after 20s");
     }
     let text = String::from_utf8_lossy(&buf);

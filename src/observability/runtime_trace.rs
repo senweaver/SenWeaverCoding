@@ -64,8 +64,10 @@ pub struct RuntimeTraceEvent {
     pub payload: Value,
 }
 
+const RUNTIME_TRACE_CHANNEL_CAP: usize = 8192;
+
 struct RuntimeTraceLogger {
-    tx: Option<std::sync::mpsc::Sender<RuntimeTraceEvent>>,
+    tx: Option<std::sync::mpsc::SyncSender<RuntimeTraceEvent>>,
 }
 
 impl RuntimeTraceLogger {
@@ -74,7 +76,8 @@ impl RuntimeTraceLogger {
             return Self { tx: None };
         }
         let max_entries = max_entries.max(1);
-        let (tx, rx) = std::sync::mpsc::channel::<RuntimeTraceEvent>();
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<RuntimeTraceEvent>(RUNTIME_TRACE_CHANNEL_CAP);
         let spawned = std::thread::Builder::new()
             .name("runtime-trace".to_string())
             .spawn(move || trace_writer_loop(mode, max_entries, path, rx))
@@ -86,8 +89,16 @@ impl RuntimeTraceLogger {
 
     fn submit(&self, event: RuntimeTraceEvent) {
         if let Some(tx) = &self.tx {
-            if tx.send(event).is_err() {
-                tracing::warn!("runtime trace writer thread is gone; trace event dropped");
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    tracing::debug!(
+                        "runtime trace channel saturated; dropping trace event to avoid unbounded growth"
+                    );
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    tracing::warn!("runtime trace writer thread is gone; trace event dropped");
+                }
             }
         }
     }

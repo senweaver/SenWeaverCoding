@@ -15,8 +15,6 @@ pub mod file_viewer;
 
 pub mod inline_edit_modal;
 
-pub mod ghost_overlay;
-
 pub mod event_loop;
 
 pub mod panels;
@@ -27,7 +25,10 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -49,7 +50,7 @@ use crate::services::ServiceContainer;
 use crate::vim_mode::transitions::{
     process_key_with_buffer as vim_process_key, process_text_object_key,
 };
-use crate::vim_mode::types::VimState;
+use crate::vim_mode::types::{VimMode, VimState};
 
 fn try_get_bootstrap_state() -> Option<&'static BootstrapState> {
     crate::bootstrap::try_get_state()
@@ -214,7 +215,7 @@ pub struct App {
     pub should_quit: bool,
     pub show_help: bool,
     pub config: Config,
-    pub chat_input: String,
+    pub chat_input: crate::editor_core::TextBuffer,
     pub chat_messages: Vec<ChatMessage>,
     pub log_entries: Vec<String>,
     pub event_entries: Vec<String>,
@@ -233,10 +234,20 @@ pub struct App {
     pub cost_details: CostDetails,
     pub bridge: agent_bridge::AgentBridge,
     pub streaming_buffer: String,
+    pub reasoning_buffer: String,
+    pub stream_finalized: bool,
 
-    pub chat_cursor_pos: usize,
+    pub chat_cursor: usize,
 
     pub chat_scroll_offset: usize,
+
+    pub last_ctrl_c_at: Option<std::time::Instant>,
+
+    pub pending_approvals: std::collections::VecDeque<ApprovalPrompt>,
+
+    pub pending_questions: std::collections::VecDeque<QuestionPromptState>,
+
+    pub answered_questions: Vec<crate::agent::bridge_types::QuestionAnswerItem>,
 
     pub vim_enabled: bool,
 
@@ -250,6 +261,8 @@ pub struct App {
 
     pub redo_stack: Vec<String>,
 
+    typing_run: bool,
+
     pub command_palette_open: bool,
 
     pub command_palette_filter: String,
@@ -259,6 +272,11 @@ pub struct App {
     pub budget_view: crate::observability::views::BudgetView,
 
     pub provider_health_view: crate::observability::views::ProviderHealthView,
+
+    health_rx: Option<tokio::sync::broadcast::Receiver<crate::agent::health_signal::HealthSignal>>,
+
+    health_rows:
+        std::collections::HashMap<(String, String), crate::agent::health_signal::HealthSignal>,
 
     pub dirty: bool,
 
@@ -302,9 +320,33 @@ pub enum RevertHunkOutcome {
         hunk_index: usize,
         new_batch_id: String,
     },
+    FileDone {
+        entry_id: u64,
+        summary: String,
+    },
     Failed {
+        entry_id: Option<u64>,
         message: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalPrompt {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub args_summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuestionPromptState {
+    pub question_id: String,
+    pub prompt: String,
+    pub options: Vec<crate::agent::bridge_types::QuestionOption>,
+    pub allow_multiple: bool,
+    pub highlighted: usize,
+    pub chosen: Vec<bool>,
+    pub free_text: String,
+    pub text_focus: bool,
 }
 
 pub struct KeyShortcut {
@@ -317,8 +359,12 @@ impl App {
     pub fn get_shortcuts() -> Vec<KeyShortcut> {
         vec![
             KeyShortcut {
-                key: "Ctrl+Q / Ctrl+C",
+                key: "Ctrl+Q / Ctrl+D",
                 description: "Quit application",
+            },
+            KeyShortcut {
+                key: "Ctrl+C",
+                description: "Cancel turn (busy) / press twice to quit",
             },
             KeyShortcut {
                 key: "Tab / Shift+Tab",
@@ -392,6 +438,7 @@ impl ChatMessage {
 
     pub fn from_parts(role: &str, content: String, timestamp: String) -> Self {
         let content_hash = chat::render_cache::fingerprint(&content);
+        chat::render_cache::bump_content_version();
         Self {
             role: role.to_string(),
             content,
@@ -405,6 +452,7 @@ impl ChatMessage {
     pub fn mark_content_dirty(&mut self) {
         self.content_hash = chat::render_cache::fingerprint(&self.content);
         chat::render_cache::invalidate_message_cache(&mut self.highlighted_cache);
+        chat::render_cache::bump_content_version();
     }
 }
 
@@ -554,7 +602,7 @@ impl App {
             should_quit: false,
             show_help: false,
             config,
-            chat_input: String::new(),
+            chat_input: crate::editor_core::TextBuffer::new(),
             chat_messages: Vec::new(),
             log_entries: vec![format!(
                 "[{}] SenWeaverCoding TUI started",
@@ -587,8 +635,14 @@ impl App {
             cost_details: CostDetails::default(),
             bridge,
             streaming_buffer: String::new(),
-            chat_cursor_pos: 0,
+            reasoning_buffer: String::new(),
+            stream_finalized: false,
+            chat_cursor: 0,
             chat_scroll_offset: 0,
+            last_ctrl_c_at: None,
+            pending_approvals: std::collections::VecDeque::new(),
+            pending_questions: std::collections::VecDeque::new(),
+            answered_questions: Vec::new(),
             vim_enabled: false,
             vim_state: VimState::default(),
 
@@ -599,11 +653,14 @@ impl App {
             vim_clipboard: String::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            typing_run: false,
             command_palette_open: false,
             command_palette_filter: String::new(),
             command_palette_selected: 0,
             budget_view: crate::observability::views::BudgetView::default(),
             provider_health_view: crate::observability::views::ProviderHealthView::default(),
+            health_rx: None,
+            health_rows: std::collections::HashMap::new(),
 
             dirty: true,
             pending_delta_started_at: None,
@@ -629,11 +686,161 @@ impl App {
         self.dirty = true;
     }
 
+    fn set_chat_cursor(&mut self, pos: usize) {
+        let clamped = pos.min(self.chat_input.char_count());
+        self.chat_cursor = clamped;
+        self.vim_state.cursor_pos = clamped;
+        self.typing_run = false;
+    }
+
+    fn handle_interrupt_key(&mut self) {
+        if self.bridge.is_busy {
+            let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                "Cancelling current turn\u{2026}".into(),
+            ));
+            return;
+        }
+        let now = Instant::now();
+        if let Some(prev) = self.last_ctrl_c_at {
+            if now.duration_since(prev) <= Duration::from_millis(1500) {
+                self.should_quit = true;
+                return;
+            }
+        }
+        self.last_ctrl_c_at = Some(now);
+        self.chat_messages.push(ChatMessage::with_role_now(
+            "system",
+            "Press Ctrl+C again within 1.5s to exit.".into(),
+        ));
+    }
+
+    fn handle_exit_key(&mut self) {
+        if self.bridge.is_busy {
+            let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                "Cancelling current turn\u{2026}".into(),
+            ));
+            return;
+        }
+        self.should_quit = true;
+    }
+
+    fn chat_history_nav_allowed(&self) -> bool {
+        self.active_tab == Tab::Chat
+            && !self.inline_edit_modal.is_open
+            && self.chat_input.char_count() == 0
+    }
+
+    fn handle_key_action(&mut self, action: KeyAction) -> bool {
+        match action {
+            KeyAction::Exit => {
+                self.handle_exit_key();
+                true
+            }
+            KeyAction::Interrupt => {
+                self.handle_interrupt_key();
+                true
+            }
+            KeyAction::Help => {
+                self.show_help = !self.show_help;
+                true
+            }
+            KeyAction::Clear => {
+                self.clear_chat_view();
+                true
+            }
+            KeyAction::ToggleVim => {
+                self.vim_enabled = !self.vim_enabled;
+                self.vim_state = VimState::default();
+                true
+            }
+            KeyAction::Submit => {
+                let vim_command_active =
+                    self.vim_enabled && self.vim_state.mode == VimMode::Command;
+                if self.active_tab == Tab::Chat
+                    && !self.inline_edit_modal.is_open
+                    && !vim_command_active
+                {
+                    self.send_chat();
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyAction::NewLine => {
+                if self.active_tab == Tab::Chat && !self.inline_edit_modal.is_open {
+                    self.push_undo_snapshot();
+                    self.chat_input.insert_at(self.chat_cursor, "\n");
+                    self.set_chat_cursor(self.chat_cursor + 1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyAction::Cancel => {
+                if self.bridge.is_busy {
+                    let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+                    self.chat_messages.push(ChatMessage::with_role_now(
+                        "system",
+                        "Cancelling current turn\u{2026}".into(),
+                    ));
+                }
+                true
+            }
+            KeyAction::HistoryPrev => {
+                if self.chat_history_nav_allowed() {
+                    self.chat_scroll_offset = (self.chat_scroll_offset + 1)
+                        .min(self.chat_render_cache.max_scroll_offset());
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyAction::HistoryNext => {
+                if self.chat_history_nav_allowed() {
+                    self.chat_scroll_offset = self.chat_scroll_offset.saturating_sub(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyAction::AutoMode
+            | KeyAction::PlanMode
+            | KeyAction::Compact
+            | KeyAction::TabComplete
+            | KeyAction::VoiceToggle
+            | KeyAction::Custom(_) => false,
+        }
+    }
+
     fn handle_key(&mut self, key: event::KeyEvent) {
+
+        if !self.pending_approvals.is_empty() {
+            self.handle_approval_key(key);
+            return;
+        }
+
+        if !self.pending_questions.is_empty() {
+            self.handle_question_key(key);
+            return;
+        }
 
         if self.command_palette_open {
             self.handle_command_palette_key(key);
             return;
+        }
+
+        if self.show_help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    self.show_help = false;
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -643,76 +850,32 @@ impl App {
             return;
         }
 
+        if self.active_tab == Tab::Chat && self.inline_edit_modal.is_open {
+            self.handle_chat_key(key);
+            return;
+        }
+
         let parsed = Self::event_to_parsed_key(&key);
         if let Some(parsed) = &parsed {
             if let Some(action) = self.keybinding_resolver.resolve(parsed).cloned() {
-                match action {
-                    KeyAction::Exit | KeyAction::Interrupt => {
-                        self.should_quit = true;
-                        return;
-                    }
-                    KeyAction::Help => {
-                        self.show_help = !self.show_help;
-                        return;
-                    }
-                    KeyAction::Clear => {
-                        self.chat_messages.clear();
-                        self.chat_reconciler.reset();
-                        return;
-                    }
-                    KeyAction::ToggleVim => {
-                        self.vim_enabled = !self.vim_enabled;
-                        self.vim_state = VimState::default();
-                        return;
-                    }
-                    KeyAction::Submit => {
-                        self.send_chat();
-                        return;
-                    }
-                    KeyAction::NewLine => {
-                        self.chat_input.insert(self.chat_cursor_pos, '\n');
-                        self.chat_cursor_pos += 1;
-                        return;
-                    }
-                    KeyAction::Cancel => {
-                        if self.bridge.is_busy {
-                            let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
-                        }
-                        return;
-                    }
-                    KeyAction::HistoryPrev => {
-
-                        self.chat_scroll_offset = (self.chat_scroll_offset + 1)
-                            .min(self.chat_messages.len().saturating_sub(1));
-                        return;
-                    }
-                    KeyAction::HistoryNext => {
-                        self.chat_scroll_offset = self.chat_scroll_offset.saturating_sub(1);
-                        return;
-                    }
-                    KeyAction::AutoMode
-                    | KeyAction::PlanMode
-                    | KeyAction::Compact
-                    | KeyAction::TabComplete
-                    | KeyAction::VoiceToggle
-                    | KeyAction::Custom(_) => {}
+                if self.handle_key_action(action) {
+                    return;
                 }
             }
         }
 
         match key.code {
             KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
+                self.handle_exit_key();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
+                self.handle_interrupt_key();
             }
             KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.chat_messages.clear();
-                self.chat_reconciler.reset();
+                self.clear_chat_view();
             }
             KeyCode::Tab => {
                 let next = (self.active_tab.index() + 1) % Tab::all().len();
@@ -748,6 +911,182 @@ impl App {
                 Tab::Files => self.handle_file_viewer_key(key),
                 _ => {}
             },
+        }
+    }
+
+    fn handle_approval_key(&mut self, key: event::KeyEvent) {
+        let respond = match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
+            _ => None,
+        };
+        let Some(approved) = respond else {
+            return;
+        };
+        let Some(prompt) = self.pending_approvals.pop_front() else {
+            return;
+        };
+        let _ = self.bridge.send(agent_bridge::UserInput::ApprovalResponse {
+            tool_id: prompt.tool_id.clone(),
+            approved,
+        });
+        let verdict = if approved { "approved" } else { "denied" };
+        self.chat_messages.push(ChatMessage::with_role_now(
+            "system",
+            format!("{verdict}: {} ({})", prompt.tool_name, prompt.tool_id),
+        ));
+    }
+
+    fn handle_question_key(&mut self, key: event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.finish_current_question(true);
+                return;
+            }
+            KeyCode::Enter => {
+                self.finish_current_question(false);
+                return;
+            }
+            _ => {}
+        }
+        let Some(question) = self.pending_questions.front_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Tab => {
+                question.text_focus = !question.text_focus;
+            }
+            KeyCode::Up if !question.text_focus => {
+                question.highlighted = question.highlighted.saturating_sub(1);
+            }
+            KeyCode::Down if !question.text_focus => {
+                if !question.options.is_empty() {
+                    question.highlighted =
+                        (question.highlighted + 1).min(question.options.len() - 1);
+                }
+            }
+            KeyCode::Char('k') if !question.text_focus => {
+                question.highlighted = question.highlighted.saturating_sub(1);
+            }
+            KeyCode::Char('j') if !question.text_focus => {
+                if !question.options.is_empty() {
+                    question.highlighted =
+                        (question.highlighted + 1).min(question.options.len() - 1);
+                }
+            }
+            KeyCode::Char(' ') if !question.text_focus && question.allow_multiple => {
+                if let Some(slot) = question.chosen.get_mut(question.highlighted) {
+                    *slot = !*slot;
+                }
+            }
+            KeyCode::Backspace if question.text_focus => {
+                pop_last_char(&mut question.free_text);
+            }
+            KeyCode::Char(c) if question.text_focus => {
+                question.free_text.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_current_question(&mut self, skipped: bool) {
+        let Some(question) = self.pending_questions.pop_front() else {
+            return;
+        };
+        let mut selected: Vec<String> = Vec::new();
+        let mut selected_labels: Vec<String> = Vec::new();
+        if !skipped {
+            if question.allow_multiple {
+                for (idx, on) in question.chosen.iter().enumerate() {
+                    if *on {
+                        if let Some(opt) = question.options.get(idx) {
+                            selected.push(opt.id.clone());
+                            selected_labels.push(opt.label.clone());
+                        }
+                    }
+                }
+            } else if let Some(opt) = question.options.get(question.highlighted) {
+                let free_text_only =
+                    question.text_focus && !question.free_text.trim().is_empty();
+                if !free_text_only {
+                    selected.push(opt.id.clone());
+                    selected_labels.push(opt.label.clone());
+                }
+            }
+            let free = question.free_text.trim();
+            if !free.is_empty() {
+                selected_labels.push(free.to_string());
+            }
+        }
+        self.answered_questions
+            .push(crate::agent::bridge_types::QuestionAnswerItem {
+                question_id: question.question_id,
+                prompt: question.prompt,
+                selected,
+                selected_labels,
+            });
+        if self.pending_questions.is_empty() {
+            let answers = std::mem::take(&mut self.answered_questions);
+            let sent = self
+                .bridge
+                .send(agent_bridge::UserInput::QuestionAnswerBatch { answers });
+            if !sent {
+                self.chat_messages.push(ChatMessage::with_role_now(
+                    "error",
+                    "failed to deliver answers to the agent (channel full)".into(),
+                ));
+            }
+        }
+    }
+
+    fn handle_paste(&mut self, text: String) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let max_chars = crate::constants::system::MAX_PASTED_CONTENT_LENGTH;
+        let char_count = normalized.chars().count();
+        let (clipped, truncated) = if char_count > max_chars {
+            (
+                normalized.chars().take(max_chars).collect::<String>(),
+                true,
+            )
+        } else {
+            (normalized, false)
+        };
+
+        if !self.pending_approvals.is_empty() {
+            return;
+        }
+        if let Some(question) = self.pending_questions.front_mut() {
+            if question.text_focus {
+                question.free_text.push_str(&clipped);
+            }
+            return;
+        }
+        if self.inline_edit_modal.is_open {
+            match self.inline_edit_modal.focus {
+                inline_edit_modal::ModalField::Path => {
+                    self.inline_edit_modal.path.push_str(&clipped);
+                }
+                inline_edit_modal::ModalField::Instruction => {
+                    self.inline_edit_modal.instruction.push_str(&clipped);
+                }
+            }
+            return;
+        }
+        if self.active_tab != Tab::Chat {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        let inserted_chars = clipped.chars().count();
+        self.chat_input.insert_at(self.chat_cursor, &clipped);
+        self.set_chat_cursor(self.chat_cursor + inserted_chars);
+        if truncated {
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                format!(
+                    "Pasted content truncated to {max_chars} characters ({char_count} pasted)."
+                ),
+            ));
         }
     }
 
@@ -817,6 +1156,11 @@ impl App {
                 self.diff_review_state.toast = Some("marked applied".into());
             }
             diff_review::DiffReviewAction::RevertFile { entry_id } => {
+                if self.diff_review_state.reverting_entries.contains(&entry_id) {
+                    self.diff_review_state.toast =
+                        Some("revert already in progress for this entry".into());
+                    return;
+                }
                 let entry = self
                     .edit_batch_registry
                     .get_mut_by_id(entry_id)
@@ -824,26 +1168,30 @@ impl App {
                 if let Some(entry) = entry {
                     let workspace = std::env::current_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    match diff_review::revert_file_entry(&entry, &workspace) {
-                        Ok(summary) => {
-                            diff_review::mark_reverted(
-                                &mut self.edit_batch_registry,
-                                entry_id,
-                                None,
-                            );
-                            self.diff_review_state.toast = Some(summary);
-                        }
-                        Err(e) => {
-                            self.diff_review_state.toast =
-                                Some(format!("revert failed: {e}"));
-                        }
-                    }
+                    self.diff_review_state.reverting_entries.insert(entry_id);
+                    let tx = self.revert_hunk_outcome_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let msg = match diff_review::revert_file_entry(&entry, &workspace) {
+                            Ok(summary) => RevertHunkOutcome::FileDone { entry_id, summary },
+                            Err(e) => RevertHunkOutcome::Failed {
+                                entry_id: Some(entry_id),
+                                message: format!("revert failed: {e}"),
+                            },
+                        };
+                        let _ = tx.blocking_send(msg);
+                    });
+                    self.diff_review_state.toast = Some("reverting file...".into());
                 }
             }
             diff_review::DiffReviewAction::RevertHunk {
                 entry_id,
                 hunk_index,
             } => {
+                if self.diff_review_state.reverting_entries.contains(&entry_id) {
+                    self.diff_review_state.toast =
+                        Some("revert already in progress for this entry".into());
+                    return;
+                }
                 let entry = self
                     .edit_batch_registry
                     .get_mut_by_id(entry_id)
@@ -852,6 +1200,7 @@ impl App {
                     let workspace = std::env::current_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
 
+                    self.diff_review_state.reverting_entries.insert(entry_id);
                     let entry_clone = entry.clone();
                     let ws_clone = workspace.clone();
                     let tx = self.revert_hunk_outcome_tx.clone();
@@ -869,6 +1218,7 @@ impl App {
                                 new_batch_id,
                             },
                             Err(e) => RevertHunkOutcome::Failed {
+                                entry_id: Some(entry_id),
                                 message: format!("hunk revert failed: {e}"),
                             },
                         };
@@ -885,6 +1235,15 @@ impl App {
             KeyCode::Enter => "enter".to_string(),
             KeyCode::Esc => "escape".to_string(),
             KeyCode::Tab => "tab".to_string(),
+            KeyCode::BackTab => "backtab".to_string(),
+            KeyCode::Up => "up".to_string(),
+            KeyCode::Down => "down".to_string(),
+            KeyCode::Left => "left".to_string(),
+            KeyCode::Right => "right".to_string(),
+            KeyCode::Home => "home".to_string(),
+            KeyCode::End => "end".to_string(),
+            KeyCode::PageUp => "pageup".to_string(),
+            KeyCode::PageDown => "pagedown".to_string(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::F(n) => format!("f{n}"),
             _ => return None,
@@ -936,6 +1295,7 @@ impl App {
                             };
                             let _ = tx.send(msg).await;
                         });
+                        self.inline_edit_modal.submitting = true;
                         self.inline_edit_modal.status =
                             Some("running inline-edit runner...".into());
                     } else {
@@ -972,20 +1332,8 @@ impl App {
         }
 
         if let KeyCode::Enter = key.code {
-            if self.chat_input.trim() == "/vim" {
-                self.vim_enabled = !self.vim_enabled;
-                self.vim_state = VimState::default();
-                let status = if self.vim_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                self.chat_messages.push(ChatMessage::with_role_now(
-                    "system",
-                    format!("Vim mode {status}"),
-                ));
-                self.chat_input.clear();
-                self.chat_cursor_pos = 0;
+            if self.chat_input.as_string().trim() == "/vim" {
+                self.toggle_vim_from_command();
                 return;
             }
         }
@@ -1009,6 +1357,12 @@ impl App {
             } else {
                 vec![]
             };
+            let buffer = match self.vim_state.mode {
+                VimMode::Insert | VimMode::Replace | VimMode::Command => String::new(),
+                VimMode::Normal | VimMode::Visual | VimMode::VisualLine => {
+                    self.chat_input.as_string()
+                }
+            };
 
             if self.vim_state.pending_operator.is_some()
                 && (self.vim_state.command_buffer == "i" || self.vim_state.command_buffer == "a")
@@ -1028,13 +1382,12 @@ impl App {
                     op,
                     ia,
                     key_char,
-                    &self.chat_input,
+                    &buffer,
                 );
                 self.apply_vim_action(action);
                 return;
             }
-            let action =
-                vim_process_key(&mut self.vim_state, key_char, &modifiers, &self.chat_input);
+            let action = vim_process_key(&mut self.vim_state, key_char, &modifiers, &buffer);
             self.apply_vim_action(action);
             return;
         }
@@ -1042,9 +1395,26 @@ impl App {
         self.handle_chat_key_normal(key);
     }
 
-    fn push_undo_snapshot(&mut self) {
-        if self.undo_stack.last().map(|s| s.as_str()) != Some(&self.chat_input) {
-            self.undo_stack.push(self.chat_input.clone());
+    fn toggle_vim_from_command(&mut self) {
+        self.vim_enabled = !self.vim_enabled;
+        self.vim_state = VimState::default();
+        let status = if self.vim_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.chat_messages.push(ChatMessage::with_role_now(
+            "system",
+            format!("Vim mode {status}"),
+        ));
+        let char_count = self.chat_input.char_count();
+        self.set_chat_cursor(self.chat_cursor.min(char_count));
+    }
+
+    fn snapshot_undo(&mut self) {
+        let current = self.chat_input.as_string();
+        if self.undo_stack.last().map(|s| s.as_str()) != Some(current.as_str()) {
+            self.undo_stack.push(current);
             if self.undo_stack.len() > 100 {
                 self.undo_stack.remove(0);
             }
@@ -1052,55 +1422,45 @@ impl App {
         }
     }
 
+    fn push_undo_snapshot(&mut self) {
+        self.typing_run = false;
+        self.snapshot_undo();
+    }
+
+    fn push_typing_undo_snapshot(&mut self) {
+        if self.typing_run {
+            return;
+        }
+        self.snapshot_undo();
+        self.typing_run = true;
+    }
+
     fn apply_vim_action(&mut self, action: crate::vim_mode::types::VimAction) {
-        use crate::vim_mode::types::{VimAction, VimMode};
+        use crate::vim_mode::types::VimAction;
         match action {
             VimAction::InsertChar(c) => {
-                self.push_undo_snapshot();
-                self.chat_input.insert(self.chat_cursor_pos, c);
-                self.chat_cursor_pos += c.len_utf8();
+                self.push_typing_undo_snapshot();
+                let mut encoded = [0u8; 4];
+                self.chat_input
+                    .insert_at(self.chat_cursor, c.encode_utf8(&mut encoded));
+                self.set_chat_cursor(self.chat_cursor + 1);
+                self.typing_run = true;
             }
-            VimAction::CursorMove(logical_pos) => {
-
-                let byte_pos = self
-                    .chat_input
-                    .char_indices()
-                    .nth(logical_pos)
-                    .map(|(b, _)| b)
-                    .unwrap_or(self.chat_input.len());
-                self.chat_cursor_pos = byte_pos;
-
-                self.vim_state.cursor_pos = logical_pos;
+            VimAction::CursorMove(char_pos) => {
+                self.set_chat_cursor(char_pos);
             }
             VimAction::DeleteRange(start_char, end_char) => {
-                let char_indices: Vec<(usize, char)> = self.chat_input.char_indices().collect();
-                let s = char_indices
-                    .get(start_char)
-                    .map(|(b, _)| *b)
-                    .unwrap_or(self.chat_input.len());
-                let e = char_indices
-                    .get(end_char)
-                    .map(|(b, _)| *b)
-                    .unwrap_or(self.chat_input.len());
+                let char_count = self.chat_input.char_count();
+                let s = start_char.min(char_count);
+                let e = end_char.min(char_count);
                 if s < e {
                     self.push_undo_snapshot();
-                    self.chat_input.drain(s..e);
-                    self.chat_cursor_pos = s;
-                    self.vim_state.cursor_pos = start_char;
+                    self.chat_input.delete_range(s, e);
+                    self.set_chat_cursor(s);
                 }
             }
-            VimAction::ModeChange(mode) => {
-
-                match mode {
-                    VimMode::Insert => {
-
-                        let char_count = self.chat_input.chars().count();
-                        if self.vim_state.cursor_pos >= char_count {
-                            self.chat_cursor_pos = self.chat_input.len();
-                        }
-                    }
-                    _ => {}
-                }
+            VimAction::ModeChange(_) => {
+                self.set_chat_cursor(self.vim_state.cursor_pos);
             }
             VimAction::Submit => {
                 self.send_chat();
@@ -1108,45 +1468,49 @@ impl App {
             VimAction::Cancel => {
                 if self.bridge.is_busy {
                     let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+                    self.chat_messages.push(ChatMessage::with_role_now(
+                        "system",
+                        "Cancelling current turn\u{2026}".into(),
+                    ));
                 }
             }
             VimAction::YankRange(start_char, end_char) => {
-                let chars: Vec<char> = self.chat_input.chars().collect();
-                let s = start_char.min(chars.len());
-                let e = end_char.min(chars.len());
+                let char_count = self.chat_input.char_count();
+                let s = start_char.min(char_count);
+                let e = end_char.min(char_count);
                 if s < e {
-                    self.vim_clipboard = chars[s..e].iter().collect();
+                    self.vim_clipboard = self.chat_input.text_range(s, e);
                 }
             }
             VimAction::PasteAfter => {
                 if !self.vim_clipboard.is_empty() {
                     self.push_undo_snapshot();
                     let text = self.vim_clipboard.clone();
-                    self.chat_input.insert_str(self.chat_cursor_pos, &text);
-                    self.chat_cursor_pos += text.len();
+                    let inserted_chars = text.chars().count();
+                    self.chat_input.insert_at(self.chat_cursor, &text);
+                    self.set_chat_cursor(self.chat_cursor + inserted_chars);
                 }
             }
             VimAction::PasteBefore => {
                 if !self.vim_clipboard.is_empty() {
                     self.push_undo_snapshot();
                     let text = self.vim_clipboard.clone();
-                    self.chat_input.insert_str(self.chat_cursor_pos, &text);
+                    self.chat_input.insert_at(self.chat_cursor, &text);
+                    self.set_chat_cursor(self.chat_cursor);
                 }
             }
             VimAction::Undo => {
                 if let Some(prev) = self.undo_stack.pop() {
-                    self.redo_stack.push(self.chat_input.clone());
-                    self.chat_input = prev;
-                    self.chat_cursor_pos = self.chat_input.len();
-                    self.vim_state.cursor_pos = self.chat_input.chars().count();
+                    self.redo_stack.push(self.chat_input.as_string());
+                    self.chat_input = crate::editor_core::TextBuffer::from_text(&prev);
+                    self.set_chat_cursor(self.chat_input.char_count());
                 }
             }
             VimAction::Redo => {
                 if let Some(next) = self.redo_stack.pop() {
-                    self.undo_stack.push(self.chat_input.clone());
-                    self.chat_input = next;
-                    self.chat_cursor_pos = self.chat_input.len();
-                    self.vim_state.cursor_pos = self.chat_input.chars().count();
+                    self.undo_stack.push(self.chat_input.as_string());
+                    self.chat_input = crate::editor_core::TextBuffer::from_text(&next);
+                    self.set_chat_cursor(self.chat_input.char_count());
                 }
             }
             VimAction::NoOp => {}
@@ -1205,7 +1569,7 @@ impl App {
                 self.command_palette_selected = 0;
             }
             KeyCode::Backspace => {
-                self.command_palette_filter.pop();
+                pop_last_char(&mut self.command_palette_filter);
                 self.command_palette_selected = 0;
             }
             _ => {}
@@ -1230,8 +1594,7 @@ impl App {
                 self.vim_state = VimState::default();
             }
             "action:clear" => {
-                self.chat_messages.clear();
-                self.chat_reconciler.reset();
+                self.clear_chat_view();
             }
             "action:help" => self.show_help = !self.show_help,
             "action:quit" => self.should_quit = true,
@@ -1240,27 +1603,54 @@ impl App {
     }
 
     fn send_chat(&mut self) {
-        if !self.chat_input.is_empty() {
-            let msg = self.chat_input.clone();
-            self.chat_input.clear();
-            self.chat_cursor_pos = 0;
-            if let Some(cmd) = msg.strip_prefix('/') {
-                let parts: Vec<&str> = cmd.split_whitespace().collect();
-                let name = parts.first().unwrap_or(&"").to_string();
-                let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+        let msg = self.chat_input.as_string();
+        if msg.is_empty() {
+            return;
+        }
+        if msg.trim() == "/vim" {
+            self.toggle_vim_from_command();
+            return;
+        }
+        if self.bridge.is_busy && !msg.starts_with('/') {
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                "Agent is busy  -  press Esc (or Ctrl+C) to cancel the current turn first.".into(),
+            ));
+            return;
+        }
+        self.chat_input = crate::editor_core::TextBuffer::new();
+        self.set_chat_cursor(0);
+        if let Some(cmd) = msg.strip_prefix('/') {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            let name = parts.first().unwrap_or(&"").to_string();
+            let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                format!("/{name} {}", args.join(" ")),
+            ));
+            if !self
+                .bridge
+                .send(agent_bridge::UserInput::SlashCommand { name, args })
+            {
                 self.chat_messages.push(ChatMessage::with_role_now(
                     "system",
-                    format!("/{name} {}", args.join(" ")),
+                    "Failed to deliver the command to the agent (channel unavailable). Please retry.".into(),
                 ));
-                let _ = self
-                    .bridge
-                    .send(agent_bridge::UserInput::SlashCommand { name, args });
-            } else {
+                self.chat_input = crate::editor_core::TextBuffer::from_text(&msg);
+                self.set_chat_cursor(self.chat_input.char_count());
+            }
+        } else {
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "user",
+                msg.clone(),
+            ));
+            if !self.bridge.send(agent_bridge::UserInput::Chat(msg.clone())) {
                 self.chat_messages.push(ChatMessage::with_role_now(
-                    "user",
-                    msg.clone(),
+                    "system",
+                    "Failed to deliver your message to the agent (channel unavailable). Your text has been restored  -  please retry.".into(),
                 ));
-                let _ = self.bridge.send(agent_bridge::UserInput::Chat(msg));
+                self.chat_input = crate::editor_core::TextBuffer::from_text(&msg);
+                self.set_chat_cursor(self.chat_input.char_count());
             }
         }
     }
@@ -1268,70 +1658,68 @@ impl App {
     fn handle_chat_key_normal(&mut self, key: event::KeyEvent) {
         match key.code {
             KeyCode::Char(c) => {
-                self.push_undo_snapshot();
-                self.chat_input.insert(self.chat_cursor_pos, c);
-                self.chat_cursor_pos += c.len_utf8();
+                self.push_typing_undo_snapshot();
+                let mut encoded = [0u8; 4];
+                self.chat_input
+                    .insert_at(self.chat_cursor, c.encode_utf8(&mut encoded));
+                self.set_chat_cursor(self.chat_cursor + 1);
+                self.typing_run = true;
             }
             KeyCode::Backspace => {
-                if self.chat_cursor_pos > 0 {
+                if self.chat_cursor > 0 {
                     self.push_undo_snapshot();
-                    let prev = self.chat_input[..self.chat_cursor_pos]
-                        .chars()
-                        .last()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    let start = self.chat_cursor_pos - prev;
-                    self.chat_input.drain(start..self.chat_cursor_pos);
-                    self.chat_cursor_pos = start;
+                    let start = self.chat_cursor - 1;
+                    self.chat_input.delete_range(start, self.chat_cursor);
+                    self.set_chat_cursor(start);
                 }
             }
             KeyCode::Delete => {
-                if self.chat_cursor_pos < self.chat_input.len() {
+                if self.chat_cursor < self.chat_input.char_count() {
                     self.push_undo_snapshot();
-                    let next = self.chat_input[self.chat_cursor_pos..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
                     self.chat_input
-                        .drain(self.chat_cursor_pos..self.chat_cursor_pos + next);
+                        .delete_range(self.chat_cursor, self.chat_cursor + 1);
                 }
             }
             KeyCode::Left => {
-                if self.chat_cursor_pos > 0 {
-                    let prev = self.chat_input[..self.chat_cursor_pos]
-                        .chars()
-                        .last()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    self.chat_cursor_pos -= prev;
+                if self.chat_cursor > 0 {
+                    self.set_chat_cursor(self.chat_cursor - 1);
                 }
             }
             KeyCode::Right => {
-                if self.chat_cursor_pos < self.chat_input.len() {
-                    let next = self.chat_input[self.chat_cursor_pos..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    self.chat_cursor_pos += next;
+                self.set_chat_cursor(self.chat_cursor + 1);
+            }
+            KeyCode::Up => {
+                let (line, col) = self.chat_input.char_to_line_col(self.chat_cursor);
+                if line > 0 {
+                    self.set_chat_cursor(self.chat_input.line_col_to_char(line - 1, col));
+                }
+            }
+            KeyCode::Down => {
+                let (line, col) = self.chat_input.char_to_line_col(self.chat_cursor);
+                if line + 1 < self.chat_input.line_count() {
+                    self.set_chat_cursor(self.chat_input.line_col_to_char(line + 1, col));
                 }
             }
             KeyCode::Home => {
-                self.chat_cursor_pos = 0;
+                self.set_chat_cursor(0);
             }
             KeyCode::End => {
-                self.chat_cursor_pos = self.chat_input.len();
+                self.set_chat_cursor(self.chat_input.char_count());
             }
             KeyCode::Esc if self.bridge.is_busy => {
                 let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+                self.chat_messages.push(ChatMessage::with_role_now(
+                    "system",
+                    "Cancelling current turn\u{2026}".into(),
+                ));
             }
             KeyCode::Enter
                 if key.modifiers.contains(KeyModifiers::SHIFT)
                     || key.modifiers.contains(KeyModifiers::ALT) =>
             {
-                self.chat_input.insert(self.chat_cursor_pos, '\n');
-                self.chat_cursor_pos += 1;
+                self.push_undo_snapshot();
+                self.chat_input.insert_at(self.chat_cursor, "\n");
+                self.set_chat_cursor(self.chat_cursor + 1);
             }
             KeyCode::Enter => {
                 self.send_chat();
@@ -1406,6 +1794,7 @@ impl App {
                     hunk_index,
                     new_batch_id,
                 }) => {
+                    self.diff_review_state.reverting_entries.remove(&entry_id);
                     diff_review::mark_reverted(
                         &mut self.edit_batch_registry,
                         entry_id,
@@ -1415,7 +1804,20 @@ impl App {
                         Some(format!("hunk reverted via new batch {new_batch_id}"));
                     self.mark_dirty();
                 }
-                Ok(RevertHunkOutcome::Failed { message }) => {
+                Ok(RevertHunkOutcome::FileDone { entry_id, summary }) => {
+                    self.diff_review_state.reverting_entries.remove(&entry_id);
+                    diff_review::mark_reverted(
+                        &mut self.edit_batch_registry,
+                        entry_id,
+                        None,
+                    );
+                    self.diff_review_state.toast = Some(summary);
+                    self.mark_dirty();
+                }
+                Ok(RevertHunkOutcome::Failed { entry_id, message }) => {
+                    if let Some(id) = entry_id {
+                        self.diff_review_state.reverting_entries.remove(&id);
+                    }
                     self.diff_review_state.toast = Some(message);
                     self.mark_dirty();
                 }
@@ -1476,7 +1878,9 @@ impl App {
                         "[{}] inline_edit_error: {summary}",
                         chrono::Local::now().format("%H:%M:%S")
                     ));
-                    self.inline_edit_modal.status = Some(summary);
+                    self.inline_edit_modal.submitting = false;
+                    self.inline_edit_modal.status =
+                        Some(format!("{summary} (Esc to cancel, Enter to retry)"));
                     crate::observability::tui_metrics::incr_tui_inline_edit_failed();
                     self.mark_dirty();
                 }
@@ -1498,6 +1902,16 @@ impl App {
         }
     }
 
+    fn clear_chat_view(&mut self) {
+        self.chat_messages.clear();
+        self.chat_reconciler.reset();
+        self.streaming_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.stream_finalized = true;
+        self.chat_scroll_offset = 0;
+        chat::render_cache::bump_content_version();
+    }
+
     pub fn handle_agent_event(&mut self, ev: agent_bridge::AgentEvent) {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         {
@@ -1505,11 +1919,34 @@ impl App {
                 agent_bridge::AgentEvent::AssistantMessage(text) => {
                     self.event_entries
                         .push(format!("[{ts}] assistant: response received"));
-                    self.chat_messages.push(ChatMessage::from_parts(
-                        "assistant",
-                        text,
-                        ts.clone(),
-                    ));
+                    let streamed = std::mem::take(&mut self.streaming_buffer);
+                    let final_text = if text.trim().is_empty() && !streamed.trim().is_empty() {
+                        streamed
+                    } else {
+                        text
+                    };
+                    let replaced = if let Some(last) = self.chat_messages.last_mut() {
+                        if last.role == "system" && last.content == "Thinking\u{2026}" {
+                            last.role = "assistant".into();
+                            last.content = final_text.clone();
+                            last.timestamp = ts.clone();
+                            last.mark_content_dirty();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !replaced {
+                        self.chat_messages.push(ChatMessage::from_parts(
+                            "assistant",
+                            final_text,
+                            ts.clone(),
+                        ));
+                    }
+                    self.reasoning_buffer.clear();
+                    self.stream_finalized = true;
                 }
                 agent_bridge::AgentEvent::ToolUse { name, id, .. } => {
                     self.event_entries.push(format!("[{ts}] tool_use: {name}"));
@@ -1535,6 +1972,8 @@ impl App {
                 }
                 agent_bridge::AgentEvent::Thinking => {
                     self.event_entries.push(format!("[{ts}] thinking"));
+                    self.stream_finalized = false;
+                    self.reasoning_buffer.clear();
 
                     let already_thinking = self
                         .chat_messages
@@ -1576,9 +2015,14 @@ impl App {
                             ));
                         }
                     }
+                    self.reasoning_buffer.clear();
+                    self.stream_finalized = true;
                 }
                 agent_bridge::AgentEvent::Error(e) => {
                     self.event_entries.push(format!("[{ts}] error: {e}"));
+                    self.streaming_buffer.clear();
+                    self.reasoning_buffer.clear();
+                    self.stream_finalized = true;
                     self.chat_messages
                         .push(ChatMessage::from_parts("error", e, ts.clone()));
                 }
@@ -1592,11 +2036,15 @@ impl App {
                         .push(format!("[{ts}] mode_changed: {mode_name}"));
                 }
                 agent_bridge::AgentEvent::StreamChunk(chunk) => {
-                    self.streaming_buffer.push_str(&chunk);
+                    if !self.stream_finalized {
+                        self.streaming_buffer.push_str(&chunk);
+                    }
                 }
-                agent_bridge::AgentEvent::ThinkingChunk(_delta) => {
-
+                agent_bridge::AgentEvent::ThinkingChunk(delta) => {
                     self.event_entries.push(format!("[{ts}] thinking_chunk"));
+                    if !self.stream_finalized {
+                        self.reasoning_buffer.push_str(&delta);
+                    }
                 }
                 agent_bridge::AgentEvent::ConfigWarning(msg) => {
                     self.event_entries
@@ -1638,13 +2086,14 @@ impl App {
                     }
                     if let Some(diff_text) = diff {
                         let max_lines = 30;
+                        let total_lines = diff_text.lines().count();
                         for (i, line) in diff_text.lines().enumerate() {
                             if i >= max_lines {
                                 self.chat_messages.push(ChatMessage::from_parts(
                                     "tool",
                                     format!(
                                         "  ... ({} more lines)",
-                                        diff_text.lines().count() - max_lines
+                                        total_lines - max_lines
                                     ),
                                     ts.clone(),
                                 ));
@@ -1694,22 +2143,43 @@ impl App {
                 }
                 agent_bridge::AgentEvent::ApprovalRequest {
                     tool_name,
+                    tool_id,
                     args_summary,
-                    ..
                 } => {
                     self.chat_messages.push(ChatMessage::from_parts(
                         "system",
                         format!("\u{26A0} Approval needed: {tool_name}  -  {args_summary}"),
                         ts.clone(),
                     ));
+                    self.pending_approvals.push_back(ApprovalPrompt {
+                        tool_id,
+                        tool_name,
+                        args_summary,
+                    });
                 }
-                agent_bridge::AgentEvent::QuestionAsked { prompt, .. } => {
+                agent_bridge::AgentEvent::QuestionAsked {
+                    question_id,
+                    prompt,
+                    options,
+                    allow_multiple,
+                } => {
 
                     self.chat_messages.push(ChatMessage::from_parts(
                         "system",
                         format!("\u{2753} {prompt}"),
                         ts.clone(),
                     ));
+                    let option_count = options.len();
+                    self.pending_questions.push_back(QuestionPromptState {
+                        question_id,
+                        prompt,
+                        options,
+                        allow_multiple,
+                        highlighted: 0,
+                        chosen: vec![false; option_count],
+                        free_text: String::new(),
+                        text_focus: option_count == 0,
+                    });
                 }
                 agent_bridge::AgentEvent::QuestionAnswered { items } => {
 
@@ -1778,6 +2248,43 @@ impl App {
         }
     }
 
+    fn refresh_provider_health_view(&mut self) {
+        if self.health_rx.is_none() {
+            if let Some(svc) = try_get_services() {
+                self.health_rx = Some(svc.health_broadcaster.subscribe());
+            }
+        }
+        let mut changed = false;
+        if let Some(rx) = self.health_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(signal) => {
+                        self.health_rows.insert(signal.key(), signal);
+                        changed = true;
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        if changed {
+            let rows: Vec<crate::observability::views::ProviderHealthRow> = self
+                .health_rows
+                .values()
+                .map(|s| crate::observability::views::ProviderHealthRow {
+                    provider: s.provider.clone(),
+                    model: s.model.clone(),
+                    success_rate: s.success_rate,
+                    p95_latency_ms: s.p95_latency_ms,
+                    retries_per_req: s.retries_per_req,
+                    cost_per_1k_tok: s.cost_per_1k_tok,
+                })
+                .collect();
+            self.provider_health_view =
+                crate::observability::views::ProviderHealthView::from_rows(rows);
+        }
+    }
+
     fn sync_from_services(&mut self) {
         if let Some(bs) = try_get_bootstrap_state() {
             bs.read(|s| {
@@ -1816,8 +2323,26 @@ impl App {
                 if let Some(ref m) = s.main_loop_model_override {
                     self.status_info.model = m.clone();
                 }
+
+                let mut segments: Vec<(String, u64)> = s
+                    .model_usage
+                    .iter()
+                    .map(|(name, u)| (name.clone(), u.input_tokens + u.output_tokens))
+                    .filter(|(_, tokens)| *tokens > 0)
+                    .collect();
+                segments.sort_by(|a, b| b.1.cmp(&a.1));
+                let total_tokens: u64 = segments.iter().map(|(_, t)| *t).sum();
+                if total_tokens > 0 {
+                    self.budget_view = crate::observability::views::BudgetView::new(
+                        total_tokens,
+                        total_tokens,
+                        segments,
+                    );
+                }
             });
         }
+
+        self.refresh_provider_health_view();
 
         if self.tick_count == 1 {
             if let Some(svc) = try_get_services() {
@@ -1848,9 +2373,11 @@ impl App {
             }
 
             if self.tool_entries.is_empty() || self.tick_count % 10 == 0 {
-                let guard = svc.tool_use_summary.lock();
-                self.tool_entries = guard
-                    .aggregate()
+                let stats = {
+                    let guard = svc.tool_use_summary.lock();
+                    guard.aggregate()
+                };
+                self.tool_entries = stats
                     .into_iter()
                     .map(|s| ToolEntry {
                         name: s.tool_name,
@@ -1956,8 +2483,12 @@ fn draw_chat_partial(f: &mut Frame, app: &mut App) {
             Constraint::Length(1),
         ])
         .split(f.area());
+    draw_tabs(f, app, chunks[0]);
     draw_chat(f, app, chunks[1]);
     inline_edit_modal::draw(f, &app.inline_edit_modal, chunks[1]);
+    draw_status_bar(f, app, chunks[2]);
+    draw_approval_overlay(f, app);
+    draw_question_overlay(f, app);
 }
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -2015,6 +2546,145 @@ fn draw(f: &mut Frame, app: &mut App) {
     if app.command_palette_open {
         draw_command_palette(f, app);
     }
+
+    draw_approval_overlay(f, app);
+    draw_question_overlay(f, app);
+}
+
+fn centered_overlay_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width.saturating_sub(2)).max(1);
+    let h = height.min(area.height.saturating_sub(2)).max(1);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn draw_approval_overlay(f: &mut Frame, app: &App) {
+    let Some(prompt) = app.pending_approvals.front() else {
+        return;
+    };
+    let area = f.area();
+    let popup = centered_overlay_rect(area, 64, 9);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "  Tool approval required",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  tool: ", theme::dim()),
+            Span::styled(prompt.tool_name.clone(), theme::warning_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("  args: ", theme::dim()),
+            Span::styled(prompt.args_summary.clone(), theme::normal()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  y: approve    n / Esc: deny",
+            theme::dim(),
+        )),
+    ];
+    if app.pending_approvals.len() > 1 {
+        lines.push(Line::from(Span::styled(
+            format!("  ({} more pending)", app.pending_approvals.len() - 1),
+            theme::dim(),
+        )));
+    }
+
+    let block = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(ratatui::style::Color::Yellow))
+            .title(" Approval "),
+    );
+    f.render_widget(ratatui::widgets::Clear, popup);
+    f.render_widget(block, popup);
+}
+
+fn draw_question_overlay(f: &mut Frame, app: &App) {
+    if !app.pending_approvals.is_empty() {
+        return;
+    }
+    let Some(question) = app.pending_questions.front() else {
+        return;
+    };
+    let area = f.area();
+    let height = (question.options.len() as u16 + 9).min(area.height.saturating_sub(2));
+    let popup = centered_overlay_rect(area, 70, height);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("  {}", question.prompt),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for (idx, option) in question.options.iter().enumerate() {
+        let pointer = if idx == question.highlighted && !question.text_focus {
+            "\u{25B8} "
+        } else {
+            "  "
+        };
+        let checkbox = if question.allow_multiple {
+            if question.chosen.get(idx).copied().unwrap_or(false) {
+                "[x] "
+            } else {
+                "[ ] "
+            }
+        } else {
+            ""
+        };
+        let style = if idx == question.highlighted && !question.text_focus {
+            theme::selected()
+        } else {
+            theme::normal()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {pointer}{checkbox}{}", option.label),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    let input_style = if question.text_focus {
+        theme::selected()
+    } else {
+        theme::dim()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  free text: ", theme::dim()),
+        Span::styled(
+            if question.free_text.is_empty() && !question.text_focus {
+                "(Tab to type)".to_string()
+            } else {
+                question.free_text.clone()
+            },
+            input_style,
+        ),
+    ]));
+    lines.push(Line::from(""));
+    let hint = if question.allow_multiple {
+        "  Up/Down: move   Space: toggle   Tab: free text   Enter: answer   Esc: skip"
+    } else {
+        "  Up/Down: move   Tab: free text   Enter: answer   Esc: skip"
+    };
+    lines.push(Line::from(Span::styled(hint, theme::dim())));
+    if app.pending_questions.len() > 1 {
+        lines.push(Line::from(Span::styled(
+            format!("  ({} more question(s) queued)", app.pending_questions.len() - 1),
+            theme::dim(),
+        )));
+    }
+
+    let block = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT))
+            .title(" Question "),
+    );
+    f.render_widget(ratatui::widgets::Clear, popup);
+    f.render_widget(block, popup);
 }
 
 fn draw_help_overlay(f: &mut Frame) {
@@ -2247,8 +2917,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(channels_block, right_chunks[0]);
 
-    let spinner_idx = (app.tick_count as usize) % theme::SPINNER_FRAMES.len();
-    let spinner = theme::SPINNER_FRAMES[spinner_idx];
+    let spinner = theme::spinner_frame_now();
 
     let recent: Vec<Line> = app
         .log_entries
@@ -2269,84 +2938,171 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(recent_block, right_chunks[1]);
 }
 
+fn build_chat_lines(messages: &[ChatMessage]) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(messages.len());
+    for m in messages {
+        let header = vec![
+            Span::styled(format!("[{}] ", m.timestamp), theme::dim()),
+            Span::styled(format!("{}: ", m.role), theme::style_for_role(&m.role)),
+        ];
+        if m.content.contains("```") {
+            lines.push(Line::from(header));
+            let highlighted =
+                chat::render_cache::render_message_cached(&m.highlighted_cache, &m.content);
+
+            lines.extend(highlighted.iter().cloned());
+        } else {
+            let mut spans = header;
+            spans.push(Span::styled(m.content.clone(), theme::normal()));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+pub(super) fn pop_last_char(s: &mut String) {
+    if let Some((idx, _)) = s.char_indices().next_back() {
+        s.truncate(idx);
+    }
+}
+
+fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
+    let spans: Vec<Span<'a>> = line
+        .spans
+        .iter()
+        .map(|s| Span {
+            content: std::borrow::Cow::Borrowed(s.content.as_ref()),
+            style: s.style,
+        })
+        .collect();
+    let mut out = Line::from(spans);
+    out.style = line.style;
+    out.alignment = line.alignment;
+    out
+}
+
 fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
         .split(area);
 
-    let mut messages: Vec<Line> = Vec::new();
-    let viewport_fp = {
+    let lines_fp = {
+        use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::Hasher;
         h.write_usize(app.chat_messages.len());
-        h.write_u64(
-            app.chat_messages
-                .last()
-                .map(|m| m.content_hash)
-                .unwrap_or(0),
-        );
-        h.write_usize(app.streaming_buffer.len());
-        h.write_u8(app.bridge.is_busy as u8);
+        h.write_u64(chat::render_cache::content_version());
+        if let Some(last) = app.chat_messages.last() {
+            h.write_u64(last.content_hash);
+            last.role.hash(&mut h);
+            last.timestamp.hash(&mut h);
+        }
         h.write_u16(chunks[0].width);
-        h.write_u16(chunks[0].height);
-        h.write_usize(app.chat_scroll_offset);
         h.finish()
     };
-    let _viewport_hit = app.chat_render_cache.viewport_matches(viewport_fp);
-    for m in &app.chat_messages {
-        let header = vec![
-            Span::styled(format!("[{}] ", m.timestamp), theme::dim()),
-            Span::styled(format!("{}: ", m.role), theme::style_for_role(&m.role)),
-        ];
-        if m.content.contains("```") {
-            messages.push(Line::from(header));
-            let highlighted =
-                chat::render_cache::render_message_cached(&m.highlighted_cache, &m.content);
-
-            messages.extend(highlighted.iter().cloned());
-        } else {
-            let mut spans = header;
-            spans.push(Span::styled(m.content.clone(), theme::normal()));
-            messages.push(Line::from(spans));
-        }
+    if !app.chat_render_cache.lines_match(lines_fp) {
+        let built = build_chat_lines(&app.chat_messages);
+        app.chat_render_cache.store_lines(lines_fp, built);
     }
 
+    let mut live_lines: Vec<Line<'static>> = Vec::new();
+    if app.bridge.is_busy && !app.reasoning_buffer.is_empty() {
+        let reasoning: &str = if app.reasoning_buffer.len() > 800 {
+            let start = app.reasoning_buffer.len() - 800;
+            let start = crate::util::floor_char_boundary(&app.reasoning_buffer, start);
+            &app.reasoning_buffer[start..]
+        } else {
+            &app.reasoning_buffer
+        };
+        for line in reasoning.lines() {
+            live_lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                theme::thinking_style(),
+            )));
+        }
+    }
     if app.bridge.is_busy && !app.streaming_buffer.is_empty() {
-        let spinner_idx = (app.tick_count as usize) % theme::SPINNER_FRAMES.len();
-        let spinner = theme::SPINNER_FRAMES[spinner_idx];
+        let spinner = theme::spinner_frame_now();
 
         let preview: &str = if app.streaming_buffer.len() > 800 {
             let start = app.streaming_buffer.len() - 800;
-            let start = app.streaming_buffer.floor_char_boundary(start);
+            let start = crate::util::floor_char_boundary(&app.streaming_buffer, start);
             &app.streaming_buffer[start..]
         } else {
             &app.streaming_buffer
         };
         for line in preview.lines() {
-            messages.push(Line::from(Span::styled(
+            live_lines.push(Line::from(Span::styled(
                 format!("{spinner} {line}"),
                 theme::thinking_style(),
             )));
         }
     } else if app.bridge.is_busy {
-        let spinner_idx = (app.tick_count as usize) % theme::SPINNER_FRAMES.len();
-        let spinner = theme::SPINNER_FRAMES[spinner_idx];
-        messages.push(Line::from(Span::styled(
+        let spinner = theme::spinner_frame_now();
+        live_lines.push(Line::from(Span::styled(
             format!("{spinner} Agent is thinking… (Esc to cancel)"),
             theme::thinking_style(),
         )));
     }
 
-    let visible_messages = if app.chat_scroll_offset > 0 && messages.len() > app.chat_scroll_offset
-    {
-        messages[..messages.len() - app.chat_scroll_offset].to_vec()
+    let cached_len = app.chat_render_cache.lines().len();
+    let total = cached_len + live_lines.len();
+    let view_height = (chunks[0].height as usize).saturating_sub(2);
+    app.chat_render_cache
+        .record_scroll_bounds(total, view_height);
+    if app.chat_scroll_offset > total.saturating_sub(view_height) {
+        app.chat_scroll_offset = total.saturating_sub(view_height);
+    }
+    let keep = if app.chat_scroll_offset > 0 && total > app.chat_scroll_offset {
+        total - app.chat_scroll_offset
     } else {
-        messages
+        total
     };
 
-    let visible_len = visible_messages.len();
-    let messages_block = Paragraph::new(visible_messages)
+    let viewport_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut vh = std::collections::hash_map::DefaultHasher::new();
+        vh.write_u64(lines_fp);
+        vh.write_usize(app.chat_scroll_offset);
+        vh.write_u16(chunks[0].height);
+        vh.write_usize(keep);
+        for line in &live_lines {
+            for span in &line.spans {
+                span.content.hash(&mut vh);
+            }
+        }
+        vh.finish()
+    };
+
+    if !app.chat_render_cache.viewport_match(viewport_hash) {
+        let end = keep;
+        let start = end.saturating_sub(view_height);
+        let cached = app.chat_render_cache.lines();
+        let mut visible_messages: Vec<Line<'static>> = Vec::with_capacity(end - start);
+        for idx in start..end {
+            if idx < cached_len {
+                if let Some(line) = cached.get(idx) {
+                    visible_messages.push(line.clone());
+                }
+            } else {
+                let live_idx = idx - cached_len;
+                if let Some(line) = live_lines.get(live_idx) {
+                    visible_messages.push(line.clone());
+                }
+            }
+        }
+        app.chat_render_cache
+            .store_viewport(viewport_hash, visible_messages);
+    }
+
+    let visible_len = app.chat_render_cache.visible_lines().len();
+    let view: Vec<Line<'_>> = app
+        .chat_render_cache
+        .visible_lines()
+        .iter()
+        .map(borrow_line)
+        .collect();
+    let messages_block = Paragraph::new(view)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2361,7 +3117,7 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         .len()
         .saturating_sub(visible_len.saturating_add(app.chat_scroll_offset));
     app.chat_render_cache
-        .record_render(viewport_fp, first_visible_idx, chunks[0].height);
+        .record_render(viewport_hash, first_visible_idx, chunks[0].height);
     crate::observability::tui_metrics::add_tui_chat_lines_rendered(visible_len as u64);
 
     let input_title = if app.bridge.is_busy {
@@ -2370,8 +3126,11 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         " Input (Enter to send, / for commands) "
     };
 
-    let before_cursor = &app.chat_input[..app.chat_cursor_pos.min(app.chat_input.len())];
-    let after_cursor = &app.chat_input[app.chat_cursor_pos.min(app.chat_input.len())..];
+    let cursor = app.chat_cursor.min(app.chat_input.char_count());
+    let before_cursor = app.chat_input.text_range(0, cursor);
+    let after_cursor = app
+        .chat_input
+        .text_range(cursor, app.chat_input.char_count());
     let input = Paragraph::new(Line::from(vec![
         Span::styled("> ", theme::info_style()),
         Span::styled(before_cursor, theme::normal()),
@@ -2717,7 +3476,11 @@ fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        let mut end = max.saturating_sub(3);
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
@@ -2806,7 +3569,49 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
+    }
+}
+
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+struct PanicHookGuard {
+    previous: Option<std::sync::Arc<PanicHook>>,
+}
+
+impl PanicHookGuard {
+    fn install() -> Self {
+        let previous = std::sync::Arc::new(std::panic::take_hook());
+        let chained = previous.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                DisableBracketedPaste
+            );
+            chained(info);
+        }));
+        Self {
+            previous: Some(previous),
+        }
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        let _ = std::panic::take_hook();
+        if let Some(previous) = self.previous.take() {
+            if let Ok(original) = std::sync::Arc::try_unwrap(previous) {
+                std::panic::set_hook(original);
+            }
+        }
     }
 }
 
@@ -2815,10 +3620,16 @@ async fn run_tui_inner(
     bridge: agent_bridge::AgentBridge,
     legacy: bool,
 ) -> anyhow::Result<()> {
+    let _panic_guard = PanicHookGuard::install();
     enable_raw_mode()?;
     let _guard = TerminalGuard::new();
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2857,6 +3668,8 @@ async fn run_event_driven_loop(
 
     let one_second = Duration::from_secs(1);
     let mut last_second = Instant::now();
+    let animation_period = Duration::from_millis(100);
+    let mut last_animation = Instant::now();
 
     loop {
         if app.dirty {
@@ -2984,6 +3797,15 @@ async fn run_event_driven_loop(
                     app.mark_dirty();
                 }
 
+                let animating = app.bridge.is_busy
+                    || !app.diff_review_state.reverting_entries.is_empty();
+                if animating && last_animation.elapsed() >= animation_period {
+                    last_animation = Instant::now();
+                    app.partial_redraw_pending = app.active_tab == Tab::Chat
+                        && app.diff_review_state.reverting_entries.is_empty();
+                    app.mark_dirty();
+                }
+
                 let before_msgs = app.chat_messages.len();
                 let before_buf = app.streaming_buffer.len();
                 app.drain_agent_events();
@@ -3023,10 +3845,18 @@ async fn run_legacy_loop(
     let mut last_tick = Instant::now();
 
     loop {
-        terminal.draw(|f| draw(f, app))?;
-        crate::observability::tui_metrics::incr_tui_frame_draws();
+        if app.dirty {
+            terminal.draw(|f| draw(f, app))?;
+            app.dirty = false;
+            app.partial_redraw_pending = false;
+            crate::observability::tui_metrics::incr_tui_frame_draws();
+        } else {
+            crate::observability::tui_metrics::incr_tui_frame_skipped_dirty();
+        }
 
-        let timeout = if app.bridge.is_busy {
+        let animating =
+            app.bridge.is_busy || !app.diff_review_state.reverting_entries.is_empty();
+        let timeout = if animating {
             poll_rate
         } else {
             tick_rate
@@ -3038,13 +3868,28 @@ async fn run_legacy_loop(
             let ev = event::read()?;
             handle_crossterm_event(app, terminal, ev)?;
             crate::observability::tui_metrics::incr_tui_input_events();
+            app.mark_dirty();
         }
 
+        let before_msgs = app.chat_messages.len();
+        let before_buf = app.streaming_buffer.len();
+        let before_events = app.event_entries.len();
         app.drain_agent_events();
+        if app.chat_messages.len() != before_msgs
+            || app.streaming_buffer.len() != before_buf
+            || app.event_entries.len() != before_events
+        {
+            app.mark_dirty();
+        }
+
+        if animating {
+            app.mark_dirty();
+        }
 
         if last_tick.elapsed() >= tick_rate {
             app.tick();
             last_tick = Instant::now();
+            app.mark_dirty();
         }
 
         if app.should_quit {
@@ -3062,6 +3907,7 @@ fn handle_crossterm_event(
 ) -> anyhow::Result<()> {
     match ev {
         Event::Key(key) => app.handle_key(key),
+        Event::Paste(text) => app.handle_paste(text),
         Event::Mouse(mouse) => match mouse.kind {
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 if mouse.row < 3 {
@@ -3083,7 +3929,7 @@ fn handle_crossterm_event(
             crossterm::event::MouseEventKind::ScrollUp => {
                 if app.active_tab == Tab::Chat {
                     app.chat_scroll_offset = (app.chat_scroll_offset + 3)
-                        .min(app.chat_messages.len().saturating_sub(1));
+                        .min(app.chat_render_cache.max_scroll_offset());
                 }
             }
             _ => {}

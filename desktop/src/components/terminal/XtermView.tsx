@@ -24,7 +24,7 @@ export type XtermViewProps = {
   active: boolean
   initialCwd?: string
   onSpawned?: (info: { sessionId: number; shell: string; cwd: string }) => void
-  onExited?: (info: { code: number; signal?: string | null }) => void
+  onExited?: (info: { code: number }) => void
   onError?: (message: string) => void
   forwardRef?: Ref<XtermViewHandle>
 }
@@ -207,10 +207,9 @@ export function XtermView(props: XtermViewProps) {
         })
         const exitUnlisten = await terminalApi.onExit((payload) => {
           if (payload.session_id !== sessionIdRef.current) return
-          const signal = payload.signal ? `, ${payload.signal}` : ''
-          terminal.writeln(`\r\n[process exited: ${payload.code}${signal}]`)
+          terminal.writeln(`\r\n[process exited: ${payload.code}]`)
           sessionIdRef.current = null
-          onExitedRef.current?.({ code: payload.code, signal: payload.signal ?? null })
+          onExitedRef.current?.({ code: payload.code })
         })
         unlistenRef.current = [outputUnlisten, exitUnlisten]
 

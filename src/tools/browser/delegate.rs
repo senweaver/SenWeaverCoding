@@ -11,9 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock};
 use tokio::time::{Duration, timeout};
 
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s\)\]\},\"'`<>]+"#).expect("browser_delegate URL regex must compile")
-});
+static URL_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s\)\]\},\"'`<>]+"#).ok());
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserDelegateConfig {
@@ -99,8 +98,10 @@ impl BrowserDelegateTool {
     }
 
     fn validate_task_urls(&self, task: &str) -> anyhow::Result<()> {
-        for m in URL_RE.find_iter(task) {
-            self.validate_url(m.as_str())?;
+        if let Some(re) = URL_RE.as_ref() {
+            for m in re.find_iter(task) {
+                self.validate_url(m.as_str())?;
+            }
         }
         Ok(())
     }
@@ -152,6 +153,8 @@ fn domain_matches(domain: &str, pattern: &str) -> bool {
 }
 
 const MAX_STDERR_CHARS: usize = 512;
+
+const MAX_STDOUT_BYTES: usize = 1_048_576;
 
 const VALID_EXTRACT_FORMATS: &[&str] = &["text", "json", "summary"];
 
@@ -288,7 +291,11 @@ impl Tool for BrowserDelegateTool {
 
         match result {
             Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                if stdout.len() > MAX_STDOUT_BYTES {
+                    crate::util::truncate_string_bytes(&mut stdout, MAX_STDOUT_BYTES);
+                    stdout.push_str("\n... [stdout truncated at 1MB]");
+                }
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stderr_truncated: String = stderr.chars().take(MAX_STDERR_CHARS).collect();
 

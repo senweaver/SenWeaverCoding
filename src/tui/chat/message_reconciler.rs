@@ -46,7 +46,7 @@ impl ChatMessageReconciler {
 
     pub fn reconcile(
         &mut self,
-        chat_messages: &mut Vec<super::ChatMessage>,
+        chat_messages: &mut Vec<crate::tui::ChatMessage>,
         actor_slot: &std::sync::Arc<
             once_cell::sync::OnceCell<std::sync::Arc<crate::session::SessionActor>>,
         >,
@@ -85,7 +85,7 @@ impl ChatMessageReconciler {
             {
                 continue;
             }
-            chat_messages.push(super::ChatMessage::from_parts(
+            chat_messages.push(crate::tui::ChatMessage::from_parts(
                 "system",
                 format!("↯ peer turn (#{}): {}", turn.seq, turn.input),
                 ts.clone(),

@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useTranslation } from '../../i18n'
+import { useTranslation, type TranslationKey } from '../../i18n'
 import { useProviderStore } from '../../stores/providerStore'
 import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -14,6 +14,7 @@ import type { EffortLevel, ModelInfo } from '../../types/settings'
 import { isValidRuntimeSelection, persistRuntimeSelection, resolveEffectiveRuntimeSelection } from '../../utils/runtimeSelection'
 import { syncRuntimeSelectionToBackend } from '../../utils/runtimeSync'
 import { enabledProviderModelIds } from '../../utils/providerModels'
+import { DEFAULT_MODEL_TYPE, buildModelTypeLookup, modelMatchesType, modelTypeLabelKey } from '../../utils/modelTypes'
 
 type ProviderChoice = {
   providerId: string
@@ -27,6 +28,8 @@ type Props = {
   onChange?: (modelId: string) => void
   runtimeKey?: string
   disabled?: boolean
+  requiredType?: string
+  modelPool?: ModelInfo[]
 }
 
 function buildProviderModels(provider: SavedProvider): ModelInfo[] {
@@ -54,13 +57,14 @@ function buildProviderChoices(
 }
 
 function resolveDefaultRuntimeSelection(
+  runtimeKey: string,
   activeId: string | null,
   activeProviderName: string | null,
   providers: SavedProvider[],
   currentModelId: string | undefined,
 ): RuntimeSelection | null {
   return resolveEffectiveRuntimeSelection(
-    null,
+    runtimeKey,
     providers,
     activeId ?? (
       activeProviderName
@@ -76,6 +80,8 @@ export function ModelSelector({
   onChange,
   runtimeKey,
   disabled = false,
+  requiredType = DEFAULT_MODEL_TYPE,
+  modelPool,
 }: Props = {}) {
   const t = useTranslation()
   const storeModel = useSettingsStore((s) => s.currentModel)
@@ -166,13 +172,49 @@ export function ModelSelector({
     }
   }, [open, updateDropdownPos])
 
+  const typeLookup = useMemo(() => buildModelTypeLookup(providers), [providers])
+
+  const renderTypeBadges = (modelId: string) => {
+    const types = typeLookup.get(modelId) ?? [DEFAULT_MODEL_TYPE]
+    return (
+      <div className="mt-1 flex flex-wrap gap-1">
+        {types.map((tp) => (
+          <span
+            key={tp}
+            className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-high)] px-1.5 py-[1px] text-[9px] font-medium leading-none text-[var(--color-text-tertiary)]"
+          >
+            {t(modelTypeLabelKey(tp) as TranslationKey)}
+          </span>
+        ))}
+      </div>
+    )
+  }
+
   const providerChoices = useMemo(
-    () => buildProviderChoices(providers, activeId),
-    [activeId, providers],
+    () =>
+      buildProviderChoices(providers, activeId)
+        .map((choice) => ({
+          ...choice,
+          models: choice.models.filter((model) =>
+            modelMatchesType(typeLookup, model.id, requiredType),
+          ),
+        }))
+        .filter((choice) => choice.models.length > 0),
+    [activeId, providers, typeLookup, requiredType],
+  )
+
+  const baseModels = isControlled && modelPool ? modelPool : availableModels
+
+  const filteredAvailableModels = useMemo(
+    () =>
+      baseModels.filter((model) =>
+        modelMatchesType(typeLookup, model.id, requiredType),
+      ),
+    [baseModels, typeLookup, requiredType],
   )
 
   const selectedModel = isControlled
-    ? availableModels.find((model) => model.id === value) || null
+    ? baseModels.find((model) => model.id === value) || null
     : storeModel
 
   const validRuntimeSelection = useMemo(() => {
@@ -190,8 +232,9 @@ export function ModelSelector({
     }
   }, [isRuntimeScoped, runtimeKey, providersLoading, providers, runtimeSelection])
 
-  const activeRuntimeSelection = isRuntimeScoped
+  const activeRuntimeSelection = isRuntimeScoped && runtimeKey
     ? validRuntimeSelection ?? resolveDefaultRuntimeSelection(
+      runtimeKey,
       activeId,
       activeProviderName,
       providers,
@@ -201,6 +244,7 @@ export function ModelSelector({
 
   useEffect(() => {
     if (!isRuntimeScoped || !runtimeKey || providersLoading || providers.length === 0) return
+    if (runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY) return
     if (!activeRuntimeSelection?.providerId || !activeRuntimeSelection.modelId.trim()) return
     if (validRuntimeSelection) {
       lastAutoSyncedRef.current = null
@@ -210,11 +254,7 @@ export function ModelSelector({
     if (lastAutoSyncedRef.current === syncKey) return
     lastAutoSyncedRef.current = syncKey
     persistRuntimeSelection(runtimeKey, activeRuntimeSelection)
-    void syncRuntimeSelectionToBackend(
-      activeRuntimeSelection,
-      runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY ? runtimeKey : null,
-      false,
-    )
+    void syncRuntimeSelectionToBackend(activeRuntimeSelection, null, false)
   }, [
     isRuntimeScoped,
     runtimeKey,
@@ -240,7 +280,7 @@ export function ModelSelector({
 
   const noConfiguredModels = isRuntimeScoped
     ? providerChoices.length === 0
-    : availableModels.length === 0
+    : filteredAvailableModels.length === 0
   const buttonModelLabel = noConfiguredModels
     ? t('model.unconfiguredPlaceholder')
     : isRuntimeScoped
@@ -370,6 +410,7 @@ export function ModelSelector({
                                     {model.description}
                                   </div>
                                 )}
+                                {renderTypeBadges(model.id)}
                               </div>
                             </div>
                           </button>
@@ -380,13 +421,13 @@ export function ModelSelector({
                 ))}
               </div>
               )
-            ) : availableModels.length === 0 ? (
+            ) : filteredAvailableModels.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center text-xs text-[var(--color-text-tertiary)]">
                 {t('settings.providers.empty')}
               </div>
             ) : (
               <div className="space-y-0.5">
-                {availableModels.map((model) => {
+                {filteredAvailableModels.map((model) => {
                   const isSelected = model.id === selectedModel?.id
                   return (
                     <button
@@ -431,6 +472,7 @@ export function ModelSelector({
                               {model.description}
                             </div>
                           )}
+                          {renderTypeBadges(model.id)}
                         </div>
                       </div>
                     </button>

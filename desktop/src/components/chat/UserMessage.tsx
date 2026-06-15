@@ -21,6 +21,19 @@ type Props = {
   onEditAsDraft?: () => void
 
   superseded?: boolean
+
+  designRef?: string
+  designRefName?: string
+  designRefElement?: string
+  designRefElementLabel?: string
+}
+
+function designRefIcon(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif', 'bmp'].includes(ext)) return 'image'
+  if (['mp4', 'webm', 'mov', 'm4v'].includes(ext)) return 'movie'
+  if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)) return 'graphic_eq'
+  return 'draw'
 }
 
 export function UserMessage({
@@ -32,9 +45,19 @@ export function UserMessage({
   restoreLabel,
   onEditAsDraft,
   superseded,
+  designRef,
+  designRefName,
+  designRefElement,
+  designRefElementLabel,
 }: Props) {
   const t = useTranslation()
   const hasText = content.trim().length > 0
+  const refLabel = designRef
+    ? (designRefName?.trim() || designRef.split('/').pop() || designRef)
+    : ''
+  const elementLabel = designRefElement
+    ? (designRefElementLabel?.trim() || designRefElement)
+    : ''
   const editTooltip = t('chat.editPromptHint')
   const showRestore = !!onRestore
   const showRewind = !showRestore && !!onRewind
@@ -50,6 +73,29 @@ export function UserMessage({
       >
         {attachments && attachments.length > 0 && (
           <AttachmentGallery attachments={attachments} variant="message" />
+        )}
+
+        {designRef && (
+          <div
+            className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 py-1 pl-1.5 pr-2 text-[11px] text-[var(--color-text-secondary)]"
+            title={designRef}
+          >
+            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded bg-[var(--color-accent)]/15">
+              <span className="material-symbols-outlined text-[13px] text-[var(--color-accent)]">
+                {designRefIcon(designRef)}
+              </span>
+            </span>
+            <span className="flex min-w-0 flex-col leading-tight">
+              <span className="max-w-[220px] truncate text-[9px] uppercase tracking-wide text-[var(--color-accent)]">
+                {elementLabel
+                  ? `${t('designer.canvas.elementRef')}: ${elementLabel}`
+                  : t('designer.canvas.editRefChip')}
+              </span>
+              <span className="max-w-[220px] truncate text-[11px] font-medium text-[var(--color-text-primary)]">
+                {refLabel}
+              </span>
+            </span>
+          </div>
         )}
 
         {hasText && (

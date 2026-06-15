@@ -16,48 +16,9 @@ pub enum CompactStrategy {
     Microcompact,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactOptions {
-    pub strategy: CompactStrategy,
-
-    pub target_utilization: f64,
-
-    pub preserve_recent_turns: usize,
-
-    pub preserve_skills: bool,
-
-    pub summary_prompt: Option<String>,
-}
-
-impl Default for CompactOptions {
-    fn default() -> Self {
-        Self {
-            strategy: CompactStrategy::Hybrid,
-            target_utilization: 0.5,
-            preserve_recent_turns: 4,
-            preserve_skills: true,
-            summary_prompt: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactResult {
-    pub messages_before: usize,
-    pub messages_after: usize,
-    pub tokens_before: u64,
-    pub tokens_after: u64,
-    pub summary: Option<String>,
-    pub strategy_used: CompactStrategy,
-}
-
 pub struct CompactService;
 
 impl CompactService {
-
-    pub fn should_compact(utilization: f64, threshold: f64) -> bool {
-        utilization > threshold
-    }
 
     pub fn choose_strategy(utilization: f64, turn_count: usize) -> CompactStrategy {
         if utilization > 0.95 {

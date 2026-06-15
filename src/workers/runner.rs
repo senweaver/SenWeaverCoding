@@ -23,6 +23,8 @@ pub struct WorkerRunContext {
     pub live_config: Option<crate::config::live::LiveConfig>,
 
     pub parent_workspace_dir: Option<String>,
+
+    pub parent_permission_mode: Option<String>,
 }
 
 pub async fn run_worker(
@@ -153,11 +155,21 @@ pub async fn run_worker(
         .current_coding_mode()
         .unwrap_or(crate::agent::coding_mode::CodingMode::Agent);
 
+    let worker_permission_mode = ctx
+        .parent_permission_mode
+        .clone()
+        .unwrap_or_else(crate::gateway::ws::desktop::global_permission_mode);
+
     let run_future = {
         let turn = agent.turn_streamed(&prompt, tx);
         let mode_scoped =
             crate::agent::coding_mode::scope_coding_mode(worker_coding_mode, turn);
-        crate::session::scope_session_context(worker_session_ctx, mode_scoped)
+        let session_scoped =
+            crate::session::scope_session_context(worker_session_ctx, mode_scoped);
+        crate::gateway::ws::desktop::scope_permission_mode(
+            worker_permission_mode,
+            session_scoped,
+        )
     };
 
     use futures_util::FutureExt as _;

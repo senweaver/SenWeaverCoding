@@ -14,7 +14,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 #[cfg(unix)]
 use tokio::fs::File;
 use tokio::fs::{self, OpenOptions};
@@ -689,6 +688,9 @@ pub struct Config {
     pub plan_mode: crate::agent::plan_mode::PlanModeConfig,
 
     #[serde(default)]
+    pub intent_analysis: crate::agent::intent::IntentAnalysisConfig,
+
+    #[serde(default)]
     pub auto_title: crate::agent::auto_title::AutoTitleConfig,
 
     #[serde(default)]
@@ -1097,6 +1099,12 @@ pub struct ModelProviderConfig {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub model_context_windows: std::collections::HashMap<String, u32>,
 
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub model_types: std::collections::HashMap<String, Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub model_pricing: std::collections::HashMap<String, ModelPricing>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_headers: Vec<CustomHttpHeader>,
 
@@ -1105,6 +1113,71 @@ pub struct ModelProviderConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
+}
+
+pub const DEFAULT_MODEL_TYPE: &str = "text";
+
+pub const MODEL_TYPES: &[&str] = &[
+    "text",
+    "image-generation",
+    "video-generation",
+    "audio-generation",
+    "image-understanding",
+    "video-understanding",
+    "speech-recognition",
+    "embedding",
+    "rerank",
+    "music-generation",
+];
+
+pub fn is_known_model_type(value: &str) -> bool {
+    MODEL_TYPES.contains(&value)
+}
+
+pub fn sanitize_model_types<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for value in values {
+        let trimmed = value.as_ref().trim();
+        if trimmed.is_empty() || !is_known_model_type(trimmed) {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+impl ModelProviderConfig {
+
+    pub fn types_for_model(&self, model: &str) -> Vec<String> {
+        let needle = model.trim();
+        if needle.is_empty() {
+            return vec![DEFAULT_MODEL_TYPE.to_string()];
+        }
+        let resolved = self
+            .model_types
+            .get(needle)
+            .map(|types| sanitize_model_types(types.iter().map(String::as_str)))
+            .filter(|types| !types.is_empty())
+            .unwrap_or_default();
+        if resolved.is_empty() {
+            vec![DEFAULT_MODEL_TYPE.to_string()]
+        } else {
+            resolved
+        }
+    }
+
+    pub fn model_supports_type(&self, model: &str, model_type: &str) -> bool {
+        self.types_for_model(model)
+            .iter()
+            .any(|t| t == model_type)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2187,7 +2260,7 @@ impl Default for IdentityConfig {
     }
 }
 
-mod model_pricing;
+pub mod model_pricing;
 
 pub use model_pricing::{CostConfig, CostEnforcementConfig, ModelPricing};
 
@@ -2206,6 +2279,9 @@ pub struct GatewayConfig {
 
     #[serde(default)]
     pub allow_public_bind: bool,
+
+    #[serde(default)]
+    pub isolated: bool,
 
     #[serde(default, serialize_with = "crate::config::redact::redact_vec_string")]
     pub paired_tokens: Vec<String>,
@@ -2289,6 +2365,7 @@ impl Default for GatewayConfig {
             host: default_gateway_host(),
             require_pairing: true,
             allow_public_bind: false,
+            isolated: false,
             paired_tokens: Vec::new(),
             pair_rate_limit_per_minute: default_pair_rate_limit(),
             webhook_rate_limit_per_minute: default_webhook_rate_limit(),
@@ -3665,6 +3742,9 @@ pub struct AutonomyConfig {
 
     #[serde(default)]
     pub enable_command_policy: bool,
+
+    #[serde(default = "default_true")]
+    pub allow_shell_in_non_interactive: bool,
 }
 
 fn default_auto_approve() -> Vec<String> {
@@ -3765,6 +3845,7 @@ impl Default for AutonomyConfig {
             protect_mcp_tools: true,
             auto_approve_mode_transitions: Vec::new(),
             enable_command_policy: false,
+            allow_shell_in_non_interactive: true,
         }
     }
 }
@@ -3782,6 +3863,9 @@ pub struct ModelRouteConfig {
 
     #[serde(default)]
     pub api_key: Option<String>,
+
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -5535,6 +5619,7 @@ impl Default for Config {
             shell_tool: ShellToolConfig::default(),
             guardrails: crate::guardrails::GuardrailsConfig::default(),
             plan_mode: crate::agent::plan_mode::PlanModeConfig::default(),
+            intent_analysis: crate::agent::intent::IntentAnalysisConfig::default(),
             auto_title: crate::agent::auto_title::AutoTitleConfig::default(),
             suggestions: crate::agent::suggestions::SuggestionsConfig::default(),
             tool_groups: crate::tools::handler::groups::ToolGroupsConfig::default(),
@@ -6280,40 +6365,26 @@ impl Config {
             };
 
             config.autonomy.ensure_default_auto_approve();
+            config.cost.merge_default_prices();
 
             let migration_applied = config.migrate_legacy_low_caps();
 
-            if let Ok(raw) = contents.parse::<toml::Table>() {
-
-                static KNOWN_KEYS: OnceLock<Vec<String>> = OnceLock::new();
-                let known = KNOWN_KEYS.get_or_init(|| {
-                    let mut keys = toml::to_string(&Config::default())
-                        .ok()
-                        .and_then(|s| s.parse::<toml::Table>().ok())
-                        .map(|t| t.keys().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    for legacy in [
-                        "api_key",
-                        "api_url",
-                        "api_path",
-                        "default_provider",
-                        "default_model",
-                        "model",
-                        "model_provider",
-                    ] {
-                        let name = legacy.to_string();
-                        if !keys.contains(&name) {
-                            keys.push(name);
-                        }
+            if let Ok(de) = toml::de::Deserializer::parse(&contents) {
+                const RETIRED_KEYS: &[&str] = &["node_transport"];
+                let mut ignored_keys: Vec<String> = Vec::new();
+                let _: Result<Config, _> =
+                    serde_ignored::deserialize(de, |path| ignored_keys.push(path.to_string()));
+                for key in ignored_keys {
+                    if RETIRED_KEYS
+                        .iter()
+                        .any(|r| key == *r || key.starts_with(&format!("{r}.")))
+                    {
+                        tracing::debug!("Retired config key ignored: \"{key}\"");
+                        continue;
                     }
-                    keys
-                });
-                for key in raw.keys() {
-                    if !known.contains(key) {
-                        tracing::warn!(
-                            "Unknown config key ignored: \"{key}\". Check config.toml for typos or deprecated options.",
-                        );
-                    }
+                    tracing::warn!(
+                        "Unknown config key ignored: \"{key}\". Check config.toml for typos or deprecated options.",
+                    );
                 }
             }
 
@@ -6782,6 +6853,7 @@ impl Config {
         config.config_path = config_path;
         config.workspace_dir = workspace_dir;
 
+        config.cost.merge_default_prices();
         config.migrate_legacy_low_caps();
 
         config.apply_env_overrides();

@@ -22,11 +22,19 @@ pub struct CostConfig {
     #[serde(default)]
     pub allow_override: bool,
 
-    #[serde(default)]
+    #[serde(default = "get_default_pricing")]
     pub prices: std::collections::HashMap<String, ModelPricing>,
 
     #[serde(default)]
     pub enforcement: CostEnforcementConfig,
+}
+
+impl CostConfig {
+    pub fn merge_default_prices(&mut self) {
+        for (key, value) in get_default_pricing() {
+            self.prices.entry(key).or_insert(value);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -98,74 +106,60 @@ impl Default for CostConfig {
     }
 }
 
-fn get_default_pricing() -> std::collections::HashMap<String, ModelPricing> {
-    let mut prices = std::collections::HashMap::new();
+pub fn get_default_pricing() -> std::collections::HashMap<String, ModelPricing> {
+    const DEFAULTS: &[(&str, f64, f64)] = &[
+        ("anthropic/claude-sonnet-4-20250514", 3.0, 15.0),
+        ("anthropic/claude-opus-4-20250514", 15.0, 75.0),
+        ("anthropic/claude-sonnet-4-5", 3.0, 15.0),
+        ("anthropic/claude-opus-4-1", 15.0, 75.0),
+        ("anthropic/claude-haiku-4-5", 1.0, 5.0),
+        ("anthropic/claude-3.5-sonnet", 3.0, 15.0),
+        ("anthropic/claude-3-5-haiku", 0.8, 4.0),
+        ("anthropic/claude-3-haiku", 0.25, 1.25),
+        ("openai/gpt-4o", 2.5, 10.0),
+        ("openai/gpt-4o-mini", 0.15, 0.60),
+        ("openai/gpt-4.1", 2.0, 8.0),
+        ("openai/gpt-4.1-mini", 0.4, 1.6),
+        ("openai/gpt-4.1-nano", 0.1, 0.4),
+        ("openai/gpt-5", 1.25, 10.0),
+        ("openai/gpt-5-mini", 0.25, 2.0),
+        ("openai/gpt-5-nano", 0.05, 0.4),
+        ("openai/o1-preview", 15.0, 60.0),
+        ("openai/o3", 2.0, 8.0),
+        ("openai/o4-mini", 1.1, 4.4),
+        ("deepseek/deepseek-chat", 0.28, 0.42),
+        ("deepseek/deepseek-reasoner", 0.28, 0.42),
+        ("deepseek/deepseek-v3", 0.27, 1.10),
+        ("moonshot/kimi-k2", 0.6, 2.5),
+        ("moonshot/kimi-k2-thinking", 0.6, 2.5),
+        ("qwen/qwen-max", 1.6, 6.4),
+        ("qwen/qwen-plus", 0.4, 1.2),
+        ("qwen/qwen-turbo", 0.05, 0.2),
+        ("qwen/qwen3-coder-plus", 1.0, 5.0),
+        ("zhipu/glm-4.6", 0.6, 2.2),
+        ("zhipu/glm-4.5", 0.6, 2.2),
+        ("zhipu/glm-4.5-air", 0.2, 1.1),
+        ("google/gemini-2.0-flash", 0.10, 0.40),
+        ("google/gemini-1.5-pro", 1.25, 5.0),
+        ("google/gemini-2.5-pro", 1.25, 10.0),
+        ("google/gemini-2.5-flash", 0.30, 2.50),
+        ("google/gemini-2.5-flash-lite", 0.10, 0.40),
+        ("xai/grok-4", 3.0, 15.0),
+        ("xai/grok-4-fast", 0.2, 0.5),
+        ("xai/grok-code-fast-1", 0.2, 1.5),
+        ("mistral/mistral-large", 2.0, 6.0),
+    ];
 
-    prices.insert(
-        "anthropic/claude-sonnet-4-20250514".into(),
-        ModelPricing {
-            input: 3.0,
-            output: 15.0,
-        },
-    );
-    prices.insert(
-        "anthropic/claude-opus-4-20250514".into(),
-        ModelPricing {
-            input: 15.0,
-            output: 75.0,
-        },
-    );
-    prices.insert(
-        "anthropic/claude-3.5-sonnet".into(),
-        ModelPricing {
-            input: 3.0,
-            output: 15.0,
-        },
-    );
-    prices.insert(
-        "anthropic/claude-3-haiku".into(),
-        ModelPricing {
-            input: 0.25,
-            output: 1.25,
-        },
-    );
-
-    prices.insert(
-        "openai/gpt-4o".into(),
-        ModelPricing {
-            input: 5.0,
-            output: 15.0,
-        },
-    );
-    prices.insert(
-        "openai/gpt-4o-mini".into(),
-        ModelPricing {
-            input: 0.15,
-            output: 0.60,
-        },
-    );
-    prices.insert(
-        "openai/o1-preview".into(),
-        ModelPricing {
-            input: 15.0,
-            output: 60.0,
-        },
-    );
-
-    prices.insert(
-        "google/gemini-2.0-flash".into(),
-        ModelPricing {
-            input: 0.10,
-            output: 0.40,
-        },
-    );
-    prices.insert(
-        "google/gemini-1.5-pro".into(),
-        ModelPricing {
-            input: 1.25,
-            output: 5.0,
-        },
-    );
-
-    prices
+    DEFAULTS
+        .iter()
+        .map(|(model, input, output)| {
+            (
+                (*model).to_string(),
+                ModelPricing {
+                    input: *input,
+                    output: *output,
+                },
+            )
+        })
+        .collect()
 }

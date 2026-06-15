@@ -23,8 +23,16 @@ export function bindPrototypeRef(sessionId: string, tabId: number) {
   useBrowserPanelStore.getState().setPrototypeRefTab(sessionId, tabId)
 }
 
+export function bindPrototypeFigma(sessionId: string, url: string) {
+  const trimmed = url.trim()
+  if (!sessionId || !trimmed.includes('figma.com/')) return
+  wsManager.send(sessionId, { type: 'debug_bind_prototype_ref', figma_url: trimmed })
+  useBrowserPanelStore.getState().setPrototypeRefFigma(sessionId, trimmed)
+}
+
 export function unbindPrototypeRef(sessionId: string) {
   if (!sessionId) return
   wsManager.send(sessionId, { type: 'debug_unbind_prototype_ref' })
   useBrowserPanelStore.getState().clearPrototypeRefTab(sessionId)
+  useBrowserPanelStore.getState().clearPrototypeRefFigma(sessionId)
 }

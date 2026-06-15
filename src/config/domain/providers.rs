@@ -80,6 +80,9 @@ pub struct ModelRouteConfig {
 
     #[serde(default)]
     pub api_key: Option<String>,
+
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

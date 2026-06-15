@@ -122,7 +122,7 @@ fn write_state(workspace_dir: &Path, report: &HygieneReport) -> Result<()> {
         last_report: report.clone(),
     };
     let json = serde_json::to_vec_pretty(&state)?;
-    fs::write(path, json)?;
+    crate::util::atomic_write(&path, &json)?;
     Ok(())
 }
 

@@ -4,6 +4,19 @@
 use super::super::background_registry::{self, BackgroundShellSignal, BgStream};
 use std::time::Duration;
 
+const FOREGROUND_STREAM_CAP: usize = 1_048_576;
+
+fn utf8_floor_boundary(bytes: &[u8], target: usize) -> usize {
+    if target >= bytes.len() {
+        return bytes.len();
+    }
+    let mut idx = target;
+    while idx > 0 && (bytes[idx] & 0xC0) == 0x80 {
+        idx -= 1;
+    }
+    idx
+}
+
 pub(crate) enum ForegroundOutcome {
     Exited(std::process::ExitStatus, String, String),
     Timeout(String, String),
@@ -50,6 +63,7 @@ where
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::runtime::spawn_supervised(label, async move {
         let mut raw_all: Vec<u8> = Vec::new();
+        let mut capped = false;
         if let Some(pipe) = pipe {
             use tokio::io::AsyncBufReadExt;
             let mut reader = tokio::io::BufReader::new(pipe);
@@ -59,7 +73,15 @@ where
                 match reader.read_until(b'\n', &mut line).await {
                     Ok(0) => break,
                     Ok(_) => {
-                        raw_all.extend_from_slice(&line);
+                        if !capped {
+                            raw_all.extend_from_slice(&line);
+                            if raw_all.len() > FOREGROUND_STREAM_CAP {
+                                let boundary = utf8_floor_boundary(&raw_all, FOREGROUND_STREAM_CAP);
+                                raw_all.truncate(boundary);
+                                raw_all.extend_from_slice(b"\n... [output truncated at 1MB]");
+                                capped = true;
+                            }
+                        }
                         let decoded = crate::util::decode_subprocess_bytes(&line);
                         super::core::emit_mirror_chunks(
                             &mirror_id,

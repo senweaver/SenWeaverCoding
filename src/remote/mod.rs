@@ -3,5 +3,4 @@
 // Licensed under the MIT License.
 
 pub mod manager;
-pub mod permission_bridge;
 pub mod websocket;

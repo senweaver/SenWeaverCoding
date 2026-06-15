@@ -10,11 +10,7 @@ use super::types::{ContextItem, ContextResolveError, ContextTag};
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const MAX_FOLDER_ENTRIES: usize = 80;
 
-pub fn resolve_file(
-    root: &Path,
-    path: &PathBuf,
-    budget: &ContextBudget,
-) -> Result<ContextItem, ContextResolveError> {
+fn load_file_body(root: &Path, path: &PathBuf) -> Result<String, ContextResolveError> {
     let full = if path.is_absolute() {
         path.clone()
     } else {
@@ -29,7 +25,10 @@ pub fn resolve_file(
     } else {
         &bytes[..]
     };
-    let body = String::from_utf8_lossy(body_slice).to_string();
+    Ok(String::from_utf8_lossy(body_slice).to_string())
+}
+
+fn finish_file_item(path: &PathBuf, body: String, budget: &ContextBudget) -> ContextItem {
     let want = body.len() / 4;
     let granted = budget.reserve_at_most(want);
     let final_body = if granted < want {
@@ -39,20 +38,24 @@ pub fn resolve_file(
     } else {
         body
     };
-    let item = ContextItem::new(
+    ContextItem::new(
         format!("file:{}", path.display()),
         format!("File {}", path.display()),
         final_body,
     )
-    .with_source("fs");
-    Ok(item)
+    .with_source("fs")
 }
 
-pub fn resolve_folder(
+pub fn resolve_file(
     root: &Path,
     path: &PathBuf,
     budget: &ContextBudget,
 ) -> Result<ContextItem, ContextResolveError> {
+    let body = load_file_body(root, path)?;
+    Ok(finish_file_item(path, body, budget))
+}
+
+fn load_folder_listing(root: &Path, path: &PathBuf) -> Result<String, ContextResolveError> {
     let full = if path.is_absolute() {
         path.clone()
     } else {
@@ -73,7 +76,10 @@ pub fn resolve_folder(
             Err(_) => continue,
         }
     }
-    let body = lines.join("\n");
+    Ok(lines.join("\n"))
+}
+
+fn finish_folder_item(path: &PathBuf, body: String, budget: &ContextBudget) -> ContextItem {
     let want = body.len() / 4;
     let granted = budget.reserve_at_most(want);
     let final_body = if granted < want {
@@ -81,12 +87,21 @@ pub fn resolve_folder(
     } else {
         body
     };
-    Ok(ContextItem::new(
+    ContextItem::new(
         format!("folder:{}", path.display()),
         format!("Folder listing: {}", path.display()),
         final_body,
     )
-    .with_source("fs"))
+    .with_source("fs")
+}
+
+pub fn resolve_folder(
+    root: &Path,
+    path: &PathBuf,
+    budget: &ContextBudget,
+) -> Result<ContextItem, ContextResolveError> {
+    let body = load_folder_listing(root, path)?;
+    Ok(finish_folder_item(path, body, budget))
 }
 
 pub fn resolve_url(url: &str, _budget: &ContextBudget) -> Result<ContextItem, ContextResolveError> {
@@ -210,5 +225,47 @@ pub fn resolve_tag(
         ContextTag::Recent => resolve_recent(recents, budget),
         ContextTag::Selection => resolve_selection(selection, budget),
         ContextTag::Codebase(q) => super::codebase::resolve_codebase(root, q, budget),
+    }
+}
+
+pub async fn resolve_tag_async(
+    tag: &ContextTag,
+    root: &Path,
+    recents: &[PathBuf],
+    selection: &str,
+    budget: &ContextBudget,
+) -> Result<ContextItem, ContextResolveError> {
+    match tag {
+        ContextTag::File(p) => {
+            let root_owned = root.to_path_buf();
+            let path_owned = p.clone();
+            let body = tokio::task::spawn_blocking(move || {
+                load_file_body(&root_owned, &path_owned)
+            })
+            .await
+            .map_err(|e| ContextResolveError::Io(std::io::Error::other(e)))??;
+            Ok(finish_file_item(p, body, budget))
+        }
+        ContextTag::Folder(p) => {
+            let root_owned = root.to_path_buf();
+            let path_owned = p.clone();
+            let body = tokio::task::spawn_blocking(move || {
+                load_folder_listing(&root_owned, &path_owned)
+            })
+            .await
+            .map_err(|e| ContextResolveError::Io(std::io::Error::other(e)))??;
+            Ok(finish_folder_item(p, body, budget))
+        }
+        ContextTag::Codebase(q) => {
+            let root_owned = root.to_path_buf();
+            let query_owned = q.clone();
+            let body = tokio::task::spawn_blocking(move || {
+                super::codebase::collect_codebase_body(&root_owned, &query_owned)
+            })
+            .await
+            .map_err(|e| ContextResolveError::Io(std::io::Error::other(e)))??;
+            Ok(super::codebase::finish_codebase_item(q, body, budget))
+        }
+        other => resolve_tag(other, root, recents, selection, budget),
     }
 }

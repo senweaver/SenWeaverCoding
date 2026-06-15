@@ -3,11 +3,12 @@
 // Licensed under the MIT License.
 use super::Provider;
 use super::traits::{
-    ChatMessage, ChatRequest, ChatResponse, StreamChunk, StreamEvent, StreamOptions, StreamResult,
+    ChatMessage, ChatRequest, ChatResponse, StreamChunk, StreamError, StreamEvent, StreamOptions,
+    StreamResult,
 };
 use crate::config::schema::ModelPricing;
 use async_trait::async_trait;
-use futures_util::stream::BoxStream;
+use futures_util::stream::{self, BoxStream, StreamExt};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -76,7 +77,7 @@ impl RouterProvider {
         prices: &HashMap<String, ModelPricing>,
         required_vision: bool,
         required_tools: bool,
-    ) -> (usize, String) {
+    ) -> anyhow::Result<(usize, String)> {
         let hint = model.strip_prefix("route:").or_else(|| {
             model.strip_prefix("hint:").inspect(|_| {
                 tracing::warn!(
@@ -114,17 +115,17 @@ impl RouterProvider {
         candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
         if let Some((idx, route_model, _)) = candidates.into_iter().next() {
-            return (idx, route_model);
+            return Ok((idx, route_model));
         }
 
         tracing::warn!(
             "No cost-optimized route found with matching pricing data, \
-             falling back to default"
+             falling back to default resolution"
         );
-        (self.default_index, self.default_model.clone())
+        self.resolve(model)
     }
 
-    fn resolve_auto(&self, model: &str) -> (usize, String) {
+    fn resolve_auto(&self, model: &str) -> anyhow::Result<(usize, String)> {
         let is_cost_prefix = model.starts_with("route:cost")
             || model.starts_with("route:cheap")
             || model.starts_with("hint:cost")
@@ -135,7 +136,7 @@ impl RouterProvider {
         self.resolve(model)
     }
 
-    fn resolve(&self, model: &str) -> (usize, String) {
+    fn resolve(&self, model: &str) -> anyhow::Result<(usize, String)> {
         let prefixed = model.strip_prefix("route:").or_else(|| {
             model.strip_prefix("hint:").inspect(|_| {
                 tracing::warn!(
@@ -147,15 +148,35 @@ impl RouterProvider {
         });
         if let Some(hint) = prefixed {
             if let Some((idx, resolved_model)) = self.routes.get(hint) {
-                return (*idx, resolved_model.clone());
+                return Ok((*idx, resolved_model.clone()));
             }
             tracing::warn!(
                 hint = hint,
                 "Unknown route hint, falling back to default provider"
             );
+            if !self.default_model.trim().is_empty() {
+                return Ok((self.default_index, self.default_model.clone()));
+            }
+            if let Some((fallback_hint, (idx, route_model))) = self
+                .routes
+                .iter()
+                .min_by(|a, b| a.0.cmp(b.0))
+            {
+                tracing::warn!(
+                    hint = hint,
+                    fallback_route = fallback_hint.as_str(),
+                    fallback_model = route_model.as_str(),
+                    "default_model is empty, falling back to first configured route"
+                );
+                return Ok((*idx, route_model.clone()));
+            }
+            anyhow::bail!(
+                "Router cannot resolve route hint '{hint}': no matching route, \
+                 empty default_model, and no configured routes are available"
+            );
         }
 
-        (self.default_index, model.to_string())
+        Ok((self.default_index, model.to_string()))
     }
 }
 
@@ -203,7 +224,7 @@ impl Provider for RouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (provider_idx, resolved_model) = self.resolve_auto(model)?;
 
         let (provider_name, provider) = &self.providers[provider_idx];
         tracing::info!(
@@ -223,7 +244,7 @@ impl Provider for RouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (provider_idx, resolved_model) = self.resolve_auto(model)?;
         let (_, provider) = &self.providers[provider_idx];
         provider
             .chat_with_history(messages, &resolved_model, temperature)
@@ -236,7 +257,7 @@ impl Provider for RouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
-        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (provider_idx, resolved_model) = self.resolve_auto(model)?;
         let (_, provider) = &self.providers[provider_idx];
         provider.chat(request, &resolved_model, temperature).await
     }
@@ -248,7 +269,7 @@ impl Provider for RouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
-        let (provider_idx, resolved_model) = self.resolve_auto(model);
+        let (provider_idx, resolved_model) = self.resolve_auto(model)?;
         let (_, provider) = &self.providers[provider_idx];
         provider
             .chat_with_tools(messages, tools, &resolved_model, temperature)
@@ -273,6 +294,37 @@ impl Provider for RouterProvider {
             .any(|(_, provider)| provider.supports_streaming_tool_events())
     }
 
+    fn stream_chat_with_system(
+        &self,
+        system_prompt: Option<&str>,
+        message: &str,
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> BoxStream<'static, StreamResult<StreamChunk>> {
+        let (provider_idx, resolved_model) = match self.resolve_auto(model) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let detail = error.to_string();
+                return stream::once(async move { Err(StreamError::Provider(detail)) }).boxed();
+            }
+        };
+        let (provider_name, provider) = &self.providers[provider_idx];
+        if !provider.supports_streaming() {
+            let detail = format!(
+                "routed provider '{provider_name}' does not support streaming for model '{resolved_model}'"
+            );
+            return stream::once(async move { Err(StreamError::Provider(detail)) }).boxed();
+        }
+        provider.stream_chat_with_system(
+            system_prompt,
+            message,
+            &resolved_model,
+            temperature,
+            options,
+        )
+    }
+
     fn stream_chat_with_history(
         &self,
         messages: &[ChatMessage],
@@ -280,8 +332,20 @@ impl Provider for RouterProvider {
         temperature: f64,
         options: StreamOptions,
     ) -> BoxStream<'static, StreamResult<StreamChunk>> {
-        let (provider_idx, resolved_model) = self.resolve_auto(model);
-        let (_, provider) = &self.providers[provider_idx];
+        let (provider_idx, resolved_model) = match self.resolve_auto(model) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let message = error.to_string();
+                return stream::once(async move { Err(StreamError::Provider(message)) }).boxed();
+            }
+        };
+        let (provider_name, provider) = &self.providers[provider_idx];
+        if !provider.supports_streaming() {
+            let detail = format!(
+                "routed provider '{provider_name}' does not support streaming for model '{resolved_model}'"
+            );
+            return stream::once(async move { Err(StreamError::Provider(detail)) }).boxed();
+        }
         provider.stream_chat_with_history(messages, &resolved_model, temperature, options)
     }
 
@@ -292,8 +356,20 @@ impl Provider for RouterProvider {
         temperature: f64,
         options: StreamOptions,
     ) -> BoxStream<'static, StreamResult<StreamEvent>> {
-        let (provider_idx, resolved_model) = self.resolve_auto(model);
-        let (_, provider) = &self.providers[provider_idx];
+        let (provider_idx, resolved_model) = match self.resolve_auto(model) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let message = error.to_string();
+                return stream::once(async move { Err(StreamError::Provider(message)) }).boxed();
+            }
+        };
+        let (provider_name, provider) = &self.providers[provider_idx];
+        if !provider.supports_streaming() {
+            let detail = format!(
+                "routed provider '{provider_name}' does not support streaming for model '{resolved_model}'"
+            );
+            return stream::once(async move { Err(StreamError::Provider(detail)) }).boxed();
+        }
         provider.stream_chat(request, &resolved_model, temperature, options)
     }
 

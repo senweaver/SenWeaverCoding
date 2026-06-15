@@ -17,11 +17,21 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
 
 const WS_NODE_PROTOCOL: &str = "sen.nodes.v1";
+
+const NODE_INVOCATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+const NODE_PENDING_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+struct PendingInvocation {
+    response_tx: oneshot::Sender<NodeInvocationResult>,
+    deadline: Instant,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeCapability {
@@ -250,27 +260,75 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
     let mut registered_node_id: Option<String> = None;
 
     let (invoke_tx, mut invoke_rx) = mpsc::channel::<NodeInvocation>(32);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(16);
 
-    let pending: Arc<RwLock<HashMap<String, oneshot::Sender<NodeInvocationResult>>>> =
+    let pending: Arc<RwLock<HashMap<String, PendingInvocation>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
     let pending_clone = Arc::clone(&pending);
 
     let send_task = spawn_supervised("gateway.nodes.invocation_forwarder", async move {
-        while let Some(invocation) = invoke_rx.recv().await {
-            let msg = GatewayMessage::Invoke {
-                call_id: invocation.call_id.clone(),
-                capability: invocation.capability,
-                args: invocation.args,
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
+        loop {
+            tokio::select! {
+                maybe_invocation = invoke_rx.recv() => {
+                    let Some(invocation) = maybe_invocation else { break; };
+                    let msg = GatewayMessage::Invoke {
+                        call_id: invocation.call_id.clone(),
+                        capability: invocation.capability,
+                        args: invocation.args,
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        pending_clone.write().insert(
+                            invocation.call_id.clone(),
+                            PendingInvocation {
+                                response_tx: invocation.response_tx,
+                                deadline: Instant::now() + NODE_INVOCATION_TIMEOUT,
+                            },
+                        );
+                        if sender.send(Message::Text(json.into())).await.is_err() {
+                            pending_clone.write().remove(&invocation.call_id);
+                            break;
+                        }
+                    }
+                }
+                maybe_ctrl = ctrl_rx.recv() => {
+                    let Some(json) = maybe_ctrl else { break; };
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 
-                pending_clone
-                    .write()
-                    .insert(invocation.call_id.clone(), invocation.response_tx);
-                if sender.send(Message::Text(json.into())).await.is_err() {
-                    pending_clone.write().remove(&invocation.call_id);
-                    break;
+    let sweep_pending = Arc::clone(&pending);
+    let sweep_task = spawn_supervised("gateway.nodes.pending_sweeper", async move {
+        let mut ticker = tokio::time::interval(NODE_PENDING_SWEEP_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let now = Instant::now();
+            let expired: Vec<String> = {
+                let map = sweep_pending.read();
+                map.iter()
+                    .filter(|(_, entry)| entry.deadline <= now)
+                    .map(|(call_id, _)| call_id.clone())
+                    .collect()
+            };
+            if expired.is_empty() {
+                continue;
+            }
+            let mut map = sweep_pending.write();
+            for call_id in expired {
+                if let Some(entry) = map.remove(&call_id) {
+                    let _ = entry.response_tx.send(NodeInvocationResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("node invocation timed out".to_string()),
+                    });
+                    tracing::warn!(
+                        call_id = %call_id,
+                        "node invocation timed out; cleaned up pending entry"
+                    );
                 }
             }
         }
@@ -315,10 +373,21 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
                     tracing::info!("Node registered: {node_id} with {caps_count} capabilities");
                     registered_node_id = Some(node_id.clone());
 
+                    if let Ok(json) = serde_json::to_string(&GatewayMessage::Registered {
+                        node_id: node_id.clone(),
+                        capabilities_count: caps_count,
+                    }) {
+                        let _ = ctrl_tx.send(json).await;
+                    }
                 } else {
                     tracing::warn!(
                         "Node registration rejected: registry at capacity for {node_id}"
                     );
+                    if let Ok(json) = serde_json::to_string(&GatewayMessage::Error {
+                        message: format!("node registry at capacity; rejected `{node_id}`"),
+                    }) {
+                        let _ = ctrl_tx.send(json).await;
+                    }
                 }
             }
             NodeMessage::Result {
@@ -327,8 +396,8 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
                 output,
                 error,
             } => {
-                if let Some(tx) = pending.write().remove(&call_id) {
-                    let _ = tx.send(NodeInvocationResult {
+                if let Some(entry) = pending.write().remove(&call_id) {
+                    let _ = entry.response_tx.send(NodeInvocationResult {
                         success,
                         output,
                         error,
@@ -344,4 +413,5 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
     }
 
     send_task.abort();
+    sweep_task.abort();
 }

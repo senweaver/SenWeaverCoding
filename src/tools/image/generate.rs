@@ -192,7 +192,16 @@ impl ImageGenTool {
             .await
             .context("Failed to create images directory")?;
 
-        let output_path = images_dir.join(format!("{safe_name}.png"));
+        let stem = PathBuf::from(&safe_name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "generated_image".to_string());
+        let mut output_path = images_dir.join(format!("{stem}.png"));
+        let mut attempt = 2;
+        while output_path.exists() {
+            output_path = images_dir.join(format!("{stem}-{attempt}.png"));
+            attempt += 1;
+        }
         tokio::fs::write(&output_path, &bytes)
             .await
             .context("Failed to write image file")?;

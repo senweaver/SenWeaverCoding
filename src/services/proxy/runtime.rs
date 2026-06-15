@@ -10,6 +10,25 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::config::ProxyConfig;
 use crate::config::schema::{is_disallowed_custom_header, normalize_proxy_url_option};
 
+const FALLBACK_TIMEOUT_SECS: u64 = 120;
+const FALLBACK_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+fn timed_fallback_client(
+    timeout_secs: Option<u64>,
+    connect_timeout_secs: Option<u64>,
+    no_redirect: bool,
+) -> reqwest::Client {
+    let timeout = timeout_secs.unwrap_or(FALLBACK_TIMEOUT_SECS);
+    let connect = connect_timeout_secs.unwrap_or(FALLBACK_CONNECT_TIMEOUT_SECS);
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .connect_timeout(std::time::Duration::from_secs(connect));
+    if no_redirect {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
 trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 
@@ -117,7 +136,7 @@ impl ProxyRuntime {
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(service_key, "Failed to build proxied client: {e}");
-                reqwest::Client::new()
+                timed_fallback_client(None, None, false)
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -142,7 +161,7 @@ impl ProxyRuntime {
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(service_key, "Failed to build proxied timeout client: {e}");
-                reqwest::Client::new()
+                timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -174,10 +193,7 @@ impl ProxyRuntime {
                     service_key,
                     "Failed to build proxied no-redirect client: {e}"
                 );
-                reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new())
+                timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), true)
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -240,7 +256,7 @@ impl ProxyRuntime {
                 service_key,
                 "Failed to build proxied timeout client with custom headers: {e}"
             );
-            reqwest::Client::new()
+            timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
         })
     }
 
@@ -325,7 +341,7 @@ impl ProxyRuntime {
                 proxy_url,
                 "Failed to build channel proxy client: {e}"
             );
-            reqwest::Client::new()
+            timed_fallback_client(timeout_secs, connect_timeout_secs, false)
         });
         self.set_cached_client(ck, c.clone());
         c

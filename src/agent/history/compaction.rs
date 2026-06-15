@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,47 @@ impl InteractiveSessionState {
     }
 }
 
+fn unique_backup_path(path: &Path, ts: &str) -> PathBuf {
+    let first = path.with_extension(format!("corrupt.{ts}.json"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 1..10_000 {
+        let candidate = path.with_extension(format!("corrupt.{ts}.{n}.json"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.with_extension(format!("corrupt.{ts}.{}.json", std::process::id()))
+}
+
+fn backup_and_fresh_session(
+    path: &Path,
+    system_prompt: &str,
+    reason: &str,
+    detail: &str,
+) -> Vec<ChatMessage> {
+    let ts = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let backup = unique_backup_path(path, &ts);
+    match std::fs::rename(path, &backup) {
+        Ok(()) => tracing::error!(
+            file = %path.display(),
+            backup = %backup.display(),
+            reason,
+            detail,
+            "interactive session history could not be loaded; backed it up and starting a fresh session"
+        ),
+        Err(rename_err) => tracing::error!(
+            file = %path.display(),
+            reason,
+            detail,
+            rename_error = %rename_err,
+            "interactive session history could not be loaded and could not be backed up; starting a fresh session"
+        ),
+    }
+    vec![ChatMessage::system(system_prompt)]
+}
+
 pub(crate) fn load_interactive_session_history(
     path: &Path,
     system_prompt: &str,
@@ -79,16 +120,41 @@ pub(crate) fn load_interactive_session_history(
 
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > MAX_SESSION_HISTORY_BYTES {
-            anyhow::bail!(
-                "session history file too large ({} bytes, limit {})",
-                meta.len(),
-                MAX_SESSION_HISTORY_BYTES
-            );
+            return Ok(backup_and_fresh_session(
+                path,
+                system_prompt,
+                "file too large",
+                &format!(
+                    "{} bytes exceeds limit {}",
+                    meta.len(),
+                    MAX_SESSION_HISTORY_BYTES
+                ),
+            ));
         }
     }
 
-    let raw = std::fs::read_to_string(path)?;
-    let mut state: InteractiveSessionState = serde_json::from_str(&raw)?;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return Ok(backup_and_fresh_session(
+                path,
+                system_prompt,
+                "read failed",
+                &err.to_string(),
+            ));
+        }
+    };
+    let mut state: InteractiveSessionState = match serde_json::from_str(&raw) {
+        Ok(state) => state,
+        Err(err) => {
+            return Ok(backup_and_fresh_session(
+                path,
+                system_prompt,
+                "corrupt json",
+                &err.to_string(),
+            ));
+        }
+    };
     if state.history.is_empty() {
         state.history.push(ChatMessage::system(system_prompt));
     } else if state.history.first().map(|msg| msg.role.as_str()) != Some("system") {
@@ -103,7 +169,7 @@ pub(crate) fn save_interactive_session_history(path: &Path, history: &[ChatMessa
         std::fs::create_dir_all(parent)?;
     }
 
-    let payload = serde_json::to_string_pretty(&InteractiveSessionState::from_history(history))?;
+    let payload = serde_json::to_string(&InteractiveSessionState::from_history(history))?;
     crate::util::atomic_write(path, payload.as_bytes())?;
     Ok(())
 }

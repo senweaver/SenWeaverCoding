@@ -12,6 +12,7 @@ pub mod sse;
 pub mod tls;
 pub mod ws;
 pub mod credential_routes;
+pub mod desktop_bridge;
 pub mod desktop_routes;
 pub mod evolution_routes;
 pub mod git_routes;
@@ -29,9 +30,9 @@ pub mod rate_limit;
 
 pub use crate::gateway::lifecycle::{
     StartupWarning, is_fully_stopped, is_running, is_shutdown_requested, push_startup_warning,
-    request_shutdown, snapshot_startup_warnings,
+    request_embedded_shutdown, request_shutdown, snapshot_startup_warnings, wait_embedded_stopped,
 };
-use crate::gateway::lifecycle::{GATEWAY_SHUTDOWN_SIGNAL, GatewayRunningGuard};
+use crate::gateway::lifecycle::GatewayRunningGuard;
 
 use crate::channels::{
     Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
@@ -480,13 +481,46 @@ async fn run_gateway_inner(
     prebound: Option<tokio::net::TcpListener>,
     with_scheduler: bool,
 ) -> Result<()> {
+    desktop_bridge::install_remote_controllers();
+    if desktop_bridge::bridge_mode() {
+        config.gateway.require_pairing = false;
+        config.gateway.allow_public_bind = false;
+        config.gateway.trust_forwarded_headers = false;
+        config.gateway.paired_tokens.clear();
+        tracing::info!(
+            target: "gateway.desktop_bridge",
+            "desktop bridge mode: applied loopback-only gateway overrides (pairing disabled)"
+        );
+    }
     if with_scheduler && config.cron.enabled {
         let scheduler_cfg = config.clone();
-        crate::runtime::task_manager::spawn_supervised(
+        crate::runtime::task_manager::spawn_supervised_restartable(
             "gateway.cron_scheduler",
-            async move {
-                if let Err(e) = crate::cron::scheduler::run(scheduler_cfg).await {
-                    tracing::warn!("cron scheduler exited with error: {e}");
+            3,
+            move || {
+                let scheduler_cfg = scheduler_cfg.clone();
+                async move {
+                    loop {
+                        if crate::gateway::lifecycle::is_shutdown_requested() {
+                            tracing::info!(
+                                "Embedded cron scheduler stopping: gateway shutdown requested"
+                            );
+                            break;
+                        }
+                        match crate::cron::scheduler::run(scheduler_cfg.clone()).await {
+                            Ok(()) => {
+                                tracing::warn!(
+                                    "cron scheduler exited unexpectedly; restarting in 30s"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "cron scheduler exited with error: {e}; restarting in 30s"
+                                );
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
                 }
             },
         );
@@ -497,11 +531,36 @@ async fn run_gateway_inner(
 
     if with_scheduler && config.hands.enabled {
         let hands_cfg = config.clone();
-        crate::runtime::task_manager::spawn_supervised("gateway.hands", async move {
-            if let Err(e) = crate::hands::runner::run(hands_cfg).await {
-                tracing::warn!("hands worker exited with error: {e}");
-            }
-        });
+        crate::runtime::task_manager::spawn_supervised_restartable(
+            "gateway.hands",
+            3,
+            move || {
+                let hands_cfg = hands_cfg.clone();
+                async move {
+                    loop {
+                        if crate::gateway::lifecycle::is_shutdown_requested() {
+                            tracing::info!(
+                                "Embedded hands worker stopping: gateway shutdown requested"
+                            );
+                            break;
+                        }
+                        match crate::hands::runner::run(hands_cfg.clone()).await {
+                            Ok(()) => {
+                                tracing::warn!(
+                                    "hands worker exited unexpectedly; restarting in 30s"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "hands worker exited with error: {e}; restarting in 30s"
+                                );
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                }
+            },
+        );
         tracing::info!("Embedded hands worker started alongside gateway");
     }
 
@@ -582,9 +641,13 @@ async fn run_gateway_inner(
             .await;
     }
     if with_scheduler {
-        crate::runtime::task_manager::spawn_supervised("gateway.auto_dream_scheduler", async move {
-            crate::agent::auto_dream_scheduler::run().await;
-        });
+        crate::runtime::task_manager::spawn_supervised_restartable(
+            "gateway.auto_dream_scheduler",
+            3,
+            || async {
+                crate::agent::auto_dream_scheduler::run().await;
+            },
+        );
         tracing::info!("AutoDream scheduler started alongside gateway");
     }
     crate::event_bus::integration::publish_system(
@@ -989,6 +1052,7 @@ async fn run_gateway_inner(
                 "type": "usage_updated",
                 "sessionId": record.chat_session_id,
                 "codingMode": record.coding_mode,
+                "provider": record.provider,
                 "model": record.usage.model,
                 "inputTokens": record.usage.input_tokens,
                 "outputTokens": record.usage.output_tokens,
@@ -1148,6 +1212,9 @@ async fn run_gateway_inner(
             Ok(b) => {
                 tracing::info!("Gateway session persistence enabled (SQLite)");
                 let backend = Arc::new(b);
+                crate::channels::session::set_global_session_backend(
+                    Arc::clone(&backend) as Arc<dyn SessionBackend>,
+                );
                 if config.gateway.session_ttl_hours > 0 {
                     let cleanup_backend = Arc::clone(&backend);
                     let ttl_hours = config.gateway.session_ttl_hours;
@@ -1283,8 +1350,6 @@ async fn run_gateway_inner(
     println!("  GET  {pfx}/metrics    -  Prometheus metrics");
     println!("  Press Ctrl+C to stop.\n");
 
-    crate::health::mark_component_ok("gateway");
-
     hooks.fire_gateway_start(host, actual_port).await;
 
     let broadcast_observer: Arc<dyn crate::observability::Observer> =
@@ -1294,7 +1359,7 @@ async fn run_gateway_inner(
         ));
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    let _ = GATEWAY_SHUTDOWN_SIGNAL.set(shutdown_tx.clone());
+    crate::gateway::lifecycle::install_shutdown_sender(shutdown_tx.clone());
     let _running_guard = GatewayRunningGuard::install();
 
     let node_registry = Arc::new(nodes::NodeRegistry::new(config.nodes.max_nodes));
@@ -1448,7 +1513,7 @@ async fn run_gateway_inner(
     let a2a_state = a2a::build_a2a_state("sen", format!("http://{}:{}", host, actual_port))
         .with_executor(Arc::new(move |description: String| {
             let cfg_handle = a2a_config.clone();
-            tokio::spawn(async move {
+            Box::pin(async move {
                 let cfg = cfg_handle.lock().clone();
                 let temperature = cfg.default_temperature;
                 crate::agent::run(
@@ -1569,6 +1634,26 @@ async fn run_gateway_inner(
         .route(
             "/api/sessions/{id}/revert-batches",
             post(api::handle_api_session_revert_batches),
+        )
+        .route(
+            "/api/sessions/{id}/design-artifacts",
+            get(desktop_routes::handle_session_design_artifacts),
+        )
+        .route(
+            "/api/sessions/{id}/design-artifacts/delete",
+            post(desktop_routes::handle_session_design_artifact_delete),
+        )
+        .route(
+            "/api/sessions/{id}/design-handoff",
+            post(desktop_routes::handle_session_design_handoff),
+        )
+        .route(
+            "/api/sessions/{id}/design-lint",
+            post(desktop_routes::handle_session_design_lint),
+        )
+        .route(
+            "/api/sessions/{id}/design-units",
+            post(desktop_routes::handle_session_design_unit_add),
         )
         .route(
             "/api/sessions/{id}",
@@ -1943,6 +2028,14 @@ async fn run_gateway_inner(
             get(workspace_files::handle_workspace_structure_doc),
         )
         .route("/api/workspace/file", get(workspace_files::handle_workspace_file_get))
+        .route(
+            "/api/workspace/raw-handle",
+            get(workspace_files::handle_workspace_raw_handle),
+        )
+        .route(
+            "/api/workspace/raw/{raw_id}/{*path}",
+            get(workspace_files::handle_workspace_raw_get),
+        )
         .route("/api/workspace/dir", post(workspace_files::handle_workspace_dir_post))
         .route("/api/workspace/move", post(workspace_files::handle_workspace_move))
         .route("/api/workspace/copy", post(workspace_files::handle_workspace_copy))
@@ -1997,6 +2090,22 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_settings_cli_launcher),
         )
         .route("/api/suggestions", get(desktop_routes::handle_suggestions))
+        .route(
+            "/api/designer/submodes",
+            get(desktop_routes::handle_designer_submodes),
+        )
+        .route(
+            "/api/designer/design-systems",
+            get(desktop_routes::handle_designer_design_systems),
+        )
+        .route(
+            "/api/designer/prompt-templates",
+            get(desktop_routes::handle_designer_prompt_templates),
+        )
+        .route(
+            "/api/designer/html-templates",
+            get(desktop_routes::handle_designer_html_templates),
+        )
         .route(
             "/api/settings/sync/export",
             get(desktop_routes::handle_settings_sync_export),
@@ -2146,6 +2255,10 @@ async fn run_gateway_inner(
 
         .route("/ws/{session_id}", get(ws::desktop::handle_ws_desktop))
 
+        .route("/ws/desktop-bridge", get(desktop_bridge::handle_bridge_ws))
+
+        .route("/api/debug/test-target", post(desktop_routes::handle_debug_test_target))
+
         .route("/approval/{id}/respond", post(ws::handle_approval_respond))
 
         .route("/ws/nodes", get(nodes::handle_ws_nodes))
@@ -2199,6 +2312,8 @@ async fn run_gateway_inner(
         }
         _ => None,
     };
+
+    crate::health::mark_component_ok("gateway");
 
     if let Some(tls_acceptor) = tls_acceptor {
 
@@ -2341,11 +2456,23 @@ async fn run_gateway_post_shutdown_cleanup() {
 }
 
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = crate::health::snapshot();
+    let degraded: Vec<&str> = snapshot
+        .components
+        .iter()
+        .filter(|(_, health)| health.status == "error")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let status = if degraded.is_empty() { "ok" } else { "degraded" };
     let body = serde_json::json!({
-        "status": "ok",
+        "status": status,
+        "degraded_components": degraded,
         "paired": state.pairing.is_paired(),
         "require_pairing": state.pairing.require_pairing(),
-        "runtime": crate::health::snapshot_json(),
+        "runtime": serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({
+            "status": "error",
+            "message": "failed to serialize health snapshot"
+        })),
     });
     Json(body)
 }

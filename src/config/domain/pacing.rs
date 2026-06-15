@@ -11,8 +11,11 @@ pub struct PacingConfig {
     #[serde(default)]
     pub step_timeout_secs: Option<u64>,
 
-    #[serde(default)]
+    #[serde(default = "default_tool_timeout_secs")]
     pub tool_timeout_secs: Option<u64>,
+
+    #[serde(default)]
+    pub total_turn_timeout_secs: Option<u64>,
 
     #[serde(default = "default_stream_idle_timeout_secs")]
     pub stream_idle_timeout_secs: Option<u64>,
@@ -43,6 +46,10 @@ pub(crate) fn default_stream_idle_timeout_secs() -> Option<u64> {
     Some(180)
 }
 
+pub(crate) fn default_tool_timeout_secs() -> Option<u64> {
+    Some(600)
+}
+
 pub(crate) fn default_loop_detection_enabled() -> bool {
     true
 }
@@ -63,7 +70,8 @@ impl Default for PacingConfig {
     fn default() -> Self {
         Self {
             step_timeout_secs: None,
-            tool_timeout_secs: None,
+            tool_timeout_secs: default_tool_timeout_secs(),
+            total_turn_timeout_secs: None,
             stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             loop_detection_min_elapsed_secs: Some(0),
             loop_ignore_tools: Vec::new(),
@@ -108,6 +116,11 @@ impl PacingConfig {
         if let Some(t) = self.tool_timeout_secs {
             if t == 0 {
                 errors.push("pacing.tool_timeout_secs must be > 0 when set".into());
+            }
+        }
+        if let Some(t) = self.total_turn_timeout_secs {
+            if t == 0 {
+                errors.push("pacing.total_turn_timeout_secs must be > 0 when set".into());
             }
         }
         if let Some(t) = self.stream_idle_timeout_secs {

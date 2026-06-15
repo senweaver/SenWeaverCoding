@@ -78,16 +78,26 @@ window.addEventListener('unhandledrejection', (e) => {
   paintBootError('unhandledrejection', message, stack)
 })
 
+function storedLocale(): 'en' | 'zh' {
+  try {
+    const stored = localStorage.getItem('sen-locale')
+    if (stored === 'en' || stored === 'zh') return stored
+  } catch {  }
+  return 'zh'
+}
+
 async function boot() {
   try {
-    const [{ default: React }, { default: ReactDOM }, appModule, uiModule, boundaryModule] =
+    const [{ default: React }, { default: ReactDOM }, appModule, uiModule, boundaryModule, i18nModule] =
       await Promise.all([
         import('react'),
         import('react-dom/client'),
         import('./App'),
         import('./stores/uiStore'),
         import('./components/layout/AppErrorBoundary'),
+        import('./i18n'),
       ])
+    await i18nModule.ensureLocaleLoaded(storedLocale())
     uiModule.initializeTheme()
     const root = document.getElementById('root')
     if (!root) {

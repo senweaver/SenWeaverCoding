@@ -140,7 +140,12 @@ pub async fn prepare_messages_for_provider(
         });
     }
 
-    let remote_client = crate::services::require_services()
+    let remote_client = crate::services::try_get_services()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "multimodal image preparation requires initialized services; call init_services() before submitting messages with image markers"
+            )
+        })?
         .proxy_runtime()
         .build_client_with_timeouts("provider.ollama", 30, 10);
 

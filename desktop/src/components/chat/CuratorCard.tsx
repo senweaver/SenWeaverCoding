@@ -2,28 +2,44 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../shared/Modal'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import {
+  extractMermaidBlocks,
+  renderCuratorDiagrams,
+  regenerateCuratorDocxWithDiagrams,
+} from '../../lib/mermaidToImage'
+import {
   selectCuratorCardExecutionState,
   type CuratorExecutionState,
 } from '../../utils/activeCuratorSelector'
 
+function cleanWinPath(path: string): string {
+  if (!path) return path
+  if (path.startsWith('\\\\?\\UNC\\')) return '\\\\' + path.slice('\\\\?\\UNC\\'.length)
+  if (path.startsWith('\\\\?\\')) return path.slice('\\\\?\\'.length)
+  return path
+}
+
+const docxDiagramsProcessed = new Set<string>()
+
 async function openLocalPath(path: string): Promise<void> {
-  if (!path) return
+  const target = cleanWinPath(path)
+  if (!target) return
   if (!isTauriRuntime()) {
-    window.open(path, '_blank')
+    window.open(target, '_blank')
     return
   }
   try {
     const mod = (await import(/* @vite-ignore */ '@tauri-apps/plugin-shell')) as {
       open: (target: string) => Promise<void>
     }
-    await mod.open(path)
+    await mod.open(target)
   } catch (err) {
     console.warn('[CuratorCard] open docx failed', err)
   }
@@ -60,12 +76,23 @@ export function CuratorCard({
   const requestModeSwitch = useChatStore((s) => s.requestCuratorModeSwitch)
   const resumeCuratorExecution = useChatStore((s) => s.resumeCuratorExecution)
 
-  const execState = useChatStore((s): CuratorExecutionState => {
-    if (!sessionId) return 'idle'
-    const session = s.sessions[sessionId]
-    if (!session) return 'idle'
-    return selectCuratorCardExecutionState(session.messages, messageId, session.chatState)
-  })
+  const curatorInputs = useChatStore(
+    useShallow((s) => {
+      const session = sessionId ? s.sessions[sessionId] : undefined
+      return {
+        messages: session?.messages,
+        chatState: session?.chatState,
+      }
+    }),
+  )
+  const execState = useMemo<CuratorExecutionState>(() => {
+    if (!sessionId || !curatorInputs.messages) return 'idle'
+    return selectCuratorCardExecutionState(
+      curatorInputs.messages,
+      messageId,
+      curatorInputs.chatState ?? 'idle',
+    )
+  }, [sessionId, curatorInputs.messages, curatorInputs.chatState, messageId])
 
   const isWriting = status === 'writing'
   const isExecuting = execState === 'executing'
@@ -90,7 +117,7 @@ export function CuratorCard({
   }
 
   async function handleCopyPath() {
-    const target = finalMdPath || implBlueprintPath
+    const target = cleanWinPath(finalMdPath || implBlueprintPath)
     if (!target) return
     try {
       if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
@@ -113,6 +140,45 @@ export function CuratorCard({
   }
 
   const subtitle = `${template} · ${slug}`
+  const finalMdDisplay = cleanWinPath(finalMdPath)
+  const implBlueprintDisplay = cleanWinPath(implBlueprintPath)
+  const docxDisplay = docxPath ? cleanWinPath(docxPath) : undefined
+
+  const [diagramState, setDiagramState] = useState<'idle' | 'rendering' | 'done'>('idle')
+  const diagramRanRef = useRef(false)
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    if (isWriting) return
+    if (!docxPath || !finalMdPath) return
+    if (diagramRanRef.current) return
+    const processKey = `${messageId}::${docxPath}`
+    if (docxDiagramsProcessed.has(processKey)) return
+    if (extractMermaidBlocks(body).length === 0) return
+
+    diagramRanRef.current = true
+    docxDiagramsProcessed.add(processKey)
+    let cancelled = false
+    setDiagramState('rendering')
+    void (async () => {
+      try {
+        const diagrams = await renderCuratorDiagrams(body)
+        if (cancelled) return
+        if (diagrams.length > 0) {
+          await regenerateCuratorDocxWithDiagrams({
+            finalMdPath: cleanWinPath(finalMdPath),
+            template,
+            diagrams,
+          })
+        }
+      } finally {
+        if (!cancelled) setDiagramState('done')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [messageId, docxPath, finalMdPath, body, template, isWriting])
 
   return (
     <div className="mb-3">
@@ -125,9 +191,9 @@ export function CuratorCard({
           </span>
           <span
             className="font-[var(--font-mono)] text-[11px] text-[var(--color-text-secondary)] truncate"
-            title={finalMdPath || implBlueprintPath}
+            title={finalMdDisplay || implBlueprintDisplay}
           >
-            {(finalMdPath || implBlueprintPath).split(/[\\/]/).slice(-1)[0] || 'final.md'}
+            {(finalMdDisplay || implBlueprintDisplay).split(/[\\/]/).slice(-1)[0] || 'final.md'}
           </span>
           <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-curator-accent-container)] text-[var(--color-on-curator-accent-container)]">
             curator
@@ -145,18 +211,18 @@ export function CuratorCard({
           </div>
           <div className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">{subtitle}</div>
           <div className="mt-2 text-[11px] text-[var(--color-text-secondary)] space-y-0.5">
-            <div className="truncate" title={finalMdPath}>
+            <div className="truncate" title={finalMdDisplay}>
               <span className="opacity-70">final.md:</span>{' '}
-              <code className="text-[10px]">{finalMdPath}</code>
+              <code className="text-[10px]">{finalMdDisplay}</code>
             </div>
-            <div className="truncate" title={implBlueprintPath}>
+            <div className="truncate" title={implBlueprintDisplay}>
               <span className="opacity-70">impl_blueprint.md:</span>{' '}
-              <code className="text-[10px]">{implBlueprintPath}</code>
+              <code className="text-[10px]">{implBlueprintDisplay}</code>
             </div>
-            {docxPath && (
-              <div className="truncate" title={docxPath}>
+            {docxDisplay && (
+              <div className="truncate" title={docxDisplay}>
                 <span className="opacity-70">final.docx:</span>{' '}
-                <code className="text-[10px]">{docxPath}</code>
+                <code className="text-[10px]">{docxDisplay}</code>
               </div>
             )}
           </div>
@@ -174,13 +240,18 @@ export function CuratorCard({
           >
             {pathCopied ? t('plan.copyPathDone') : t('curator.copyPath')}
           </button>
-          {docxPath && (
+          {docxDisplay && (
             <button
-              onClick={() => void openLocalPath(docxPath)}
-              title={docxPath}
-              className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md text-[var(--color-curator-accent)] hover:bg-[var(--color-surface-hover)]"
+              onClick={() => void openLocalPath(docxDisplay)}
+              disabled={diagramState === 'rendering'}
+              title={diagramState === 'rendering' ? t('curator.renderingDiagrams') || docxDisplay : docxDisplay}
+              className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md text-[var(--color-curator-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <span className="material-symbols-outlined text-[14px]">description</span>
+              <span
+                className={`material-symbols-outlined text-[14px]${diagramState === 'rendering' ? ' animate-spin' : ''}`}
+              >
+                {diagramState === 'rendering' ? 'progress_activity' : 'description'}
+              </span>
               {t('curator.openDocx')}
             </button>
           )}

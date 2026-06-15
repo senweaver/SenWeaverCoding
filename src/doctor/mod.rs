@@ -622,6 +622,34 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
         }
     }
 
+    let mem_provider = config.memory.embedding_provider.trim();
+    if let Some(reason) = embedding_provider_validation_error(mem_provider) {
+        items.push(DiagItem::warn(
+            cat,
+            format!(
+                "memory.embedding_provider \"{mem_provider}\" is invalid: {reason}; vector search will be disabled (keyword-only fallback)"
+            ),
+        ));
+    } else if mem_provider.eq_ignore_ascii_case("none")
+        && matches!(
+            config.memory.search_mode,
+            crate::config::schema::SearchMode::Embedding | crate::config::schema::SearchMode::Hybrid
+        )
+    {
+        items.push(DiagItem::warn(
+            cat,
+            format!(
+                "memory.search_mode is {:?} but embedding_provider is \"none\"  -  semantic/vector search is disabled; set an embedding provider or use search_mode = bm25",
+                config.memory.search_mode
+            ),
+        ));
+    } else if !mem_provider.eq_ignore_ascii_case("none") {
+        items.push(DiagItem::ok(
+            cat,
+            format!("memory.embedding_provider: {mem_provider}"),
+        ));
+    }
+
     if let Some(hint) = config
         .memory
         .embedding_model
@@ -690,12 +718,16 @@ fn provider_validation_error(name: &str) -> Option<String> {
 
 fn embedding_provider_validation_error(name: &str) -> Option<String> {
     let normalized = name.trim();
-    if normalized.eq_ignore_ascii_case("none") || normalized.eq_ignore_ascii_case("openai") {
+    if normalized.eq_ignore_ascii_case("none")
+        || normalized.eq_ignore_ascii_case("openai")
+        || normalized.eq_ignore_ascii_case("openrouter")
+        || normalized.eq_ignore_ascii_case("cohere")
+    {
         return None;
     }
 
     let Some(url) = normalized.strip_prefix("custom:") else {
-        return Some("supported values: none, openai, custom:<url>".into());
+        return Some("supported values: none, openai, openrouter, cohere, custom:<url>".into());
     };
 
     let url = url.trim();

@@ -194,20 +194,45 @@ impl OllamaProvider {
     }
 
     fn strip_think_tags(s: &str) -> String {
+        const OPEN_TAG: &str = "<think>";
+        const CLOSE_TAG: &str = "</think>";
         let mut result = String::with_capacity(s.len());
         let mut rest = s;
+        let mut depth: usize = 0;
         loop {
-            if let Some(start) = rest.find("<think>") {
-                result.push_str(&rest[..start]);
-                if let Some(end) = rest[start..].find("</think>") {
-                    rest = &rest[start + end + "</think>".len()..];
-                } else {
-
+            let open_pos = rest.find(OPEN_TAG);
+            let close_pos = rest.find(CLOSE_TAG);
+            match (open_pos, close_pos) {
+                (Some(open), Some(close)) if open < close => {
+                    if depth == 0 {
+                        result.push_str(&rest[..open]);
+                    }
+                    depth += 1;
+                    rest = &rest[open + OPEN_TAG.len()..];
+                }
+                (_, Some(close)) => {
+                    if depth > 0 {
+                        depth -= 1;
+                    } else {
+                        result.push_str(&rest[..close]);
+                    }
+                    rest = &rest[close + CLOSE_TAG.len()..];
+                }
+                (Some(open), None) => {
+                    if depth == 0 {
+                        result.push_str(&rest[..open]);
+                    }
+                    depth += 1;
+                    rest = &rest[open + OPEN_TAG.len()..];
+                }
+                (None, None) => {
+                    if depth == 0 {
+                        result.push_str(rest);
+                    } else if result.trim().is_empty() {
+                        return rest.trim().to_string();
+                    }
                     break;
                 }
-            } else {
-                result.push_str(rest);
-                break;
             }
         }
         result.trim().to_string()

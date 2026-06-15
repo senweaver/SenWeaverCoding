@@ -315,13 +315,27 @@ impl Channel for RedditChannel {
             };
 
             let mut read_ids = Vec::new();
-            for child in &items {
-                if let Some(ref name) = child.data.name {
-                    read_ids.push(name.clone());
-                }
-                if let Some(msg) = self.parse_item(&child.data) {
-                    if tx.send(msg).await.is_err() {
-                        return Ok(());
+            'batch: for child in &items {
+                match self.parse_item(&child.data) {
+                    Some(msg) => {
+                        match crate::channels::forward_channel_message("reddit", &tx, msg) {
+                            crate::channels::ForwardOutcome::Delivered => {
+                                if let Some(ref name) = child.data.name {
+                                    read_ids.push(name.clone());
+                                }
+                            }
+                            crate::channels::ForwardOutcome::Dropped => {
+                                break 'batch;
+                            }
+                            crate::channels::ForwardOutcome::Closed => {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(ref name) = child.data.name {
+                            read_ids.push(name.clone());
+                        }
                     }
                 }
             }

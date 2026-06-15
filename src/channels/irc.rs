@@ -532,7 +532,8 @@ impl Channel for IrcChannel {
                         attachments: vec![],
                     };
 
-                    if tx.send(channel_msg).await.is_err() {
+                    if crate::channels::forward_channel_message("irc", &tx, channel_msg).is_closed()
+                    {
                         return Ok(());
                     }
                 }

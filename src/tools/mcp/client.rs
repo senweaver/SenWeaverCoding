@@ -45,18 +45,18 @@ pub struct McpServer {
 
 impl McpServer {
 
-    pub async fn connect(config: McpServerConfig) -> Result<Self> {
-
-        let mut transport = create_transport(&config).with_context(|| {
+    async fn handshake(
+        config: &McpServerConfig,
+    ) -> Result<(Box<dyn McpTransportConn>, Vec<McpToolDef>)> {
+        let mut transport = create_transport(config).with_context(|| {
             format!(
                 "failed to create transport for MCP server `{}`",
                 config.name
             )
         })?;
 
-        let id = 1u64;
         let init_req = JsonRpcRequest::new(
-            id,
+            1u64,
             "initialize",
             json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -92,8 +92,7 @@ impl McpServer {
 
         let _ = transport.send_and_recv(&notif).await;
 
-        let id = 2u64;
-        let list_req = JsonRpcRequest::new(id, "tools/list", json!({}));
+        let list_req = JsonRpcRequest::new(2u64, "tools/list", json!({}));
 
         let list_resp = timeout(
             Duration::from_secs(RECV_TIMEOUT_SECS),
@@ -113,7 +112,51 @@ impl McpServer {
         let tool_list: McpToolsListResult = serde_json::from_value(result)
             .with_context(|| format!("failed to parse tools/list from `{}`", config.name))?;
 
-        let tool_count = tool_list.tools.len();
+        Ok((transport, tool_list.tools))
+    }
+
+    async fn transport_call(
+        inner: &mut McpServerInner,
+        req: &JsonRpcRequest,
+        timeout_secs: u64,
+        tool_name: &str,
+    ) -> Result<crate::tools::mcp::protocol::JsonRpcResponse> {
+        timeout(
+            Duration::from_secs(timeout_secs),
+            inner.transport.send_and_recv(req),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "MCP server `{}` timed out after {}s during tool call `{tool_name}`",
+                inner.config.name,
+                timeout_secs
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "MCP server `{}` error during tool call `{tool_name}`",
+                inner.config.name
+            )
+        })
+    }
+
+    async fn reconnect(inner: &mut McpServerInner) -> Result<()> {
+        let (transport, tools) = Self::handshake(&inner.config).await?;
+        inner.transport = transport;
+        inner.tools = tools;
+        inner.next_id.store(3, Ordering::Relaxed);
+        tracing::info!(
+            "MCP server `{}` reconnected  -  {} tool(s) available",
+            inner.config.name,
+            inner.tools.len()
+        );
+        Ok(())
+    }
+
+    pub async fn connect(config: McpServerConfig) -> Result<Self> {
+        let (transport, tools) = Self::handshake(&config).await?;
+        let tool_count = tools.len();
 
         let inner = McpServerInner {
             config,
@@ -122,7 +165,7 @@ impl McpServer {
             next_id: AtomicU64::new(3),
             #[cfg(not(target_has_atomic = "64"))]
             next_id: AtomicU32::new(3),
-            tools: tool_list.tools,
+            tools,
         };
 
         tracing::info!(
@@ -163,24 +206,22 @@ impl McpServer {
             .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
             .min(MAX_TOOL_TIMEOUT_SECS);
 
-        let resp = timeout(
-            Duration::from_secs(tool_timeout),
-            inner.transport.send_and_recv(&req),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "MCP server `{}` timed out after {}s during tool call `{tool_name}`",
-                inner.config.name,
-                tool_timeout
-            )
-        })?
-        .with_context(|| {
-            format!(
-                "MCP server `{}` error during tool call `{tool_name}`",
-                inner.config.name
-            )
-        })?;
+        let resp = match Self::transport_call(&mut inner, &req, tool_timeout, tool_name).await {
+            Ok(resp) => resp,
+            Err(transport_err) => {
+                tracing::warn!(
+                    "MCP server `{}` transport failure during tool call `{tool_name}`: {transport_err}; attempting one reconnect",
+                    inner.config.name
+                );
+                Self::reconnect(&mut inner).await.with_context(|| {
+                    format!(
+                        "MCP server `{}` reconnect failed after transport failure during `{tool_name}`",
+                        inner.config.name
+                    )
+                })?;
+                Self::transport_call(&mut inner, &req, tool_timeout, tool_name).await?
+            }
+        };
 
         if let Some(err) = resp.error {
             bail!("MCP tool `{tool_name}` error {}: {}", err.code, err.message);

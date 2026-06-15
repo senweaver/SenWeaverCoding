@@ -58,14 +58,14 @@ function replaceServer(
   return servers.map((item, itemIndex) => (itemIndex === index ? normalizedNext : item))
 }
 
-export const useMcpStore = create<McpStore>((set) => ({
+export const useMcpStore = create<McpStore>((set, get) => ({
   servers: [],
   selectedServer: null,
   isLoading: false,
   error: null,
 
   fetchServers: async (projectPaths, fallbackCwd) => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: get().servers.length === 0, error: null })
     try {
       const normalizedPaths = Array.from(new Set((projectPaths ?? []).filter(Boolean)))
       const contexts = normalizedPaths.length > 0 ? normalizedPaths : [fallbackCwd].filter(Boolean)

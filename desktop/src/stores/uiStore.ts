@@ -135,11 +135,10 @@ export type SettingsTab =
   | 'lsp'
   | 'keyboard'
   | 'credentials'
-  | 'integrations'
   | 'autoDream'
   | 'computerUse'
 
-type ActiveView = 'code' | 'scheduled' | 'terminal' | 'history' | 'settings'
+type ActiveView = 'code'
 
 export type WorkspaceFinderMode = 'quick-open' | 'search-in-files' | 'workspace-symbol'
 

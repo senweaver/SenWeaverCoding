@@ -67,6 +67,8 @@ pub enum ExecuteError {
     },
     #[error("run_command spawn failed: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error("run_command `{command}` timed out after {timeout_secs}s")]
+    Timeout { command: String, timeout_secs: u64 },
     #[error("path escapes workspace: {0}")]
     PathEscape(PathBuf),
 }
@@ -605,14 +607,24 @@ async fn run_shell(command: &str, cwd: &Path) -> Result<(i32, String), ExecuteEr
     #[cfg(not(windows))]
     let (program, flag) = ("sh", "-c");
 
-    let output = crate::util::hidden_async_command(program)
-        .arg(flag)
+    let timeout_secs = crate::services::try_get_services()
+        .and_then(|s| s.config().pacing.tool_timeout_secs)
+        .unwrap_or(120);
+
+    let mut cmd = crate::util::hidden_async_command(program);
+    cmd.arg(flag)
         .arg(command)
         .current_dir(cwd)
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        .stderr(Stdio::piped());
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
         .await
+        .map_err(|_| ExecuteError::Timeout {
+            command: command.to_string(),
+            timeout_secs,
+        })?
         .map_err(ExecuteError::Spawn)?;
     let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
     captured.push_str(&String::from_utf8_lossy(&output.stderr));

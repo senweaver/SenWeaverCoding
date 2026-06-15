@@ -26,6 +26,36 @@ pub struct ModelsListQuery {
     pub provider_id: Option<String>,
 }
 
+pub async fn handle_debug_test_target(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let session_id = body
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "sessionId is required" })),
+        )
+            .into_response();
+    }
+    match body.get("tabId").and_then(serde_json::Value::as_u64) {
+        Some(tab_id) => {
+            #[allow(clippy::cast_possible_truncation)]
+            crate::tools::browser::set_test_target_tab(session_id, tab_id as u32);
+        }
+        None => crate::tools::browser::clear_test_target_tab(session_id),
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
 pub async fn handle_models_list(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -35,7 +65,7 @@ pub async fn handle_models_list(
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
 
     let resolved_provider_id: Option<String> = q
         .provider_id
@@ -103,7 +133,7 @@ pub async fn handle_models_available(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let default_provider_id = config
         .default_provider
         .as_deref()
@@ -168,7 +198,7 @@ pub async fn handle_models_current(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
 
     let active_provider_id: Option<String> = config
         .default_provider
@@ -246,7 +276,7 @@ pub async fn handle_effort_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let level = config
         .runtime
         .reasoning_effort
@@ -465,6 +495,15 @@ fn provider_to_saved_provider(
         .filter(|(_, value)| **value > 0)
         .map(|(model, value)| (model.clone(), serde_json::Value::from(*value)))
         .collect();
+    let model_types: serde_json::Map<String, serde_json::Value> = models
+        .iter()
+        .map(|model| {
+            (
+                model.clone(),
+                serde_json::Value::from(profile.types_for_model(model)),
+            )
+        })
+        .collect();
     let custom_headers: Vec<serde_json::Value> = profile
         .custom_headers
         .iter()
@@ -476,6 +515,20 @@ fn provider_to_saved_provider(
             })
         })
         .collect();
+    let model_pricing: serde_json::Map<String, serde_json::Value> = profile
+        .model_pricing
+        .iter()
+        .filter(|(_, pricing)| pricing.input > 0.0 || pricing.output > 0.0)
+        .map(|(model, pricing)| {
+            (
+                model.clone(),
+                serde_json::json!({
+                    "input": pricing.input,
+                    "output": pricing.output,
+                }),
+            )
+        })
+        .collect();
     serde_json::json!({
         "id": id,
         "presetId": profile.preset_id.clone().unwrap_or_else(|| id.to_string()),
@@ -485,6 +538,8 @@ fn provider_to_saved_provider(
         "apiFormat": wire_to_api_format(profile.wire_api.as_deref()),
         "models": models,
         "modelContextWindows": serde_json::Value::Object(model_context_windows),
+        "modelTypes": serde_json::Value::Object(model_types),
+        "modelPricing": serde_json::Value::Object(model_pricing),
         "customHeaders": custom_headers,
         "notes": profile.notes.clone().unwrap_or_default(),
         "hasKey": api_key_present || env_present,
@@ -557,6 +612,10 @@ pub struct CreateProviderBody {
 
     #[serde(default, rename = "modelContextWindows")]
     pub model_context_windows: Option<serde_json::Value>,
+    #[serde(default, rename = "modelTypes")]
+    pub model_types: Option<serde_json::Value>,
+    #[serde(default, rename = "modelPricing")]
+    pub model_pricing: Option<serde_json::Value>,
     #[serde(default, rename = "customHeaders")]
     pub custom_headers: Option<Vec<CustomHeaderInput>>,
     #[serde(default)]
@@ -577,6 +636,10 @@ pub struct UpdateProviderBody {
     pub models: Option<serde_json::Value>,
     #[serde(default, rename = "modelContextWindows")]
     pub model_context_windows: Option<serde_json::Value>,
+    #[serde(default, rename = "modelTypes")]
+    pub model_types: Option<serde_json::Value>,
+    #[serde(default, rename = "modelPricing")]
+    pub model_pricing: Option<serde_json::Value>,
     #[serde(default, rename = "customHeaders")]
     pub custom_headers: Option<Vec<CustomHeaderInput>>,
     #[serde(default)]
@@ -703,6 +766,93 @@ fn apply_model_context_windows_to_profile(
         .collect();
 }
 
+fn parse_model_types(
+    value: &serde_json::Value,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    let serde_json::Value::Object(map) = value else {
+        return out;
+    };
+    for (key, raw) in map {
+        let model = key.trim();
+        if model.is_empty() {
+            continue;
+        }
+        let serde_json::Value::Array(items) = raw else {
+            continue;
+        };
+        let types = crate::config::sanitize_model_types(
+            items.iter().filter_map(|item| item.as_str()),
+        );
+        if !types.is_empty() {
+            out.insert(model.to_string(), types);
+        }
+    }
+    out
+}
+
+fn parse_model_pricing(
+    value: &serde_json::Value,
+) -> std::collections::HashMap<String, crate::config::schema::ModelPricing> {
+    fn parse_price(raw: Option<&serde_json::Value>) -> f64 {
+        let parsed = match raw {
+            Some(serde_json::Value::Number(n)) => n.as_f64(),
+            Some(serde_json::Value::String(s)) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        };
+        match parsed {
+            Some(v) if v.is_finite() && v > 0.0 => v,
+            _ => 0.0,
+        }
+    }
+
+    let mut out = std::collections::HashMap::new();
+    let serde_json::Value::Object(map) = value else {
+        return out;
+    };
+    for (key, raw) in map {
+        let model = key.trim();
+        if model.is_empty() {
+            continue;
+        }
+        let serde_json::Value::Object(entry) = raw else {
+            continue;
+        };
+        let input = parse_price(entry.get("input"));
+        let output = parse_price(entry.get("output"));
+        if input <= 0.0 && output <= 0.0 {
+            continue;
+        }
+        out.insert(
+            model.to_string(),
+            crate::config::schema::ModelPricing { input, output },
+        );
+    }
+    out
+}
+
+fn apply_model_pricing_to_profile(
+    profile: &mut crate::config::ModelProviderConfig,
+    payload: &serde_json::Value,
+) {
+    let parsed = parse_model_pricing(payload);
+    profile.model_pricing = parsed
+        .into_iter()
+        .filter(|(model, _)| profile.model_names.iter().any(|m| m == model))
+        .collect();
+}
+
+fn apply_model_types_to_profile(
+    profile: &mut crate::config::ModelProviderConfig,
+    payload: &serde_json::Value,
+) {
+    let parsed = parse_model_types(payload);
+    profile.model_types = parsed
+        .into_iter()
+        .filter(|(model, _)| profile.model_names.iter().any(|m| m == model))
+        .collect();
+}
+
 pub async fn handle_providers_list(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -710,7 +860,7 @@ pub async fn handle_providers_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
 
     let active_id = config
         .default_provider
@@ -817,7 +967,7 @@ pub async fn handle_providers_auth_status(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let has_global_key = config.api_key.is_some();
     let active_provider = config.default_provider.clone();
     let has_provider_key = active_provider
@@ -926,7 +1076,7 @@ pub async fn handle_providers_create(
         .filter(|raw| !raw.trim().is_empty())
         .unwrap_or_else(|| slugify_provider_id(&trimmed_name));
     {
-        let cfg = state.config.lock();
+        let cfg = state.live_config.load();
         if let Some(existing_id) =
             find_provider_id_by_display_name(&cfg, &trimmed_name, None)
         {
@@ -993,6 +1143,12 @@ pub async fn handle_providers_create(
     if let Some(ref overrides) = body.model_context_windows {
         apply_model_context_windows_to_profile(&mut profile, overrides);
     }
+    if let Some(ref types) = body.model_types {
+        apply_model_types_to_profile(&mut profile, types);
+    }
+    if let Some(ref pricing) = body.model_pricing {
+        apply_model_pricing_to_profile(&mut profile, pricing);
+    }
     if let Some(ref custom_headers) = body.custom_headers {
         profile.custom_headers = sanitize_custom_headers_input(custom_headers);
     }
@@ -1014,7 +1170,7 @@ pub async fn handle_providers_create(
     state.push_live_config(snapshot);
     state.rebuild_runtime_from_config_async().await;
 
-    let config_snapshot = state.config.lock().clone();
+    let config_snapshot = state.live_config.load_ref();
     let saved = provider_to_saved_provider(&id, &profile, &config_snapshot);
     Json(serde_json::json!({ "provider": saved })).into_response()
 }
@@ -1031,7 +1187,7 @@ pub async fn handle_providers_update(
 
     if let Some(name) = body.name.as_deref().map(str::trim) {
         if !name.is_empty() {
-            let cfg = state.config.lock();
+            let cfg = state.live_config.load();
             if let Some(existing_id) =
                 find_provider_id_by_display_name(&cfg, name, Some(id.as_str()))
             {
@@ -1099,6 +1255,22 @@ pub async fn handle_providers_update(
                     .model_context_windows
                     .retain(|model, _| kept.contains(model));
             }
+            if let Some(ref types) = body.model_types {
+                apply_model_types_to_profile(profile, types);
+            } else if body.models.is_some() {
+                let kept: std::collections::HashSet<String> =
+                    profile.model_names.iter().cloned().collect();
+                profile.model_types.retain(|model, _| kept.contains(model));
+            }
+            if let Some(ref pricing) = body.model_pricing {
+                apply_model_pricing_to_profile(profile, pricing);
+            } else if body.models.is_some() {
+                let kept: std::collections::HashSet<String> =
+                    profile.model_names.iter().cloned().collect();
+                profile
+                    .model_pricing
+                    .retain(|model, _| kept.contains(model));
+            }
             if let Some(ref custom_headers) = body.custom_headers {
                 profile.custom_headers = sanitize_custom_headers_input(custom_headers);
             }
@@ -1121,7 +1293,7 @@ pub async fn handle_providers_update(
     state.push_live_config(snapshot);
     state.rebuild_runtime_from_config_async().await;
 
-    let config_snapshot = state.config.lock().clone();
+    let config_snapshot = state.live_config.load_ref();
     let profile = config_snapshot
         .model_providers
         .get(&id)
@@ -1431,7 +1603,7 @@ pub async fn handle_providers_test(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let Some(profile) = config.model_providers.get(&id).cloned() else {
         return (
             StatusCode::NOT_FOUND,
@@ -1529,7 +1701,7 @@ pub async fn handle_skills_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let cwd = q
         .cwd
         .map(PathBuf::from)
@@ -2611,7 +2783,7 @@ pub async fn handle_skills_detail(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let cwd = q
         .cwd
         .map(PathBuf::from)
@@ -2850,7 +3022,7 @@ pub async fn handle_mcp_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let mcp_enabled = config.mcp.enabled;
     let location = config_path_string(&state);
     let mut servers: Vec<serde_json::Value> = Vec::new();
@@ -2868,7 +3040,7 @@ pub async fn handle_mcp_status(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let location = config_path_string(&state);
     let Some(server) = config.mcp.servers.iter().find(|s| s.name == name).cloned() else {
         return (
@@ -3096,7 +3268,7 @@ pub async fn handle_mcp_reconnect(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let Some(server) = config.mcp.servers.iter().find(|s| s.name == name).cloned() else {
         return (
             StatusCode::NOT_FOUND,
@@ -3216,7 +3388,7 @@ pub async fn handle_plugins_list(
     }
     #[cfg(feature = "plugins-wasm")]
     {
-        let globally_enabled = state.config.lock().plugins.enabled;
+        let globally_enabled = state.live_config.load().plugins.enabled;
         let install_path = plugin_install_path();
         let plugins = collect_plugins();
         let plugins_json: Vec<serde_json::Value> = plugins
@@ -3275,7 +3447,7 @@ pub async fn handle_plugins_detail(
     }
     #[cfg(feature = "plugins-wasm")]
     {
-        let globally_enabled = state.config.lock().plugins.enabled;
+        let globally_enabled = state.live_config.load().plugins.enabled;
         let install_path = plugin_install_path();
         let plugins = collect_plugins();
         let Some(info) = plugins.into_iter().find(|p| p.name == q.id) else {
@@ -3422,7 +3594,7 @@ pub async fn handle_plugins_reload(
     }
     #[cfg(feature = "plugins-wasm")]
     {
-        let globally_enabled = state.config.lock().plugins.enabled;
+        let globally_enabled = state.live_config.load().plugins.enabled;
         let plugins = collect_plugins();
         let enabled_count = plugins
             .iter()
@@ -3611,7 +3783,7 @@ pub async fn handle_agents_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
 
     let mut all_agents: Vec<serde_json::Value> = config
         .agents
@@ -3832,7 +4004,7 @@ pub async fn handle_adapters_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_adapters_payload(&config)).into_response()
 }
 
@@ -4056,7 +4228,7 @@ pub async fn handle_filesystem_browse(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let raw_path = q
         .path
         .clone()
@@ -4139,7 +4311,7 @@ pub async fn handle_search_files(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let cwd = body
         .cwd
         .map(PathBuf::from)
@@ -4280,7 +4452,7 @@ pub async fn handle_search_sessions(
 }
 
 fn desktop_user_settings_path(state: &AppState) -> PathBuf {
-    let config_path = state.config.lock().config_path.clone();
+    let config_path = state.live_config.load().config_path.clone();
     config_path
         .parent()
         .map(|p| p.to_path_buf())
@@ -4572,26 +4744,38 @@ pub async fn handle_coding_modes_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let modes: Vec<serde_json::Value> = crate::agent::coding_mode::CodingMode::visible()
-        .iter()
-        .map(|m| {
-            let allowed = build_allowed_tools_for_mode(*m);
-            let profile = m.resource_profile();
-            serde_json::json!({
-                "id": m.display_name(),
-                "label": m.label(),
-                "description": m.description(),
-                "icon": m.icon(),
-                "permissionMode": derive_permission_from_coding(m),
-                "allowedTools": allowed,
-                "resourceProfile": {
-                    "browser": profile.browser,
-                    "shell": profile.shell,
-                    "mayWrite": profile.may_write,
-                },
-            })
-        })
-        .collect();
+    let mut modes: Vec<serde_json::Value> = Vec::new();
+    modes.push(serde_json::json!({
+        "id": "auto",
+        "label": "Auto",
+        "description": "Automatically selects the most suitable coding mode for each message based on your intent (debugging, planning, design, Q&A, or general agent work). It never locks in a single mode \u{2014} every turn is routed to the best fit while leaving all other modes and their behavior unchanged.",
+        "icon": "\u{2728}",
+        "permissionMode": "default",
+        "allowedTools": serde_json::Value::Null,
+        "resourceProfile": serde_json::Value::Null,
+        "auto": true,
+    }));
+    modes.extend(
+        crate::agent::coding_mode::CodingMode::visible()
+            .iter()
+            .map(|m| {
+                let allowed = build_allowed_tools_for_mode(*m);
+                let profile = m.resource_profile();
+                serde_json::json!({
+                    "id": m.display_name(),
+                    "label": m.label(),
+                    "description": m.description(),
+                    "icon": m.icon(),
+                    "permissionMode": derive_permission_from_coding(m),
+                    "allowedTools": allowed,
+                    "resourceProfile": {
+                        "browser": profile.browser,
+                        "shell": profile.shell,
+                        "mayWrite": profile.may_write,
+                    },
+                })
+            }),
+    );
     Json(serde_json::json!({ "modes": modes })).into_response()
 }
 
@@ -4640,6 +4824,32 @@ pub async fn handle_coding_mode_put(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    if body.mode.eq_ignore_ascii_case("auto") {
+        let permission = "default";
+        match body.session_key.as_deref() {
+            Some(session_key) if !session_key.is_empty() => {
+                if let Some(svc) = crate::services::try_get_services() {
+                    svc.set_session_auto_coding_mode(session_key, true);
+                }
+                super::ws::desktop::desktop_runtime_state()
+                    .set_session_permission_mode(session_key, permission);
+            }
+            _ => {
+                if let Some(svc) = crate::services::try_get_services() {
+                    svc.set_global_auto_coding_mode(true);
+                }
+            }
+        }
+        return Json(serde_json::json!({
+            "ok": true,
+            "mode": "auto",
+            "label": "Auto",
+            "permissionMode": permission,
+            "auto": true,
+            "autoApproved": true,
+        }))
+        .into_response();
+    }
     let Some(parsed) = crate::agent::coding_mode::CodingMode::from_str_loose(&body.mode) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -4655,7 +4865,7 @@ pub async fn handle_coding_mode_put(
         .unwrap_or_default();
     let cfg = svc_opt
         .map(|svc| svc.config())
-        .unwrap_or_else(|| std::sync::Arc::new(state.config.lock().clone()));
+        .unwrap_or_else(|| state.live_config.load_ref());
     let whitelist: &[String] = cfg.autonomy.auto_approve_mode_transitions.as_slice();
     let auto_approved = crate::agent::mode::transition::is_auto_approved(
         whitelist,
@@ -4685,6 +4895,7 @@ pub async fn handle_coding_mode_put(
     match body.session_key.as_deref() {
         Some(session_key) if !session_key.is_empty() => {
             if let Some(svc) = svc_opt {
+                svc.set_session_auto_coding_mode(session_key, false);
                 svc.set_session_coding_mode(session_key, parsed);
             }
             super::ws::desktop::desktop_runtime_state()
@@ -4692,6 +4903,7 @@ pub async fn handle_coding_mode_put(
         }
         _ => {
             if let Some(svc) = svc_opt {
+                svc.set_global_auto_coding_mode(false);
                 *svc.coding_mode.write() = parsed;
             }
             super::ws::desktop::desktop_runtime_state().set_permission_mode(permission);
@@ -4712,7 +4924,7 @@ pub fn derive_permission_from_coding(mode: &crate::agent::coding_mode::CodingMod
     use crate::agent::coding_mode::CodingMode;
     match mode {
         CodingMode::Plan | CodingMode::Ask => "plan",
-        CodingMode::Agent | CodingMode::Harness => "bypassPermissions",
+        CodingMode::Agent | CodingMode::Harness | CodingMode::Designer => "bypassPermissions",
         _ => "acceptEdits",
     }
 }
@@ -4789,11 +5001,70 @@ pub async fn handle_suggestions(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let workspace_dir = state.config.lock().workspace_dir.clone();
+    let workspace_dir = state.live_config.load().workspace_dir.clone();
     let signals = gather_prompt_context_signals(&workspace_dir).await;
     let suggestions =
         crate::services::prompt_suggestion::PromptSuggestionService::suggest(&signals);
     Json(serde_json::json!({ "suggestions": suggestions })).into_response()
+}
+
+pub async fn handle_designer_design_systems(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let systems = crate::agent::designer::design_system::catalog();
+    Json(serde_json::json!({ "designSystems": systems })).into_response()
+}
+
+pub async fn handle_designer_prompt_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let templates = crate::agent::designer::prompt_template::catalog();
+    Json(serde_json::json!({ "promptTemplates": templates })).into_response()
+}
+
+pub async fn handle_designer_html_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let templates = crate::agent::designer::html_template::catalog();
+    Json(serde_json::json!({ "htmlTemplates": templates })).into_response()
+}
+
+pub async fn handle_designer_submodes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let schemas = crate::agent::designer::params::all_submode_schemas();
+    let media_models = serde_json::json!({
+        "image": crate::tools::media::registry::default_models(
+            crate::tools::media::MediaSurface::Image
+        ),
+        "video": crate::tools::media::registry::default_models(
+            crate::tools::media::MediaSurface::Video
+        ),
+        "audio": crate::tools::media::registry::default_models(
+            crate::tools::media::MediaSurface::Audio
+        ),
+    });
+    Json(serde_json::json!({
+        "submodes": schemas.get("submodes").cloned().unwrap_or(serde_json::json!([])),
+        "mediaModels": media_models,
+    }))
+    .into_response()
 }
 
 pub async fn handle_scheduled_tasks_list(
@@ -4803,7 +5074,7 @@ pub async fn handle_scheduled_tasks_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let jobs = match crate::cron::list_jobs(&config) {
         Ok(j) => j,
         Err(_) => return Json(serde_json::json!({ "tasks": [] })).into_response(),
@@ -4889,7 +5160,7 @@ pub async fn handle_scheduled_tasks_create(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -5009,7 +5280,7 @@ pub async fn handle_scheduled_tasks_update(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let mut patch = crate::cron::CronJobPatch::default();
     if let Some(expr) = body
         .get("cron")
@@ -5082,7 +5353,7 @@ pub async fn handle_scheduled_tasks_delete(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     match crate::cron::remove_job(&config, &id) {
         Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => {
@@ -5104,7 +5375,7 @@ pub async fn handle_scheduled_tasks_run(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let jobs = match crate::cron::list_jobs(&config) {
         Ok(j) => j,
         Err(e) => {
@@ -5153,7 +5424,7 @@ pub async fn handle_scheduled_tasks_runs(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let limit = q.limit.unwrap_or(50);
     let mut all_runs: Vec<crate::cron::CronRun> = Vec::new();
     if let Ok(jobs) = crate::cron::list_jobs(&config) {
@@ -5180,7 +5451,7 @@ pub async fn handle_scheduled_tasks_task_runs(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let runs = crate::cron::list_runs(&config, &id, 50).unwrap_or_default();
     let runs_json: Vec<serde_json::Value> = runs
         .into_iter()
@@ -5380,6 +5651,337 @@ pub async fn handle_conversations_list(
     Json(serde_json::json!({ "conversations": conversations })).into_response()
 }
 
+pub async fn handle_session_design_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(ref backend) = state.session_backend else {
+        return Json(serde_json::json!({ "artifacts": [] })).into_response();
+    };
+    let session_key = format!("gw_{id}");
+    let backend_cloned = backend.clone();
+    let artifacts = tokio::task::spawn_blocking(move || {
+        backend_cloned
+            .list_design_artifacts(&session_key)
+            .into_iter()
+            .map(|rec| {
+                serde_json::json!({
+                    "relPath": rec.rel_path,
+                    "submode": rec.submode,
+                    "surface": rec.surface,
+                    "createdAt": rec.created_at,
+                    "updatedAt": rec.updated_at,
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({ "artifacts": artifacts })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct DeleteDesignArtifactBody {
+    #[serde(rename = "relPath", alias = "rel_path")]
+    pub rel_path: String,
+}
+
+pub async fn handle_session_design_artifact_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<DeleteDesignArtifactBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(ref backend) = state.session_backend else {
+        return Json(serde_json::json!({ "ok": false })).into_response();
+    };
+    let rel = body.rel_path.trim().to_string();
+    if rel.is_empty() || rel.contains("..") {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid path" }))
+            .into_response();
+    }
+    let session_key = format!("gw_{id}");
+    let fallback_dir = state
+        .config
+        .lock()
+        .workspace_dir
+        .to_string_lossy()
+        .into_owned();
+    let backend_cloned = backend.clone();
+    let session_key_cl = session_key.clone();
+    let rel_cl = rel.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let work_dir = backend_cloned
+            .get_session_work_dir(&session_key_cl)
+            .ok()
+            .flatten()
+            .unwrap_or(fallback_dir);
+        let _ = backend_cloned.delete_design_artifact(&session_key_cl, &rel_cl);
+        let root = std::path::Path::new(&work_dir);
+        let normalized = rel_cl.trim_start_matches(['/', '\\']).replace('\\', "/");
+        let target = root.join(&normalized);
+        let is_deck_manifest = normalized
+            .rsplit('/')
+            .next()
+            .map(|n| n.eq_ignore_ascii_case("deck.json"))
+            .unwrap_or(false)
+            && normalized.contains(".senweavercoding/designer/");
+        if let (Ok(root_c), Ok(target_c)) = (root.canonicalize(), target.canonicalize()) {
+            if target_c.starts_with(&root_c) && target_c.is_file() {
+                if is_deck_manifest {
+                    if let Some(deck_dir) = target_c.parent() {
+                        let _ = std::fs::remove_dir_all(deck_dir);
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&target_c);
+                }
+            }
+        }
+    })
+    .await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct DesignLintBody {
+    #[serde(rename = "relPath", alias = "rel_path")]
+    pub rel_path: String,
+}
+
+pub async fn handle_session_design_lint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<DesignLintBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let rel = body.rel_path.trim().to_string();
+    if rel.is_empty() || rel.contains("..") {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid path" })).into_response();
+    }
+    let fallback_dir = state
+        .config
+        .lock()
+        .workspace_dir
+        .to_string_lossy()
+        .into_owned();
+    let session_key = format!("gw_{id}");
+    let backend = state.session_backend.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let work_dir = backend
+            .as_ref()
+            .and_then(|b| b.get_session_work_dir(&session_key).ok().flatten())
+            .unwrap_or(fallback_dir);
+        let workspace = std::path::Path::new(&work_dir).to_path_buf();
+        let abs = workspace.join(rel.trim_start_matches(['/', '\\']));
+        let lower = rel.to_ascii_lowercase();
+        if lower.ends_with("deck.json") {
+            let deck_dir = abs
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| workspace.clone());
+            let outcome = crate::agent::designer::deck::compile::compile_deck(&deck_dir, &workspace);
+            return Ok(crate::agent::designer::lint::report_from_deck_outcome(&outcome));
+        }
+        if lower.ends_with(".mmd") {
+            return std::fs::read_to_string(&abs)
+                .map(|content| crate::agent::designer::lint::lint_mermaid(&content));
+        }
+        if lower.ends_with(".echarts.json") {
+            return std::fs::read_to_string(&abs)
+                .map(|content| crate::agent::designer::lint::lint_echarts_json(&content));
+        }
+        if lower.ends_with(".mindmap.md") {
+            return std::fs::read_to_string(&abs)
+                .map(|content| crate::agent::designer::lint::lint_mindmap_md(&content));
+        }
+        std::fs::read_to_string(&abs).map(|content| crate::agent::designer::lint::lint_html(&content))
+    })
+    .await;
+    match result {
+        Ok(Ok(report)) => Json(serde_json::json!({ "ok": true, "report": report })).into_response(),
+        Ok(Err(e)) => {
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct DesignUnitAddBody {
+    pub source: String,
+    #[serde(rename = "templateId", alias = "template_id", default)]
+    pub template_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub html: Option<String>,
+}
+
+fn design_unit_file_stem(name: Option<&str>, fallback: &str) -> String {
+    let raw = name.map(str::trim).unwrap_or_default();
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if matches!(c, ' ' | '-' | '_' | '.') {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+        if out.chars().count() >= 40 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed
+    }
+}
+
+pub async fn handle_session_design_unit_add(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<DesignUnitAddBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let (content, default_stem): (String, String) = match body.source.as_str() {
+        "template" => {
+            let template_id = body.template_id.as_deref().unwrap_or_default().trim();
+            let Some(html) = crate::agent::designer::html_template::read(template_id) else {
+                return Json(serde_json::json!({ "ok": false, "error": "unknown template" }))
+                    .into_response();
+            };
+            let stem = crate::agent::designer::html_template::title_for(template_id)
+                .unwrap_or_else(|| template_id.to_string());
+            (html.to_string(), stem)
+        }
+        "html" => {
+            let html = body.html.as_deref().unwrap_or_default();
+            if html.trim().is_empty() {
+                return Json(serde_json::json!({ "ok": false, "error": "empty html" }))
+                    .into_response();
+            }
+            if html.len() > 4_000_000 {
+                return Json(serde_json::json!({ "ok": false, "error": "html too large" }))
+                    .into_response();
+            }
+            (html.to_string(), "sketch".to_string())
+        }
+        _ => {
+            return Json(serde_json::json!({ "ok": false, "error": "invalid source" }))
+                .into_response();
+        }
+    };
+    let stem = design_unit_file_stem(body.name.as_deref(), &default_stem);
+    let session_dir = crate::agent::designer::pipeline::designer_session_dir(&id);
+    let fallback_dir = state
+        .config
+        .lock()
+        .workspace_dir
+        .to_string_lossy()
+        .into_owned();
+    let session_key = format!("gw_{id}");
+    let backend = state.session_backend.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let work_dir = backend
+            .as_ref()
+            .and_then(|b| b.get_session_work_dir(&session_key).ok().flatten())
+            .unwrap_or(fallback_dir);
+        let dir = std::path::Path::new(&work_dir).join(&session_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut rel = format!("{session_dir}/{stem}.html");
+        let mut attempt = 1usize;
+        while std::path::Path::new(&work_dir).join(&rel).exists() {
+            attempt += 1;
+            rel = format!("{session_dir}/{stem}-{attempt}.html");
+            if attempt > 200 {
+                return Err("could not allocate a unique file name".to_string());
+            }
+        }
+        let abs = std::path::Path::new(&work_dir).join(&rel);
+        std::fs::write(&abs, content).map_err(|e| e.to_string())?;
+        if let Some(b) = backend.as_ref() {
+            let _ = b.record_design_artifact(&session_key, &rel, None, "html");
+        }
+        Ok(rel)
+    })
+    .await;
+    match result {
+        Ok(Ok(rel)) => {
+            Json(serde_json::json!({ "ok": true, "relPath": rel })).into_response()
+        }
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e })).into_response(),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
+}
+
+pub async fn handle_session_design_handoff(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(ref backend) = state.session_backend else {
+        return Json(serde_json::json!({ "ok": false, "error": "no session backend" }))
+            .into_response();
+    };
+    let session_key = format!("gw_{id}");
+    let fallback_dir = state
+        .config
+        .lock()
+        .workspace_dir
+        .to_string_lossy()
+        .into_owned();
+    let backend_cloned = backend.clone();
+    let session_key_cl = session_key.clone();
+    let id_cl = id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let work_dir = backend_cloned
+            .get_session_work_dir(&session_key_cl)
+            .ok()
+            .flatten()
+            .unwrap_or(fallback_dir);
+        let artifacts: Vec<crate::agent::designer::handoff::HandoffArtifact> = backend_cloned
+            .list_design_artifacts(&session_key_cl)
+            .into_iter()
+            .map(|rec| crate::agent::designer::handoff::HandoffArtifact {
+                rel_path: rec.rel_path,
+                surface: rec.surface,
+            })
+            .collect();
+        crate::agent::designer::handoff::build_handoff(
+            &id_cl,
+            std::path::Path::new(&work_dir),
+            &artifacts,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(res)) => Json(serde_json::json!({ "ok": true, "handoff": res })).into_response(),
+        Ok(Err(e)) => {
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
+}
+
 pub async fn handle_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5387,7 +5989,7 @@ pub async fn handle_status(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -5406,7 +6008,7 @@ pub async fn handle_runtime_snapshot(
         return e.into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let started_at = crate::runtime::task_manager::process_started_at();
     let uptime_secs = crate::runtime::task_manager::process_uptime_secs();
 
@@ -5505,7 +6107,7 @@ pub async fn handle_hooks_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_hooks_payload(&config)).into_response()
 }
 
@@ -5639,7 +6241,7 @@ pub async fn handle_agent_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     match config.agents.get(name.trim()) {
         Some(cfg) => Json(serde_json::json!({
             "agent": agent_to_camel_json(name.trim(), cfg)
@@ -5845,7 +6447,7 @@ pub async fn handle_custom_tools_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     let tools: Vec<serde_json::Value> = config
         .custom_tools
         .tools
@@ -6089,9 +6691,15 @@ pub async fn handle_usage_get(
         .unwrap_or(true);
 
     let aggregates = if include_lifetime {
-        let workspace_dir = state.config.lock().workspace_dir.clone();
+        let (workspace_dir, prices) = {
+            let cfg = state.live_config.load();
+            (
+                cfg.workspace_dir.clone(),
+                crate::cost::pricing::effective_model_prices(&cfg),
+            )
+        };
         tokio::task::spawn_blocking(move || {
-            compute_lifetime_by_model_and_session(&workspace_dir)
+            compute_lifetime_by_model_and_session(&workspace_dir, &prices)
         })
         .await
         .unwrap_or_else(|_| UsageAggregates::empty())
@@ -6106,6 +6714,16 @@ pub async fn handle_usage_get(
         map.insert("byProvider".to_string(), aggregates.by_provider);
         map.insert("byWorkspace".to_string(), aggregates.by_workspace);
         map.insert("byCodingMode".to_string(), aggregates.by_coding_mode);
+        if include_lifetime {
+            map.insert(
+                "dailyCostUsd".to_string(),
+                serde_json::json!(aggregates.daily_cost_usd),
+            );
+            map.insert(
+                "monthlyCostUsd".to_string(),
+                serde_json::json!(aggregates.monthly_cost_usd),
+            );
+        }
         map.insert(
             "tokenRatePerMin".to_string(),
             serde_json::json!(aggregates.token_rate_per_min),
@@ -6145,6 +6763,8 @@ struct UsageAggregates {
     by_workspace: serde_json::Value,
     by_coding_mode: serde_json::Value,
     token_rate_per_min: f64,
+    daily_cost_usd: f64,
+    monthly_cost_usd: f64,
     last_24h_tokens: u64,
     last_24h_cost_usd: f64,
     last_24h_requests: u64,
@@ -6163,6 +6783,8 @@ impl UsageAggregates {
             by_workspace: empty(),
             by_coding_mode: empty(),
             token_rate_per_min: 0.0,
+            daily_cost_usd: 0.0,
+            monthly_cost_usd: 0.0,
             last_24h_tokens: 0,
             last_24h_cost_usd: 0.0,
             last_24h_requests: 0,
@@ -6215,6 +6837,7 @@ fn provider_from_model(model: &str) -> String {
 
 fn compute_lifetime_by_model_and_session(
     workspace_dir: &std::path::Path,
+    prices: &std::collections::HashMap<String, crate::config::schema::ModelPricing>,
 ) -> UsageAggregates {
     use std::io::{BufRead, BufReader};
 
@@ -6285,6 +6908,11 @@ fn compute_lifetime_by_model_and_session(
     let one_hour_ago = now - chrono::Duration::hours(1);
     let twenty_four_hours_ago = now - chrono::Duration::hours(24);
     let seven_days_ago = now - chrono::Duration::days(7);
+    let today = now.date_naive();
+    let (current_year, current_month) = {
+        use chrono::Datelike;
+        (now.year(), now.month())
+    };
 
     let mut last_minute_tokens: u64 = 0;
     let mut last_hour_tokens: u64 = 0;
@@ -6294,6 +6922,8 @@ fn compute_lifetime_by_model_and_session(
     let mut last_7d_tokens: u64 = 0;
     let mut last_7d_cost_usd: f64 = 0.0;
     let mut last_7d_requests: u64 = 0;
+    let mut daily_cost_usd: f64 = 0.0;
+    let mut monthly_cost_usd: f64 = 0.0;
 
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
@@ -6312,9 +6942,39 @@ fn compute_lifetime_by_model_and_session(
         };
         let ts = record.usage.timestamp;
         let model = record.usage.model.clone();
-        let provider = provider_from_model(&model);
+        let provider = record
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| provider_from_model(&model));
         let total = record.usage.total_tokens;
-        let cost = record.usage.cost_usd;
+        let cost = if record.usage.cost_usd > 0.0 {
+            record.usage.cost_usd
+        } else if total > 0 {
+            crate::cost::pricing::lookup_model_pricing(prices, &provider, &model)
+                .map(|pricing| {
+                    (record.usage.input_tokens as f64 / 1_000_000.0) * pricing.input.max(0.0)
+                        + (record.usage.output_tokens as f64 / 1_000_000.0)
+                            * pricing.output.max(0.0)
+                })
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        {
+            use chrono::Datelike;
+            let naive = ts.naive_utc();
+            if naive.date() == today {
+                daily_cost_usd += cost;
+            }
+            if naive.year() == current_year && naive.month() == current_month {
+                monthly_cost_usd += cost;
+            }
+        }
 
         if ts >= one_minute_ago {
             last_minute_tokens += total;
@@ -6525,6 +7185,8 @@ fn compute_lifetime_by_model_and_session(
         by_workspace: serde_json::Value::Object(serde_json::Map::new()),
         by_coding_mode: serde_json::Value::Object(coding_mode_out),
         token_rate_per_min,
+        daily_cost_usd,
+        monthly_cost_usd,
         last_24h_tokens,
         last_24h_cost_usd,
         last_24h_requests,
@@ -6546,7 +7208,7 @@ pub async fn handle_agent_config_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_agent_config_payload(&config)).into_response()
 }
 
@@ -6606,7 +7268,7 @@ pub async fn handle_agent_runtime_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_agent_runtime_payload(&config)).into_response()
 }
 
@@ -6666,7 +7328,7 @@ pub async fn handle_web_search_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_web_search_payload(&config)).into_response()
 }
 
@@ -6726,7 +7388,7 @@ pub async fn handle_web_fetch_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_web_fetch_payload(&config)).into_response()
 }
 
@@ -6838,7 +7500,7 @@ pub async fn handle_lsp_list(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let cfg = state.config.lock().clone();
+    let cfg = state.live_config.load_ref();
     let live_servers = state.lsp.service().list_servers().await;
     let live_languages: std::collections::HashSet<String> = live_servers
         .into_iter()
@@ -6909,7 +7571,7 @@ pub async fn handle_lsp_preferences_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let cfg = state.config.lock().clone();
+    let cfg = state.live_config.load_ref();
     Json(serde_json::json!({
         "inlayHintsEnabled": cfg.lsp.inlay_hints_enabled,
         "formatOnSave": cfg.lsp.format_on_save,
@@ -7162,7 +7824,7 @@ pub async fn handle_lsp_install(
         return e.into_response();
     }
     {
-        let cfg = state.config.lock();
+        let cfg = state.live_config.load();
         if !cfg.lsp.servers.iter().any(|s| s.id == id) {
             return (
                 StatusCode::NOT_FOUND,
@@ -7201,7 +7863,7 @@ pub async fn handle_lsp_restart(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let snapshot = state.config.lock().clone();
+    let snapshot = state.live_config.load_ref();
     let Some(entry) = snapshot.lsp.servers.iter().find(|s| s.id == id).cloned() else {
         return (
             StatusCode::NOT_FOUND,
@@ -7319,7 +7981,7 @@ pub async fn handle_lsp_notify(
 
     let svc = state.lsp.service();
 
-    let snapshot = state.config.lock().clone();
+    let snapshot = state.live_config.load_ref();
     let routed = resolve_lsp_server_language(&snapshot, &hint, Some(&path));
     let Some(language) = routed else {
         if body.method == "didClose" {
@@ -7505,7 +8167,7 @@ pub async fn handle_lsp_request(
     };
 
     let svc = state.lsp.service();
-    let snapshot = state.config.lock().clone();
+    let snapshot = state.live_config.load_ref();
     let workspace = snapshot.workspace_dir.clone();
     let Some(language) = resolve_lsp_server_language(&snapshot, &hint, Some(&path)) else {
         return Json(serde_json::json!({"result": null})).into_response();
@@ -7785,7 +8447,7 @@ async fn handle_lsp_pathless_request(
             }
         };
 
-    let snapshot = state.config.lock().clone();
+    let snapshot = state.live_config.load_ref();
     let workspace = snapshot.workspace_dir.clone();
     let lsp_enabled = snapshot.lsp.enabled;
     let language = match hint_language {
@@ -7878,7 +8540,7 @@ async fn handle_lsp_execute_command(
             }
         };
 
-    let snapshot = state.config.lock().clone();
+    let snapshot = state.live_config.load_ref();
     let workspace = snapshot.workspace_dir.clone();
     let lsp_enabled = snapshot.lsp.enabled;
     let language = match hint_language {
@@ -8042,7 +8704,7 @@ pub async fn handle_browser_config_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let config = state.config.lock().clone();
+    let config = state.live_config.load_ref();
     Json(build_browser_computer_use_payload(&config)).into_response()
 }
 

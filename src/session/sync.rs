@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 use crate::observability::session_write_mode_metrics;
 use crate::session::state::{SessionDelta, SessionId};
 
-const CHANNEL_CAPACITY: usize = 256;
+const CHANNEL_CAPACITY: usize = 1024;
 
 static GLOBAL: Lazy<Arc<SessionSyncHub>> = Lazy::new(|| Arc::new(SessionSyncHub::new()));
 
@@ -65,12 +65,7 @@ impl SessionSyncHub {
     }
 
     pub fn publish(&self, id: &str, delta: SessionDelta) {
-        {
-            let guard = self.inner.read();
-            if let Some(tx) = guard.get(id) {
-                let _ = tx.send(delta.clone());
-            }
-        }
+        self.publish_local(id, &delta);
         let transport = self.transport.read().clone();
         if let Some(transport) = transport {
             let session_id = id.to_string();
@@ -84,6 +79,13 @@ impl SessionSyncHub {
                     );
                 }
             });
+        }
+    }
+
+    pub fn publish_local(&self, id: &str, delta: &SessionDelta) {
+        let guard = self.inner.read();
+        if let Some(tx) = guard.get(id) {
+            let _ = tx.send(delta.clone());
         }
     }
 

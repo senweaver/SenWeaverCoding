@@ -850,7 +850,16 @@ impl Channel for DiscordChannel {
     #[allow(clippy::too_many_lines)]
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         let bot_user_id = Self::bot_user_id_from_token(&self.bot_token).unwrap_or_default();
+        let mut reconnect_attempt: u32 = 0;
 
+        loop {
+            if tx.is_closed() {
+                tracing::info!("Discord: message channel closed; stopping listener");
+                return Ok(());
+            }
+
+            let session_started = std::time::Instant::now();
+            let session: anyhow::Result<bool> = async {
         let gw_resp: serde_json::Value = self
             .http_client()
             .get("https://discord.com/api/v10/gateway/bot")
@@ -902,12 +911,17 @@ impl Channel for DiscordChannel {
 
         let mut sequence: i64 = -1;
 
-        let (hb_tx, mut hb_rx) = tokio::sync::mpsc::channel::<()>(1);
+        const MAX_MISSED_ACKS: u32 = 3;
+        let mut missed_ack_count: u32 = 0;
         let hb_interval = heartbeat_interval;
+        let grace_ms: u64 = (hb_interval / 10).min(5_000);
+        let effective_interval = hb_interval.saturating_add(grace_ms);
+
+        let (hb_tx, mut hb_rx) = tokio::sync::mpsc::channel::<()>(1);
         let _heartbeat_task =
             crate::runtime::spawn_supervised("channels.discord.heartbeat", async move {
                 let mut interval =
-                    tokio::time::interval(std::time::Duration::from_millis(hb_interval));
+                    tokio::time::interval(std::time::Duration::from_millis(effective_interval));
                 loop {
                     interval.tick().await;
                     if hb_tx.send(()).await.is_err() {
@@ -921,11 +935,26 @@ impl Channel for DiscordChannel {
         loop {
             tokio::select! {
                 _ = hb_rx.recv() => {
+                    if missed_ack_count > 0 {
+                        if missed_ack_count >= MAX_MISSED_ACKS {
+                            tracing::warn!(
+                                "Discord: {missed_ack_count} consecutive heartbeat ACKs missed \
+                                 (interval {hb_interval}ms + {grace_ms}ms grace); \
+                                 connection appears zombied, reconnecting"
+                            );
+                            break;
+                        }
+                        tracing::info!(
+                            "Discord: heartbeat ACK missed ({missed_ack_count}/{MAX_MISSED_ACKS}); \
+                             tolerating transient delay"
+                        );
+                    }
                     let d = if sequence >= 0 { json!(sequence) } else { json!(null) };
                     let hb = json!({"op": 1, "d": d});
                     if write.send(Message::Text(hb.to_string().into())).await.is_err() {
                         break;
                     }
+                    missed_ack_count += 1;
                 }
                 msg = read.next() => {
                     let msg = match msg {
@@ -964,6 +993,7 @@ impl Channel for DiscordChannel {
                             if write.send(Message::Text(hb.to_string().into())).await.is_err() {
                                 break;
                             }
+                            missed_ack_count += 1;
                             continue;
                         }
 
@@ -975,6 +1005,11 @@ impl Channel for DiscordChannel {
                         9 => {
                             tracing::warn!("Discord: received Invalid Session (op 9), closing for restart");
                             break;
+                        }
+
+                        11 => {
+                            missed_ack_count = 0;
+                            continue;
                         }
                         _ => {}
                     }
@@ -1113,14 +1148,41 @@ impl Channel for DiscordChannel {
                     attachments: vec![],
                     };
 
-                    if tx.send(channel_msg).await.is_err() {
-                        break;
+                    if crate::channels::forward_channel_message("discord", &tx, channel_msg)
+                        .is_closed()
+                    {
+                        return Ok(true);
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(false)
+            }
+            .await;
+
+            match session {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    tracing::warn!("Discord: gateway connection lost");
+                }
+                Err(e) => {
+                    tracing::warn!("Discord: gateway session error: {e:#}");
+                }
+            }
+
+            if session_started.elapsed() >= std::time::Duration::from_secs(60) {
+                reconnect_attempt = 0;
+            }
+            let wait = crate::channels::reconnect_backoff_delay(reconnect_attempt, 2, 60, 500);
+            tracing::warn!(
+                "Discord: reconnecting in {:.3}s (attempt #{})",
+                wait.as_secs_f64(),
+                reconnect_attempt.saturating_add(1),
+            );
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            tokio::time::sleep(wait).await;
+        }
     }
 
     async fn health_check(&self) -> bool {

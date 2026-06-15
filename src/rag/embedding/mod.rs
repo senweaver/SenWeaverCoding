@@ -65,7 +65,13 @@ pub fn build_code_embedder(cfg: &CodeEmbedderConfig) -> Box<dyn EmbeddingProvide
     match cfg.backend {
         CodeEmbedderBackend::OpenAi => match openai::build(cfg) {
             Some(p) => p,
-            None => Box::new(crate::memory::embeddings::NoopEmbedding),
+            None => {
+                tracing::error!(
+                    model = %cfg.model,
+                    "OpenAI code embedder could not be built (missing API key); falling back to no-op embeddings  -  semantic code retrieval will return empty results"
+                );
+                Box::new(crate::memory::embeddings::NoopEmbedding)
+            }
         },
         CodeEmbedderBackend::Ollama => Box::new(ollama::OllamaCodeEmbedding::from_config(cfg)),
         CodeEmbedderBackend::LocalBge => Box::new(local_bge::LocalBgeEmbedding::from_config(cfg)),

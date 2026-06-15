@@ -8,21 +8,22 @@ use std::{
     path::PathBuf,
     str,
     sync::{
-        atomic::{AtomicU32, Ordering},
-        Mutex,
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     thread,
-};
-
-#[cfg(not(target_os = "windows"))]
-use std::{
-    process::Stdio,
     time::{Duration, Instant},
 };
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+#[cfg(not(target_os = "windows"))]
+use std::process::Stdio;
+
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 8192;
+const TERMINAL_WRITE_CHANNEL_CAPACITY: usize = 4096;
 
 #[derive(Default)]
 pub(crate) struct TerminalState {
@@ -31,8 +32,8 @@ pub(crate) struct TerminalState {
 }
 
 pub(crate) struct TerminalSession {
-    master: Box<dyn MasterPty + Send>,
-    writer: Mutex<Box<dyn std::io::Write + Send>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    write_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
@@ -55,14 +56,21 @@ struct TerminalExitPayload {
     code: u32,
 }
 
-#[tauri::command]
-pub(crate) fn terminal_spawn(
-    app: AppHandle,
-    state: State<'_, TerminalState>,
+struct SpawnedTerminal {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    child: Box<dyn Child + Send + Sync>,
+    reader: Box<dyn std::io::Read + Send>,
+    shell: String,
+    cwd: PathBuf,
+}
+
+fn spawn_terminal_blocking(
     cols: u16,
     rows: u16,
     cwd: Option<String>,
-) -> Result<TerminalSpawnResult, String> {
+) -> Result<SpawnedTerminal, String> {
     let cwd_path = resolve_terminal_cwd(cwd)?;
     let shell = default_shell();
     let pty_system = native_pty_system();
@@ -83,13 +91,13 @@ pub(crate) fn terminal_spawn(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
-    let mut child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|err| format!("spawn terminal shell: {err}"))?;
     drop(pair.slave);
 
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|err| format!("clone terminal reader: {err}"))?;
@@ -98,7 +106,55 @@ pub(crate) fn terminal_spawn(
         .take_writer()
         .map_err(|err| format!("open terminal writer: {err}"))?;
     let killer = child.clone_killer();
+
+    Ok(SpawnedTerminal {
+        master: pair.master,
+        writer,
+        killer,
+        child,
+        reader,
+        shell,
+        cwd: cwd_path,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn terminal_spawn(
+    app: AppHandle,
+    state: State<'_, TerminalState>,
+    cols: u16,
+    rows: u16,
+    cwd: Option<String>,
+) -> Result<TerminalSpawnResult, String> {
+    let spawned =
+        tauri::async_runtime::spawn_blocking(move || spawn_terminal_blocking(cols, rows, cwd))
+            .await
+            .map_err(|err| format!("terminal spawn task failed: {err}"))??;
+    let SpawnedTerminal {
+        master,
+        writer,
+        killer,
+        mut child,
+        mut reader,
+        shell,
+        cwd: cwd_path,
+    } = spawned;
+
     let session_id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+
+    let (write_tx, write_rx) =
+        std::sync::mpsc::sync_channel::<Vec<u8>>(TERMINAL_WRITE_CHANNEL_CAPACITY);
+    thread::spawn(move || {
+        let mut writer = writer;
+        while let Ok(bytes) = write_rx.recv() {
+            if writer.write_all(&bytes).is_err() {
+                break;
+            }
+            if writer.flush().is_err() {
+                break;
+            }
+        }
+    });
 
     {
         let mut sessions = state
@@ -108,14 +164,16 @@ pub(crate) fn terminal_spawn(
         sessions.insert(
             session_id,
             TerminalSession {
-                master: pair.master,
-                writer: Mutex::new(writer),
+                master: Arc::new(Mutex::new(master)),
+                write_tx,
                 killer: Mutex::new(killer),
             },
         );
     }
 
     let output_app = app.clone();
+    let (chunk_tx, chunk_rx) =
+        std::sync::mpsc::sync_channel::<String>(TERMINAL_OUTPUT_CHANNEL_CAPACITY);
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         let mut pending_utf8 = Vec::new();
@@ -124,36 +182,57 @@ pub(crate) fn terminal_spawn(
                 Ok(0) => break,
                 Ok(n) => {
                     let data = decode_terminal_output(&mut pending_utf8, &buffer[..n]);
-                    if !data.is_empty() {
-                        let _ = output_app.emit(
-                            "terminal-output",
-                            TerminalOutputPayload { session_id, data },
-                        );
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if chunk_tx.send(data).is_err() {
+                        break;
                     }
                 }
                 Err(err) => {
-                    let _ = output_app.emit(
-                        "terminal-output",
-                        TerminalOutputPayload {
-                            session_id,
-                            data: format!("\r\n[terminal read error: {err}]\r\n"),
-                        },
-                    );
+                    let _ = chunk_tx.send(format!("\r\n[terminal read error: {err}]\r\n"));
                     break;
                 }
             }
         }
         if !pending_utf8.is_empty() {
-            let data = String::from_utf8_lossy(&pending_utf8).to_string();
-            let _ = output_app.emit(
+            let _ = chunk_tx.send(String::from_utf8_lossy(&pending_utf8).to_string());
+        }
+    });
+
+    thread::spawn(move || {
+        const COALESCE_WINDOW: Duration = Duration::from_millis(8);
+        const MAX_PENDING_BYTES: usize = 262_144;
+        static OUTPUT_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+        while let Ok(first) = chunk_rx.recv() {
+            let mut pending = first;
+            let deadline = Instant::now() + COALESCE_WINDOW;
+            while pending.len() < MAX_PENDING_BYTES {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match chunk_rx.recv_timeout(deadline - now) {
+                    Ok(more) => pending.push_str(&more),
+                    Err(_) => break,
+                }
+            }
+            if let Err(err) = output_app.emit(
                 "terminal-output",
-                TerminalOutputPayload { session_id, data },
-            );
+                TerminalOutputPayload {
+                    session_id,
+                    data: pending,
+                },
+            ) {
+                crate::warn_emit_failure(&OUTPUT_EMIT_FAILURES, "terminal-output", &err);
+            }
         }
     });
 
     let exit_app = app.clone();
     thread::spawn(move || {
+        static EXIT_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+        static WAIT_ERROR_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
         let status = child.wait();
         if let Some(state) = exit_app.try_state::<TerminalState>() {
             if let Ok(mut sessions) = state.sessions.lock() {
@@ -162,22 +241,30 @@ pub(crate) fn terminal_spawn(
         }
         match status {
             Ok(status) => {
-                let _ = exit_app.emit(
+                if let Err(err) = exit_app.emit(
                     "terminal-exit",
                     TerminalExitPayload {
                         session_id,
                         code: status.exit_code(),
                     },
-                );
+                ) {
+                    crate::warn_emit_failure(&EXIT_EMIT_FAILURES, "terminal-exit", &err);
+                }
             }
             Err(err) => {
-                let _ = exit_app.emit(
+                if let Err(emit_err) = exit_app.emit(
                     "terminal-output",
                     TerminalOutputPayload {
                         session_id,
                         data: format!("\r\n[terminal wait error: {err}]\r\n"),
                     },
-                );
+                ) {
+                    crate::warn_emit_failure(
+                        &WAIT_ERROR_EMIT_FAILURES,
+                        "terminal-output (wait error)",
+                        &emit_err,
+                    );
+                }
             }
         }
     });
@@ -190,7 +277,7 @@ pub(crate) fn terminal_spawn(
 }
 
 #[tauri::command]
-pub(crate) fn terminal_write(
+pub(crate) async fn terminal_write(
     state: State<'_, TerminalState>,
     session_id: u32,
     data: String,
@@ -202,43 +289,50 @@ pub(crate) fn terminal_write(
     let session = sessions
         .get(&session_id)
         .ok_or_else(|| "terminal session is not running".to_string())?;
-    let mut writer = session
-        .writer
-        .lock()
-        .map_err(|_| "terminal writer is unavailable".to_string())?;
-    writer
-        .write_all(data.as_bytes())
-        .map_err(|err| format!("write terminal input: {err}"))?;
-    writer
-        .flush()
-        .map_err(|err| format!("flush terminal input: {err}"))?;
-    Ok(())
+    session
+        .write_tx
+        .try_send(data.into_bytes())
+        .map_err(|err| match err {
+            std::sync::mpsc::TrySendError::Full(_) => "terminal write buffer full".to_string(),
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                "terminal session is not running".to_string()
+            }
+        })
 }
 
 #[tauri::command]
-pub(crate) fn terminal_resize(
+pub(crate) async fn terminal_resize(
     state: State<'_, TerminalState>,
     session_id: u32,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let sessions = state
-        .sessions
-        .lock()
-        .map_err(|_| "terminal state is unavailable".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| "terminal session is not running".to_string())?;
-    session
-        .master
-        .resize(PtySize {
-            rows: rows.max(8),
-            cols: cols.max(20),
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|err| format!("resize terminal: {err}"))?;
-    Ok(())
+    let master = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "terminal state is unavailable".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| "terminal session is not running".to_string())?;
+        session.master.clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let master = master
+            .lock()
+            .map_err(|_| "terminal master is unavailable".to_string())?;
+        master
+            .resize(PtySize {
+                rows: rows.max(8),
+                cols: cols.max(20),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|err| format!("resize terminal: {err}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| format!("terminal resize task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -294,9 +388,7 @@ fn decode_terminal_output(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
             Err(err) => {
                 let valid_up_to = err.valid_up_to();
                 if valid_up_to > 0 {
-                    let text = str::from_utf8(&pending[..valid_up_to])
-                        .expect("valid_up_to marks a valid UTF-8 prefix");
-                    output.push_str(text);
+                    output.push_str(&String::from_utf8_lossy(&pending[..valid_up_to]));
                     pending.drain(..valid_up_to);
                     continue;
                 }

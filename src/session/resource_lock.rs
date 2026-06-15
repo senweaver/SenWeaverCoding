@@ -704,6 +704,7 @@ pub fn record_read_for_current_session(path: &Path) {
 }
 
 pub fn record_write_for_current_session(path: &Path) {
+    crate::agent::designer::record_artifact_if_designer(path);
     let Some(ctx) = current_session_context() else {
         return;
     };

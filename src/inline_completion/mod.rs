@@ -4,7 +4,6 @@
 
 pub mod cache;
 pub mod context_builder;
-pub mod ghost_renderer;
 
 pub mod nep;
 pub mod providers;
@@ -15,7 +14,6 @@ pub mod traits;
 
 pub use cache::{CacheKey, CompletionCache};
 pub use context_builder::{InlineContext, build_context_from_window};
-pub use ghost_renderer::{GhostText, GhostTextRenderer};
 pub use registry::{InlineCompletionRegistry, RegistryHandle};
 pub use stats::{AcceptanceEvent, CompletionStats, global_stats};
 pub use throttle::{Throttler, ThrottlerDecision};

@@ -379,15 +379,78 @@ impl WorkerWireTracker {
                 "model": model,
                 "message": message,
             })],
-            TurnEvent::WorkerSpawned { .. }
-            | TurnEvent::WorkerStatus { .. }
-            | TurnEvent::WorkerProgress { .. }
-            | TurnEvent::WorkerCompleted { .. }
-            | TurnEvent::WorkerStopped { .. }
-            | TurnEvent::ParentResumed { .. }
-            | TurnEvent::ContextCompressed { .. }
-            | TurnEvent::PlanProgressCommitted { .. }
-            | TurnEvent::PiiSanitized { .. } => Vec::new(),
+            TurnEvent::WorkerSpawned {
+                parent_tool_use_id,
+                worker_id,
+                title,
+                model,
+            } => vec![json!({
+                "type": "worker_spawned",
+                "parentToolUseId": parent_tool_use_id,
+                "workerId": worker_id,
+                "title": title,
+                "model": model,
+            })],
+            TurnEvent::WorkerStatus {
+                worker_id,
+                status,
+                detail,
+            } => vec![json!({
+                "type": "worker_status",
+                "workerId": worker_id,
+                "status": status,
+                "detail": detail,
+            })],
+            TurnEvent::WorkerProgress {
+                worker_id,
+                action,
+                detail,
+            } => vec![json!({
+                "type": "worker_progress",
+                "workerId": worker_id,
+                "action": action,
+                "detail": detail,
+            })],
+            TurnEvent::WorkerCompleted {
+                worker_id,
+                success,
+                summary,
+            } => vec![json!({
+                "type": "worker_completed",
+                "workerId": worker_id,
+                "success": success,
+                "summary": summary,
+            })],
+            TurnEvent::WorkerStopped { worker_id, reason } => vec![json!({
+                "type": "worker_stopped",
+                "workerId": worker_id,
+                "reason": reason,
+            })],
+            TurnEvent::ParentResumed { reason } => vec![json!({
+                "type": "parent_resumed",
+                "reason": reason,
+            })],
+            TurnEvent::ContextCompressed {
+                tokens_before,
+                tokens_after,
+            } => vec![json!({
+                "type": "context_compressed",
+                "tokensBefore": tokens_before,
+                "tokensAfter": tokens_after,
+            })],
+            TurnEvent::PlanProgressCommitted {
+                plan_path,
+                title,
+                todos_json,
+            } => vec![json!({
+                "type": "plan_progress_committed",
+                "planPath": plan_path,
+                "title": title,
+                "todos": todos_json,
+            })],
+            TurnEvent::PiiSanitized { .. } => vec![json!({
+                "type": "pii_sanitized",
+            })],
         }
     }
 }

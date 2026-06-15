@@ -112,6 +112,7 @@ fn is_ui_only_block(block: &Value) -> bool {
             | "command_preview"
             | "subagent_chunk"
             | "worker_event"
+            | "error"
     )
 }
 

@@ -15,66 +15,151 @@ inventory::submit!(StaticSlashCommand {
     handler: make_handler!(handle_hooks),
 });
 
+fn apply_hook_toggle(
+    config: &mut crate::config::Config,
+    name: &str,
+    enable: bool,
+    url: Option<&str>,
+) -> Result<String, String> {
+    match name {
+        "command_logger" => {
+            config.hooks.builtin.command_logger = enable;
+            if enable {
+                config.hooks.enabled = true;
+            }
+            Ok(format!(
+                "Builtin hook 'command_logger' is now {}.",
+                if enable { "enabled" } else { "disabled" }
+            ))
+        }
+        "webhook_audit" => {
+            if enable {
+                if let Some(url) = url {
+                    config.hooks.builtin.webhook_audit.url = url.to_string();
+                }
+                if config.hooks.builtin.webhook_audit.url.trim().is_empty() {
+                    return Err(
+                        "webhook_audit requires a URL. Usage: /hooks add webhook_audit <url>"
+                            .to_string(),
+                    );
+                }
+                config.hooks.enabled = true;
+            }
+            config.hooks.builtin.webhook_audit.enabled = enable;
+            Ok(format!(
+                "Builtin hook 'webhook_audit' is now {}{}.",
+                if enable { "enabled" } else { "disabled" },
+                if enable {
+                    format!(" (url: {})", config.hooks.builtin.webhook_audit.url)
+                } else {
+                    String::new()
+                }
+            ))
+        }
+        other => Err(format!(
+            "Unknown hook '{other}'. Available builtin hooks: command_logger, webhook_audit"
+        )),
+    }
+}
+
+async fn persist_hook_change(
+    name: &str,
+    enable: bool,
+    url: Option<&str>,
+) -> CommandResult {
+    let mut config = match crate::config::Config::load_or_init().await {
+        Ok(c) => c,
+        Err(e) => return CommandResult::err(format!("Failed to load config: {e}")),
+    };
+    let summary = match apply_hook_toggle(&mut config, name, enable, url) {
+        Ok(s) => s,
+        Err(e) => return CommandResult::err(e),
+    };
+    if let Err(e) = config.save().await {
+        return CommandResult::err(format!("Failed to write config.toml: {e}"));
+    }
+
+    let hooks_section = config.hooks.clone();
+    let hot_applied = if let Some(svc) = crate::services::try_get_services() {
+        svc.shared_config.mutate(
+            move |live| {
+                live.hooks = hooks_section;
+            },
+            vec!["hooks".to_string()],
+        );
+        true
+    } else {
+        false
+    };
+
+    let effect_note = if hot_applied {
+        "Change written to config.toml and hot-applied to the running session."
+    } else {
+        "Change written to config.toml; restart SenWeaverCoding for it to take effect."
+    };
+    CommandResult::ok(format!("{summary}\n{effect_note}"))
+}
+
 pub async fn handle_hooks(ctx: CommandContext) -> CommandResult {
     if ctx.args.is_empty() {
         return CommandResult::ok(
-            "Session hooks:\n  /hooks list -- Show registered hooks\n  /hooks add <name> -- Register a hook (requires config.toml edit)\n  /hooks remove <name> -- Unregister a hook (requires config.toml edit)\n\nNote: Hooks are configured in config.toml under [hooks] section.",
+            "Session hooks:\n  /hooks list -- Show hook configuration\n  /hooks add <name> [url] -- Enable a builtin hook (command_logger | webhook_audit)\n  /hooks remove <name> -- Disable a builtin hook",
         );
     }
     let sub = ctx.args[0].to_lowercase();
     match sub.as_str() {
         "list" => {
-            let mut lines = vec!["Registered hooks:".to_string()];
+            let config = match crate::services::try_get_services() {
+                Some(svc) => svc.config(),
+                None => match crate::config::Config::load_or_init().await {
+                    Ok(c) => std::sync::Arc::new(c),
+                    Err(e) => {
+                        return CommandResult::err(format!("Failed to load config: {e}"));
+                    }
+                },
+            };
+            let hooks = &config.hooks;
+            let mut lines = vec![format!(
+                "Hooks globally {}.",
+                if hooks.enabled { "enabled" } else { "disabled" }
+            )];
+            lines.push(format!(
+                "  command_logger -- Log all commands [{}]",
+                if hooks.builtin.command_logger { "on" } else { "off" }
+            ));
+            lines.push(format!(
+                "  webhook_audit -- Audit log via webhook [{}]{}",
+                if hooks.builtin.webhook_audit.enabled { "on" } else { "off" },
+                if hooks.builtin.webhook_audit.url.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (url: {})", hooks.builtin.webhook_audit.url)
+                }
+            ));
             lines.push(
-                "  webhook_audit -- Audit log via webhook (built-in, enabled in config)"
+                "\nUse /hooks add <name> [url] or /hooks remove <name> to change them."
                     .to_string(),
             );
-            lines.push(
-                "  command_logger -- Log all commands (built-in, enabled in config)".to_string(),
-            );
-
-            if let Some(bs) = crate::bootstrap::try_get_state() {
-                let mut count = 0u32;
-                bs.read(|_state| {
-                    count = 2;
-                });
-                lines.push(format!(
-                    "\nTotal: {count} hook(s) registered in this session."
-                ));
-            }
-            lines.push("\nTo enable/disable hooks, edit config.toml:".to_string());
-            lines.push("  [hooks.enabled] = true/false".to_string());
-            lines.push("  [hooks.builtin.command_logger] = true/false".to_string());
-            lines.push("  [hooks.builtin.webhook_audit.url] = <webhook_url>".to_string());
             CommandResult::ok(lines.join("\n"))
         }
         "add" => {
             let name = ctx.args.get(1).map(|s| s.as_str()).unwrap_or("");
             if name.is_empty() {
                 return CommandResult::err(
-                    "Usage: /hooks add <hook_name>\nNote: Hooks must be configured in config.toml under [hooks].",
+                    "Usage: /hooks add <hook_name> [url]\nAvailable: command_logger, webhook_audit",
                 );
             }
-            CommandResult::ok(format!(
-                "Hook '{name}' noted. To add a custom hook:\n\
-                1. Edit config.toml\n\
-                2. Add your hook under [hooks.custom]\n\
-                3. Restart SenWeaverCoding"
-            ))
+            let url = ctx.args.get(2).map(|s| s.as_str());
+            persist_hook_change(name, true, url).await
         }
         "remove" => {
             let name = ctx.args.get(1).map(|s| s.as_str()).unwrap_or("");
             if name.is_empty() {
                 return CommandResult::err(
-                    "Usage: /hooks remove <hook_name>\nNote: To disable a hook, edit config.toml and restart.",
+                    "Usage: /hooks remove <hook_name>\nAvailable: command_logger, webhook_audit",
                 );
             }
-            CommandResult::ok(format!(
-                "Hook '{name}' noted for removal. To disable a hook:\n\
-                1. Edit config.toml\n\
-                2. Set [hooks.enabled] = false or disable specific hooks\n\
-                3. Restart SenWeaverCoding"
-            ))
+            persist_hook_change(name, false, None).await
         }
         _ => CommandResult::err(format!(
             "Unknown hooks subcommand: {sub}. Use: list, add, remove"

@@ -252,6 +252,7 @@ pub fn collect_scope_samples(
     raw_scope: &[String],
     per_file_max_bytes: usize,
     overall_file_cap: usize,
+    security: &SecurityPolicy,
 ) -> Result<Vec<ScopeSample>, anyhow::Error> {
     let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
     let mut samples: Vec<ScopeSample> = Vec::new();
@@ -271,6 +272,7 @@ pub fn collect_scope_samples(
                 per_file_max_bytes,
                 &mut visited,
                 &mut samples,
+                security,
             )?;
             continue;
         }
@@ -285,6 +287,7 @@ pub fn collect_scope_samples(
                     per_file_max_bytes,
                     &mut visited,
                     &mut samples,
+                    security,
                 )?;
             }
             continue;
@@ -299,6 +302,7 @@ pub fn collect_scope_samples(
                 per_file_max_bytes,
                 &mut visited,
                 &mut samples,
+                security,
             )?;
         }
     }
@@ -311,8 +315,14 @@ fn push_file_sample(
     per_file_max_bytes: usize,
     visited: &mut BTreeSet<PathBuf>,
     out: &mut Vec<ScopeSample>,
+    security: &SecurityPolicy,
 ) -> Result<(), anyhow::Error> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Ok(canonical) = path.canonicalize() else {
+        return Ok(());
+    };
+    if !security.is_resolved_path_allowed(&canonical) {
+        return Ok(());
+    }
     if !visited.insert(canonical.clone()) {
         return Ok(());
     }
@@ -346,6 +356,10 @@ fn push_file_sample(
 
 fn walk_dir(root: &Path, cap: usize) -> Vec<PathBuf> {
     let mut acc: Vec<PathBuf> = Vec::new();
+    let mut visited_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    if let Ok(canonical_root) = root.canonicalize() {
+        visited_dirs.insert(canonical_root);
+    }
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         if acc.len() >= cap {
@@ -364,6 +378,12 @@ fn walk_dir(root: &Path, cap: usize) -> Vec<PathBuf> {
                 continue;
             }
             if path.is_dir() {
+                let Ok(canonical) = path.canonicalize() else {
+                    continue;
+                };
+                if !visited_dirs.insert(canonical) {
+                    continue;
+                }
                 stack.push(path);
             } else if path.is_file() {
                 acc.push(path);

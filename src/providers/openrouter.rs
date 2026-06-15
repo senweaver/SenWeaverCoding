@@ -604,6 +604,61 @@ impl OpenRouterProvider {
                 &self.extra_headers,
             )
     }
+
+    fn stream_http_client(&self) -> Client {
+        let read_timeout_secs = self.timeout_secs.max(300);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in &self.extra_headers {
+            match (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    headers.insert(name, val);
+                }
+                _ => {
+                    tracing::warn!(header = key, "Skipping invalid extra header name or value");
+                }
+            }
+        }
+
+        let stream_builder = || {
+            let mut builder = Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(
+                    OPENROUTER_CONNECT_TIMEOUT_SECS,
+                ))
+                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                .pool_idle_timeout(std::time::Duration::from_secs(15));
+            if !headers.is_empty() {
+                builder = builder.default_headers(headers.clone());
+            }
+            builder
+        };
+
+        let proxied = crate::services::require_services()
+            .proxy_runtime()
+            .apply_to_builder(stream_builder(), "provider.openrouter.stream");
+
+        proxied
+            .build()
+            .or_else(|error| {
+                tracing::warn!(
+                    "Failed to build proxied OpenRouter stream client: {error}; retrying without proxy"
+                );
+                stream_builder().build()
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!("Failed to build OpenRouter stream client: {error}");
+                Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(
+                        OPENROUTER_CONNECT_TIMEOUT_SECS,
+                    ))
+                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                    .build()
+                    .unwrap_or_else(|_| Client::new())
+            })
+    }
 }
 
 #[async_trait]
@@ -1215,7 +1270,7 @@ impl Provider for OpenRouterProvider {
             }
         };
 
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let count_tokens = options.count_tokens;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
@@ -1350,7 +1405,7 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let count_tokens = options.count_tokens;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 
@@ -1485,7 +1540,7 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let client = self.http_client();
+        let client = self.stream_http_client();
         let count_tokens = options.count_tokens;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 

@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react'
 import { ToolCard } from './tools/ToolCard'
-import { ThinkingBlock } from './ThinkingBlock'
+import { ThinkingBlock, ActiveThinkingBlock } from './ThinkingBlock'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import type { UIMessage } from '../../types/chat'
@@ -30,6 +30,10 @@ type Props = {
   isStreaming?: boolean
 
   activeThinkingId?: string | null
+
+  sessionId?: string | null
+
+  onLiveThinkingGrow?: () => void
 }
 
 const COUNTERS: Array<{
@@ -71,6 +75,8 @@ export function ExploredCard({
   summary,
   isStreaming = false,
   activeThinkingId,
+  sessionId,
+  onLiveThinkingGrow,
 }: Props) {
   const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
@@ -117,11 +123,21 @@ export function ExploredCard({
           {items.map((item) => {
             if (item.type === 'thinking') {
               const thinking = item as Thinking
+              if (thinking.id === activeThinkingId) {
+                return (
+                  <ActiveThinkingBlock
+                    key={thinking.id}
+                    sessionId={sessionId ?? null}
+                    onContentGrow={onLiveThinkingGrow}
+                    compact
+                  />
+                )
+              }
               return (
                 <ThinkingBlock
                   key={thinking.id}
                   content={thinking.content}
-                  isActive={thinking.id === activeThinkingId}
+                  isActive={false}
                   startedAt={thinking.startedAt}
                   completedAt={thinking.completedAt}
                   compact

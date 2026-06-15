@@ -28,13 +28,35 @@ function loadSelections(): Record<string, RuntimeSelection> {
   }
 }
 
-function persistSelections(selections: Record<string, RuntimeSelection>) {
-  if (typeof localStorage === 'undefined') return
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+let pendingSelections: Record<string, RuntimeSelection> | null = null
+
+function flushSelections() {
+  persistTimer = null
+  const selections = pendingSelections
+  pendingSelections = null
+  if (!selections || typeof localStorage === 'undefined') return
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(selections))
   } catch {
 
   }
+}
+
+function persistSelections(selections: Record<string, RuntimeSelection>) {
+  pendingSelections = selections
+  if (persistTimer === null) {
+    persistTimer = setTimeout(flushSelections, 300)
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    if (persistTimer !== null) {
+      clearTimeout(persistTimer)
+      flushSelections()
+    }
+  })
 }
 
 export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({

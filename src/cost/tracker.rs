@@ -121,6 +121,16 @@ impl CostTracker {
         coding_mode: Option<&str>,
         usage: TokenUsage,
     ) -> Result<()> {
+        self.record_usage_with_attribution(chat_session_id, coding_mode, None, usage)
+    }
+
+    pub fn record_usage_with_attribution(
+        &self,
+        chat_session_id: Option<&str>,
+        coding_mode: Option<&str>,
+        provider: Option<&str>,
+        usage: TokenUsage,
+    ) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -131,10 +141,14 @@ impl CostTracker {
             ));
         }
 
-        let record = CostRecord::for_chat_session_with_mode(
+        let record = CostRecord::with_attribution(
             &self.session_id,
             chat_session_id.map(|s| s.to_string()),
             coding_mode.map(|s| s.to_string()),
+            provider
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             usage,
         );
 

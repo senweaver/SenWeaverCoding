@@ -36,11 +36,10 @@ pub struct CodebaseHit {
     pub score_x1000: u32,
 }
 
-pub fn resolve_codebase(
+pub(crate) fn collect_codebase_body(
     root: &Path,
     query: &str,
-    budget: &ContextBudget,
-) -> Result<ContextItem, ContextResolveError> {
+) -> Result<String, ContextResolveError> {
     if query.trim().is_empty() {
         return Err(ContextResolveError::NotFound {
             tag: "codebase:".into(),
@@ -54,8 +53,14 @@ pub fn resolve_codebase(
     let fused = rrf_fuse(&path_hits, &symbol_hits);
 
     let top: Vec<&CodebaseHit> = fused.iter().take(MAX_RESULTS).collect();
-    let body = render_body(root, &top);
+    Ok(render_body(root, &top))
+}
 
+pub(crate) fn finish_codebase_item(
+    query: &str,
+    body: String,
+    budget: &ContextBudget,
+) -> ContextItem {
     let want = body.len() / 4;
     let granted = budget.reserve_at_most(want);
     let final_body = if granted < want {
@@ -64,12 +69,21 @@ pub fn resolve_codebase(
         body
     };
 
-    Ok(ContextItem::new(
+    ContextItem::new(
         format!("codebase:{query}"),
         format!("Codebase search: {query}"),
         final_body,
     )
-    .with_source("rrf"))
+    .with_source("rrf")
+}
+
+pub fn resolve_codebase(
+    root: &Path,
+    query: &str,
+    budget: &ContextBudget,
+) -> Result<ContextItem, ContextResolveError> {
+    let body = collect_codebase_body(root, query)?;
+    Ok(finish_codebase_item(query, body, budget))
 }
 
 fn rank_by_path(root: &Path, query_lc: &str) -> Vec<(PathBuf, usize)> {

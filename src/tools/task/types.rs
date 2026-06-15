@@ -31,6 +31,24 @@ pub struct TaskInfo {
 
 pub type TaskManagerHandle = Arc<RwLock<TaskManager>>;
 
+const MAX_STORED_OUTPUT_BYTES: usize = 512 * 1024;
+
+fn cap_stored_output(output: String) -> String {
+    if output.len() <= MAX_STORED_OUTPUT_BYTES {
+        return output;
+    }
+    let mut start = output.len() - MAX_STORED_OUTPUT_BYTES;
+    while start < output.len() && !output.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[task output truncated: dropped first {} of {} bytes, keeping the tail]\n{}",
+        start,
+        output.len(),
+        &output[start..]
+    )
+}
+
 pub struct TaskManager {
     tasks: HashMap<String, TaskInfo>,
     next_id: u64,
@@ -80,7 +98,7 @@ impl TaskManager {
                 task.state = s;
             }
             if let Some(o) = output {
-                task.output = o;
+                task.output = cap_stored_output(o);
             }
             if let Some(e) = error {
                 task.error = Some(e);

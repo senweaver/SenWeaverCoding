@@ -2,9 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use parking_lot::RwLock;
-use std::sync::Arc;
-
 pub const MAX_PLAN_NUDGES: usize = 3;
 
 pub const ASK_QUESTION_WAIT_SENTINEL: &str = "__WAITING_FOR_USER_RESPONSE__";
@@ -61,8 +58,8 @@ impl PlanModeNudgeState {
     }
 }
 
-pub fn detect_plan_mode_active(plan_mode_flag: Option<&Arc<RwLock<bool>>>) -> bool {
-    let from_flag = plan_mode_flag.map(|f| *f.read()).unwrap_or(false);
+pub fn detect_plan_mode_active(plan_mode_flag: Option<&crate::tools::PlanModeFlag>) -> bool {
+    let from_flag = plan_mode_flag.map(crate::tools::PlanModeFlag::is_active).unwrap_or(false);
     if from_flag {
         return true;
     }

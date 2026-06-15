@@ -114,8 +114,16 @@ pub struct ServiceContainer {
     pub session_coding_modes:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, CodingMode>>>,
 
+    session_auto_coding_modes:
+        Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+
+    global_auto_coding_mode: Arc<std::sync::atomic::AtomicBool>,
+
     session_pending_plans:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, String>>>,
+
+    session_designer:
+        Arc<parking_lot::RwLock<std::collections::HashMap<String, DesignerSelection>>>,
 
     #[cfg(feature = "tool-curator")]
     pub curator_state: crate::tools::curator::state::CuratorState,
@@ -159,6 +167,14 @@ pub struct ServiceContainer {
     pub remote_sessions: crate::remote::manager::RemoteSessionManager,
 
     pub tips: parking_lot::Mutex<TipManager>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DesignerSelection {
+    pub submode_id: String,
+    pub params: serde_json::Value,
+    #[serde(default)]
+    pub ref_artifact: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -231,7 +247,14 @@ impl ServiceContainer {
             session_coding_modes: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
+            session_auto_coding_modes: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
+            global_auto_coding_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_pending_plans: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            session_designer: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             #[cfg(feature = "tool-curator")]
@@ -374,6 +397,54 @@ impl ServiceContainer {
 
     pub fn clear_session_coding_mode(&self, session_key: &str) {
         self.session_coding_modes.write().remove(session_key);
+        self.session_auto_coding_modes.write().remove(session_key);
+    }
+
+    pub fn is_session_auto_coding_mode(&self, session_key: &str) -> bool {
+        self.session_auto_coding_modes.read().contains(session_key)
+    }
+
+    pub fn set_session_auto_coding_mode(&self, session_key: &str, enabled: bool) {
+        let mut guard = self.session_auto_coding_modes.write();
+        if enabled {
+            guard.insert(session_key.to_string());
+        } else {
+            guard.remove(session_key);
+        }
+    }
+
+    pub fn is_global_auto_coding_mode(&self) -> bool {
+        self.global_auto_coding_mode.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_global_auto_coding_mode(&self, enabled: bool) {
+        self.global_auto_coding_mode
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn session_designer(&self, session_key: &str) -> Option<DesignerSelection> {
+        self.session_designer.read().get(session_key).cloned()
+    }
+
+    pub fn set_session_designer(
+        &self,
+        session_key: &str,
+        submode_id: String,
+        params: serde_json::Value,
+        ref_artifact: Option<String>,
+    ) {
+        self.session_designer.write().insert(
+            session_key.to_string(),
+            DesignerSelection {
+                submode_id,
+                params,
+                ref_artifact,
+            },
+        );
+    }
+
+    pub fn clear_session_designer(&self, session_key: &str) {
+        self.session_designer.write().remove(session_key);
     }
 
     pub fn resolve_coding_mode_for(&self, session_key: Option<&str>) -> CodingMode {

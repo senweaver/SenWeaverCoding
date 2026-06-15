@@ -258,16 +258,18 @@ impl GmailPushChannel {
     }
 
     pub async fn fetch_history(&self, start_history_id: u64) -> Result<Vec<String>> {
+        let (message_ids, new_history_id) = self.fetch_history_inner(start_history_id).await?;
         let mut last_id = self.last_history_id.lock().await;
-        self.fetch_history_inner(start_history_id, &mut last_id)
-            .await
+        if new_history_id > 0 && new_history_id > *last_id {
+            *last_id = new_history_id;
+        }
+        Ok(message_ids)
     }
 
     async fn fetch_history_inner(
         &self,
         start_history_id: u64,
-        last_id: &mut u64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<(Vec<String>, u64)> {
         let token = self.resolve_oauth_token();
         if token.is_empty() {
             return Err(anyhow!("Gmail OAuth token is not configured"));
@@ -275,6 +277,7 @@ impl GmailPushChannel {
 
         let mut message_ids = Vec::new();
         let mut page_token: Option<String> = None;
+        let mut max_history_id: u64 = 0;
 
         loop {
             let mut url = format!(
@@ -303,8 +306,8 @@ impl GmailPushChannel {
                 }
             }
 
-            if history_resp.history_id > 0 && history_resp.history_id > *last_id {
-                *last_id = history_resp.history_id;
+            if history_resp.history_id > max_history_id {
+                max_history_id = history_resp.history_id;
             }
 
             match history_resp.next_page_token {
@@ -313,7 +316,7 @@ impl GmailPushChannel {
             }
         }
 
-        Ok(message_ids)
+        Ok((message_ids, max_history_id))
     }
 
     pub async fn fetch_message(&self, message_id: &str) -> Result<GmailMessage> {
@@ -360,24 +363,26 @@ impl GmailPushChannel {
             notification.email_address, notification.history_id
         );
 
-        let mut last_id = self.last_history_id.lock().await;
+        let start_id = {
+            let mut last_id = self.last_history_id.lock().await;
+            if *last_id == 0 {
+                *last_id = notification.history_id;
+                info!(
+                    "Gmail push: first notification, seeding historyId={}",
+                    notification.history_id
+                );
+                return Ok(());
+            }
+            *last_id
+        };
 
-        if *last_id == 0 {
-
-            *last_id = notification.history_id;
-            info!(
-                "Gmail push: first notification, seeding historyId={}",
-                notification.history_id
-            );
-            return Ok(());
-        }
-
-        let start_id = *last_id;
-        let message_ids = self.fetch_history_inner(start_id, &mut last_id).await?;
-
-        drop(last_id);
+        let (message_ids, new_history_id) = self.fetch_history_inner(start_id).await?;
 
         if message_ids.is_empty() {
+            let mut last_id = self.last_history_id.lock().await;
+            if new_history_id > 0 && new_history_id > *last_id {
+                *last_id = new_history_id;
+            }
             debug!("Gmail push: no new messages in history");
             return Ok(());
         }
@@ -398,7 +403,8 @@ impl GmailPushChannel {
             }
         };
 
-        for msg_id in message_ids {
+        let mut all_delivered = true;
+        'batch: for msg_id in message_ids {
             match self.fetch_message(&msg_id).await {
                 Ok(gmail_msg) => {
                     let sender = extract_header(&gmail_msg, "From").unwrap_or_default();
@@ -436,14 +442,30 @@ impl GmailPushChannel {
                         attachments: Vec::new(),
                     };
 
-                    if tx.send(channel_msg).await.is_err() {
-                        debug!("Gmail push: listener channel closed");
-                        return Ok(());
+                    match crate::channels::forward_channel_message("gmail_push", &tx, channel_msg) {
+                        crate::channels::ForwardOutcome::Delivered => {}
+                        crate::channels::ForwardOutcome::Dropped => {
+                            all_delivered = false;
+                            break 'batch;
+                        }
+                        crate::channels::ForwardOutcome::Closed => {
+                            debug!("Gmail push: listener channel closed");
+                            return Ok(());
+                        }
                     }
                 }
                 Err(e) => {
                     error!("Gmail push: failed to fetch message {}: {}", msg_id, e);
+                    all_delivered = false;
+                    break 'batch;
                 }
+            }
+        }
+
+        if all_delivered {
+            let mut last_id = self.last_history_id.lock().await;
+            if new_history_id > 0 && new_history_id > *last_id {
+                *last_id = new_history_id;
             }
         }
 

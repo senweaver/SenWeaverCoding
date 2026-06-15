@@ -369,7 +369,11 @@ impl Channel for SignalChannel {
                                 Ok(sse) => {
                                     if let Some(ref envelope) = sse.envelope {
                                         if let Some(msg) = self.process_envelope(envelope) {
-                                            if tx.send(msg).await.is_err() {
+                                            if crate::channels::forward_channel_message(
+                                                "signal", &tx, msg,
+                                            )
+                                            .is_closed()
+                                            {
                                                 return Ok(());
                                             }
                                         }
@@ -396,7 +400,11 @@ impl Channel for SignalChannel {
                     Ok(sse) => {
                         if let Some(ref envelope) = sse.envelope {
                             if let Some(msg) = self.process_envelope(envelope) {
-                                let _ = tx.send(msg).await;
+                                if crate::channels::forward_channel_message("signal", &tx, msg)
+                                    .is_closed()
+                                {
+                                    return Ok(());
+                                }
                             }
                         }
                     }

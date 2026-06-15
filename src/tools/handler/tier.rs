@@ -191,41 +191,49 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
             SAFE,
             "Advanced GitHub search with the full advanced-search qualifier surface (owners/repos/language/stars/forks/license/path/extension/topic/state/labels/comments/author/reviewed-by …)",
         ),
+        #[cfg(feature = "tool-workspace-deep")]
         (
             "workspace_deep_search",
             SAFE,
             "Local workspace DeepSearch with planner + BM25 + vector + structural + fuzzy recall and paragraph-level traced output",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "enter_curator_mode",
             SAFE,
             "Enter Curator mode (extensive research + DOCX-grade document drafting)",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "exit_curator_mode",
             SAFE,
             "Exit Curator mode and persist final.md/impl_blueprint.md/final.docx",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "curator_collect",
             SAFE,
             "Persist research notes / sources for the active Curator session",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "curator_template_list",
             SAFE,
             "List bundled Curator document templates (paper / solution / tech_report)",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "curator_template_apply",
             SAFE,
             "Apply a bundled Curator template to a draft document",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "curator_git_reference",
             MODERATE,
             "Shallow-clone remote git repositories into the active Curator session as reference projects (writes [Gn] entries to sources.md and structured excerpts to research_notes.md)",
         ),
+        #[cfg(feature = "tool-curator")]
         (
             "curator_local_reference",
             SAFE,
@@ -247,6 +255,7 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("backup", MODERATE, "Take a workspace backup"),
         ("workspace", SAFE, "Manage workspaces"),
         ("vi_verify", SAFE, "Run the verifiable-intent check"),
+        #[cfg(feature = "tool-image")]
         ("view_image", SAFE, "View an image file"),
         ("send_message", SAFE, "Send a message to another channel"),
     ];
@@ -255,39 +264,71 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
     }
 
     let on_demand_entries: &[(&str, ToolRiskLevel, &str)] = &[
+        #[cfg(feature = "tool-cron")]
         ("cron_add", HIGH_RISK, "Schedule a new cron job"),
+        #[cfg(feature = "tool-cron")]
         ("cron_list", HIGH_RISK, "List existing cron jobs"),
+        #[cfg(feature = "tool-cron")]
         ("cron_remove", HIGH_RISK, "Remove a cron job"),
+        #[cfg(feature = "tool-cron")]
         ("cron_update", HIGH_RISK, "Update a cron job"),
+        #[cfg(feature = "tool-cron")]
         ("cron_run", HIGH_RISK, "Run a cron job immediately"),
+        #[cfg(feature = "tool-cron")]
         ("cron_runs", HIGH_RISK, "List cron job runs"),
+        #[cfg(feature = "tool-cron")]
         ("schedule", HIGH_RISK, "Schedule a one-shot job"),
+        #[cfg(feature = "tool-sop")]
         ("sop_list", HIGH_RISK, "List standard operating procedures"),
+        #[cfg(feature = "tool-sop")]
         ("sop_execute", HIGH_RISK, "Execute a standard operating procedure"),
+        #[cfg(feature = "tool-sop")]
         ("sop_advance", HIGH_RISK, "Advance a SOP step"),
+        #[cfg(feature = "tool-sop")]
         ("sop_approve", HIGH_RISK, "Approve a SOP step"),
+        #[cfg(feature = "tool-sop")]
         ("sop_status", HIGH_RISK, "Check the status of a SOP run"),
+        #[cfg(feature = "tool-team")]
         ("team_create", HIGH_RISK, "Create a team registry entry"),
+        #[cfg(feature = "tool-team")]
         ("team_delete", HIGH_RISK, "Delete a team registry entry"),
+        #[cfg(feature = "tool-reports")]
         ("report_template", HIGH_RISK, "Apply a report template"),
         ("project_intel", HIGH_RISK, "Run a project intelligence sweep"),
+        #[cfg(feature = "tool-cloud-ops")]
         ("cloud_ops", HIGH_RISK, "Perform a cloud operation"),
+        #[cfg(feature = "tool-cloud-ops")]
         ("cloud_patterns", HIGH_RISK, "Look up cloud patterns"),
+        #[cfg(feature = "tool-cloud-ops")]
         ("data_management", HIGH_RISK, "Run a data management operation"),
+        #[cfg(feature = "tool-cloud-ops")]
         ("security_ops", HIGH_RISK, "Run a security operations action"),
+        #[cfg(feature = "tool-linkedin")]
         ("linkedin", HIGH_RISK, "Post or interact via LinkedIn"),
+        #[cfg(feature = "tool-pushover")]
         ("pushover", HIGH_RISK, "Send a Pushover push notification"),
+        #[cfg(feature = "tool-search-social")]
         ("discord_search", MODERATE, "Search Discord history"),
+        #[cfg(feature = "tool-search-social")]
         ("reddit_search", MODERATE, "Search Reddit"),
+        #[cfg(feature = "tool-search-social")]
         ("youtube_search", MODERATE, "Search YouTube"),
+        #[cfg(feature = "tool-productivity")]
         ("composio", HIGH_RISK, "Run a Composio integration action"),
+        #[cfg(feature = "tool-productivity")]
         ("google_workspace", HIGH_RISK, "Interact with Google Workspace"),
         ("microsoft365", HIGH_RISK, "Interact with Microsoft 365"),
+        #[cfg(feature = "tool-productivity")]
         ("jira", HIGH_RISK, "Interact with Jira"),
+        #[cfg(feature = "tool-productivity")]
         ("notion", HIGH_RISK, "Interact with Notion"),
+        #[cfg(feature = "tool-utility-misc")]
         ("calculator", SAFE, "Evaluate a math expression"),
+        #[cfg(feature = "tool-utility-misc")]
         ("weather", SAFE, "Look up the weather"),
+        #[cfg(feature = "tool-image")]
         ("image_search", MODERATE, "Search the web for images"),
+        #[cfg(feature = "tool-image")]
         ("image_info", SAFE, "Inspect image metadata"),
         ("reaction", HIGH_RISK, "Send a reaction in a channel"),
         ("poll", HIGH_RISK, "Run a poll in a channel"),
@@ -297,8 +338,11 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
     }
 
     let desktop_pref: &[(&str, ToolRiskLevel, &str)] = &[
+        #[cfg(feature = "tool-image")]
         ("screenshot", MODERATE, "Capture a screenshot"),
+        #[cfg(feature = "tool-utility-misc")]
         ("canvas", MODERATE, "Generate canvas-rendered output"),
+        #[cfg(feature = "tool-image")]
         ("image_gen", HIGH_RISK, "Generate an image from text"),
     ];
     for (name, risk, desc) in desktop_pref {

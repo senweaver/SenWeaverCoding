@@ -457,6 +457,10 @@ pub const TRANSIENT_RETRY_FLOOR: u32 = 12;
 
 pub const TRANSPORT_RETRY_CAP: u32 = 12;
 
+pub const DEFAULT_CLIENT_LLM_RATE_LIMIT_CAPACITY: f64 = 60.0;
+
+pub const DEFAULT_CLIENT_LLM_RATE_LIMIT_REFILL_PER_SEC: f64 = 1.0;
+
 const STREAM_BACKOFF_CEILING_MS: u64 = 10_000;
 
 pub struct ReliableProvider {
@@ -626,10 +630,23 @@ impl ReliableProvider {
     }
 
     async fn gate_rate_limit(&self, provider: &str) {
-        if !self.client_rate_limit_enabled {
+        Self::gate_rate_limit_shared(
+            self.client_rate_limit_enabled,
+            &self.rate_limiters,
+            provider,
+        )
+        .await;
+    }
+
+    async fn gate_rate_limit_shared(
+        enabled: bool,
+        limiters: &crate::providers::core::rate_limit::RateLimiterMap<String>,
+        provider: &str,
+    ) {
+        if !enabled {
             return;
         }
-        self.rate_limiters.wait(&provider.to_string(), 1.0).await;
+        limiters.wait(&provider.to_string(), 1.0).await;
     }
 
     fn effective_class_cap(&self, class: FailureClass) -> u32 {
@@ -787,6 +804,138 @@ impl ReliableProvider {
             "Provider call failed, retrying"
         );
         FailureAction::Retry { sleep_ms: wait }
+    }
+
+    fn stream_chunks_with_failover<F>(
+        &self,
+        model: &str,
+        options: StreamOptions,
+        make_stream: F,
+    ) -> stream::BoxStream<'static, StreamResult<StreamChunk>>
+    where
+        F: Fn(Arc<dyn Provider>, String) -> stream::BoxStream<'static, StreamResult<StreamChunk>>
+            + Send
+            + 'static,
+    {
+        let mut candidates: Vec<(String, Arc<dyn Provider>)> = Vec::new();
+        if options.enabled {
+            for (provider_name, provider) in &self.providers {
+                if provider.supports_streaming() {
+                    candidates.push((provider_name.clone(), Arc::clone(provider)));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return stream::once(async move {
+                Err(StreamError::Provider(
+                    "No provider supports streaming".to_string(),
+                ))
+            })
+            .boxed();
+        }
+
+        let model_list: Vec<String> = {
+            let chain: Vec<String> = self
+                .model_chain(model)
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect();
+            if chain.is_empty() {
+                vec![model.to_string()]
+            } else {
+                chain
+            }
+        };
+
+        let mut combos: Vec<(String, Arc<dyn Provider>, String)> = Vec::new();
+        for current_model in &model_list {
+            for (label, prov) in &candidates {
+                combos.push((label.clone(), Arc::clone(prov), current_model.clone()));
+            }
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        let rate_limit_enabled = self.client_rate_limit_enabled;
+        let rate_limiters = std::sync::Arc::clone(&self.rate_limiters);
+
+        let _bg = crate::runtime::spawn_supervised(
+            "providers.reliable.stream_chunks_failover",
+            async move {
+                let mut last_err: Option<StreamError> = None;
+
+                for (provider_label, provider_arc, current_model) in combos {
+                    Self::gate_rate_limit_shared(
+                        rate_limit_enabled,
+                        &rate_limiters,
+                        &provider_label,
+                    )
+                    .await;
+                    let mut stream = make_stream(provider_arc, current_model.clone());
+                    let mut made_progress = false;
+                    let mut failed_before_progress = false;
+
+                    while let Some(item) = stream.next().await {
+                        match item {
+                            Ok(chunk) => {
+                                made_progress = true;
+                                if tx.send(Ok(chunk)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                if made_progress {
+                                    tracing::warn!(
+                                        provider = %provider_label,
+                                        model = %current_model,
+                                        "Streaming error after first chunk: {e}"
+                                    );
+                                    let _ = tx.send(Err(e)).await;
+                                    return;
+                                }
+                                tracing::warn!(
+                                    provider = %provider_label,
+                                    model = %current_model,
+                                    error = %e,
+                                    "streaming failed before first chunk; failing over to next streaming candidate"
+                                );
+                                last_err = Some(e);
+                                failed_before_progress = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if made_progress {
+                        return;
+                    }
+                    if !failed_before_progress {
+                        tracing::warn!(
+                            provider = %provider_label,
+                            model = %current_model,
+                            "stream produced no chunks; failing over to next streaming candidate"
+                        );
+                        last_err = Some(StreamError::Provider(
+                            "upstream stream produced no chunks".to_string(),
+                        ));
+                    }
+                }
+
+                let _ = tx
+                    .send(Err(last_err.unwrap_or_else(|| {
+                        StreamError::Provider(
+                            "all streaming providers/models failed".to_string(),
+                        )
+                    })))
+                    .await;
+            },
+        );
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|chunk| (chunk, rx))
+        })
+        .boxed()
     }
 }
 
@@ -1400,6 +1549,9 @@ impl Provider for ReliableProvider {
 
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
+            let rate_limit_enabled = self.client_rate_limit_enabled;
+            let rate_limiters = std::sync::Arc::clone(&self.rate_limiters);
+
             let _bg = crate::runtime::spawn_supervised(
                 "providers.reliable.stream_chat_retry",
                 async move {
@@ -1428,6 +1580,13 @@ impl Provider for ReliableProvider {
                                     return;
                                 }
                             }
+
+                            Self::gate_rate_limit_shared(
+                                rate_limit_enabled,
+                                &rate_limiters,
+                                &provider_label,
+                            )
+                            .await;
 
                             let req = ChatRequest {
                                 messages: messages_owned.as_slice(),
@@ -1480,6 +1639,12 @@ impl Provider for ReliableProvider {
                                             made_progress = true;
                                         }
                                         let is_final = matches!(ev, StreamEvent::Final);
+                                        if is_final && !made_progress {
+                                            break 'retry (
+                                                "Upstream emitted Final with no preceding output (empty stream)".to_string(),
+                                                RetryClass::Transient,
+                                            );
+                                        }
                                         if tx.send(Ok(ev)).await.is_err() {
                                             return;
                                         }
@@ -1506,6 +1671,20 @@ impl Provider for ReliableProvider {
                             };
 
                             let err_string = err.to_string();
+
+                            if made_progress {
+                                break 'retry (
+                                    format!(
+                                        "Streaming interrupted after partial output on \
+                                         {provider_label}/{current_model}; not retrying the same \
+                                         provider to avoid resending duplicate output. Failing over \
+                                         to the next streaming candidate if available. Last error: \
+                                         {err_string}"
+                                    ),
+                                    RetryClass::Transient,
+                                );
+                            }
+
                             let anyhow_err = anyhow::anyhow!("{}", err_string);
                             let class = FailureClass::from_error(&anyhow_err);
 
@@ -1693,60 +1872,18 @@ impl Provider for ReliableProvider {
         temperature: f64,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let system_owned = system_prompt.map(ToString::to_string);
+        let message_owned = message.to_string();
 
-        for (provider_name, provider) in &self.providers {
-            if !provider.supports_streaming() || !options.enabled {
-                continue;
-            }
-
-            let provider_clone = provider_name.clone();
-
-            let current_model = match self.model_chain(model).first() {
-                Some(m) => (*m).to_string(),
-                None => model.to_string(),
-            };
-
-            let stream = provider.stream_chat_with_system(
-                system_prompt,
-                message,
+        self.stream_chunks_with_failover(model, options, move |provider, current_model| {
+            provider.stream_chat_with_system(
+                system_owned.as_deref(),
+                &message_owned,
                 &current_model,
                 temperature,
                 options,
-            );
-
-            let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
-
-            let _bg = crate::runtime::spawn_supervised(
-                "providers.reliable.stream_chat_with_system",
-                async move {
-                    let mut stream = stream;
-                    while let Some(chunk) = stream.next().await {
-                        if let Err(ref e) = chunk {
-                            tracing::warn!(
-                                provider = provider_clone,
-                                model = current_model,
-                                "Streaming error: {e}"
-                            );
-                        }
-                        if tx.send(chunk).await.is_err() {
-                            break;
-                        }
-                    }
-                },
-            );
-
-            return stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|chunk| (chunk, rx))
-            })
-            .boxed();
-        }
-
-        stream::once(async move {
-            Err(super::traits::StreamError::Provider(
-                "No provider supports streaming".to_string(),
-            ))
+            )
         })
-        .boxed()
     }
 
     fn stream_chat_with_history(
@@ -1756,54 +1893,15 @@ impl Provider for ReliableProvider {
         temperature: f64,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let messages_owned: Arc<Vec<ChatMessage>> = Arc::new(messages.to_vec());
 
-        for (provider_name, provider) in &self.providers {
-            if !provider.supports_streaming() || !options.enabled {
-                continue;
-            }
-
-            let provider_clone = provider_name.clone();
-
-            let current_model = match self.model_chain(model).first() {
-                Some(m) => (*m).to_string(),
-                None => model.to_string(),
-            };
-
-            let stream =
-                provider.stream_chat_with_history(messages, &current_model, temperature, options);
-
-            let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
-
-            let _bg = crate::runtime::spawn_supervised(
-                "providers.reliable.stream_chat_with_system",
-                async move {
-                    let mut stream = stream;
-                    while let Some(chunk) = stream.next().await {
-                        if let Err(ref e) = chunk {
-                            tracing::warn!(
-                                provider = provider_clone,
-                                model = current_model,
-                                "Streaming error: {e}"
-                            );
-                        }
-                        if tx.send(chunk).await.is_err() {
-                            break;
-                        }
-                    }
-                },
-            );
-
-            return stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|chunk| (chunk, rx))
-            })
-            .boxed();
-        }
-
-        stream::once(async move {
-            Err(super::traits::StreamError::Provider(
-                "No provider supports streaming".to_string(),
-            ))
+        self.stream_chunks_with_failover(model, options, move |provider, current_model| {
+            provider.stream_chat_with_history(
+                messages_owned.as_slice(),
+                &current_model,
+                temperature,
+                options,
+            )
         })
-        .boxed()
     }
 }

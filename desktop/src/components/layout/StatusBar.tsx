@@ -57,6 +57,7 @@ function detectIndentSpec(text: string): string {
 }
 
 const STATUS_MODE_GLYPH: Record<CodingModeId, string> = {
+  auto: 'auto_awesome',
   vibe: 'bolt',
   agent: 'robot_2',
   spec: 'description',
@@ -70,6 +71,7 @@ const STATUS_MODE_GLYPH: Record<CodingModeId, string> = {
   mvai: 'hub',
   harness: 'precision_manufacturing',
   curator: 'auto_stories',
+  designer: 'palette',
 }
 
 const STATUS_AUTONOMOUS_MODES = new Set<CodingModeId>(['agent', 'harness'])
@@ -356,7 +358,7 @@ export function StatusBar() {
           (connectionState === 'reconnecting' || connectionState === 'disconnected') && (
             <button
               type="button"
-              onClick={() => connectToSession(activeTabId)}
+              onClick={() => connectToSession(activeTabId, { force: true })}
               title={t('chat.reconnect')}
               className="flex items-center gap-1 rounded-full px-1.5 py-px text-[var(--color-warning)] hover:bg-[var(--color-surface-hover)]"
             >

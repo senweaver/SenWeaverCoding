@@ -2681,6 +2681,8 @@ impl Channel for TelegramChannel {
 
         tracing::debug!("Startup probe succeeded; entering main long-poll loop.");
 
+        let mut poll_error_attempt: u32 = 0;
+
         loop {
             if self.mention_only {
                 let missing_username = self.bot_username.lock().is_none();
@@ -2699,8 +2701,15 @@ impl Channel for TelegramChannel {
             let resp = match self.http_client().post(&url).json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("Telegram poll error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let wait =
+                        crate::channels::reconnect_backoff_delay(poll_error_attempt, 5, 60, 500);
+                    tracing::warn!(
+                        "Telegram poll error: {e}; retrying in {:.3}s (attempt #{})",
+                        wait.as_secs_f64(),
+                        poll_error_attempt.saturating_add(1),
+                    );
+                    poll_error_attempt = poll_error_attempt.saturating_add(1);
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
             };
@@ -2708,8 +2717,15 @@ impl Channel for TelegramChannel {
             let data: serde_json::Value = match resp.json().await {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("Telegram parse error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let wait =
+                        crate::channels::reconnect_backoff_delay(poll_error_attempt, 5, 60, 500);
+                    tracing::warn!(
+                        "Telegram parse error: {e}; retrying in {:.3}s (attempt #{})",
+                        wait.as_secs_f64(),
+                        poll_error_attempt.saturating_add(1),
+                    );
+                    poll_error_attempt = poll_error_attempt.saturating_add(1);
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
             };
@@ -2736,21 +2752,26 @@ Ensure only one `sen` process is using this bot token."
 
                     tokio::time::sleep(std::time::Duration::from_secs(35)).await;
                 } else {
+                    let wait =
+                        crate::channels::reconnect_backoff_delay(poll_error_attempt, 5, 60, 500);
                     tracing::warn!(
-                        "Telegram getUpdates API error (code={}): {description}",
-                        error_code
+                        "Telegram getUpdates API error (code={}): {description}; retrying in {:.3}s (attempt #{})",
+                        error_code,
+                        wait.as_secs_f64(),
+                        poll_error_attempt.saturating_add(1),
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    poll_error_attempt = poll_error_attempt.saturating_add(1);
+                    tokio::time::sleep(wait).await;
                 }
                 continue;
             }
 
+            poll_error_attempt = 0;
+
             if let Some(results) = data.get("result").and_then(serde_json::Value::as_array) {
                 for update in results {
 
-                    if let Some(uid) = update.get("update_id").and_then(serde_json::Value::as_i64) {
-                        offset = uid + 1;
-                    }
+                    let update_id = update.get("update_id").and_then(serde_json::Value::as_i64);
 
                     let msg = if let Some(m) = self.parse_update_message(update) {
                         m
@@ -2760,6 +2781,9 @@ Ensure only one `sen` process is using this bot token."
                         m
                     } else {
                         Box::pin(self.handle_unauthorized_message(update)).await;
+                        if let Some(uid) = update_id {
+                            offset = uid + 1;
+                        }
                         continue;
                     };
 
@@ -2785,8 +2809,14 @@ Ensure only one `sen` process is using this bot token."
                         .send()
                         .await;
 
-                    if tx.send(msg).await.is_err() {
-                        return Ok(());
+                    match crate::channels::forward_channel_message("telegram", &tx, msg) {
+                        crate::channels::ForwardOutcome::Delivered => {
+                            if let Some(uid) = update_id {
+                                offset = uid + 1;
+                            }
+                        }
+                        crate::channels::ForwardOutcome::Dropped => break,
+                        crate::channels::ForwardOutcome::Closed => return Ok(()),
                     }
                 }
             }

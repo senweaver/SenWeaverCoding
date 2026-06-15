@@ -341,7 +341,7 @@ impl TauriFetchController {
                 *buf = ChunkBuffer::new(total);
             }
             if buf.ingest(seq, payload) {
-                Some(guard.remove(&req_id).unwrap().assemble())
+                guard.remove(&req_id).map(|b| b.assemble())
             } else {
                 None
             }
@@ -432,7 +432,7 @@ impl TauriFetchController {
         args: Value,
         timeout: Duration,
     ) -> Result<FetchResponse> {
-        let webview = self
+        let _ = self
             .0
             .app
             .get_webview(FETCH_WORKER_LABEL)
@@ -451,7 +451,14 @@ impl TauriFetchController {
             "window.__senFetchBridge && window.__senFetchBridge.exec({});",
             payload_js
         );
-        if let Err(err) = webview.eval(&source) {
+        if let Err(err) = run_fetch_on_main_thread(&self.0.app, "fetch_worker eval", move |app| {
+            let webview = app
+                .get_webview(FETCH_WORKER_LABEL)
+                .ok_or_else(|| anyhow::anyhow!("fetch_worker webview not available"))?;
+            webview
+                .eval(&source)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }) {
             self.forget_request(req_id);
             return Err(anyhow::anyhow!("fetch_worker eval failed: {err}"));
         }
@@ -489,14 +496,15 @@ impl FetchController for TauriFetchController {
 
         let parsed = Url::parse(url)
             .map_err(|e| anyhow::anyhow!("invalid url '{url}': {e}"))?;
-        let webview = self
-            .0
-            .app
-            .get_webview(FETCH_WORKER_LABEL)
-            .ok_or_else(|| anyhow::anyhow!("fetch_worker webview missing"))?;
-        webview
-            .navigate(parsed.clone())
-            .map_err(|e| anyhow::anyhow!("fetch_worker navigate failed: {e}"))?;
+        let parsed_for_nav = parsed.clone();
+        run_fetch_on_main_thread(&self.0.app, "fetch_worker navigate", move |app| {
+            let webview = app
+                .get_webview(FETCH_WORKER_LABEL)
+                .ok_or_else(|| anyhow::anyhow!("fetch_worker webview missing"))?;
+            webview
+                .navigate(parsed_for_nav)
+                .map_err(|e| anyhow::anyhow!("fetch_worker navigate failed: {e}"))
+        })?;
 
         let nav_timeout = timeout.min(Duration::from_secs(45));
         if let Err(err) = self
@@ -567,9 +575,39 @@ fn urls_logically_match(a: &str, b: &str) -> bool {
     normalize(a) == normalize(b)
 }
 
-fn ensure_fetch_webview(app: &AppHandle) -> Result<tauri::Webview> {
-    if let Some(wv) = app.get_webview(FETCH_WORKER_LABEL) {
-        return Ok(wv);
+static FETCH_MAIN_THREAD_ID: std::sync::OnceLock<std::thread::ThreadId> =
+    std::sync::OnceLock::new();
+
+fn record_fetch_main_thread() {
+    let _ = FETCH_MAIN_THREAD_ID.set(std::thread::current().id());
+}
+
+fn fetch_thread_is_main() -> bool {
+    FETCH_MAIN_THREAD_ID
+        .get()
+        .is_some_and(|id| *id == std::thread::current().id())
+}
+
+fn run_fetch_on_main_thread<F>(app: &AppHandle, label: &'static str, f: F) -> Result<()>
+where
+    F: FnOnce(&AppHandle) -> Result<()> + Send + 'static,
+{
+    if fetch_thread_is_main() {
+        return f(app);
+    }
+    let app_for_main = app.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(f(&app_for_main));
+    })
+    .map_err(|e| anyhow::anyhow!("schedule {label} on the main thread failed: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(20))
+        .map_err(|e| anyhow::anyhow!("await {label} result failed: {e}"))?
+}
+
+fn build_and_attach_fetch_webview(app: &AppHandle) -> Result<()> {
+    if app.get_webview(FETCH_WORKER_LABEL).is_some() {
+        return Ok(());
     }
     let main = app
         .get_window("main")
@@ -605,8 +643,15 @@ fn ensure_fetch_webview(app: &AppHandle) -> Result<tauri::Webview> {
         LogicalPosition::new(-32_000.0, -32_000.0),
         LogicalSize::new(1280.0, 800.0),
     )
-    .map_err(|e| anyhow::anyhow!("add_child(fetch_worker) failed: {e}"))?;
+    .map(|_| ())
+    .map_err(|e| anyhow::anyhow!("add_child(fetch_worker) failed: {e}"))
+}
 
+fn ensure_fetch_webview(app: &AppHandle) -> Result<tauri::Webview> {
+    if let Some(wv) = app.get_webview(FETCH_WORKER_LABEL) {
+        return Ok(wv);
+    }
+    run_fetch_on_main_thread(app, "add_child(fetch_worker)", build_and_attach_fetch_webview)?;
     app.get_webview(FETCH_WORKER_LABEL)
         .ok_or_else(|| anyhow::anyhow!("fetch_worker webview missing after add_child"))
 }
@@ -704,6 +749,7 @@ pub fn handle_protocol_path(
 }
 
 pub fn install_into(app: &AppHandle) {
+    record_fetch_main_thread();
     let controller = TauriFetchController::new(app.clone());
     app.manage(controller.clone());
     app.manage(FetchSharedState::new());

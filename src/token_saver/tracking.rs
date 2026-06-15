@@ -5,28 +5,37 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use parking_lot::Mutex;
 
 const DB_FILE: &str = "token_saver/tracking.db";
 
-static CONN: Mutex<Option<(PathBuf, Connection)>> = Mutex::new(None);
+const WRITE_QUEUE_CAPACITY: usize = 1024;
 
-fn open_or_reuse(data_dir: &Path) -> Result<()> {
-    let mut guard = CONN.lock();
-    let target = data_dir.join(DB_FILE);
-    if let Some((p, _)) = guard.as_ref() {
-        if p == &target {
-            return Ok(());
-        }
-    }
-    if let Some(parent) = target.parent() {
+struct TrackingRow {
+    db_path: PathBuf,
+    ts: i64,
+    command: String,
+    category: String,
+    tokens_before: i64,
+    tokens_after: i64,
+    tokens_saved: i64,
+    exit_code: i64,
+}
+
+static WRITER: OnceLock<SyncSender<TrackingRow>> = OnceLock::new();
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+fn open_db(db_path: &Path) -> Result<Connection> {
+    if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(&target)?;
+    let conn = Connection::open(db_path)?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS token_savings (
+        "PRAGMA busy_timeout = 5000;
+        CREATE TABLE IF NOT EXISTS token_savings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts INTEGER NOT NULL,
             command TEXT NOT NULL,
@@ -39,10 +48,67 @@ fn open_or_reuse(data_dir: &Path) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_token_savings_ts ON token_savings(ts);
         CREATE INDEX IF NOT EXISTS idx_token_savings_category ON token_savings(category);",
     )?;
-    *guard = Some((target, conn));
-    Ok(())
+    Ok(conn)
 }
 
+fn writer_loop(rx: std::sync::mpsc::Receiver<TrackingRow>) {
+    let mut conn: Option<(PathBuf, Connection)> = None;
+    while let Ok(row) = rx.recv() {
+        let reuse = conn
+            .as_ref()
+            .map(|(path, _)| path == &row.db_path)
+            .unwrap_or(false);
+        if !reuse {
+            match open_db(&row.db_path) {
+                Ok(opened) => conn = Some((row.db_path.clone(), opened)),
+                Err(e) => {
+                    tracing::warn!(
+                        db = %row.db_path.display(),
+                        error = %e,
+                        "token saver tracking: failed to open database; dropping record"
+                    );
+                    conn = None;
+                    continue;
+                }
+            }
+        }
+        if let Some((_, ref c)) = conn {
+            if let Err(e) = c.execute(
+                "INSERT INTO token_savings (ts, command, category, tokens_before, tokens_after, tokens_saved, exit_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    row.ts,
+                    row.command,
+                    row.category,
+                    row.tokens_before,
+                    row.tokens_after,
+                    row.tokens_saved,
+                    row.exit_code
+                ],
+            ) {
+                tracing::warn!(error = %e, "token saver tracking: insert failed");
+            }
+        }
+    }
+}
+
+fn writer_tx() -> &'static SyncSender<TrackingRow> {
+    WRITER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<TrackingRow>(WRITE_QUEUE_CAPACITY);
+        let spawned = std::thread::Builder::new()
+            .name("token-saver-tracking".to_string())
+            .spawn(move || writer_loop(rx));
+        if let Err(e) = spawned {
+            tracing::warn!(
+                error = %e,
+                "token saver tracking: writer thread failed to start; tracking disabled"
+            );
+        }
+        tx
+    })
+}
+
+#[allow(clippy::cast_possible_wrap)]
 pub fn record(
     command: &str,
     category: &str,
@@ -51,9 +117,6 @@ pub fn record(
     exit_code: i32,
     data_dir: &Path,
 ) -> Result<()> {
-    if open_or_reuse(data_dir).is_err() {
-        return Ok(());
-    }
     let tokens_before = (raw_bytes.div_ceil(4)).saturating_add(4) as i64;
     let tokens_after = (compacted_bytes.div_ceil(4)).saturating_add(4) as i64;
     let tokens_saved = tokens_before.saturating_sub(tokens_after);
@@ -62,14 +125,29 @@ pub fn record(
         .map(|d| d.as_secs())
         .unwrap_or(0) as i64;
 
-    let mut guard = CONN.lock();
-    if let Some((_, conn)) = guard.as_mut() {
-        let trimmed = command.chars().take(512).collect::<String>();
-        conn.execute(
-            "INSERT INTO token_savings (ts, command, category, tokens_before, tokens_after, tokens_saved, exit_code)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![ts, trimmed, category, tokens_before, tokens_after, tokens_saved, exit_code as i64],
-        )?;
+    let row = TrackingRow {
+        db_path: data_dir.join(DB_FILE),
+        ts,
+        command: command.chars().take(512).collect::<String>(),
+        category: category.to_string(),
+        tokens_before,
+        tokens_after,
+        tokens_saved,
+        exit_code: i64::from(exit_code),
+    };
+
+    match writer_tx().try_send(row) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            let dropped = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % 100 == 0 {
+                tracing::warn!(
+                    dropped,
+                    "token saver tracking: write queue full; dropping records"
+                );
+            }
+        }
+        Err(TrySendError::Disconnected(_)) => {}
     }
     Ok(())
 }
@@ -82,10 +160,9 @@ pub struct Aggregate {
     pub tokens_saved: u64,
 }
 
+#[allow(clippy::cast_possible_wrap)]
 pub fn aggregate(window_seconds: u64, data_dir: &Path) -> Result<Aggregate> {
-    open_or_reuse(data_dir)?;
-    let mut guard = CONN.lock();
-    let (_, conn) = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no db"))?;
+    let conn = open_db(&data_dir.join(DB_FILE))?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -111,11 +188,19 @@ pub fn aggregate(window_seconds: u64, data_dir: &Path) -> Result<Aggregate> {
 }
 
 pub fn reset(data_dir: &Path) -> Result<u64> {
-    open_or_reuse(data_dir)?;
-    let mut guard = CONN.lock();
-    let (_, conn) = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no db"))?;
+    let conn = open_db(&data_dir.join(DB_FILE))?;
     let n = conn.execute("DELETE FROM token_savings", [])? as u64;
     Ok(n)
+}
+
+pub async fn aggregate_async(window_seconds: u64, data_dir: &Path) -> Result<Aggregate> {
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || aggregate(window_seconds, &data_dir)).await?
+}
+
+pub async fn reset_async(data_dir: &Path) -> Result<u64> {
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || reset(&data_dir)).await?
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -138,9 +223,7 @@ impl CategoryAggregate {
 }
 
 pub fn aggregate_by_category(data_dir: &Path) -> Result<Vec<CategoryAggregate>> {
-    open_or_reuse(data_dir)?;
-    let mut guard = CONN.lock();
-    let (_, conn) = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no db"))?;
+    let conn = open_db(&data_dir.join(DB_FILE))?;
     let mut stmt = conn.prepare(
         "SELECT category, COUNT(*) AS hits, COALESCE(SUM(tokens_before),0), \
          COALESCE(SUM(tokens_after),0), COALESCE(SUM(tokens_saved),0) \
@@ -157,4 +240,9 @@ pub fn aggregate_by_category(data_dir: &Path) -> Result<Vec<CategoryAggregate>> 
     })?;
     let out: Result<Vec<_>, _> = rows.collect();
     Ok(out?)
+}
+
+pub async fn aggregate_by_category_async(data_dir: &Path) -> Result<Vec<CategoryAggregate>> {
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || aggregate_by_category(&data_dir)).await?
 }

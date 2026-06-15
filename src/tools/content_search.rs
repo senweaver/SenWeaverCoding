@@ -357,9 +357,11 @@ impl Tool for ContentSearchTool {
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
 
+                let mut async_cmd = tokio::process::Command::from(cmd);
+                async_cmd.kill_on_drop(true);
                 let output = match tokio::time::timeout(
                     std::time::Duration::from_secs(TIMEOUT_SECS),
-                    tokio::process::Command::from(cmd).output(),
+                    async_cmd.output(),
                 )
                 .await
                 {

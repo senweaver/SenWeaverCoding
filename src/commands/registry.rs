@@ -13,6 +13,8 @@ pub struct CommandResult {
     pub success: bool,
     pub message: Option<String>,
     pub data: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_prompt: Option<String>,
 }
 
 impl CommandResult {
@@ -21,6 +23,7 @@ impl CommandResult {
             success: true,
             message: Some(message.into()),
             data: None,
+            followup_prompt: None,
         }
     }
 
@@ -29,6 +32,16 @@ impl CommandResult {
             success: false,
             message: Some(message.into()),
             data: None,
+            followup_prompt: None,
+        }
+    }
+
+    pub fn ok_with_followup(message: impl Into<String>, followup: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: Some(message.into()),
+            data: None,
+            followup_prompt: Some(followup.into()),
         }
     }
 }

@@ -306,7 +306,6 @@ impl Channel for MattermostChannel {
                         .get("create_at")
                         .and_then(|c| c.as_i64())
                         .unwrap_or(last_create_at);
-                    last_create_at = last_create_at.max(create_at);
 
                     let effective_text = if post
                         .get("message")
@@ -329,9 +328,19 @@ impl Channel for MattermostChannel {
                         &channel_id,
                         effective_text.as_deref(),
                     ) {
-                        if tx.send(channel_msg).await.is_err() {
-                            return Ok(());
+                        match crate::channels::forward_channel_message(
+                            "mattermost",
+                            &tx,
+                            channel_msg,
+                        ) {
+                            crate::channels::ForwardOutcome::Delivered => {
+                                last_create_at = last_create_at.max(create_at);
+                            }
+                            crate::channels::ForwardOutcome::Dropped => break,
+                            crate::channels::ForwardOutcome::Closed => return Ok(()),
                         }
+                    } else {
+                        last_create_at = last_create_at.max(create_at);
                     }
                 }
             }

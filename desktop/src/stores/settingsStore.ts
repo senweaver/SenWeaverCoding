@@ -157,6 +157,7 @@ type SettingsStore = {
   pendingCodingModeTransition: PendingCodingModeTransition | null
 
   fetchAll: () => Promise<void>
+  fetchModels: () => Promise<void>
   setCodingModeOrder: (order: CodingModeId[]) => void
   setCodingMode: (mode: CodingModeId) => Promise<void>
   requestSetCodingMode: (mode: CodingModeId) => Promise<void>
@@ -191,6 +192,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   error: null,
   pendingCodingModeTransition: null,
   piiSanitizer: getStoredPiiSettings(),
+
+  fetchModels: async () => {
+    const settled = await Promise.allSettled([modelsApi.list(), modelsApi.getCurrent()])
+    const [modelsListRes, currentModelRes] = settled
+    const previous = get()
+    const modelsRes =
+      modelsListRes.status === 'fulfilled'
+        ? modelsListRes.value
+        : {
+            models: previous.availableModels,
+            provider: { name: previous.activeProviderName ?? '' },
+          }
+    const currentModel =
+      currentModelRes.status === 'fulfilled'
+        ? currentModelRes.value.model
+        : previous.currentModel
+    set({
+      availableModels: modelsRes.models,
+      activeProviderName: modelsRes.provider?.name ?? null,
+      currentModel,
+    })
+  },
 
   fetchAll: async () => {
     set({ isLoading: true, error: null })
@@ -332,6 +355,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
     set({ pendingCodingModeTransition: null })
 
+    const prevMode = get().codingMode
+    set({ codingMode: mode })
+
     try {
       const res = await codingModesApi.setCurrent(mode, false)
       const derived = (res.permissionMode as PermissionMode) || get().permissionMode
@@ -344,6 +370,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         !!err.body &&
         typeof err.body === 'object' &&
         (err.body as Record<string, unknown>).confirmationRequired === true
+      set({ codingMode: prevMode })
       if (!needsConfirm) {
         console.warn('[settings] requestSetCodingMode failed', err)
         return
@@ -400,8 +427,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setLocale: (locale) => {
-    set({ locale })
-    try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch {  }
+    void import('../i18n')
+      .then(({ ensureLocaleLoaded }) => ensureLocaleLoaded(locale))
+      .catch(() => {})
+      .then(() => {
+        set({ locale })
+        try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch {  }
+      })
   },
 
   setTheme: async (theme) => {

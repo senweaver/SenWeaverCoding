@@ -361,6 +361,7 @@ impl Tool for GoogleWorkspaceTool {
 
         let mut cmd = crate::util::hidden_async_command("gws");
         cmd.args(&cmd_args);
+        cmd.kill_on_drop(true);
         cmd.env_clear();
 
         for key in &["PATH", "HOME", "APPDATA", "USERPROFILE", "LANG", "TERM"] {

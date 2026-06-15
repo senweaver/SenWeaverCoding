@@ -591,7 +591,7 @@ impl SqliteMemory {
             idx += 1;
         }
         if let Some(sid) = session_id {
-            let _ = write!(sql, " AND session_id = ?{idx}");
+            let _ = write!(sql, " AND (session_id IS NULL OR session_id = ?{idx})");
             param_values.push(Box::new(sid.to_string()));
         }
 
@@ -704,7 +704,7 @@ impl SqliteMemory {
             next_idx += 1;
         }
         if session_id.is_some() {
-            let _ = write!(sql, " AND session_id = ?{next_idx}");
+            let _ = write!(sql, " AND (session_id IS NULL OR session_id = ?{next_idx})");
         }
 
         let mut stmt = conn.prepare(&sql)?;
@@ -823,10 +823,17 @@ impl Memory for SqliteMemory {
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
 
-        let embedding_bytes = self
-            .get_or_compute_embedding(content)
-            .await?
-            .map(|emb| vector::vec_to_bytes(&emb));
+        let embedding_bytes = match self.get_or_compute_embedding(content).await {
+            Ok(embedding) => embedding.map(|emb| vector::vec_to_bytes(&emb)),
+            Err(err) => {
+                tracing::warn!(
+                    key = %key,
+                    error = %err,
+                    "memory store: embedding failed; storing entry without vector"
+                );
+                None
+            }
+        };
 
         let key_owned = key.to_string();
         let content_owned = content.to_string();
@@ -882,10 +889,22 @@ impl Memory for SqliteMemory {
                 .await;
         }
 
+        let mut effective_mode = self.search_mode.clone();
         let query_embedding = if self.search_mode == SearchMode::Bm25 {
             None
         } else {
-            self.get_or_compute_embedding(query).await?
+            match self.get_or_compute_embedding(query).await {
+                Ok(embedding) => embedding,
+                Err(err) => {
+                    tracing::warn!(
+                        mode = ?self.search_mode,
+                        error = %err,
+                        "memory recall: embedding failed; degrading to keyword-only (FTS) search"
+                    );
+                    effective_mode = SearchMode::Bm25;
+                    None
+                }
+            }
         };
 
         let conn = self.conn.clone();
@@ -896,7 +915,7 @@ impl Memory for SqliteMemory {
         let until_owned = until.map(String::from);
         let vector_weight = self.vector_weight;
         let keyword_weight = self.keyword_weight;
-        let search_mode = self.search_mode.clone();
+        let search_mode = effective_mode;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let conn = conn.lock();
@@ -1017,8 +1036,10 @@ impl Memory for SqliteMemory {
                             superseded_by: sup,
                         };
                         if let Some(filter_sid) = session_ref {
-                            if entry.session_id.as_deref() != Some(filter_sid) {
-                                continue;
+                            if let Some(other) = entry.session_id.as_deref() {
+                                if other != filter_sid {
+                                    continue;
+                                }
                             }
                         }
                         results.push(entry);
@@ -1090,9 +1111,11 @@ impl Memory for SqliteMemory {
                     })?;
                     for row in rows {
                         let entry = row?;
-                        if let Some(sid) = session_ref {
-                            if entry.session_id.as_deref() != Some(sid) {
-                                continue;
+                        if let Some(filter_sid) = session_ref {
+                            if let Some(other) = entry.session_id.as_deref() {
+                                if other != filter_sid {
+                                    continue;
+                                }
                             }
                         }
                         results.push(entry);
@@ -1430,10 +1453,17 @@ impl Memory for SqliteMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
     ) -> anyhow::Result<()> {
-        let embedding_bytes = self
-            .get_or_compute_embedding(content)
-            .await?
-            .map(|emb| vector::vec_to_bytes(&emb));
+        let embedding_bytes = match self.get_or_compute_embedding(content).await {
+            Ok(embedding) => embedding.map(|emb| vector::vec_to_bytes(&emb)),
+            Err(err) => {
+                tracing::warn!(
+                    key = %key,
+                    error = %err,
+                    "memory store: embedding failed; storing entry without vector"
+                );
+                None
+            }
+        };
 
         let conn = self.conn.clone();
         let key = key.to_string();

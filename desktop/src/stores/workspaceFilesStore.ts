@@ -207,6 +207,7 @@ export type WorkspaceFilesState = {
 
   setRoot: (root: string | null) => void
   refreshRoot: () => Promise<void>
+  refreshAll: () => Promise<void>
   loadDirectory: (relPath: string) => Promise<void>
   setExpanded: (relPath: string, expanded: boolean) => void
   toggleExpanded: (relPath: string) => Promise<void>
@@ -523,6 +524,13 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         () => {
 
         },
+        () => {
+
+          if (get().root === root) {
+            void get().refreshAll()
+            useGitStatusStore.getState().scheduleRefresh(root)
+          }
+        },
       )
     }
   },
@@ -545,6 +553,36 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         rootError: err instanceof Error ? err.message : String(err),
       })
     }
+  },
+
+  refreshAll: async () => {
+    const root = get().root
+    if (!root) return
+    await get().refreshRoot()
+    if (get().root !== root) return
+    const prefix = `${root}::`
+    const dirs = get().dirs
+    const rels: string[] = []
+    for (const key of Object.keys(dirs)) {
+      if (!key.startsWith(prefix)) continue
+      const rel = key.slice(prefix.length)
+      if (!rel) continue
+      const dir = dirs[key]
+      if (dir?.loaded || dir?.loading || dir?.expanded) rels.push(rel)
+    }
+    rels.sort((a, b) => a.length - b.length)
+    const queue = [...rels]
+    const workerCount = Math.min(6, queue.length)
+    if (workerCount === 0) return
+    const workers = Array.from({ length: workerCount }, async () => {
+      for (;;) {
+        const rel = queue.shift()
+        if (rel === undefined) return
+        if (get().root !== root) return
+        await reloadLoadedDir(get, set, root, rel)
+      }
+    })
+    await Promise.all(workers)
   },
 
   loadDirectory: async (relPath: string) => {
@@ -593,6 +631,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     const root = get().root
     if (!root) return
     const key = k(root, relPath)
+    const prev = get().dirs[key]
     set((s) => {
       const nextDirs = {
         ...s.dirs,
@@ -604,6 +643,9 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       schedulePersistExpanded(root, nextDirs)
       return { dirs: nextDirs }
     })
+    if (expanded && prev?.loaded && !prev.loading) {
+      void reloadLoadedDir(get, set, root, relPath)
+    }
   },
 
   toggleExpanded: async (relPath: string) => {
@@ -615,14 +657,18 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       await get().loadDirectory(relPath)
       return
     }
+    const willExpand = !dir.expanded
     set((s) => {
       const nextDirs = {
         ...s.dirs,
-        [key]: { ...dir, expanded: !dir.expanded },
+        [key]: { ...dir, expanded: willExpand },
       }
       schedulePersistExpanded(root, nextDirs)
       return { dirs: nextDirs }
     })
+    if (willExpand && dir.loaded && !dir.loading) {
+      void reloadLoadedDir(get, set, root, relPath)
+    }
   },
 
   selectFile: async (relPath: string) => {
@@ -1543,7 +1589,8 @@ async function refreshDir(
           children: tree.entries,
           loaded: true,
           loading: false,
-          expanded: true,
+          expanded: s.dirs[key]?.expanded ?? true,
+          error: undefined,
         },
       },
     }))
@@ -1558,6 +1605,52 @@ async function refreshDir(
         },
       },
     }))
+  }
+}
+
+async function reloadLoadedDir(
+  get: () => WorkspaceFilesState,
+  set: (
+    partial:
+      | Partial<WorkspaceFilesState>
+      | ((s: WorkspaceFilesState) => Partial<WorkspaceFilesState>),
+  ) => void,
+  root: string,
+  relPath: string,
+) {
+  const key = k(root, relPath)
+  try {
+    const tree = await workspaceFilesApi.tree({ root, path: relPath, depth: 1 })
+    if (get().root !== root) return
+    set((s) => {
+      const existing = s.dirs[key]
+      if (!existing) return {}
+      return {
+        dirs: {
+          ...s.dirs,
+          [key]: {
+            ...existing,
+            children: tree.entries,
+            loaded: true,
+            loading: false,
+            error: undefined,
+          },
+        },
+      }
+    })
+  } catch {
+    if (get().root !== root) return
+    set((s) => {
+      if (!s.dirs[key]) return {}
+      const subtreePrefix = `${key}/`
+      const nextDirs: Record<Key, DirState> = {}
+      for (const [dirKey, value] of Object.entries(s.dirs)) {
+        if (dirKey === key || dirKey.startsWith(subtreePrefix)) continue
+        nextDirs[dirKey] = value
+      }
+      schedulePersistExpanded(root, nextDirs)
+      return { dirs: nextDirs }
+    })
   }
 }
 

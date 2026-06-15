@@ -109,6 +109,10 @@ pub fn is_browser_tool(name: &str) -> bool {
     BROWSER_FAMILY_TOOLS.contains(&name)
 }
 
+pub fn is_shell_tool(name: &str) -> bool {
+    matches!(name, "shell" | "powershell")
+}
+
 pub fn is_mcp_tool_name(name: &str) -> bool {
     if name.starts_with("mcp_") {
         return true;

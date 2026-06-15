@@ -287,14 +287,38 @@ impl Verifier for TestRunnerVerifier {
         let mut cmd = crate::util::hidden_async_command(&program);
         cmd.args(&args)
             .current_dir(&cwd)
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd.spawn()?;
-        let output = match timeout(self.config.timeout, child.wait_with_output()).await {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
+        let mut child = cmd.spawn()?;
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let collect = async {
+            use tokio::io::AsyncReadExt;
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            let read_out = async {
+                if let Some(pipe) = stdout_pipe.as_mut() {
+                    let _ = pipe.read_to_end(&mut stdout_buf).await;
+                }
+            };
+            let read_err = async {
+                if let Some(pipe) = stderr_pipe.as_mut() {
+                    let _ = pipe.read_to_end(&mut stderr_buf).await;
+                }
+            };
+            let (status, (), ()) = tokio::join!(child.wait(), read_out, read_err);
+            (status, stdout_buf, stderr_buf)
+        };
+        let output = match timeout(self.config.timeout, collect).await {
+            Ok((Ok(status), stdout, stderr)) => std::process::Output {
+                status,
+                stdout,
+                stderr,
+            },
+            Ok((Err(e), _, _)) => {
                 return Ok(VerificationReport::failed(
                     self.name(),
                     vec![],
@@ -302,7 +326,8 @@ impl Verifier for TestRunnerVerifier {
                 ));
             }
             Err(_) => {
-
+                let _ = child.start_kill();
+                let _ = timeout(Duration::from_secs(3), child.wait()).await;
                 let secs = self.config.timeout.as_secs();
                 return Ok(VerificationReport {
                     verifier: self.name(),

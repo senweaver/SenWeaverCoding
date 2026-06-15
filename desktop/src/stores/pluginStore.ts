@@ -46,7 +46,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   error: null,
 
   fetchPlugins: async (cwd) => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: get().plugins.length === 0, error: null })
     try {
       const data = await pluginsApi.list(cwd)
       set({

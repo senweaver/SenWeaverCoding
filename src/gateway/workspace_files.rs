@@ -20,6 +20,7 @@ const DEFAULT_TREE_DEPTH: u32 = 1;
 const MAX_TREE_DEPTH: u32 = 6;
 const MAX_TREE_NODES: usize = 5_000;
 const MAX_FILE_READ_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_RAW_READ_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SEARCH_RESULTS: usize = 500;
 
@@ -383,6 +384,99 @@ pub async fn handle_workspace_file_get(
         }),
     };
     Json(payload).into_response()
+}
+
+fn raw_id_for_root(root: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let s = root.to_string_lossy();
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h1);
+    let a = h1.finish();
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    0x9e3779b97f4a7c15u64.hash(&mut h2);
+    s.hash(&mut h2);
+    let b = h2.finish();
+    format!("{a:016x}{b:016x}")
+}
+
+fn all_allowed_canonicals_blocking(state: &AppState) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Ok(ws) = state.config.lock().workspace_dir.clone().canonicalize() {
+        out.push(ws);
+    }
+    out.extend(session_allowed_workspace_canonicals(state));
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[derive(Deserialize)]
+pub struct RawHandleQuery {
+    pub root: String,
+}
+
+pub async fn handle_workspace_raw_handle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<RawHandleQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let root = match allowed_workspace_root(&state, &q.root).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    Json(json!({ "rawId": raw_id_for_root(&root) })).into_response()
+}
+
+pub async fn handle_workspace_raw_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((raw_id, rel)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let state_for_io = state.clone();
+    let read_result: Result<(PathBuf, Vec<u8>), FsError> =
+        tokio::task::spawn_blocking(move || {
+            let root = all_allowed_canonicals_blocking(&state_for_io)
+                .into_iter()
+                .find(|p| raw_id_for_root(p) == raw_id)
+                .ok_or(FsError::InvalidRoot)?;
+            let target = resolve_within(&root, &rel, true)?;
+            if !target.is_file() {
+                return Err(FsError::InvalidName);
+            }
+            let metadata = std::fs::metadata(&target).map_err(FsError::Io)?;
+            if metadata.len() > MAX_RAW_READ_BYTES {
+                return Err(FsError::TooLarge(metadata.len()));
+            }
+            let bytes = std::fs::read(&target).map_err(FsError::Io)?;
+            Ok((target, bytes))
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(FsError::Io(std::io::Error::other(format!(
+                "blocking task join failed: {e}"
+            ))))
+        });
+    let (target, bytes) = match read_result {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let mime = mime_from_extension(&target);
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 fn classify_file_content(path: &Path, bytes: &[u8]) -> Option<String> {

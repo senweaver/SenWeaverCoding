@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import { useSettingsStore, PII_KIND_LABELS, type PiiKindLabel } from '../stores/settingsStore'
 import { useChatStore } from '../stores/chatStore'
 import { useTabStore } from '../stores/tabStore'
@@ -21,32 +21,81 @@ import type {
   ProviderTestResult,
   ApiFormat,
   CustomHttpHeader,
+  ModelPricingEntry,
 } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import type { CodingModeId } from '../types/codingMode'
 import { sortByCodingModeOrder } from '../types/codingMode'
 import { ApiError } from '../api/client'
 import { settingsApi } from '../api/settings'
-import { AdapterSettings } from './AdapterSettings'
-import { ToolsAndMcpsSettings } from './ToolsAndMcpsSettings'
-import { HooksSettings } from './HooksSettings'
-import { UsageSettings } from './UsageSettings'
-import { EvolutionSettings } from './EvolutionSettings'
-import { RulesSkillsSubagentsSettings } from './RulesSkillsSubagentsSettings'
-import { AgentsSettings } from './AgentsSettings'
-import { LspSettings } from './LspSettings'
-import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings'
-import { CredentialsSettings } from './CredentialsSettings'
-import { AutoDreamSettings } from './AutoDreamSettings'
-import { ComputerUseSettings } from './ComputerUseSettings'
+import {
+  MODEL_TYPES,
+  DEFAULT_MODEL_TYPE,
+  effectiveModelTypes,
+  sanitizeModelTypes,
+  modelTypeLabelKey,
+} from '../utils/modelTypes'
 import { GlobalModelsPanel } from './GlobalModelsPanel'
 import { ProviderModelsPanel } from './ProviderModelsPanel'
-import { PluginList } from '../components/plugins/PluginList'
-import { PluginDetail } from '../components/plugins/PluginDetail'
 import { usePluginStore } from '../stores/pluginStore'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 
-const SHOW_COMPUTER_USE_TAB = false
+const AdapterSettings = lazy(() =>
+  import('./AdapterSettings').then((m) => ({ default: m.AdapterSettings })),
+)
+const ToolsAndMcpsSettings = lazy(() =>
+  import('./ToolsAndMcpsSettings').then((m) => ({ default: m.ToolsAndMcpsSettings })),
+)
+const HooksSettings = lazy(() =>
+  import('./HooksSettings').then((m) => ({ default: m.HooksSettings })),
+)
+const UsageSettings = lazy(() =>
+  import('./UsageSettings').then((m) => ({ default: m.UsageSettings })),
+)
+const EvolutionSettings = lazy(() =>
+  import('./EvolutionSettings').then((m) => ({ default: m.EvolutionSettings })),
+)
+const RulesSkillsSubagentsSettings = lazy(() =>
+  import('./RulesSkillsSubagentsSettings').then((m) => ({
+    default: m.RulesSkillsSubagentsSettings,
+  })),
+)
+const AgentsSettings = lazy(() =>
+  import('./AgentsSettings').then((m) => ({ default: m.AgentsSettings })),
+)
+const LspSettings = lazy(() =>
+  import('./LspSettings').then((m) => ({ default: m.LspSettings })),
+)
+const KeyboardShortcutsSettings = lazy(() =>
+  import('./KeyboardShortcutsSettings').then((m) => ({
+    default: m.KeyboardShortcutsSettings,
+  })),
+)
+const CredentialsSettings = lazy(() =>
+  import('./CredentialsSettings').then((m) => ({ default: m.CredentialsSettings })),
+)
+const AutoDreamSettings = lazy(() =>
+  import('./AutoDreamSettings').then((m) => ({ default: m.AutoDreamSettings })),
+)
+const ComputerUseSettings = lazy(() =>
+  import('./ComputerUseSettings').then((m) => ({ default: m.ComputerUseSettings })),
+)
+const PluginList = lazy(() =>
+  import('../components/plugins/PluginList').then((m) => ({ default: m.PluginList })),
+)
+const PluginDetail = lazy(() =>
+  import('../components/plugins/PluginDetail').then((m) => ({ default: m.PluginDetail })),
+)
+
+function SettingsTabFallback() {
+  return (
+    <div className="flex items-center justify-center h-40 text-[var(--color-text-tertiary)]">
+      <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
+    </div>
+  )
+}
+
+const SHOW_COMPUTER_USE_TAB = true
 
 export function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -98,22 +147,24 @@ export function Settings() {
 
         {}
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          {activeTab === 'providers' && <ProviderSettings />}
-          {activeTab === 'agents' && <AgentsSettings />}
-          {activeTab === 'codingMode' && <CodingModeSettings />}
-          {activeTab === 'general' && <GeneralSettings />}
-          {activeTab === 'adapters' && <AdapterSettings />}
-          {activeTab === 'mcp' && <ToolsAndMcpsSettings />}
-          {activeTab === 'plugins' && <PluginsSettings />}
-          {activeTab === 'lsp' && <LspSettings />}
-          {activeTab === 'keyboard' && <KeyboardShortcutsSettings />}
-          {activeTab === 'skills' && <RulesSkillsSubagentsSettings />}
-          {activeTab === 'hooks' && <HooksSettings />}
-          {activeTab === 'usage' && <UsageSettings />}
-          {activeTab === 'evolution' && <EvolutionSettings />}
-          {activeTab === 'credentials' && <CredentialsSettings />}
-          {activeTab === 'autoDream' && <AutoDreamSettings />}
-          {SHOW_COMPUTER_USE_TAB && activeTab === 'computerUse' && <ComputerUseSettings />}
+          <Suspense fallback={<SettingsTabFallback />}>
+            {activeTab === 'providers' && <ProviderSettings />}
+            {activeTab === 'agents' && <AgentsSettings />}
+            {activeTab === 'codingMode' && <CodingModeSettings />}
+            {activeTab === 'general' && <GeneralSettings />}
+            {activeTab === 'adapters' && <AdapterSettings />}
+            {activeTab === 'mcp' && <ToolsAndMcpsSettings />}
+            {activeTab === 'plugins' && <PluginsSettings />}
+            {activeTab === 'lsp' && <LspSettings />}
+            {activeTab === 'keyboard' && <KeyboardShortcutsSettings />}
+            {activeTab === 'skills' && <RulesSkillsSubagentsSettings />}
+            {activeTab === 'hooks' && <HooksSettings />}
+            {activeTab === 'usage' && <UsageSettings />}
+            {activeTab === 'evolution' && <EvolutionSettings />}
+            {activeTab === 'credentials' && <CredentialsSettings />}
+            {activeTab === 'autoDream' && <AutoDreamSettings />}
+            {SHOW_COMPUTER_USE_TAB && activeTab === 'computerUse' && <ComputerUseSettings />}
+          </Suspense>
         </div>
       </div>
     </div>
@@ -254,7 +305,7 @@ function ProviderSettings() {
   const activateProvider = useProviderStore((s) => s.activateProvider)
   const testProvider = useProviderStore((s) => s.testProvider)
   const updateProvider = useProviderStore((s) => s.updateProvider)
-  const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  const fetchSettings = useSettingsStore((s) => s.fetchModels)
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -562,12 +613,83 @@ function toModelRows(values: string[]): ModelRow[] {
   return values.map((value) => ({ id: createModelRowId(), value }))
 }
 
+function ModelTypeSelect({
+  selected,
+  onToggle,
+  disabled,
+  t,
+}: {
+  selected: string[]
+  onToggle: (type: string) => void
+  disabled: boolean
+  t: ReturnType<typeof useTranslation>
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  const eff = effectiveModelTypes(selected)
+  const summary = eff
+    .map((tpe) => t(modelTypeLabelKey(tpe) as TranslationKey))
+    .join('、')
+  return (
+    <div ref={ref} className="relative flex-shrink-0">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+        title={t('settings.providers.modelTypeTooltip')}
+        className="flex w-40 items-center gap-1 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2 py-1.5 text-xs text-[var(--color-text-primary)] outline-none transition-colors hover:border-[var(--color-border-focus)] disabled:opacity-50"
+      >
+        <span className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]">
+          category
+        </span>
+        <span className="min-w-0 flex-1 truncate text-left">{summary}</span>
+        <span className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]">
+          expand_more
+        </span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-[9999] mt-1 w-56 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]">
+          <div className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+            {t('settings.providers.modelTypeLabel')}
+          </div>
+          {MODEL_TYPES.map((tpe) => {
+            const on = eff.includes(tpe)
+            return (
+              <button
+                key={tpe}
+                type="button"
+                onClick={() => onToggle(tpe)}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-surface-hover)] ${
+                  on ? 'text-[var(--color-brand)]' : 'text-[var(--color-text-primary)]'
+                }`}
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  {on ? 'check_box' : 'check_box_outline_blank'}
+                </span>
+                <span className="truncate">{t(modelTypeLabelKey(tpe) as TranslationKey)}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const createProvider = useProviderStore((s) => s.createProvider)
   const updateProvider = useProviderStore((s) => s.updateProvider)
   const testConfig = useProviderStore((s) => s.testConfig)
   const allProviders = useProviderStore((s) => s.providers)
-  const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  const fetchSettings = useSettingsStore((s) => s.fetchModels)
   const t = useTranslation()
 
   const availablePresets = presets.filter((p) => p.id !== 'official')
@@ -597,6 +719,35 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
           initial[key] = String(value)
         }
+      }
+    }
+    return initial
+  })
+  const [modelTypes, setModelTypes] = useState<Record<string, string[]>>(() => {
+    const initial: Record<string, string[]> = {}
+    if (provider?.modelTypes) {
+      for (const [key, value] of Object.entries(provider.modelTypes)) {
+        const sanitized = sanitizeModelTypes(value)
+        if (sanitized.length > 0) initial[key] = sanitized
+      }
+    }
+    return initial
+  })
+  const [modelPricing, setModelPricing] = useState<
+    Record<string, { input: string; output: string }>
+  >(() => {
+    const initial: Record<string, { input: string; output: string }> = {}
+    if (provider?.modelPricing) {
+      for (const [key, value] of Object.entries(provider.modelPricing)) {
+        const input =
+          typeof value?.input === 'number' && Number.isFinite(value.input) && value.input > 0
+            ? String(value.input)
+            : ''
+        const output =
+          typeof value?.output === 'number' && Number.isFinite(value.output) && value.output > 0
+            ? String(value.output)
+            : ''
+        if (input || output) initial[key] = { input, output }
       }
     }
     return initial
@@ -642,6 +793,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setModelRows(toModelRows([...preset.defaultModels]))
 
     setModelContextWindows({})
+    setModelTypes({})
+    setModelPricing({})
     setTestResult(null)
     setSubmitError(null)
   }
@@ -687,6 +840,16 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             const { [modelId]: _removed, ...rest } = windows
             return rest
           })
+          setModelTypes((types) => {
+            if (!(modelId in types)) return types
+            const { [modelId]: _removed, ...rest } = types
+            return rest
+          })
+          setModelPricing((pricing) => {
+            if (!(modelId in pricing)) return pricing
+            const { [modelId]: _removed, ...rest } = pricing
+            return rest
+          })
         }
       }
       return prev.filter((row) => row.id !== rowId)
@@ -704,6 +867,26 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           const trimmedNext = value.trim()
           if (!trimmedNext) return rest
           const merged: Record<string, string> = { ...rest }
+          merged[trimmedNext] = carried
+          return merged
+        })
+        setModelTypes((existing) => {
+          const carried = existing[previous]
+          if (carried === undefined) return existing
+          const { [previous]: _removed, ...rest } = existing
+          const trimmedNext = value.trim()
+          if (!trimmedNext) return rest
+          const merged: Record<string, string[]> = { ...rest }
+          merged[trimmedNext] = carried
+          return merged
+        })
+        setModelPricing((existing) => {
+          const carried = existing[previous]
+          if (carried === undefined) return existing
+          const { [previous]: _removed, ...rest } = existing
+          const trimmedNext = value.trim()
+          if (!trimmedNext) return rest
+          const merged: Record<string, { input: string; output: string }> = { ...rest }
           merged[trimmedNext] = carried
           return merged
         })
@@ -740,6 +923,70 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       if (Number.isFinite(parsed) && parsed > 0) {
         payload[model] = parsed
       }
+    }
+    return payload
+  }
+
+  const updateModelPricing = (
+    modelId: string,
+    field: 'input' | 'output',
+    raw: string,
+  ) => {
+    setModelPricing((prev) => {
+      const sanitized = raw.replace(/[^0-9.]/g, '')
+      const current = prev[modelId] ?? { input: '', output: '' }
+      const next = { ...current, [field]: sanitized }
+      if (!next.input && !next.output) {
+        if (!(modelId in prev)) return prev
+        const { [modelId]: _removed, ...rest } = prev
+        return rest
+      }
+      return { ...prev, [modelId]: next }
+    })
+  }
+
+  const buildModelPricingPayload = (): Record<string, ModelPricingEntry> => {
+    const payload: Record<string, ModelPricingEntry> = {}
+    const seen = new Set(trimmedModels)
+    for (const [model, raw] of Object.entries(modelPricing)) {
+      if (!seen.has(model)) continue
+      const input = Number.parseFloat(raw.input)
+      const output = Number.parseFloat(raw.output)
+      const inputOk = Number.isFinite(input) && input > 0
+      const outputOk = Number.isFinite(output) && output > 0
+      if (!inputOk && !outputOk) continue
+      payload[model] = {
+        input: inputOk ? input : 0,
+        output: outputOk ? output : 0,
+      }
+    }
+    return payload
+  }
+
+  const toggleModelType = (modelId: string, type: string) => {
+    if (!modelId) return
+    setModelTypes((prev) => {
+      const current = effectiveModelTypes(prev[modelId])
+      const next = current.includes(type as never)
+        ? current.filter((t) => t !== type)
+        : [...current, type]
+      const sanitized = sanitizeModelTypes(next)
+      const resolved = sanitized.length > 0 ? sanitized : [DEFAULT_MODEL_TYPE]
+      return { ...prev, [modelId]: resolved }
+    })
+  }
+
+  const buildModelTypesPayload = (): Record<string, string[]> => {
+    const payload: Record<string, string[]> = {}
+    const seen = new Set(trimmedModels)
+    for (const model of trimmedModels) {
+      if (!seen.has(model)) continue
+      const sanitized = sanitizeModelTypes(modelTypes[model])
+      if (sanitized.length === 0) continue
+      const isDefaultOnly =
+        sanitized.length === 1 && sanitized[0] === DEFAULT_MODEL_TYPE
+      if (isDefaultOnly) continue
+      payload[model] = sanitized
     }
     return payload
   }
@@ -811,6 +1058,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setIsSubmitting(true)
     try {
       const overridesPayload = buildContextWindowsPayload()
+      const modelTypesPayload = buildModelTypesPayload()
+      const modelPricingPayload = buildModelPricingPayload()
       const customHeadersPayload = buildCustomHeadersPayload()
       if (mode === 'create') {
         await createProvider({
@@ -822,6 +1071,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           apiFormat,
           models: trimmedModels,
           modelContextWindows: overridesPayload,
+          modelTypes: modelTypesPayload,
+          modelPricing: modelPricingPayload,
           customHeaders: customHeadersPayload,
           notes: notes.trim() || undefined,
         })
@@ -832,6 +1083,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           apiFormat,
           models: trimmedModels,
           modelContextWindows: overridesPayload,
+          modelTypes: modelTypesPayload,
+          modelPricing: modelPricingPayload,
           customHeaders: customHeadersPayload,
           notes: notes.trim() || undefined,
         }
@@ -998,6 +1251,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               const contextWindowDraft = trimmedModelId
                 ? modelContextWindows[trimmedModelId] ?? ''
                 : ''
+              const pricingDraft = trimmedModelId
+                ? modelPricing[trimmedModelId] ?? { input: '', output: '' }
+                : { input: '', output: '' }
               return (
                 <div key={row.id} className="flex items-center gap-2">
                   <input
@@ -1018,6 +1274,36 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     title={t('settings.providers.contextWindowTooltip')}
                     disabled={!trimmedModelId}
                     className="w-28 text-xs font-mono px-2 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
+                  />
+                  <input
+                    value={pricingDraft.input}
+                    onChange={(e) =>
+                      trimmedModelId &&
+                      updateModelPricing(trimmedModelId, 'input', e.target.value)
+                    }
+                    inputMode="decimal"
+                    placeholder={t('settings.providers.priceInputPlaceholder')}
+                    title={t('settings.providers.priceInputTooltip')}
+                    disabled={!trimmedModelId}
+                    className="w-16 text-xs font-mono px-2 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
+                  />
+                  <input
+                    value={pricingDraft.output}
+                    onChange={(e) =>
+                      trimmedModelId &&
+                      updateModelPricing(trimmedModelId, 'output', e.target.value)
+                    }
+                    inputMode="decimal"
+                    placeholder={t('settings.providers.priceOutputPlaceholder')}
+                    title={t('settings.providers.priceOutputTooltip')}
+                    disabled={!trimmedModelId}
+                    className="w-16 text-xs font-mono px-2 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
+                  />
+                  <ModelTypeSelect
+                    selected={trimmedModelId ? modelTypes[trimmedModelId] ?? [] : []}
+                    onToggle={(type) => toggleModelType(trimmedModelId, type)}
+                    disabled={!trimmedModelId}
+                    t={t}
                   />
                   {idx === 0 && (
                     <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border border-[var(--color-brand)]/18 bg-[var(--color-brand)]/14 text-[var(--color-brand)] leading-none">

@@ -21,8 +21,16 @@ pub mod glob;
 pub mod hardware;
 #[cfg(feature = "tool-image")]
 pub mod image;
+pub mod deck_compile;
+pub mod design_system_read;
+pub mod designer_lint;
+pub mod designer_scaffold;
+pub mod designer_skill_read;
+pub mod designer_template_read;
+pub mod figma_fetch;
 pub mod inline;
 pub mod mcp;
+pub mod media;
 pub mod memory;
 pub mod multi;
 pub mod plan_mode;
@@ -210,6 +218,14 @@ pub use hardware::memory::read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 #[cfg(feature = "tool-image")]
 pub use image::generate::ImageGenTool;
+pub use deck_compile::DeckCompileTool;
+pub use design_system_read::DesignSystemReadTool;
+pub use designer_lint::DesignerLintTool;
+pub use designer_scaffold::DesignerScaffoldTool;
+pub use designer_skill_read::DesignerSkillReadTool;
+pub use designer_template_read::DesignerTemplateReadTool;
+pub use figma_fetch::FigmaFetchTool;
+pub use media::MediaGenTool;
 #[cfg(feature = "tool-image")]
 pub use image::info::ImageInfoTool;
 #[cfg(feature = "tool-image")]
@@ -577,7 +593,7 @@ pub fn all_tools_with_runtime(
 ) {
     let has_shell_access = runtime.has_shell_access();
     let sandbox = create_sandbox(&root_config.security);
-    let plan_mode_flag: PlanModeFlag = Arc::new(RwLock::new(false));
+    let plan_mode_flag: PlanModeFlag = PlanModeFlag::new();
     let task_manager: TaskManagerHandle = Arc::new(RwLock::new(TaskManager::new()));
     #[cfg(not(feature = "tool-utility-misc"))]
     let _ = canvas_store;
@@ -672,9 +688,9 @@ pub fn all_tools_with_runtime(
         Arc::new(StructuredOutputTool::new(None)),
         Arc::new(McpResourcesListTool::new()),
         Arc::new(McpResourcesReadTool::new(None)),
-        Arc::new(EnterPlanModeTool::new(Arc::clone(&plan_mode_flag))),
+        Arc::new(EnterPlanModeTool::new(plan_mode_flag.clone())),
         Arc::new(
-            ExitPlanModeTool::new(Arc::clone(&plan_mode_flag))
+            ExitPlanModeTool::new(plan_mode_flag.clone())
                 .with_workspace_root(security.workspace_root_handle()),
         ),
         #[cfg(feature = "tool-curator")]
@@ -765,7 +781,7 @@ pub fn all_tools_with_runtime(
                 .unwrap_or_else(crate::tools::curator::state::new_pending_curator);
             Arc::new(crate::tools::curator::ExitCuratorModeTool::new(
                 curator_flag,
-                Arc::clone(&plan_mode_flag),
+                plan_mode_flag.clone(),
                 curator_state,
                 pending_curator,
                 security.clone(),
@@ -1258,6 +1274,18 @@ pub fn all_tools_with_runtime(
             root_config.image_gen.api_key_env.clone(),
         )));
     }
+
+    tool_arcs.push(Arc::new(MediaGenTool::new(
+        security.clone(),
+        workspace_dir.to_path_buf(),
+    )));
+    tool_arcs.push(Arc::new(DesignSystemReadTool::new()));
+    tool_arcs.push(Arc::new(DesignerSkillReadTool::new()));
+    tool_arcs.push(Arc::new(DesignerTemplateReadTool::new()));
+    tool_arcs.push(Arc::new(DesignerLintTool::new()));
+    tool_arcs.push(Arc::new(DeckCompileTool::new()));
+    tool_arcs.push(Arc::new(DesignerScaffoldTool::new()));
+    tool_arcs.push(Arc::new(FigmaFetchTool::new()));
 
     let channel_map_handle: ChannelMapHandle = Arc::new(RwLock::new(HashMap::new()));
     tool_arcs.push(Arc::new(PollTool::new(

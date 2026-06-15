@@ -220,11 +220,22 @@ impl Channel for WebhookChannel {
                 attachments: vec![],
             };
 
-            if state.tx.send(msg).await.is_err() {
-                return StatusCode::SERVICE_UNAVAILABLE;
+            match state.tx.try_send(msg) {
+                Ok(()) => StatusCode::OK,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(dropped)) => {
+                    let total = crate::channels::record_channel_message_drop("webhook");
+                    tracing::warn!(
+                        channel = "webhook",
+                        dropped_total = total,
+                        message_id = %dropped.id,
+                        "channel message queue full; rejecting webhook request"
+                    );
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
             }
-
-            StatusCode::OK
         }
 
         let app = Router::new()

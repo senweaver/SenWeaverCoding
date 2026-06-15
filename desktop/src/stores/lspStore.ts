@@ -391,7 +391,7 @@ export const useLspStore = create<LspStore>((set, get) => ({
   preferencesLoaded: false,
 
   fetch: async () => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: get().servers.length === 0, error: null })
     try {
       const response = await lspApi.list()
       const snapshot: ServerStatusMap = {}

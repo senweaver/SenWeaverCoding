@@ -15,6 +15,7 @@ import type { CodingModeId } from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
 
 const QUICK_MODE_GLYPH: Record<CodingModeId, string> = {
+  auto: 'auto_awesome',
   vibe: 'bolt',
   agent: 'robot_2',
   spec: 'description',
@@ -28,12 +29,15 @@ const QUICK_MODE_GLYPH: Record<CodingModeId, string> = {
   mvai: 'hub',
   harness: 'precision_manufacturing',
   curator: 'auto_stories',
+  designer: 'palette',
 }
 
 const QUICK_MODE_ORDER: CodingModeId[] = [
   'agent',
   'spec',
   'plan',
+  'curator',
+  'designer',
   'ask',
   'debug',
   'harness',

@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '../../i18n'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -16,6 +17,9 @@ import { sessionsApi } from '../../api/sessions'
 import { suggestionsApi, type PromptSuggestion } from '../../api/suggestions'
 import { anyProviderHasModel } from '../../utils/modelAvailability'
 import { isValidRuntimeSelection } from '../../utils/runtimeSelection'
+import { enabledProviderModelIds } from '../../utils/providerModels'
+import { surfaceToModelType } from '../../utils/modelTypes'
+import type { ModelInfo } from '../../types/settings'
 import { CodingModeSelector } from '../controls/CodingModeSelector'
 import { ModelSelector } from '../controls/ModelSelector'
 import { CODING_MODE_ACCENT } from '../../types/codingMode'
@@ -23,6 +27,10 @@ import type { AttachmentRef } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
 import { ProjectContextChip } from '../shared/ProjectContextChip'
 import { DirectoryPicker } from '../shared/DirectoryPicker'
+import { DesignerInlineControls } from '../designer/DesignerInlineControls'
+import { useDesignerStore } from '../../stores/designerStore'
+import { useDesignerCanvasStore, unitDisplayName } from '../../stores/designerCanvasStore'
+import { DESIGN_UNIT_DND_MIME } from '../designer/DesignArtifactFrame'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { PrivacyBanner } from './PrivacyBanner'
@@ -40,7 +48,7 @@ import {
 import { useCredentialsStore } from '../../stores/credentialsStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { dockListTabs, type BrowserDockTabInfo } from '../../lib/browserDock'
-import { bindDebugTab, unbindDebugTab, bindPrototypeRef, unbindPrototypeRef } from '../../lib/debugTabBind'
+import { bindDebugTab, unbindDebugTab, bindPrototypeRef, bindPrototypeFigma, unbindPrototypeRef } from '../../lib/debugTabBind'
 
 type GitInfo = { branch: string | null; repoName: string | null; workDir: string; changedFiles: number }
 
@@ -58,11 +66,16 @@ type ChatInputProps = {
 }
 
 const EMPTY_DOCK_TABS: BrowserDockTabInfo[] = []
+const EMPTY_SLASH_COMMANDS: Array<{ name: string; description: string }> = []
 
 export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const t = useTranslation()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [designRef, setDesignRef] = useState<string | null>(null)
+  const [designRefElement, setDesignRefElement] = useState<
+    { id: string; label: string } | null
+  >(null)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
@@ -79,15 +92,43 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const sendMessage = useChatStore((s) => s.sendMessage)
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
-  const chatState = sessionState?.chatState ?? 'idle'
-  const stopRequested = sessionState?.stopRequested ?? false
-  const slashCommands = sessionState?.slashCommands ?? []
-  const composerPrefill = sessionState?.composerPrefill ?? null
-  const codingMode = useSettingsStore((s) => s.codingMode)
+  const sessionView = useChatStore(
+    useShallow((s) => {
+      const st = activeTabId ? s.sessions[activeTabId] : undefined
+      return {
+        chatState: st?.chatState ?? 'idle',
+        stopRequested: st?.stopRequested ?? false,
+        slashCommands: st?.slashCommands,
+        composerPrefill: st?.composerPrefill ?? null,
+        pendingPermission: st?.pendingPermission ?? null,
+      }
+    }),
+  )
+  const chatState = sessionView.chatState
+  const stopRequested = sessionView.stopRequested
+  const slashCommands = sessionView.slashCommands ?? EMPTY_SLASH_COMMANDS
+  const composerPrefill = sessionView.composerPrefill
+  const globalCodingMode = useSettingsStore((s) => s.codingMode)
+  const sessionCodingMode = useChatStore((s) =>
+    activeTabId ? s.sessionCodingMode[activeTabId] : undefined,
+  )
+  const codingMode = sessionCodingMode ?? globalCodingMode
   const isPlanMode = codingMode === 'plan'
   const isDebugMode = codingMode === 'debug'
   const modeAccent = CODING_MODE_ACCENT[codingMode]
+  const designerSelectedId = useDesignerStore((s) =>
+    activeTabId ? s.sessions[activeTabId]?.selectedSubmodeId ?? null : null,
+  )
+  const designerCatalog = useDesignerStore((s) => s.catalog)
+  const designerSelectedModel = useDesignerStore((s) => {
+    if (!activeTabId) return ''
+    const session = s.sessions[activeTabId]
+    const submodeId = session?.selectedSubmodeId
+    return submodeId
+      ? String(session?.paramsBySubmode[submodeId]?.model ?? '')
+      : ''
+  })
+  const designerSetParam = useDesignerStore((s) => s.setParam)
   const credentialsList = useCredentialsStore((s) => s.credentials)
   const credentialsHasFetched = useCredentialsStore((s) => s.hasFetched)
   const credentialsIsLoading = useCredentialsStore((s) => s.isLoading)
@@ -106,6 +147,10 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const protoTabId = useBrowserPanelStore((s) =>
     activeTabId ? s.panels[activeTabId]?.prototypeRefTabId ?? null : null,
   )
+  const protoFigmaUrl = useBrowserPanelStore((s) =>
+    activeTabId ? s.panels[activeTabId]?.prototypeRefFigmaUrl ?? null : null,
+  )
+  const [protoFigmaDraft, setProtoFigmaDraft] = useState('')
   const dockTabsFromPanel = useBrowserPanelStore((s) =>
     activeTabId ? s.panels[activeTabId]?.tabs ?? EMPTY_DOCK_TABS : EMPTY_DOCK_TABS,
   )
@@ -118,6 +163,30 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const settingsAvailableModels = useSettingsStore((s) => s.availableModels)
   const sessionRuntimeSelection = useSessionRuntimeStore((s) => activeTabId ? s.selections[activeTabId] : undefined)
   const openSettingsOverlay = useUIStore((s) => s.openSettingsOverlay)
+
+  const designerSurface = useMemo(
+    () =>
+      codingMode === 'designer'
+        ? designerCatalog.find((s) => s.id === designerSelectedId)?.surface ?? null
+        : null,
+    [codingMode, designerCatalog, designerSelectedId],
+  )
+  const designerMediaType = surfaceToModelType(designerSurface)
+  const designerMediaModel =
+    designerMediaType && designerSelectedId ? designerSelectedModel : ''
+  const designerMediaPool = useMemo<ModelInfo[]>(() => {
+    if (!designerMediaType) return []
+    const seen = new Set<string>()
+    const out: ModelInfo[] = []
+    for (const provider of providers) {
+      for (const id of enabledProviderModelIds(provider)) {
+        if (seen.has(id)) continue
+        seen.add(id)
+        out.push({ id, name: id, description: '', context: '' })
+      }
+    }
+    return out
+  }, [providers, designerMediaType])
 
   const isMemberSession = !!memberInfo
   const isActive = chatState !== 'idle'
@@ -152,6 +221,26 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       }
     }
   }, [isActive, stopRequested])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent).detail as
+        | { sessionId?: string; relPath?: string; element?: string; elementLabel?: string }
+        | undefined
+      if (!detail?.relPath) return
+      if (detail.sessionId && detail.sessionId !== activeTabId) return
+      setDesignRef(detail.relPath)
+      setDesignRefElement(
+        detail.element
+          ? { id: detail.element, label: detail.elementLabel ?? detail.element }
+          : null,
+      )
+      requestAnimationFrame(() => textareaRef.current?.focus())
+    }
+    window.addEventListener('designer:composer-ref', handler)
+    return () => window.removeEventListener('designer:composer-ref', handler)
+  }, [activeTabId])
+
   useEffect(() => {
     if (!isDebugMode) {
       setCredPanelOpen(false)
@@ -301,6 +390,22 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     unbindPrototypeRef(activeTabId)
     setProtoBindOpen(false)
   }, [activeTabId])
+
+  const handleBindProtoFigma = useCallback(() => {
+    if (!activeTabId) return
+    const url = protoFigmaDraft.trim()
+    if (!url) return
+    if (!url.includes('figma.com/')) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('designer.figma.invalidUrl'),
+      })
+      return
+    }
+    bindPrototypeFigma(activeTabId, url)
+    setProtoFigmaDraft('')
+    setProtoBindOpen(false)
+  }, [activeTabId, protoFigmaDraft, t])
 
   const insertCredentialPlaceholder = useCallback((name: string) => {
     const placeholder = `\${cred.${name}}`
@@ -659,6 +764,59 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     const text = input.trim()
     if ((!text && (!attachments.length || isMemberSession)) || isWorkspaceMissing) return
 
+    if (codingMode === 'designer' && !isMemberSession && activeTabId) {
+      const ds = useDesignerStore.getState()
+      const dsSession = ds.sessions[activeTabId]
+      const submodeId = dsSession?.selectedSubmodeId ?? null
+      if (submodeId && text) {
+        const submodeMeta = ds.catalog.find((s) => s.id === submodeId)
+        const submodeParams = dsSession?.paramsBySubmode[submodeId] ?? {}
+        const isZh = useSettingsStore.getState().locale === 'zh'
+        for (const field of submodeMeta?.fields ?? []) {
+          if (!field.required) continue
+          const raw = submodeParams[field.key]
+          const value = typeof raw === 'string' ? raw.trim() : ''
+          if (value) {
+            if (field.key === 'figmaUrl' && !value.includes('figma.com/')) {
+              useUIStore.getState().addToast({
+                type: 'error',
+                message: t('designer.figma.invalidUrl'),
+              })
+              return
+            }
+            continue
+          }
+          if (field.key === 'figmaUrl' && text.includes('figma.com/')) continue
+          useUIStore.getState().addToast({
+            type: 'error',
+            message: t('designer.inline.requiredMissing').replace(
+              '{label}',
+              isZh ? field.labelZh : field.labelEn,
+            ),
+          })
+          return
+        }
+        const designGeneration = {
+          submode: submodeId,
+          params: dsSession?.paramsBySubmode[submodeId] ?? {},
+          refArtifact: designRef ?? undefined,
+          refArtifactName: designRef ? designRefName : undefined,
+          refElement: designRefElement?.id,
+          refElementLabel: designRefElement?.label,
+        }
+        setInput('')
+        setAttachments([])
+        setDesignRef(null)
+        setDesignRefElement(null)
+        setSlashMenuOpen(false)
+        setFileSearchOpen(false)
+        setLocalSlashPanel(null)
+        useChatStore.getState().clearComposerDraft(activeTabId)
+        sendMessage(activeTabId, text, undefined, { designGeneration })
+        return
+      }
+    }
+
     const slashUiAction = !isMemberSession && text.startsWith('/') ? resolveSlashUiAction(text.slice(1)) : null
     if (slashUiAction?.type === 'panel') {
       setLocalSlashPanel(slashUiAction.command as LocalSlashCommandName)
@@ -683,7 +841,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       mimeType: attachment.mimeType,
     }))
 
-    sendMessage(activeTabId!, text, attachmentPayload)
+    const targetTabId = activeTabId!
     setInput('')
     setAttachments([])
     setSlashMenuOpen(false)
@@ -692,6 +850,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     if (activeTabId) {
       useChatStore.getState().clearComposerDraft(activeTabId)
     }
+    sendMessage(targetTabId, text, attachmentPayload)
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -823,6 +982,22 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const handleDrop = (event: React.DragEvent) => {
     event.preventDefault()
     if (isMemberSession) return
+    const designUnitPayload = event.dataTransfer.getData(DESIGN_UNIT_DND_MIME)
+    if (designUnitPayload) {
+      try {
+        const parsed = JSON.parse(designUnitPayload) as {
+          relPath?: string
+          sessionId?: string
+        }
+        if (parsed.relPath && (!parsed.sessionId || parsed.sessionId === activeTabId)) {
+          setDesignRef(parsed.relPath)
+          setDesignRefElement(null)
+          return
+        }
+      } catch {
+        /* ignore malformed payload */
+      }
+    }
     const files = event.dataTransfer.files
     if (files.length > 0) {
       const fakeEvent = { target: { files } } as React.ChangeEvent<HTMLInputElement>
@@ -835,9 +1010,27 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   }
 
   const isPendingQuestion =
-    !!sessionState?.pendingPermission &&
-    (sessionState.pendingPermission.toolName === 'ask_question' ||
-      sessionState.pendingPermission.toolName === 'AskUserQuestion')
+    !!sessionView.pendingPermission &&
+    (sessionView.pendingPermission.toolName === 'ask_question' ||
+      sessionView.pendingPermission.toolName === 'AskUserQuestion')
+
+  const designRefUnit = useDesignerCanvasStore((s) => {
+    if (!designRef || !activeTabId) return null
+    return s.panels[activeTabId]?.units.find((u) => u.relPath === designRef) ?? null
+  })
+  const designRefName = designRefUnit
+    ? unitDisplayName(designRefUnit)
+    : (designRef?.split('/').pop() ?? '')
+  const designRefIcon =
+    designRefUnit?.surface === 'image'
+      ? 'image'
+      : designRefUnit?.surface === 'video'
+        ? 'movie'
+        : designRefUnit?.surface === 'audio'
+          ? 'graphic_eq'
+          : designRefUnit?.surface === 'deck'
+            ? 'co_present'
+            : 'draw'
 
   const composerPlaceholder = isPendingQuestion
     ? t('composer.askDetailsPlaceholder')
@@ -967,6 +1160,53 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                 <AttachmentGallery attachments={attachments} variant="composer" onRemove={removeAttachment} />
               </div>
             )
+          )}
+
+          {designRef && !isMemberSession && (
+            <div className={isHeroComposer ? 'mb-1.5' : 'px-3 pt-2'}>
+              <span
+                className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 py-1 pl-1.5 pr-1 text-[11px] text-[var(--color-text-secondary)]"
+                title={designRef}
+              >
+                <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded bg-[var(--color-accent)]/15">
+                  <span className="material-symbols-outlined text-[13px] text-[var(--color-accent)]">
+                    {designRefIcon}
+                  </span>
+                </span>
+                <span className="flex min-w-0 flex-col leading-tight">
+                  <span className="text-[9px] uppercase tracking-wide text-[var(--color-accent)]">
+                    {designRefElement
+                      ? `${t('designer.canvas.elementRef')}: ${designRefElement.label}`
+                      : t('designer.canvas.editRefChip')}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (activeTabId && designRefUnit) {
+                        useDesignerCanvasStore.getState().setVisible(activeTabId, true)
+                        useDesignerCanvasStore
+                          .getState()
+                          .focusUnit(activeTabId, designRefUnit.id)
+                      }
+                    }}
+                    className="max-w-[200px] truncate text-left text-[11px] font-medium text-[var(--color-text-primary)] hover:underline"
+                  >
+                    {designRefName}
+                  </button>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDesignRef(null)
+                    setDesignRefElement(null)
+                  }}
+                  className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded hover:bg-[var(--color-surface-hover)]"
+                  aria-label={t('designer.canvas.editRefRemove')}
+                >
+                  <span className="material-symbols-outlined text-[13px]">close</span>
+                </button>
+              </span>
+            </div>
           )}
 
           {!isMemberSession && isDebugMode && (
@@ -1133,7 +1373,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                   }}
                   className={
                     'inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border ' +
-                    (protoTabId != null
+                    (protoTabId != null || protoFigmaUrl
                       ? 'border-[var(--color-success)]/50 bg-[var(--color-success)]/10 text-[var(--color-success)]'
                       : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]')
                   }
@@ -1144,6 +1384,11 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                   {protoTabId != null && (
                     <span className="ml-0.5 inline-flex items-center gap-0.5 rounded-full bg-[var(--color-success)]/15 px-1.5 py-px text-[10px] font-mono">
                       #{protoTabId}
+                    </span>
+                  )}
+                  {protoFigmaUrl && (
+                    <span className="ml-0.5 inline-flex items-center gap-0.5 rounded-full bg-[var(--color-success)]/15 px-1.5 py-px text-[10px]">
+                      Figma
                     </span>
                   )}
                   <span className="material-symbols-outlined text-[14px]">
@@ -1164,6 +1409,43 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                       >
                         <span className="material-symbols-outlined text-[12px]">refresh</span>
                       </button>
+                    </div>
+                    <div className="mb-2 border-b border-[var(--color-border)] pb-2">
+                      <div className="mb-1 text-[11px] text-[var(--color-text-tertiary)]">
+                        {t('debug.qa.prototypeRef.figmaHint')}
+                      </div>
+                      {protoFigmaUrl ? (
+                        <div className="flex items-center gap-1.5 rounded border border-[var(--color-success)]/40 bg-[var(--color-success)]/10 px-2 py-1 text-[11px] text-[var(--color-success)]">
+                          <span className="material-symbols-outlined text-[13px]">check_circle</span>
+                          <span className="flex-1 truncate" title={protoFigmaUrl}>
+                            {protoFigmaUrl}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            value={protoFigmaDraft}
+                            onChange={(e) => setProtoFigmaDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                handleBindProtoFigma()
+                              }
+                            }}
+                            placeholder={t('debug.qa.prototypeRef.figmaPlaceholder')}
+                            className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[11px] text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleBindProtoFigma}
+                            disabled={!protoFigmaDraft.trim()}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-40"
+                          >
+                            <span className="material-symbols-outlined text-[12px]">link</span>
+                            {t('debug.qa.prototypeRef.figmaBind')}
+                          </button>
+                        </div>
+                      )}
                     </div>
                     {(() => {
                       const tabs = refreshedProtoTabs ?? dockTabsFromPanel
@@ -1208,7 +1490,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                         </div>
                       )
                     })()}
-                    {protoTabId != null && (
+                    {(protoTabId != null || protoFigmaUrl) && (
                       <div className="mt-1.5 flex items-center justify-end">
                         <button
                           type="button"
@@ -1226,7 +1508,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             </div>
           )}
 
-          {isHeroComposer && input.trim().length === 0 && promptSuggestions.length > 0 && (
+          {isHeroComposer && codingMode !== 'designer' && input.trim().length === 0 && promptSuggestions.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {promptSuggestions.map((s) => (
                 <button
@@ -1276,21 +1558,46 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
               placeholder={composerPlaceholder}
               disabled={isWorkspaceMissing}
               rows={1}
-              className="w-full min-h-[80px] resize-none bg-transparent py-1 pb-9 text-[12px] leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
+              className={`w-full min-h-[80px] resize-none bg-transparent py-1 ${codingMode === 'designer' ? 'pb-1' : 'pb-9'} text-[12px] leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50`}
             />
           )}
 
           {}
           <div className={isHeroComposer
-            ? 'flex items-center justify-between'
-            : 'absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2'}>
+            ? 'flex items-start justify-between gap-2'
+            : codingMode === 'designer'
+              ? 'flex items-start justify-between gap-2 px-3 pb-2 pt-1'
+              : 'absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2'}>
             {}
-            <div className="flex items-center gap-1.5">
+            <div
+              className={`flex min-w-0 flex-1 gap-1.5 ${
+                codingMode === 'designer' && !isMemberSession
+                  ? 'flex-col items-start'
+                  : 'flex-wrap items-center'
+              }`}
+            >
               {!isMemberSession && (
                 <>
-                  <CodingModeSelector />
-                  {activeTabId && (
-                    <ModelSelector runtimeKey={activeTabId} disabled={isActive} />
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <CodingModeSelector />
+                    {activeTabId && (
+                      designerMediaType && designerSelectedId ? (
+                        <ModelSelector
+                          value={designerMediaModel}
+                          onChange={(id) =>
+                            designerSetParam(activeTabId, designerSelectedId, 'model', id)
+                          }
+                          requiredType={designerMediaType}
+                          modelPool={designerMediaPool}
+                          disabled={isActive}
+                        />
+                      ) : (
+                        <ModelSelector runtimeKey={activeTabId} disabled={isActive} />
+                      )
+                    )}
+                  </div>
+                  {codingMode === 'designer' && activeTabId && (
+                    <DesignerInlineControls sessionId={activeTabId} />
                   )}
                 </>
               )}

@@ -7,6 +7,21 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
+const MAX_OUTPUT_BYTES: usize = 1_048_576;
+
+const DEFAULT_LLM_OUTPUT_CAP: usize = 32_768;
+
+fn truncate_output(s: &mut String, cap: usize, marker: &str) {
+    if s.len() > cap {
+        let mut b = cap.min(s.len());
+        while b > 0 && !s.is_char_boundary(b) {
+            b -= 1;
+        }
+        s.truncate(b);
+        s.push_str(marker);
+    }
+}
+
 pub struct PowerShellTool {
     security: Arc<SecurityPolicy>,
 }
@@ -122,7 +137,24 @@ impl Tool for PowerShellTool {
 
         if let Some(dir) = working_dir {
             let full_dir = self.security.resolve_tool_path(dir);
-            cmd.current_dir(full_dir);
+            let resolved = match tokio::fs::canonicalize(&full_dir).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Invalid working_directory '{dir}': {e}")),
+                    });
+                }
+            };
+            if !self.security.is_resolved_path_allowed(&resolved) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(self.security.resolved_path_violation_message(&resolved)),
+                });
+            }
+            cmd.current_dir(resolved);
         }
 
         for (k, v) in crate::python_env::activation_env(&self.security.workspace_dir()) {
@@ -265,7 +297,7 @@ impl Tool for PowerShellTool {
                     error: Some(error_text),
                 })
             }
-            ForegroundOutcome::Exited(status, stdout, stderr) => {
+            ForegroundOutcome::Exited(status, mut stdout, mut stderr) => {
                 let exit_code = status.code().unwrap_or(-1);
                 crate::tools::background_registry::publish(
                     crate::tools::background_registry::BackgroundShellSignal::Exited {
@@ -274,6 +306,17 @@ impl Tool for PowerShellTool {
                         exit_code: Some(exit_code),
                         session_id: mirror_session_id.clone(),
                     },
+                );
+
+                truncate_output(
+                    &mut stdout,
+                    MAX_OUTPUT_BYTES,
+                    "\n... [output truncated at 1MB]",
+                );
+                truncate_output(
+                    &mut stderr,
+                    MAX_OUTPUT_BYTES,
+                    "\n... [stderr truncated at 1MB]",
                 );
 
                 let (compacted_stdout, compacted_stderr, tee_hint) =
@@ -300,6 +343,12 @@ impl Tool for PowerShellTool {
                 if !tee_hint.is_empty() && !combined.contains(&tee_hint) {
                     combined.push_str(&tee_hint);
                 }
+
+                truncate_output(
+                    &mut combined,
+                    DEFAULT_LLM_OUTPUT_CAP,
+                    "\n... [output truncated: use a more specific command to narrow results]",
+                );
 
                 Ok(ToolResult {
                     success: status.success(),

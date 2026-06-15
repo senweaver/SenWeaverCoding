@@ -33,7 +33,7 @@ type AgentSettingsStore = {
   updateWebFetch: (patch: WebFetchPatch) => Promise<void>
 }
 
-export const useAgentSettingsStore = create<AgentSettingsStore>((set) => ({
+export const useAgentSettingsStore = create<AgentSettingsStore>((set, get) => ({
   agentConfig: null,
   agentRuntime: null,
   webSearch: null,
@@ -43,7 +43,7 @@ export const useAgentSettingsStore = create<AgentSettingsStore>((set) => ({
   error: null,
 
   fetchAll: async () => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: get().agentConfig === null, error: null })
     try {
       const [agentConfig, agentRuntime, webSearch, webFetch] = await Promise.all([
         agentSettingsApi.getAgentConfig(),

@@ -2,7 +2,9 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-#[doc(inline)]
-pub use crate::agent::loop_::process_message;
-#[doc(inline)]
-pub use crate::agent::loop_::run;
+pub mod compile;
+pub mod pptx;
+pub mod render;
+pub mod spec;
+pub mod styles;
+pub mod theme;

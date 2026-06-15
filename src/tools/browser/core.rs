@@ -19,6 +19,7 @@ pub use dock::{
     clear_test_target_for_tab, clear_test_target_tab, current_test_target_tab, dock_controller,
     install_dock_controller, sessions_pinned_to, set_test_target_tab,
     set_prototype_ref_tab, clear_prototype_ref_tab, current_prototype_ref_tab,
+    set_prototype_ref_figma, clear_prototype_ref_figma, current_prototype_ref_figma,
     DockController, DockRequest,
     DockResponse, DockTabInfo,
 };
@@ -101,6 +102,10 @@ mod dock {
         async fn present_session(&self, _session_id: String) -> Result<Option<u32>> {
             Ok(None)
         }
+
+        async fn park(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     static CONTROLLER: OnceLock<Arc<dyn DockController>> = OnceLock::new();
@@ -180,6 +185,26 @@ mod dock {
 
     pub fn current_prototype_ref_tab(session_id: &str) -> Option<u32> {
         proto_slot().read().get(session_id).copied()
+    }
+
+    static PROTOTYPE_REF_FIGMA: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+    fn proto_figma_slot() -> &'static RwLock<HashMap<String, String>> {
+        PROTOTYPE_REF_FIGMA.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    pub fn set_prototype_ref_figma(session_id: &str, url: &str) {
+        proto_figma_slot()
+            .write()
+            .insert(session_id.to_string(), url.to_string());
+    }
+
+    pub fn clear_prototype_ref_figma(session_id: &str) {
+        proto_figma_slot().write().remove(session_id);
+    }
+
+    pub fn current_prototype_ref_figma(session_id: &str) -> Option<String> {
+        proto_figma_slot().read().get(session_id).cloned()
     }
 }
 
@@ -290,6 +315,54 @@ struct AgentBrowserResponse {
     error: Option<String>,
 }
 
+const AGENT_BROWSER_COMMAND_TIMEOUT_MS: u64 = 120_000;
+
+const AGENT_BROWSER_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+
+fn cap_browser_text(text: &str) -> String {
+    if text.len() <= AGENT_BROWSER_MAX_OUTPUT_BYTES {
+        return text.to_string();
+    }
+    let mut end = AGENT_BROWSER_MAX_OUTPUT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[output truncated: kept first {} of {} bytes]",
+        &text[..end],
+        end,
+        text.len()
+    )
+}
+
+fn cap_agent_browser_response(resp: AgentBrowserResponse) -> AgentBrowserResponse {
+    let Some(data) = resp.data else {
+        return resp;
+    };
+    let serialized = serde_json::to_string(&data).unwrap_or_default();
+    if serialized.len() <= AGENT_BROWSER_MAX_OUTPUT_BYTES {
+        return AgentBrowserResponse {
+            success: resp.success,
+            data: Some(data),
+            error: resp.error,
+        };
+    }
+    let pretty = serde_json::to_string_pretty(&data).unwrap_or(serialized);
+    AgentBrowserResponse {
+        success: resp.success,
+        data: Some(json!({
+            "truncated": true,
+            "original_bytes": pretty.len(),
+            "note": format!(
+                "agent-browser output exceeded {} bytes; the head of the serialized payload is kept as text",
+                AGENT_BROWSER_MAX_OUTPUT_BYTES
+            ),
+            "output": cap_browser_text(&pretty),
+        })),
+        error: resp.error,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ComputerUseResponse {
     #[serde(default)]
@@ -322,6 +395,11 @@ pub enum BrowserAction {
     Type { selector: String, text: String },
 
     GetText { selector: String },
+
+    GetStyles {
+        selector: Option<String>,
+        limit: Option<u64>,
+    },
 
     GetTitle,
 
@@ -450,6 +528,44 @@ pub enum BrowserAction {
     ClearTestTarget,
 
     GetTestTarget,
+
+    PerfVitals,
+
+    Emulate {
+        #[serde(default)]
+        viewport: Option<Value>,
+        #[serde(default)]
+        network: Option<String>,
+        #[serde(default)]
+        cpu_rate: Option<f64>,
+        #[serde(default)]
+        reset: bool,
+    },
+
+    NetworkCapture {
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        limit: Option<u64>,
+        #[serde(default)]
+        url_contains: Option<String>,
+        #[serde(default)]
+        only_failures: bool,
+        #[serde(default)]
+        api_only: bool,
+    },
+
+    WebToolsList,
+
+    WebToolsCall {
+        name: String,
+        #[serde(default)]
+        tool_args: Option<Value>,
+    },
+
+    RunSteps { steps: Vec<Value> },
 }
 
 fn default_activate() -> bool {
@@ -457,6 +573,126 @@ fn default_activate() -> bool {
 }
 
 impl BrowserTool {
+    async fn execute_run_steps(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let steps = args
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if steps.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("run_steps requires a non-empty 'steps' array".into()),
+            });
+        }
+        if steps.len() > 20 {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("run_steps supports at most 20 steps per call".into()),
+            });
+        }
+        let continue_on_error = args
+            .get("continue_on_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let parent_tab = args.get("tab_id").cloned();
+        let mut results: Vec<Value> = Vec::new();
+        let mut all_ok = true;
+        for (idx, step) in steps.iter().enumerate() {
+            let action_name = step
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !step.is_object() || action_name.is_empty() {
+                all_ok = false;
+                results.push(json!({
+                    "index": idx,
+                    "success": false,
+                    "error": "each step must be an object with an 'action' field",
+                }));
+                if !continue_on_error {
+                    break;
+                }
+                continue;
+            }
+            if action_name == "run_steps" {
+                all_ok = false;
+                results.push(json!({
+                    "index": idx,
+                    "action": "run_steps",
+                    "success": false,
+                    "error": "nested run_steps is not allowed",
+                }));
+                if !continue_on_error {
+                    break;
+                }
+                continue;
+            }
+            let mut step_args = step.clone();
+            if let (Some(obj), Some(tab)) = (step_args.as_object_mut(), parent_tab.as_ref()) {
+                obj.entry("tab_id".to_string()).or_insert_with(|| tab.clone());
+            }
+            let outcome = Box::pin(Tool::execute(self, step_args)).await;
+            match outcome {
+                Ok(res) => {
+                    if !res.success {
+                        all_ok = false;
+                    }
+                    let mut output = res.output;
+                    if output.len() > 4_000 {
+                        let mut cut = 4_000;
+                        while !output.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        output.truncate(cut);
+                        output.push_str("\n[truncated]");
+                    }
+                    let failed = !res.success;
+                    results.push(json!({
+                        "index": idx,
+                        "action": action_name,
+                        "success": res.success,
+                        "output": output,
+                        "error": res.error,
+                    }));
+                    if failed && !continue_on_error {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    all_ok = false;
+                    results.push(json!({
+                        "index": idx,
+                        "action": action_name,
+                        "success": false,
+                        "error": err.to_string(),
+                    }));
+                    if !continue_on_error {
+                        break;
+                    }
+                }
+            }
+        }
+        let summary = json!({
+            "steps_total": steps.len(),
+            "steps_executed": results.len(),
+            "all_passed": all_ok,
+            "results": results,
+        });
+        Ok(ToolResult {
+            success: all_ok,
+            output: serde_json::to_string_pretty(&summary).unwrap_or_default(),
+            error: if all_ok {
+                None
+            } else {
+                Some("one or more steps failed".into())
+            },
+        })
+    }
+
     pub fn new(
         security: Arc<SecurityPolicy>,
         allowed_domains: Vec<String>,
@@ -506,14 +742,27 @@ impl BrowserTool {
         } else {
             "agent-browser"
         };
-        crate::util::hidden_async_command(cmd)
+        let mut command = crate::util::hidden_async_command(cmd);
+        command
             .arg("--version")
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .kill_on_drop(true);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => return false,
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+            Ok(Ok(status)) => status.success(),
+            Ok(Err(_)) => false,
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
+                false
+            }
+        }
     }
 
     pub async fn is_available() -> bool {
@@ -749,6 +998,15 @@ impl BrowserTool {
     }
 
     async fn run_command(&self, args: &[&str]) -> anyhow::Result<AgentBrowserResponse> {
+        self.run_command_with_timeout(args, AGENT_BROWSER_COMMAND_TIMEOUT_MS)
+            .await
+    }
+
+    async fn run_command_with_timeout(
+        &self,
+        args: &[&str],
+        timeout_ms: u64,
+    ) -> anyhow::Result<AgentBrowserResponse> {
         let agent_browser_bin = if cfg!(target_os = "windows") {
             "agent-browser.cmd"
         } else {
@@ -768,11 +1026,25 @@ impl BrowserTool {
 
         debug!("Running: agent-browser {} --json", args.join(" "));
 
-        let output = cmd
-            .stdout(Stdio::piped())
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .await?;
+            .kill_on_drop(true);
+
+        let output =
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), cmd.output()).await {
+                Ok(out) => out?,
+                Err(_) => {
+                    return Ok(AgentBrowserResponse {
+                        success: false,
+                        data: None,
+                        error: Some(format!(
+                            "agent-browser command '{}' timed out after {}ms and was killed",
+                            args.join(" "),
+                            timeout_ms
+                        )),
+                    });
+                }
+            };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -782,13 +1054,13 @@ impl BrowserTool {
         }
 
         if let Ok(resp) = serde_json::from_str::<AgentBrowserResponse>(&stdout) {
-            return Ok(resp);
+            return Ok(cap_agent_browser_response(resp));
         }
 
         if output.status.success() {
             Ok(AgentBrowserResponse {
                 success: true,
-                data: Some(json!({ "output": stdout.trim() })),
+                data: Some(json!({ "output": cap_browser_text(stdout.trim()) })),
                 error: None,
             })
         } else {
@@ -895,16 +1167,21 @@ impl BrowserTool {
             } => {
                 let mut args = vec!["wait"];
                 let ms_str;
+                let mut command_timeout_ms = AGENT_BROWSER_COMMAND_TIMEOUT_MS;
                 if let Some(sel) = selector.as_ref() {
                     args.push(sel);
                 } else if let Some(millis) = ms {
                     ms_str = millis.to_string();
                     args.push(&ms_str);
+                    command_timeout_ms =
+                        command_timeout_ms.max(millis.saturating_add(30_000));
                 } else if let Some(ref t) = text {
                     args.push("--text");
                     args.push(t);
                 }
-                let resp = self.run_command(&args).await?;
+                let resp = self
+                    .run_command_with_timeout(&args, command_timeout_ms)
+                    .await?;
                 self.to_result(resp)
             }
 
@@ -975,11 +1252,18 @@ impl BrowserTool {
             | BrowserAction::Forward
             | BrowserAction::Reload
             | BrowserAction::CollectLinks { .. }
-            | BrowserAction::NetworkErrors { .. } => Ok(ToolResult {
+            | BrowserAction::NetworkErrors { .. }
+            | BrowserAction::GetStyles { .. }
+            | BrowserAction::PerfVitals
+            | BrowserAction::Emulate { .. }
+            | BrowserAction::NetworkCapture { .. }
+            | BrowserAction::WebToolsList
+            | BrowserAction::WebToolsCall { .. }
+            | BrowserAction::RunSteps { .. } => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload/collect_links/network_errors) require the \
+                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload/collect_links/network_errors/get_styles/perf_vitals/emulate/network_capture/web_tools_list/web_tools_call/run_steps) require the \
                      embedded dock backend (tauri_dock). Run inside the SenAgentOS desktop app."
                         .to_string(),
                 ),
@@ -1042,7 +1326,7 @@ impl BrowserTool {
 
             Ok(ToolResult {
                 success: true,
-                output: serde_json::to_string_pretty(&output).unwrap_or_default(),
+                output: cap_browser_text(&serde_json::to_string_pretty(&output).unwrap_or_default()),
                 error: None,
             })
         }
@@ -1258,9 +1542,17 @@ impl BrowserTool {
         let controller = dock_controller().ok_or_else(|| {
             anyhow::anyhow!("Internal error: tauri_dock backend selected but controller is gone")
         })?;
-        let _ = controller
-            .ensure_visible(self.session_name.clone())
-            .await;
+        let in_designer = matches!(
+            crate::agent::coding_mode::active_coding_mode(),
+            crate::agent::coding_mode::CodingMode::Designer
+        );
+        if !in_designer || action_opens_external_url(&action) {
+            let _ = controller
+                .ensure_visible(self.session_name.clone())
+                .await;
+        } else {
+            let _ = controller.park().await;
+        }
 
         const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
@@ -1571,6 +1863,158 @@ impl BrowserTool {
                 .await);
         }
 
+        if let BrowserAction::GetStyles { selector, limit } = action.clone() {
+            let mut args_obj = serde_json::Map::new();
+            if let Some(sel) = selector {
+                args_obj.insert("selector".into(), Value::String(sel));
+            }
+            if let Some(limit) = limit {
+                args_obj.insert("limit".into(), Value::from(limit));
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "get_styles".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("get_styles", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if matches!(action, BrowserAction::PerfVitals) {
+            let args_value =
+                inject_tab_id_into_args(Value::Object(serde_json::Map::new()), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "perf_vitals".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("perf_vitals", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::Emulate {
+            viewport,
+            network,
+            cpu_rate,
+            reset,
+        } = action.clone()
+        {
+            let mut args_obj = serde_json::Map::new();
+            if let Some(vp) = viewport {
+                args_obj.insert("viewport".into(), vp);
+            }
+            if let Some(net) = network {
+                args_obj.insert("network".into(), Value::String(net));
+            }
+            if let Some(rate) = cpu_rate {
+                if let Some(num) = serde_json::Number::from_f64(rate) {
+                    args_obj.insert("cpu_rate".into(), Value::Number(num));
+                }
+            }
+            if reset {
+                args_obj.insert("reset".into(), Value::Bool(true));
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "emulate".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("emulate", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::NetworkCapture {
+            mode,
+            request_id,
+            limit,
+            url_contains,
+            only_failures,
+            api_only,
+        } = action.clone()
+        {
+            let mut args_obj = serde_json::Map::new();
+            if let Some(mode) = mode {
+                args_obj.insert("mode".into(), Value::String(mode));
+            }
+            if let Some(rid) = request_id {
+                args_obj.insert("request_id".into(), Value::String(rid));
+            }
+            if let Some(limit) = limit {
+                args_obj.insert("limit".into(), Value::from(limit));
+            }
+            if let Some(filter) = url_contains {
+                args_obj.insert("url_contains".into(), Value::String(filter));
+            }
+            if only_failures {
+                args_obj.insert("only_failures".into(), Value::Bool(true));
+            }
+            if api_only {
+                args_obj.insert("api_only".into(), Value::Bool(true));
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "network_capture".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("network_capture", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if matches!(action, BrowserAction::WebToolsList) {
+            let args_value =
+                inject_tab_id_into_args(Value::Object(serde_json::Map::new()), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "web_tools_list".to_string(),
+                    args: args_value,
+                    timeout_ms: DEFAULT_TIMEOUT_MS,
+                })
+                .await?;
+            let result = dock_response_to_result("web_tools_list", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
+        if let BrowserAction::WebToolsCall { name, tool_args } = action.clone() {
+            let mut args_obj = serde_json::Map::new();
+            args_obj.insert("name".into(), Value::String(name));
+            if let Some(ta) = tool_args {
+                args_obj.insert("tool_args".into(), ta);
+            }
+            let args_value = inject_tab_id_into_args(Value::Object(args_obj), effective_tab_id);
+            let resp = controller
+                .exec(DockRequest {
+                    kind: "web_tools_call".to_string(),
+                    args: args_value,
+                    timeout_ms: 30_000,
+                })
+                .await?;
+            let result = dock_response_to_result("web_tools_call", resp);
+            return Ok(self
+                .decorate_for_effective_tab(controller.as_ref(), result, effective_tab_id)
+                .await);
+        }
+
         if let BrowserAction::NetworkErrors { since_ms, limit } = action.clone() {
             let mut args_obj = serde_json::Map::new();
             if let Some(since) = since_ms {
@@ -1859,7 +2303,14 @@ impl BrowserTool {
                 | BrowserAction::Forward
                 | BrowserAction::Reload
                 | BrowserAction::CollectLinks { .. }
-                | BrowserAction::NetworkErrors { .. } => {
+                | BrowserAction::NetworkErrors { .. }
+                | BrowserAction::GetStyles { .. }
+                | BrowserAction::PerfVitals
+                | BrowserAction::Emulate { .. }
+                | BrowserAction::NetworkCapture { .. }
+                | BrowserAction::WebToolsList
+                | BrowserAction::WebToolsCall { .. }
+                | BrowserAction::RunSteps { .. } => {
                     return Err(anyhow::anyhow!(
                         "browser QA action must be dispatched via execute_action; reached dock fallback by mistake"
                     ));
@@ -2039,6 +2490,7 @@ impl Tool for BrowserTool {
                 "action": {
                     "type": "string",
                     "enum": ["open", "snapshot", "click", "fill", "type", "get_text",
+                             "get_styles",
                              "get_title", "get_url", "screenshot", "wait", "press",
                              "hover", "scroll", "is_visible", "close", "find",
                              "open_tab", "close_tab", "activate_tab", "list_tabs",
@@ -2047,8 +2499,10 @@ impl Tool for BrowserTool {
                              "key_press", "screen_capture",
                              "assert", "console_logs", "network_idle", "clear_storage",
                              "back", "forward", "reload",
-                             "pin_test_target", "clear_test_target", "get_test_target"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_*/QA/test-target actions require backend=tauri_dock). Use pin_test_target/get_test_target/clear_test_target in Debug mode to lock automated testing onto a user-pre-authenticated tab."
+                             "pin_test_target", "clear_test_target", "get_test_target",
+                             "perf_vitals", "emulate", "network_capture",
+                             "web_tools_list", "web_tools_call", "run_steps"],
+                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_*/QA/test-target actions require backend=tauri_dock). Use pin_test_target/get_test_target/clear_test_target in Debug mode to lock automated testing onto a user-pre-authenticated tab. Use get_styles for visual QA: with 'selector' it returns the element's computed styles (color/background/font/border-radius/box-shadow/spacing + bounding rect); without 'selector' it returns a page-level style audit aggregating distinct text colors, background colors, font families, font sizes and border radii across visible elements - use it to quantify theme consistency and compare against design tokens. Use perf_vitals to read real Core Web Vitals (LCP/FCP/CLS/INP-worst, long tasks, TTFB, transfer bytes) collected since page load. Use emulate (CDP, Windows dock) to test responsive layouts (viewport={width,height,mobile}) and degraded networks (network=offline|slow-3g|fast-3g|none, cpu_rate=1..20); ALWAYS call emulate with reset=true when done. Use network_capture (CDP, Windows dock) for full request/response auditing: mode=start before exercising the page, then mode=dump (filters: api_only/only_failures/url_contains/limit) to cross-check API data against rendered UI, mode=body with request_id to inspect a JSON response, mode=stop when finished. Use web_tools_list to discover WebMCP tools the page registered via navigator.modelContext, and web_tools_call (name + tool_args) to invoke one as a structured fast path instead of clicking through the UI - always re-verify the visible UI afterwards. Use run_steps with steps=[{action,...},...] to execute up to 20 simple actions in one call (no nested run_steps; stops on first failure unless continue_on_error)."
                 },
                 "tab": {
                     "type": "integer",
@@ -2232,6 +2686,61 @@ impl Tool for BrowserTool {
                 "force": {
                     "type": "boolean",
                     "description": "For clear_storage: required (`true`) to wipe storage on tabs that are user-owned or pinned as QA test target. Without `force`, the action is refused to protect the user's pre-authenticated session."
+                },
+                "viewport": {
+                    "type": "object",
+                    "description": "For emulate: {width,height,mobile?,device_scale_factor?} device-metrics override, e.g. {\"width\":375,\"height\":812,\"mobile\":true} for responsive QA"
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["offline", "slow-3g", "fast-3g", "none"],
+                    "description": "For emulate: network condition preset (none = remove throttling)"
+                },
+                "cpu_rate": {
+                    "type": "number",
+                    "description": "For emulate: CPU slowdown multiplier 1-20 (1 = no throttling)"
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": "For emulate: clear ALL overrides (viewport + network + cpu). Always call this after degraded-condition tests."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["start", "stop", "dump", "body", "clear"],
+                    "description": "For network_capture: start recording / stop / dump captured requests / fetch one response body / clear buffer"
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": "For network_capture mode=body: the request_id returned by mode=dump"
+                },
+                "url_contains": {
+                    "type": "string",
+                    "description": "For network_capture mode=dump: only return requests whose URL contains this substring"
+                },
+                "only_failures": {
+                    "type": "boolean",
+                    "description": "For network_capture mode=dump: only return failed requests (network error or HTTP >= 400)"
+                },
+                "api_only": {
+                    "type": "boolean",
+                    "description": "For network_capture mode=dump: only return XHR/Fetch requests (API calls)"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "For web_tools_call: registered WebMCP tool name (from web_tools_list)"
+                },
+                "tool_args": {
+                    "type": "object",
+                    "description": "For web_tools_call: arguments object matching the tool's input_schema"
+                },
+                "steps": {
+                    "type": "array",
+                    "items": { "type": "object" },
+                    "description": "For run_steps: ordered list of action objects (same shape as top-level args, e.g. [{\"action\":\"open\",\"url\":\"...\"},{\"action\":\"assert\",\"assert_kind\":\"text\",\"expected\":\"...\"}]); max 20, no nested run_steps"
+                },
+                "continue_on_error": {
+                    "type": "boolean",
+                    "description": "For run_steps: keep executing remaining steps after a failure (default false)"
                 }
             },
             "required": ["action"]
@@ -2254,6 +2763,10 @@ impl Tool for BrowserTool {
                 output: String::new(),
                 error: Some("Action blocked: rate limit exceeded".into()),
             });
+        }
+
+        if args.get("action").and_then(|v| v.as_str()) == Some("run_steps") {
+            return self.execute_run_steps(args).await;
         }
 
         let _resource_guard = match crate::session::acquire_browser_for_current_session().await {
@@ -2709,8 +3222,15 @@ mod native_backend {
                 | BrowserAction::ClearStorage { .. }
                 | BrowserAction::Back
                 | BrowserAction::Forward
-                | BrowserAction::Reload => anyhow::bail!(
-                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload) require the \
+                | BrowserAction::Reload
+                | BrowserAction::GetStyles { .. }
+                | BrowserAction::PerfVitals
+                | BrowserAction::Emulate { .. }
+                | BrowserAction::NetworkCapture { .. }
+                | BrowserAction::WebToolsList
+                | BrowserAction::WebToolsCall { .. }
+                | BrowserAction::RunSteps { .. } => anyhow::bail!(
+                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload/get_styles/perf_vitals/emulate/network_capture/web_tools_list/web_tools_call/run_steps) require the \
                      embedded dock backend (tauri_dock). Run inside the SenAgentOS desktop app."
                 ),
                 BrowserAction::PinTestTarget { .. }
@@ -3124,6 +3644,64 @@ fn parse_browser_action(action_str: &str, args: &Value) -> anyhow::Result<Browse
                 selector: selector.into(),
             })
         }
+        "get_styles" => Ok(BrowserAction::GetStyles {
+            selector: args
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            limit: args.get("limit").and_then(serde_json::Value::as_u64),
+        }),
+        "perf_vitals" => Ok(BrowserAction::PerfVitals),
+        "emulate" => Ok(BrowserAction::Emulate {
+            viewport: args.get("viewport").filter(|v| v.is_object()).cloned(),
+            network: args
+                .get("network")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            cpu_rate: args.get("cpu_rate").and_then(serde_json::Value::as_f64),
+            reset: args
+                .get("reset")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }),
+        "network_capture" => Ok(BrowserAction::NetworkCapture {
+            mode: args.get("mode").and_then(|v| v.as_str()).map(String::from),
+            request_id: args
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            limit: args.get("limit").and_then(serde_json::Value::as_u64),
+            url_contains: args
+                .get("url_contains")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            only_failures: args
+                .get("only_failures")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            api_only: args
+                .get("api_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }),
+        "web_tools_list" => Ok(BrowserAction::WebToolsList),
+        "web_tools_call" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing 'name' for web_tools_call"))?;
+            Ok(BrowserAction::WebToolsCall {
+                name: name.into(),
+                tool_args: args.get("tool_args").cloned(),
+            })
+        }
+        "run_steps" => Ok(BrowserAction::RunSteps {
+            steps: args
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        }),
         "get_title" => Ok(BrowserAction::GetTitle),
         "get_url" => Ok(BrowserAction::GetUrl),
         "screenshot" => Ok(BrowserAction::Screenshot {
@@ -3327,6 +3905,13 @@ fn is_supported_browser_action(action: &str) -> bool {
             | "fill"
             | "type"
             | "get_text"
+            | "get_styles"
+            | "perf_vitals"
+            | "emulate"
+            | "network_capture"
+            | "web_tools_list"
+            | "web_tools_call"
+            | "run_steps"
             | "get_title"
             | "get_url"
             | "screenshot"
@@ -3471,6 +4056,21 @@ fn extract_host(url_str: &str) -> anyhow::Result<String> {
     }
 
     Ok(host.to_lowercase())
+}
+
+fn action_opens_external_url(action: &BrowserAction) -> bool {
+    let url = match action {
+        BrowserAction::Open { url } => url.trim(),
+        BrowserAction::OpenTab { url: Some(u), .. } => u.trim(),
+        _ => return false,
+    };
+    if url.is_empty() || url.starts_with("file://") {
+        return false;
+    }
+    match extract_host(url) {
+        Ok(host) => !is_loopback_host(&host),
+        Err(_) => false,
+    }
 }
 
 fn is_loopback_host(host: &str) -> bool {

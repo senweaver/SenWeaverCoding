@@ -47,7 +47,10 @@ impl RemoteSessionManager {
     }
 
     pub async fn register_session(&self, session: RemoteSession) -> Arc<SessionWebSocket> {
-        let socket = Arc::new(SessionWebSocket::new(&session.url));
+        let socket = Arc::new(SessionWebSocket::with_auth(
+            &session.url,
+            session.auth_token.clone(),
+        ));
         let entry = RemoteSessionEntry {
             meta: session.clone(),
             socket: Arc::clone(&socket),
@@ -73,7 +76,9 @@ impl RemoteSessionManager {
         };
         self.set_status(session_id, RemoteSessionStatus::Connecting)
             .await;
-        match socket.connect().await {
+        let result = socket.connect_with_retry(3).await;
+        socket.start_supervised_connection();
+        match result {
             Ok(()) => {
                 self.set_status(session_id, RemoteSessionStatus::Connected)
                     .await;

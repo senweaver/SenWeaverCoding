@@ -51,10 +51,19 @@ impl MochatChannel {
             return false;
         }
 
+        let dedup = self.dedup.read().await;
+        dedup.contains(msg_id)
+    }
+
+    async fn mark_processed(&self, msg_id: &str) {
+        if msg_id.is_empty() {
+            return;
+        }
+
         let mut dedup = self.dedup.write().await;
 
         if dedup.contains(msg_id) {
-            return true;
+            return;
         }
 
         if dedup.len() >= DEDUP_CAPACITY {
@@ -65,7 +74,6 @@ impl MochatChannel {
         }
 
         dedup.insert(msg_id.to_string());
-        false
     }
 }
 
@@ -148,12 +156,19 @@ impl Channel for MochatChannel {
                         .and_then(|d| d.as_array());
 
                     if let Some(messages) = messages {
+                        let mut batch_dropped = false;
+                        let mut newest_seen: Option<String> = None;
+
                         for msg in messages {
                             let msg_id = msg
                                 .get("messageId")
                                 .or_else(|| msg.get("id"))
                                 .and_then(|i| i.as_str())
                                 .unwrap_or("");
+
+                            if !msg_id.is_empty() {
+                                newest_seen = Some(msg_id.to_string());
+                            }
 
                             if self.is_duplicate(msg_id).await {
                                 continue;
@@ -201,13 +216,31 @@ impl Channel for MochatChannel {
                                 attachments: vec![],
                             };
 
-                            if tx.send(channel_msg).await.is_err() {
-                                tracing::warn!("Mochat: message channel closed");
-                                return Ok(());
+                            match crate::channels::forward_channel_message(
+                                "mochat",
+                                &tx,
+                                channel_msg,
+                            ) {
+                                crate::channels::ForwardOutcome::Delivered => {
+                                    self.mark_processed(msg_id).await;
+                                    if !msg_id.is_empty() {
+                                        last_message_id = Some(msg_id.to_string());
+                                    }
+                                }
+                                crate::channels::ForwardOutcome::Dropped => {
+                                    batch_dropped = true;
+                                    break;
+                                }
+                                crate::channels::ForwardOutcome::Closed => {
+                                    tracing::warn!("Mochat: message channel closed");
+                                    return Ok(());
+                                }
                             }
+                        }
 
-                            if !msg_id.is_empty() {
-                                last_message_id = Some(msg_id.to_string());
+                        if !batch_dropped {
+                            if let Some(newest) = newest_seen {
+                                last_message_id = Some(newest);
                             }
                         }
                     }

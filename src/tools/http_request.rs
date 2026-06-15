@@ -33,37 +33,12 @@ impl HttpRequestTool {
     }
 
     fn validate_url(&self, raw_url: &str) -> anyhow::Result<String> {
-        let url = raw_url.trim();
-
-        if url.is_empty() {
-            anyhow::bail!("URL cannot be empty");
-        }
-
-        if url.chars().any(char::is_whitespace) {
-            anyhow::bail!("URL cannot contain whitespace");
-        }
-
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            anyhow::bail!("Only http:// and https:// URLs are allowed");
-        }
-
-        if self.allowed_domains.is_empty() {
-            anyhow::bail!(
-                "HTTP request tool is enabled but no allowed_domains are configured. Add [http_request].allowed_domains in config.toml"
-            );
-        }
-
-        let host = extract_host(url)?;
-
-        if !self.allow_private_hosts && is_private_or_local_host(&host) {
-            anyhow::bail!("Blocked local/private host: {host}");
-        }
-
-        if !host_matches_allowlist(&host, &self.allowed_domains) {
-            anyhow::bail!("Host '{host}' is not in http_request.allowed_domains");
-        }
-
-        Ok(url.to_string())
+        validate_outbound_url(
+            raw_url,
+            &self.allowed_domains,
+            self.allow_private_hosts,
+            true,
+        )
     }
 
     fn validate_method(&self, method: &str) -> anyhow::Result<reqwest::Method> {
@@ -291,6 +266,47 @@ impl Tool for HttpRequestTool {
             }),
         }
     }
+}
+
+pub(crate) fn validate_outbound_url(
+    raw_url: &str,
+    allowed_domains: &[String],
+    allow_private_hosts: bool,
+    require_allowlist: bool,
+) -> anyhow::Result<String> {
+    let url = raw_url.trim();
+
+    if url.is_empty() {
+        anyhow::bail!("URL cannot be empty");
+    }
+
+    if url.chars().any(char::is_whitespace) {
+        anyhow::bail!("URL cannot contain whitespace");
+    }
+
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        anyhow::bail!("Only http:// and https:// URLs are allowed");
+    }
+
+    let normalized = normalize_allowed_domains(allowed_domains.to_vec());
+
+    if require_allowlist && normalized.is_empty() {
+        anyhow::bail!(
+            "HTTP request tool is enabled but no allowed_domains are configured. Add [http_request].allowed_domains in config.toml"
+        );
+    }
+
+    let host = extract_host(url)?;
+
+    if !allow_private_hosts && is_private_or_local_host(&host) {
+        anyhow::bail!("Blocked local/private host: {host}");
+    }
+
+    if !normalized.is_empty() && !host_matches_allowlist(&host, &normalized) {
+        anyhow::bail!("Host '{host}' is not in http_request.allowed_domains");
+    }
+
+    Ok(url.to_string())
 }
 
 fn normalize_allowed_domains(domains: Vec<String>) -> Vec<String> {

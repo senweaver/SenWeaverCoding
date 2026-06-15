@@ -3,17 +3,22 @@
 // Licensed under the MIT License.
 
 use crate::channels::session::backend::{
-    LoadedMessage, RewindStash, SessionBackend, SessionMetadata, SessionQuery,
+    DesignArtifactRecord, LoadedMessage, RewindStash, SessionBackend, SessionMetadata, SessionQuery,
 };
 use crate::providers::traits::ChatMessage;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const READER_POOL_SIZE: usize = 3;
 
 pub struct SqliteSessionBackend {
-    conn: Mutex<Connection>,
+    writer: Mutex<Connection>,
+    readers: Vec<Mutex<Connection>>,
+    reader_cursor: AtomicUsize,
     #[allow(dead_code)]
     db_path: PathBuf,
 }
@@ -32,7 +37,8 @@ impl SqliteSessionBackend {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 4194304;",
+             PRAGMA mmap_size = 4194304;
+             PRAGMA busy_timeout = 5000;",
         )?;
 
         conn.execute_batch(
@@ -65,7 +71,19 @@ impl SqliteSessionBackend {
              CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
                 INSERT INTO sessions_fts(sessions_fts, rowid, session_key, content)
                 VALUES ('delete', old.id, old.session_key, old.content);
-             END;",
+             END;
+
+             CREATE TABLE IF NOT EXISTS session_design_artifacts (
+                session_key TEXT NOT NULL,
+                rel_path    TEXT NOT NULL,
+                submode     TEXT,
+                surface     TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (session_key, rel_path)
+             );
+             CREATE INDEX IF NOT EXISTS idx_design_artifacts_key
+                ON session_design_artifacts(session_key, created_at);",
         )
         .context("Failed to initialize session schema")?;
 
@@ -147,10 +165,38 @@ impl SqliteSessionBackend {
         )
         .context("Failed to initialize rewind/edit-batch schema")?;
 
+        let mut readers = Vec::with_capacity(READER_POOL_SIZE);
+        for _ in 0..READER_POOL_SIZE {
+            let reader = Connection::open(&db_path).with_context(|| {
+                format!("Failed to open session DB reader: {}", db_path.display())
+            })?;
+            reader.execute_batch(
+                "PRAGMA busy_timeout = 5000;
+                 PRAGMA temp_store = MEMORY;
+                 PRAGMA mmap_size = 4194304;
+                 PRAGMA query_only = ON;",
+            )?;
+            readers.push(Mutex::new(reader));
+        }
+
         Ok(Self {
-            conn: Mutex::new(conn),
+            writer: Mutex::new(conn),
+            readers,
+            reader_cursor: AtomicUsize::new(0),
             db_path,
         })
+    }
+
+    fn read_conn(&self) -> MutexGuard<'_, Connection> {
+        let start = self.reader_cursor.fetch_add(1, Ordering::Relaxed);
+        let len = self.readers.len();
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            if let Some(guard) = self.readers[idx].try_lock() {
+                return guard;
+            }
+        }
+        self.readers[start % len].lock()
     }
 
     fn append_inner(
@@ -159,7 +205,7 @@ impl SqliteSessionBackend {
         message: &ChatMessage,
         hidden_for_ui: bool,
     ) -> std::io::Result<()> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
@@ -290,7 +336,7 @@ impl SqliteSessionBackend {
 
 impl SessionBackend for SqliteSessionBackend {
     fn load(&self, session_key: &str) -> Vec<ChatMessage> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
 
         let mut stmt = match conn
             .prepare(
@@ -320,7 +366,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn load_with_tombstones(&self, session_key: &str) -> Vec<LoadedMessage> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         let mut stmt = match conn.prepare(
             "SELECT id, role, content, tombstoned_at, hidden_for_ui FROM sessions
              WHERE session_key = ?1 ORDER BY id ASC",
@@ -362,7 +408,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
 
         let last_id: Option<i64> = conn
             .query_row(
@@ -390,7 +436,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn list_sessions(&self) -> Vec<String> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         let mut stmt = match conn
             .prepare("SELECT session_key FROM session_metadata ORDER BY last_activity DESC")
         {
@@ -407,7 +453,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn list_sessions_with_metadata(&self) -> Vec<SessionMetadata> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         let mut stmt = match conn.prepare(
             "SELECT session_key, created_at, last_activity, message_count, name, work_dir
              FROM session_metadata ORDER BY last_activity DESC",
@@ -452,8 +498,140 @@ impl SessionBackend for SqliteSessionBackend {
         rows.filter_map(|r| r.ok()).collect()
     }
 
+    fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT session_key, created_at, last_activity, message_count, name, work_dir
+             FROM session_metadata WHERE session_key = ?1",
+            params![session_key],
+            |row| {
+                let key: String = row.get(0)?;
+                let created_str: String = row.get(1)?;
+                let activity_str: String = row.get(2)?;
+                let count: i64 = row.get(3)?;
+                let name: Option<String> = row.get(4)?;
+                let work_cell: Option<String> = row.get(5)?;
+                let work_dir = work_cell.and_then(|s| {
+                    let t = s.trim();
+                    (!t.is_empty()).then(|| t.to_string())
+                });
+                let created = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let activity = DateTime::parse_from_rfc3339(&activity_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                Ok(SessionMetadata {
+                    key,
+                    name,
+                    work_dir,
+                    created_at: created,
+                    last_activity: activity,
+                    message_count: count as usize,
+                })
+            },
+        )
+        .ok()
+    }
+
+    fn count_user_messages(&self, session_key: &str) -> usize {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE session_key = ?1 AND role = 'user'",
+            params![session_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| usize::try_from(n).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    fn count_messages(&self, session_key: &str) -> usize {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+            params![session_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| usize::try_from(n).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    fn load_tail(&self, session_key: &str, limit: usize) -> Vec<ChatMessage> {
+        let conn = self.read_conn();
+        let mut stmt = match conn.prepare(
+            "SELECT role, content FROM (
+                SELECT id, role, content FROM sessions
+                WHERE session_key = ?1
+                  AND tombstoned_at IS NULL
+                  AND COALESCE(hidden_for_ui, 0) = 0
+                ORDER BY id DESC LIMIT ?2
+             ) ORDER BY id ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = match stmt.query_map(params![session_key, limit as i64], |row| {
+            Ok(ChatMessage {
+                role: row.get(0)?,
+                content: row.get(1)?,
+                metadata: Default::default(),
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    fn load_with_tombstones_range(
+        &self,
+        session_key: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<LoadedMessage> {
+        let conn = self.read_conn();
+        let mut stmt = match conn.prepare(
+            "SELECT id, role, content, tombstoned_at, hidden_for_ui FROM sessions
+             WHERE session_key = ?1 ORDER BY id ASC LIMIT ?2 OFFSET ?3",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = match stmt.query_map(
+            params![session_key, limit as i64, offset as i64],
+            |row| {
+                let id: i64 = row.get(0)?;
+                let role: String = row.get(1)?;
+                let content: String = row.get(2)?;
+                let tombstoned_at: Option<String> = row.get(3)?;
+                let hidden_for_ui: i64 = row.get(4).unwrap_or(0);
+                Ok(LoadedMessage {
+                    id,
+                    message: ChatMessage {
+                        role,
+                        content,
+                        metadata: Default::default(),
+                    },
+                    tombstoned_at,
+                    hidden_for_ui: hidden_for_ui != 0,
+                })
+            },
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let cutoff = (Utc::now() - Duration::hours(i64::from(ttl_hours))).to_rfc3339();
 
         let stale_keys: Vec<String> = {
@@ -479,7 +657,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn delete_session(&self, session_key: &str) -> std::io::Result<bool> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
 
         let exists: bool = conn
             .query_row(
@@ -504,7 +682,7 @@ impl SessionBackend for SqliteSessionBackend {
         if session_keys.is_empty() {
             return Ok(0);
         }
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let tx = conn.unchecked_transaction().map_err(std::io::Error::other)?;
         let mut deleted = 0usize;
         for session_key in session_keys {
@@ -526,7 +704,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn set_session_name(&self, session_key: &str, name: &str) -> std::io::Result<()> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let name_val = if name.is_empty() { None } else { Some(name) };
         conn.execute(
             "UPDATE session_metadata SET name = ?1 WHERE session_key = ?2",
@@ -537,7 +715,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn get_session_name(&self, session_key: &str) -> std::io::Result<Option<String>> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT name FROM session_metadata WHERE session_key = ?1",
             params![session_key],
@@ -547,7 +725,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn set_session_work_dir(&self, session_key: &str, dir: &str) -> std::io::Result<()> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let dir_val = dir.trim();
         conn.execute(
             "UPDATE session_metadata SET work_dir = ?1 WHERE session_key = ?2",
@@ -558,7 +736,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn get_session_work_dir(&self, session_key: &str) -> std::io::Result<Option<String>> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         match conn.query_row(
             "SELECT work_dir FROM session_metadata WHERE session_key = ?1",
             params![session_key],
@@ -578,7 +756,7 @@ impl SessionBackend for SqliteSessionBackend {
             return self.list_sessions_with_metadata();
         };
 
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         #[allow(clippy::cast_possible_wrap)]
         let limit = query.limit.unwrap_or(50) as i64;
 
@@ -639,7 +817,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn tombstone_from(&self, session_key: &str, first_id: i64) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let now = Utc::now().to_rfc3339();
         let n = conn
             .execute(
@@ -667,7 +845,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn clear_tombstones(&self, session_key: &str) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let n = conn
             .execute(
                 "UPDATE sessions
@@ -692,7 +870,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn purge_tombstoned(&self, session_key: &str) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let n = conn
             .execute(
                 "DELETE FROM sessions
@@ -721,7 +899,7 @@ impl SessionBackend for SqliteSessionBackend {
         user_message_index: i64,
         edit_batch_id: &str,
     ) -> std::io::Result<()> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
@@ -739,7 +917,7 @@ impl SessionBackend for SqliteSessionBackend {
         session_key: &str,
         from_index: i64,
     ) -> Vec<String> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         let mut stmt = match conn.prepare(
             "SELECT edit_batch_id FROM session_edit_batches
               WHERE session_key = ?1 AND user_message_index >= ?2
@@ -760,7 +938,7 @@ impl SessionBackend for SqliteSessionBackend {
         session_key: &str,
         from_index: i64,
     ) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let n = conn
             .execute(
                 "DELETE FROM session_edit_batches
@@ -778,7 +956,7 @@ impl SessionBackend for SqliteSessionBackend {
         user_message_index: i64,
         stash_json: &str,
     ) -> std::io::Result<()> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO session_rewind_stash
@@ -794,7 +972,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn take_rewind_stash(&self, rewind_id: &str) -> Option<RewindStash> {
-        let conn = self.conn.lock();
+        let conn = self.writer.lock();
         let stash = conn
             .query_row(
                 "SELECT rewind_id, session_key, user_message_index, stash_json
@@ -821,7 +999,7 @@ impl SessionBackend for SqliteSessionBackend {
         &self,
         session_key: &str,
     ) -> Option<RewindStash> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT rewind_id, session_key, user_message_index, stash_json
                FROM session_rewind_stash
@@ -839,5 +1017,64 @@ impl SessionBackend for SqliteSessionBackend {
             },
         )
         .ok()
+    }
+
+    fn record_design_artifact(
+        &self,
+        session_key: &str,
+        rel_path: &str,
+        submode: Option<&str>,
+        surface: &str,
+    ) -> std::io::Result<()> {
+        let now = Utc::now().timestamp();
+        let conn = self.writer.lock();
+        conn.execute(
+            "INSERT INTO session_design_artifacts
+                (session_key, rel_path, submode, surface, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(session_key, rel_path) DO UPDATE SET
+                updated_at = ?5,
+                surface = ?4,
+                submode = COALESCE(?3, submode)",
+            params![session_key, rel_path, submode, surface, now],
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn list_design_artifacts(&self, session_key: &str) -> Vec<DesignArtifactRecord> {
+        let conn = self.read_conn();
+        let mut stmt = match conn.prepare(
+            "SELECT rel_path, submode, surface, created_at, updated_at
+               FROM session_design_artifacts
+              WHERE session_key = ?1
+              ORDER BY created_at ASC, rel_path ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![session_key], |row| {
+            Ok(DesignArtifactRecord {
+                rel_path: row.get(0)?,
+                submode: row.get(1)?,
+                surface: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        });
+        match rows {
+            Ok(mapped) => mapped.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn delete_design_artifact(&self, session_key: &str, rel_path: &str) -> std::io::Result<()> {
+        let conn = self.writer.lock();
+        conn.execute(
+            "DELETE FROM session_design_artifacts WHERE session_key = ?1 AND rel_path = ?2",
+            params![session_key, rel_path],
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
     }
 }

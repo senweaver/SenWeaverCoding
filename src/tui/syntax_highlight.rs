@@ -17,13 +17,26 @@ fn syntect_to_ratatui_color(c: syntect::highlighting::Color) -> Color {
     Color::Rgb(c.r, c.g, c.b)
 }
 
+fn plain_code_lines<'a>(code: &str) -> Vec<Line<'a>> {
+    LinesWithEndings::from(code)
+        .map(|line| Line::from(Span::raw(line.trim_end_matches('\n').to_string())))
+        .collect()
+}
+
 pub fn highlight_code<'a>(code: &str, language: &str) -> Vec<Line<'a>> {
     let syntax = SYNTAX_SET
         .find_syntax_by_token(language)
         .or_else(|| SYNTAX_SET.find_syntax_by_extension(language))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let theme = match THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.values().next())
+    {
+        Some(theme) => theme,
+        None => return plain_code_lines(code),
+    };
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let mut lines = Vec::new();

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
@@ -150,7 +150,8 @@ impl Tool for CustomTool {
             )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         for (key, value) in &self.env {
             if !key.trim().is_empty() {
                 command.env(key, value);
@@ -185,10 +186,26 @@ impl Tool for CustomTool {
             });
         }
 
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
         let timeout = Duration::from_secs(self.timeout_secs);
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-        let output = match result {
-            Ok(Ok(out)) => out,
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => status,
             Ok(Err(err)) => {
                 return Ok(ToolResult {
                     success: false,
@@ -197,6 +214,8 @@ impl Tool for CustomTool {
                 });
             }
             Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -206,6 +225,12 @@ impl Tool for CustomTool {
                     )),
                 });
             }
+        };
+
+        let output = std::process::Output {
+            status,
+            stdout: stdout_task.await.unwrap_or_default(),
+            stderr: stderr_task.await.unwrap_or_default(),
         };
 
         let stdout = truncate_output(&output.stdout);

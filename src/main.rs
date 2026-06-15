@@ -2231,11 +2231,16 @@ async fn async_main() -> Result<()> {
         Commands::Config { config_command } => match config_command {
             ConfigCommands::Schema => {
                 let schema = schemars::schema_for!(config::Config);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&schema).expect("failed to serialize JSON Schema")
-                );
-                Ok(())
+                match serde_json::to_string_pretty(&schema) {
+                    Ok(rendered) => {
+                        println!("{rendered}");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to serialize JSON Schema: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
             ConfigCommands::Get { key } => {
                 get_config_value(&config, &key)?;

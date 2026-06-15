@@ -23,40 +23,51 @@ pub trait ChannelAgentBridge: Send + Sync {
 }
 
 pub struct ChannelAgentBridgeImpl {
-    _priv: (),
+    agent: tokio::sync::Mutex<crate::agent::Agent>,
 }
 
 impl ChannelAgentBridgeImpl {
 
-    pub fn new() -> Self {
-        Self { _priv: () }
+    pub fn new(agent: crate::agent::Agent) -> Self {
+        Self {
+            agent: tokio::sync::Mutex::new(agent),
+        }
     }
-}
 
-impl Default for ChannelAgentBridgeImpl {
-    fn default() -> Self {
-        Self::new()
+    pub async fn from_config(config: &crate::config::Config) -> anyhow::Result<Self> {
+        let agent = crate::agent::Agent::from_config(config, None, None).await?;
+        Ok(Self::new(agent))
     }
 }
 
 impl ChannelAgentBridge for ChannelAgentBridgeImpl {
     async fn run_turn(
         &self,
-        _messages: &mut Vec<ChatMessage>,
-        _event_tx: Option<tokio::sync::mpsc::Sender<TurnEvent>>,
+        messages: &mut Vec<ChatMessage>,
+        event_tx: Option<tokio::sync::mpsc::Sender<TurnEvent>>,
     ) -> anyhow::Result<String> {
-        anyhow::bail!(
-            "ChannelAgentBridgeImpl::run_turn not yet implemented; use AgentLoopCore directly"
-        )
+        let Some(user_idx) = messages.iter().rposition(|m| m.role == "user") else {
+            anyhow::bail!("run_turn requires at least one user message in the transcript");
+        };
+        let user_message = messages[user_idx].content.clone();
+        let mut agent = self.agent.lock().await;
+        agent.clear_history();
+        if user_idx > 0 {
+            agent.seed_history(&messages[..user_idx]);
+        }
+        let reply = match event_tx {
+            Some(tx) => agent.turn_streamed(&user_message, tx).await?,
+            None => agent.turn(&user_message).await?,
+        };
+        messages.push(ChatMessage::assistant(reply.clone()));
+        Ok(reply)
     }
 
     async fn run_streamed(
         &self,
-        _messages: &mut Vec<ChatMessage>,
-        _event_tx: tokio::sync::mpsc::Sender<TurnEvent>,
+        messages: &mut Vec<ChatMessage>,
+        event_tx: tokio::sync::mpsc::Sender<TurnEvent>,
     ) -> anyhow::Result<String> {
-        anyhow::bail!(
-            "ChannelAgentBridgeImpl::run_streamed not yet implemented; use AgentLoopCore directly"
-        )
+        self.run_turn(messages, Some(event_tx)).await
     }
 }

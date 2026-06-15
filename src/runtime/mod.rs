@@ -10,7 +10,7 @@ pub mod wasm;
 
 pub use docker::DockerRuntime;
 pub use native::NativeRuntime;
-pub use task_manager::{TaskHandle, spawn_supervised};
+pub use task_manager::{TaskHandle, spawn_supervised, spawn_supervised_restartable};
 pub use traits::RuntimeAdapter;
 #[cfg(feature = "runtime-wasm")]
 pub use wasm::WasmRuntime;

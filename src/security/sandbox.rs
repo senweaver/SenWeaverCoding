@@ -5,8 +5,10 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[allow(dead_code)]
 static DEGRADED_WARNED: OnceLock<()> = OnceLock::new();
 
+#[allow(dead_code)]
 fn warn_degraded(reason: &str) {
     DEGRADED_WARNED.get_or_init(|| {
         tracing::warn!(

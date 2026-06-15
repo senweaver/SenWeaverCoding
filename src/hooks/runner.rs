@@ -32,81 +32,107 @@ impl HookRunner {
             .sort_by_key(|h| std::cmp::Reverse(h.priority()));
     }
 
+    async fn join_isolated<'a, F>(event: &str, futs: Vec<(&'a str, F)>)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        let names: Vec<&'a str> = futs.iter().map(|(name, _)| *name).collect();
+        let wrapped: Vec<_> = futs
+            .into_iter()
+            .map(|(_, fut)| AssertUnwindSafe(fut).catch_unwind())
+            .collect();
+        let results = join_all(wrapped).await;
+        for (name, result) in names.into_iter().zip(results) {
+            if result.is_err() {
+                tracing::error!(
+                    target: "hooks",
+                    hook = name,
+                    hook_event = event,
+                    "hook handler panicked; isolated to protect the agent turn"
+                );
+            }
+        }
+    }
+
     pub async fn fire_gateway_start(&self, host: &str, port: u16) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_gateway_start(host, port))
+            .map(|h| (h.name(), h.on_gateway_start(host, port)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("gateway_start", futs).await;
     }
 
     pub async fn fire_gateway_stop(&self) {
-        let futs: Vec<_> = self.handlers.iter().map(|h| h.on_gateway_stop()).collect();
-        join_all(futs).await;
+        let futs: Vec<_> = self
+            .handlers
+            .iter()
+            .map(|h| (h.name(), h.on_gateway_stop()))
+            .collect();
+        Self::join_isolated("gateway_stop", futs).await;
     }
 
     pub async fn fire_session_start(&self, session_id: &str, channel: &str) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_session_start(session_id, channel))
+            .map(|h| (h.name(), h.on_session_start(session_id, channel)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("session_start", futs).await;
     }
 
     pub async fn fire_session_end(&self, session_id: &str, channel: &str) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_session_end(session_id, channel))
+            .map(|h| (h.name(), h.on_session_end(session_id, channel)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("session_end", futs).await;
     }
 
     pub async fn fire_llm_input(&self, messages: &[ChatMessage], model: &str) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_llm_input(messages, model))
+            .map(|h| (h.name(), h.on_llm_input(messages, model)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("llm_input", futs).await;
     }
 
     pub async fn fire_llm_output(&self, response: &ChatResponse) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_llm_output(response))
+            .map(|h| (h.name(), h.on_llm_output(response)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("llm_output", futs).await;
     }
 
     pub async fn fire_after_tool_call(&self, tool: &str, result: &ToolResult, duration: Duration) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_after_tool_call(tool, result, duration))
+            .map(|h| (h.name(), h.on_after_tool_call(tool, result, duration)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("after_tool_call", futs).await;
     }
 
     pub async fn fire_message_sent(&self, channel: &str, recipient: &str, content: &str) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_message_sent(channel, recipient, content))
+            .map(|h| (h.name(), h.on_message_sent(channel, recipient, content)))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("message_sent", futs).await;
     }
 
     pub async fn fire_heartbeat_tick(&self) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| h.on_heartbeat_tick())
+            .map(|h| (h.name(), h.on_heartbeat_tick()))
             .collect();
-        join_all(futs).await;
+        Self::join_isolated("heartbeat_tick", futs).await;
     }
 
     pub async fn run_before_model_resolve(

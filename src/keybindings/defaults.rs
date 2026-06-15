@@ -63,13 +63,6 @@ pub fn default_bindings() -> Vec<KeyBinding> {
             when: None,
         },
         KeyBinding {
-            key: "Tab".to_string(),
-            modifiers: vec![],
-            action: KeyAction::TabComplete,
-            description: "Tab completion".to_string(),
-            when: None,
-        },
-        KeyBinding {
             key: "v".to_string(),
             modifiers: vec![KeyModifier::Ctrl],
             action: KeyAction::ToggleVim,

@@ -82,8 +82,7 @@ impl Tool for CuratorLocalReferenceTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let active = self
             .state
-            .read()
-            .clone()
+            .get()
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "curator_local_reference requires an active Curator session (call enter_curator_mode first)."

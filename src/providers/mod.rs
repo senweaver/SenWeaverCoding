@@ -11,6 +11,7 @@ pub mod copilot;
 pub mod core;
 pub mod gemini;
 pub mod kilocli;
+pub mod local_cli;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
@@ -331,6 +332,57 @@ fn read_qwen_oauth_cached_credentials() -> Option<QwenOauthCredentials> {
     serde_json::from_str::<QwenOauthCredentials>(&content).ok()
 }
 
+fn persist_qwen_oauth_credentials(refreshed: &QwenOauthCredentials) {
+    let Some(path) = qwen_oauth_credentials_file_path() else {
+        return;
+    };
+
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    if let Some(token) = refreshed.access_token.as_ref() {
+        root.insert(
+            "access_token".to_string(),
+            serde_json::Value::String(token.clone()),
+        );
+    }
+    if let Some(token) = refreshed.refresh_token.as_ref() {
+        root.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String(token.clone()),
+        );
+    }
+    if let Some(url) = refreshed.resource_url.as_ref() {
+        root.insert(
+            "resource_url".to_string(),
+            serde_json::Value::String(url.clone()),
+        );
+    }
+    if let Some(expiry) = refreshed.expiry_date {
+        root.insert(
+            "expiry_date".to_string(),
+            serde_json::Value::Number(expiry.into()),
+        );
+    }
+
+    match serde_json::to_vec_pretty(&serde_json::Value::Object(root)) {
+        Ok(bytes) => {
+            if let Err(error) = crate::util::atomic_write(&path, &bytes) {
+                tracing::warn!(error = %error, "failed to persist refreshed Qwen OAuth credentials");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to serialize refreshed Qwen OAuth credentials");
+        }
+    }
+}
+
 fn normalized_qwen_expiry_millis(raw: i64) -> i64 {
     if raw < 10_000_000_000 {
         raw.saturating_mul(1000)
@@ -352,6 +404,25 @@ fn qwen_oauth_token_expired(credentials: &QwenOauthCredentials) -> bool {
         .unwrap_or(i64::MAX);
 
     expiry_millis <= now_millis.saturating_add(30_000)
+}
+
+fn run_blocking_oauth_refresh<T, F>(task: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(task),
+            _ => std::thread::Builder::new()
+                .name("provider-oauth-refresh".to_string())
+                .spawn(task)
+                .map_err(|error| anyhow::anyhow!("failed to spawn OAuth refresh thread: {error}"))?
+                .join()
+                .map_err(|_| anyhow::anyhow!("OAuth refresh thread panicked"))?,
+        },
+        Err(_) => task(),
+    }
 }
 
 fn refresh_qwen_oauth_access_token(refresh_token: &str) -> anyhow::Result<QwenOauthCredentials> {
@@ -476,9 +547,12 @@ fn resolve_qwen_oauth_context(credential_override: Option<&str>) -> QwenOauthPro
                 .is_none_or(|value| value.trim().is_empty());
 
         if should_refresh {
-            if let Some(refresh_token) = refresh_token.as_deref() {
-                match refresh_qwen_oauth_access_token(refresh_token) {
+            if let Some(refresh_token) = refresh_token.clone() {
+                match run_blocking_oauth_refresh(move || {
+                    refresh_qwen_oauth_access_token(&refresh_token)
+                }) {
                     Ok(refreshed) => {
+                        persist_qwen_oauth_credentials(&refreshed);
                         cached = Some(refreshed);
                     }
                     Err(error) => {
@@ -590,8 +664,13 @@ fn refresh_minimax_oauth_access_token(name: &str, refresh_token: &str) -> anyhow
 
 fn resolve_minimax_oauth_refresh_token(name: &str) -> Option<String> {
     let refresh_token = read_non_empty_env(MINIMAX_OAUTH_REFRESH_TOKEN_ENV)?;
+    let name_owned = name.to_string();
 
-    match refresh_minimax_oauth_access_token(name, &refresh_token) {
+    let result = run_blocking_oauth_refresh(move || {
+        refresh_minimax_oauth_access_token(&name_owned, &refresh_token)
+    });
+
+    match result {
         Ok(token) => Some(token),
         Err(error) => {
             tracing::warn!(provider = name, error = %error, "MiniMax OAuth refresh failed");
@@ -1095,6 +1174,8 @@ fn inference_allows_missing_credential(primary: &str, default_model: &str) -> bo
         || base.eq_ignore_ascii_case("claude-code")
         || base.eq_ignore_ascii_case("gemini-cli")
         || base.eq_ignore_ascii_case("kilocli")
+        || base.eq_ignore_ascii_case("local-cli")
+        || base.eq_ignore_ascii_case("local_cli")
 }
 
 pub fn inference_api_credential_available(config: &crate::config::Config) -> bool {
@@ -1321,6 +1402,9 @@ pub fn create_provider_with_url_and_options(
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(mt);
             }
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
+            }
             if !options.extra_headers.is_empty() {
                 p = p.with_extra_headers(options.extra_headers.clone());
             }
@@ -1330,6 +1414,9 @@ pub fn create_provider_with_url_and_options(
             let mut p = openai::OpenAiProvider::with_base_url(api_url, key);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(Some(mt));
+            }
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
             }
             if !options.extra_headers.is_empty() {
                 p = p.with_extra_headers(options.extra_headers.clone());
@@ -1612,6 +1699,7 @@ pub fn create_provider_with_url_and_options(
         "claude-code" => Ok(Box::new(claude_code::ClaudeCodeProvider::new())),
         "gemini-cli" => Ok(Box::new(gemini::cli::GeminiCliProvider::new())),
         "kilocli" | "kilo" => Ok(Box::new(kilocli::KiloCliProvider::new())),
+        "local-cli" | "local_cli" => Ok(Box::new(local_cli::LocalCliProvider::new())),
         "lmstudio" | "lm-studio" => {
             let lm_studio_key = key
                 .map(str::trim)
@@ -1849,6 +1937,9 @@ pub fn create_provider_with_url_and_options(
                 Some("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"),
                 key,
             );
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
+            }
             if !options.extra_headers.is_empty() {
                 p = p.with_extra_headers(options.extra_headers.clone());
             }
@@ -1880,6 +1971,9 @@ pub fn create_provider_with_url_and_options(
                 anthropic::AnthropicProvider::with_base_url(key, Some(&base_url));
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(mt);
+            }
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
             }
             if !options.extra_headers.is_empty() {
                 p = p.with_extra_headers(options.extra_headers.clone());
@@ -2118,6 +2212,20 @@ pub fn create_resilient_provider(
     )
 }
 
+fn create_provider_with_endpoint_resolution(
+    name: &str,
+    api_key: Option<&str>,
+    api_url: Option<&str>,
+    options: &ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    match name {
+        "openai-codex" | "openai_codex" | "codex" => {
+            create_provider_with_options(name, api_key, options)
+        }
+        _ => create_provider_with_url_and_options(name, api_key, api_url, options),
+    }
+}
+
 pub fn create_resilient_provider_with_options(
     primary_name: &str,
     api_key: Option<&str>,
@@ -2127,13 +2235,11 @@ pub fn create_resilient_provider_with_options(
 ) -> anyhow::Result<Box<dyn Provider>> {
     let mut providers: Vec<(String, Box<dyn Provider>)> = Vec::new();
 
-    let primary_provider = match primary_name {
-        "openai-codex" | "openai_codex" | "codex" => {
-            create_provider_with_options(primary_name, api_key, options)?
-        }
-        _ => create_provider_with_url_and_options(primary_name, api_key, api_url, options)?,
-    };
+    let primary_provider =
+        create_provider_with_endpoint_resolution(primary_name, api_key, api_url, options)?;
     providers.push((primary_name.to_string(), primary_provider));
+
+    let (primary_base_name, _) = parse_provider_profile(primary_name);
 
     for fallback in &reliability.fallback_providers {
         if fallback == primary_name || providers.iter().any(|(name, _)| name == fallback) {
@@ -2151,7 +2257,20 @@ pub fn create_resilient_provider_with_options(
             None => options.clone(),
         };
 
-        match create_provider_with_options(provider_name, None, &fallback_options) {
+        let resolved_fallback_credential;
+        let (fallback_key, fallback_url) = if provider_name == primary_base_name {
+            (api_key, api_url)
+        } else {
+            resolved_fallback_credential = resolve_provider_credential(provider_name, None);
+            (resolved_fallback_credential.as_deref(), None)
+        };
+
+        match create_provider_with_endpoint_resolution(
+            provider_name,
+            fallback_key,
+            fallback_url,
+            &fallback_options,
+        ) {
             Ok(provider) => providers.push((fallback.clone(), provider)),
             Err(_error) => {
                 tracing::warn!(
@@ -2173,8 +2292,16 @@ pub fn create_resilient_provider_with_options(
         reliability.engine_overload_max_retries,
         reliability.account_rate_limit_max_retries,
     )
-    .with_transient_max_retries(reliability.transient_max_retries)
-    .with_client_rate_limit_enabled(reliability.client_llm_rate_limit_enabled);
+    .with_transient_max_retries(reliability.transient_max_retries);
+
+    let reliable = if reliability.client_llm_rate_limit_enabled {
+        reliable.with_rate_limit(
+            crate::providers::reliable::DEFAULT_CLIENT_LLM_RATE_LIMIT_CAPACITY,
+            crate::providers::reliable::DEFAULT_CLIENT_LLM_RATE_LIMIT_REFILL_PER_SEC,
+        )
+    } else {
+        reliable.with_client_rate_limit_enabled(false)
+    };
 
     Ok(Box::new(reliable))
 }
@@ -2226,18 +2353,22 @@ pub fn create_routed_provider_with_options(
 
     let mut providers: Vec<(String, Box<dyn Provider>)> = Vec::new();
     for name in &needed {
-        let routed_credential = model_routes
-            .iter()
-            .find(|r| &r.provider == name)
-            .and_then(|r| {
-                r.api_key.as_ref().and_then(|raw_key| {
-                    let trimmed_key = raw_key.trim();
-                    (!trimmed_key.is_empty()).then_some(trimmed_key)
-                })
-            });
+        let route_for_provider = model_routes.iter().find(|r| &r.provider == name);
+        let routed_credential = route_for_provider.and_then(|r| {
+            r.api_key.as_ref().and_then(|raw_key| {
+                let trimmed_key = raw_key.trim();
+                (!trimmed_key.is_empty()).then_some(trimmed_key)
+            })
+        });
         let key = routed_credential.or(api_key);
 
-        let url = if name == primary_name { api_url } else { None };
+        let routed_url = route_for_provider.and_then(|r| {
+            r.base_url.as_ref().and_then(|raw_url| {
+                let trimmed_url = raw_url.trim();
+                (!trimmed_url.is_empty()).then_some(trimmed_url)
+            })
+        });
+        let url = routed_url.or(if name == primary_name { api_url } else { None });
         match create_resilient_provider_with_options(name, key, url, reliability, options) {
             Ok(provider) => providers.push((name.clone(), provider)),
             Err(e) => {
@@ -2631,6 +2762,12 @@ pub fn list_providers() -> Vec<ProviderInfo> {
             name: "kilocli",
             display_name: "KiloCLI",
             aliases: &["kilo"],
+            local: true,
+        },
+        ProviderInfo {
+            name: "local-cli",
+            display_name: "Local CLI",
+            aliases: &["local_cli"],
             local: true,
         },
         ProviderInfo {

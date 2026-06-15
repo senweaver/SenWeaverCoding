@@ -6,6 +6,24 @@ use super::super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;
 
+const MAX_RETURNED_OUTPUT_BYTES: usize = 200 * 1024;
+
+fn cap_returned_output(output: String) -> String {
+    if output.len() <= MAX_RETURNED_OUTPUT_BYTES {
+        return output;
+    }
+    let mut start = output.len() - MAX_RETURNED_OUTPUT_BYTES;
+    while start < output.len() && !output.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[task output truncated: dropped first {} of {} bytes, keeping the tail]\n{}",
+        start,
+        output.len(),
+        &output[start..]
+    )
+}
+
 pub struct TaskOutputTool {
     manager: TaskManagerHandle,
 }
@@ -45,7 +63,7 @@ impl Tool for TaskOutputTool {
         match self.manager.read().get_output(task_id) {
             Some(output) => Ok(ToolResult {
                 success: true,
-                output: json!({ "output": output }).to_string(),
+                output: json!({ "output": cap_returned_output(output) }).to_string(),
                 error: None,
             }),
             None => Ok(ToolResult {

@@ -26,6 +26,9 @@ pub enum HookEvent {
     #[serde(rename = "preToolUse")]
     PreToolUse,
 
+    #[serde(rename = "postToolUse")]
+    PostToolUse,
+
     BeforeReadFile,
 
     BeforeSubmitPrompt,
@@ -42,6 +45,7 @@ impl HookEvent {
             HookEvent::BeforeShellExecution => "beforeShellExecution",
             HookEvent::BeforeMcpExecution => "beforeMCPExecution",
             HookEvent::PreToolUse => "preToolUse",
+            HookEvent::PostToolUse => "postToolUse",
             HookEvent::BeforeReadFile => "beforeReadFile",
             HookEvent::BeforeSubmitPrompt => "beforeSubmitPrompt",
             HookEvent::AfterFileEdit => "afterFileEdit",
@@ -487,7 +491,11 @@ fn truncate_for_payload(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let mut out = s[..max].to_string();
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = s[..end].to_string();
     out.push_str("…[truncated]");
     out
 }
@@ -618,21 +626,23 @@ impl HookHandler for ScriptHookRunner {
         result: &crate::tools::traits::ToolResult,
         _duration: Duration,
     ) {
-        let Some(event) = event_for_tool_post(tool) else {
-            return;
-        };
-        let payload = HookPayload {
-            event: event.as_str(),
-            tool_name: Some(tool.to_string()),
-            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
-            extras: json!({
-                "success": result.success,
-                "output": truncate_for_payload(&result.output, 4096),
-                "error": result.error.clone(),
-            }),
-        };
-
-        let _ = self.dispatch(event, payload).await;
+        let mut events: Vec<HookEvent> = vec![HookEvent::PostToolUse];
+        if let Some(specific) = event_for_tool_post(tool) {
+            events.push(specific);
+        }
+        for event in events {
+            let payload = HookPayload {
+                event: event.as_str(),
+                tool_name: Some(tool.to_string()),
+                workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+                extras: json!({
+                    "success": result.success,
+                    "output": truncate_for_payload(&result.output, 4096),
+                    "error": result.error.clone(),
+                }),
+            };
+            let _ = self.dispatch(event, payload).await;
+        }
     }
 
     async fn before_prompt_build(&self, prompt: String) -> HookResult<String> {

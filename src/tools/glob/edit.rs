@@ -215,6 +215,11 @@ impl Tool for GlobEditTool {
                     matches
                         .into_iter()
                         .filter(|path| {
+                            match std::fs::metadata(path) {
+                                Ok(meta) if meta.len() > GlobEditTool::MAX_FILE_SIZE => return false,
+                                Ok(_) => {}
+                                Err(_) => return false,
+                            }
                             std::fs::read_to_string(path)
                                 .map(|c| c.contains(filter))
                                 .unwrap_or(false)

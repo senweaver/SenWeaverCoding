@@ -6,13 +6,13 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::registry::AgentId;
 use crate::observability::coordination_metrics::{self, LockAcquireOutcome};
@@ -321,54 +321,92 @@ impl LockManager {
         reason: &str,
         ttl: Duration,
     ) -> LockResult {
-        let mut locks = self.locks.write();
+        let denied_owner;
+        {
+            let mut locks = self.locks.write();
 
-        if let Some(existing) = locks.get(resource) {
-            if existing.is_expired() {
-                debug!(
-                    resource = %resource,
-                    expired_owner = %existing.owner,
-                    "Lock expired, allowing acquisition"
-                );
-
-            } else if existing.owner == agent_id {
-                return LockResult::AlreadyHeld;
+            if let Some(existing) = locks.get(resource) {
+                if existing.is_expired() {
+                    debug!(
+                        resource = %resource,
+                        expired_owner = %existing.owner,
+                        "Lock expired, allowing acquisition"
+                    );
+                    denied_owner = None;
+                } else if existing.owner == agent_id {
+                    return LockResult::AlreadyHeld;
+                } else {
+                    denied_owner = Some(existing.owner.clone());
+                }
             } else {
-                return LockResult::Held {
-                    owner: existing.owner.clone(),
-                };
+                denied_owner = None;
+            }
+
+            if denied_owner.is_none() {
+                locks.insert(
+                    resource.to_string(),
+                    LockEntry {
+                        owner: agent_id.to_string(),
+                        acquired_at: Instant::now(),
+                        ttl,
+                        reason: reason.to_string(),
+                    },
+                );
             }
         }
 
-        locks.insert(
-            resource.to_string(),
-            LockEntry {
-                owner: agent_id.to_string(),
-                acquired_at: Instant::now(),
-                ttl,
-                reason: reason.to_string(),
-            },
-        );
-
-        debug!(resource = %resource, agent = %agent_id, "Lock acquired");
-        LockResult::Acquired
+        match denied_owner {
+            Some(owner) => {
+                crate::event_bus::integration::publish_coordination_now(
+                    agent_id,
+                    crate::event_bus::types::CoordinationAction::LockDenied,
+                    resource,
+                    Some(serde_json::json!({ "owner": owner })),
+                );
+                LockResult::Held { owner }
+            }
+            None => {
+                debug!(resource = %resource, agent = %agent_id, "Lock acquired");
+                crate::event_bus::integration::publish_coordination_now(
+                    agent_id,
+                    crate::event_bus::types::CoordinationAction::LockGranted,
+                    resource,
+                    None,
+                );
+                LockResult::Acquired
+            }
+        }
     }
 
     pub fn release(&self, resource: &str, agent_id: &str) -> bool {
-        let mut locks = self.locks.write();
-        if let Some(entry) = locks.get(resource) {
-            if entry.owner == agent_id || entry.is_expired() {
-                locks.remove(resource);
-                debug!(resource = %resource, agent = %agent_id, "Lock released");
+        let removed;
+        {
+            let mut locks = self.locks.write();
+            if let Some(entry) = locks.get(resource) {
+                if entry.owner == agent_id || entry.is_expired() {
+                    locks.remove(resource);
+                    debug!(resource = %resource, agent = %agent_id, "Lock released");
+                    removed = true;
+                } else {
+                    warn!(
+                        resource = %resource,
+                        agent = %agent_id,
+                        owner = %entry.owner,
+                        "Lock release denied: not the owner"
+                    );
+                    return false;
+                }
+            } else {
                 return true;
             }
-            warn!(
-                resource = %resource,
-                agent = %agent_id,
-                owner = %entry.owner,
-                "Lock release denied: not the owner"
+        }
+        if removed {
+            crate::event_bus::integration::publish_coordination_now(
+                agent_id,
+                crate::event_bus::types::CoordinationAction::LockRelease,
+                resource,
+                None,
             );
-            return false;
         }
         true
     }
@@ -903,36 +941,59 @@ impl BarrierManager {
     }
 
     pub fn arrive(&self, barrier_name: &str, agent_id: &str) -> BarrierResult {
-        let mut barriers = self.barriers.write();
-        let barrier = match barriers.get_mut(barrier_name) {
-            Some(b) => b,
-            None => return BarrierResult::NotFound,
+        let result = {
+            let mut barriers = self.barriers.write();
+            let barrier = match barriers.get_mut(barrier_name) {
+                Some(b) => b,
+                None => return BarrierResult::NotFound,
+            };
+
+            if barrier.created_at.elapsed() >= barrier.timeout {
+                barriers.remove(barrier_name);
+                return BarrierResult::TimedOut;
+            }
+
+            barrier.arrived.insert(agent_id.to_string());
+            debug!(
+                barrier = %barrier_name,
+                agent = %agent_id,
+                arrived = barrier.arrived.len(),
+                expected = barrier.expected.len(),
+                "Agent arrived at barrier"
+            );
+
+            if barrier.arrived.is_superset(&barrier.expected) {
+                barriers.remove(barrier_name);
+                info!(barrier = %barrier_name, "Barrier released ??all agents arrived");
+                BarrierResult::Released
+            } else {
+                BarrierResult::Waiting {
+                    arrived: barrier.arrived.len(),
+                    expected: barrier.expected.len(),
+                }
+            }
         };
 
-        if barrier.created_at.elapsed() >= barrier.timeout {
-            barriers.remove(barrier_name);
-            return BarrierResult::TimedOut;
-        }
-
-        barrier.arrived.insert(agent_id.to_string());
-        debug!(
-            barrier = %barrier_name,
-            agent = %agent_id,
-            arrived = barrier.arrived.len(),
-            expected = barrier.expected.len(),
-            "Agent arrived at barrier"
-        );
-
-        if barrier.arrived.is_superset(&barrier.expected) {
-            barriers.remove(barrier_name);
-            info!(barrier = %barrier_name, "Barrier released ??all agents arrived");
-            BarrierResult::Released
-        } else {
-            BarrierResult::Waiting {
-                arrived: barrier.arrived.len(),
-                expected: barrier.expected.len(),
+        match &result {
+            BarrierResult::Released => {
+                crate::event_bus::integration::publish_coordination_now(
+                    agent_id,
+                    crate::event_bus::types::CoordinationAction::BarrierRelease,
+                    barrier_name,
+                    None,
+                );
             }
+            BarrierResult::Waiting { arrived, expected } => {
+                crate::event_bus::integration::publish_coordination_now(
+                    agent_id,
+                    crate::event_bus::types::CoordinationAction::BarrierReady,
+                    barrier_name,
+                    Some(serde_json::json!({ "arrived": arrived, "expected": expected })),
+                );
+            }
+            _ => {}
         }
+        result
     }
 
     pub fn status(&self, barrier_name: &str) -> Option<(usize, usize)> {
@@ -1019,7 +1080,7 @@ impl VotingManager {
         &self,
         session_id: &str,
         topic: &str,
-        _initiator: &str,
+        initiator: &str,
         eligible: HashSet<AgentId>,
         timeout: Duration,
         majority: f64,
@@ -1041,70 +1102,112 @@ impl VotingManager {
             eligible = eligible.len(),
             "Voting session started"
         );
+        crate::event_bus::integration::publish_coordination_now(
+            initiator,
+            crate::event_bus::types::CoordinationAction::Propose,
+            topic,
+            Some(serde_json::json!({ "session_id": session_id })),
+        );
     }
 
     pub fn cast_vote(&self, session_id: &str, agent_id: &str, value: &str) -> VotingResult {
-        let mut sessions = self.sessions.write();
-        let session = match sessions.get_mut(session_id) {
-            Some(s) => s,
-            None => return VotingResult::NotFound,
+        let result = 'voting: {
+            let mut sessions = self.sessions.write();
+            let session = match sessions.get_mut(session_id) {
+                Some(s) => s,
+                None => return VotingResult::NotFound,
+            };
+
+            if session.created_at.elapsed() >= session.timeout {
+                let _tally = Self::compute_tally(&session.votes);
+                sessions.remove(session_id);
+                return VotingResult::TimedOut;
+            }
+
+            if session.votes.iter().any(|v| v.agent_id == agent_id) {
+                return VotingResult::AlreadyVoted;
+            }
+
+            session.votes.push(Vote {
+                agent_id: agent_id.to_string(),
+                value: value.to_string(),
+                timestamp: Utc::now(),
+            });
+
+            debug!(
+                session = %session_id,
+                agent = %agent_id,
+                value = %value,
+                "Vote cast"
+            );
+
+            let eligible_count = session.eligible.len();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let needed = (eligible_count as f64 * session.majority).ceil() as usize;
+            let tally = Self::compute_tally(&session.votes);
+
+            for (val, count) in &tally {
+                if *count >= needed {
+                    let winning = val.clone();
+                    let votes = *count;
+                    sessions.remove(session_id);
+                    info!(
+                        session = %session_id,
+                        value = %winning,
+                        "Consensus reached"
+                    );
+                    break 'voting VotingResult::Consensus {
+                        winning_value: winning,
+                        votes,
+                    };
+                }
+            }
+
+            if session.votes.len() >= eligible_count {
+                let tally_clone = tally.clone();
+                sessions.remove(session_id);
+                break 'voting VotingResult::NoConsensus { tally: tally_clone };
+            }
+
+            VotingResult::Recorded {
+                votes_cast: session.votes.len(),
+                votes_needed: needed,
+            }
         };
 
-        if session.created_at.elapsed() >= session.timeout {
-            let _tally = Self::compute_tally(&session.votes);
-            sessions.remove(session_id);
-            return VotingResult::TimedOut;
-        }
-
-        if session.votes.iter().any(|v| v.agent_id == agent_id) {
-            return VotingResult::AlreadyVoted;
-        }
-
-        session.votes.push(Vote {
-            agent_id: agent_id.to_string(),
-            value: value.to_string(),
-            timestamp: Utc::now(),
-        });
-
-        debug!(
-            session = %session_id,
-            agent = %agent_id,
-            value = %value,
-            "Vote cast"
-        );
-
-        let eligible_count = session.eligible.len();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let needed = (eligible_count as f64 * session.majority).ceil() as usize;
-        let tally = Self::compute_tally(&session.votes);
-
-        for (val, count) in &tally {
-            if *count >= needed {
-                let winning = val.clone();
-                let votes = *count;
-                sessions.remove(session_id);
-                info!(
-                    session = %session_id,
-                    value = %winning,
-                    "Consensus reached"
+        match &result {
+            VotingResult::Recorded {
+                votes_cast,
+                votes_needed,
+            } => {
+                crate::event_bus::integration::publish_coordination_now(
+                    agent_id,
+                    crate::event_bus::types::CoordinationAction::Vote,
+                    session_id,
+                    Some(serde_json::json!({
+                        "value": value,
+                        "votes_cast": votes_cast,
+                        "votes_needed": votes_needed,
+                    })),
                 );
-                return VotingResult::Consensus {
-                    winning_value: winning,
-                    votes,
-                };
             }
+            VotingResult::Consensus {
+                winning_value,
+                votes,
+            } => {
+                crate::event_bus::integration::publish_coordination_now(
+                    agent_id,
+                    crate::event_bus::types::CoordinationAction::Commit,
+                    session_id,
+                    Some(serde_json::json!({
+                        "winning_value": winning_value,
+                        "votes": votes,
+                    })),
+                );
+            }
+            _ => {}
         }
-
-        if session.votes.len() >= eligible_count {
-            let tally_clone = tally.clone();
-            sessions.remove(session_id);
-            return VotingResult::NoConsensus { tally: tally_clone };
-        }
-
-        VotingResult::Recorded {
-            votes_cast: session.votes.len(),
-            votes_needed: needed,
-        }
+        result
     }
 
     pub fn tally(&self, session_id: &str) -> Option<HashMap<String, usize>> {
@@ -1140,10 +1243,18 @@ impl Default for VotingManager {
     }
 }
 
+const COORD_REQUEST_BARRIER_TIMEOUT: Duration = Duration::from_secs(3600);
+const COORD_TASK_BARRIER_TIMEOUT: Duration = Duration::from_secs(3600);
+const COORD_OUTCOME_VOTE_TIMEOUT: Duration = Duration::from_secs(120);
+const COORD_RATIFY_MAJORITY: f64 = 1.0;
+const COORD_TASK_COMPLETION_TOKEN: &str = "completion";
+
 pub struct Coordinator {
     pub locks: Arc<LockManager>,
     pub barriers: BarrierManager,
     pub voting: VotingManager,
+
+    event_subscriber_started: AtomicBool,
 }
 
 impl Coordinator {
@@ -1152,6 +1263,7 @@ impl Coordinator {
             locks: Arc::new(LockManager::default()),
             barriers: BarrierManager::new(),
             voting: VotingManager::new(),
+            event_subscriber_started: AtomicBool::new(false),
         }
     }
 
@@ -1160,6 +1272,7 @@ impl Coordinator {
             locks: Arc::new(LockManager::new(lock_ttl)),
             barriers: BarrierManager::new(),
             voting: VotingManager::new(),
+            event_subscriber_started: AtomicBool::new(false),
         }
     }
 
@@ -1172,6 +1285,208 @@ impl Coordinator {
         let barriers = self.barriers.evict_expired();
         let voting = self.voting.evict_expired();
         (locks, barriers, voting)
+    }
+
+    pub fn spawn_event_subscriber(self: Arc<Self>) {
+        if self.event_subscriber_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let coordinator = self;
+        crate::runtime::spawn_supervised(
+            "agent.coordinator.event_subscriber",
+            async move {
+                let mut rx = loop {
+                    match crate::event_bus::integration::global_bus() {
+                        Some(bus) => break bus.subscribe_all(),
+                        None => tokio::time::sleep(Duration::from_secs(5)).await,
+                    }
+                };
+
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => coordinator.on_coordination_event(&event),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "coordinator event subscriber lagged; continuing");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            match crate::event_bus::integration::global_bus() {
+                                Some(bus) => {
+                                    rx = bus.subscribe_all();
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    fn on_coordination_event(&self, event: &crate::event_bus::types::Event) {
+        use crate::event_bus::types::{EventPayload, EventTarget, TaskDelegationAction};
+
+        match &event.payload {
+            EventPayload::AgentRequest {
+                request_id,
+                capability,
+                ..
+            } => {
+                if let EventTarget::Agent(agent) = &event.target {
+                    let barrier = format!("request:{request_id}");
+                    let mut expected = HashSet::new();
+                    expected.insert(agent.clone());
+                    match self.barriers.create_barrier(
+                        &barrier,
+                        expected,
+                        COORD_REQUEST_BARRIER_TIMEOUT,
+                    ) {
+                        Ok(()) => debug!(
+                            request_id = %request_id,
+                            agent = %agent,
+                            capability = %capability,
+                            "coordinator: opened request barrier"
+                        ),
+                        Err(e) => warn!(
+                            request_id = %request_id,
+                            error = %e,
+                            "coordinator: failed to open request barrier"
+                        ),
+                    }
+                }
+            }
+            EventPayload::AgentResponse {
+                request_id,
+                success,
+                ..
+            } => {
+                let barrier = format!("request:{request_id}");
+                let agent = event.source.clone();
+                match self.barriers.arrive(&barrier, &agent) {
+                    BarrierResult::Released => {
+                        debug!(
+                            request_id = %request_id,
+                            agent = %agent,
+                            "coordinator: request barrier released"
+                        );
+                        self.ratify_outcome(
+                            &format!("request-outcome:{request_id}"),
+                            &agent,
+                            *success,
+                        );
+                    }
+                    BarrierResult::Waiting { arrived, expected } => debug!(
+                        request_id = %request_id,
+                        arrived,
+                        expected,
+                        "coordinator: request barrier waiting"
+                    ),
+                    BarrierResult::NotFound => {
+                        self.ratify_outcome(
+                            &format!("request-outcome:{request_id}"),
+                            &agent,
+                            *success,
+                        );
+                    }
+                    BarrierResult::TimedOut => debug!(
+                        request_id = %request_id,
+                        "coordinator: request barrier timed out"
+                    ),
+                }
+            }
+            EventPayload::TaskDelegation {
+                task_id, action, ..
+            } => {
+                let barrier = format!("task:{task_id}");
+                match action {
+                    TaskDelegationAction::Assigned => {
+                        let mut expected = HashSet::new();
+                        expected.insert(COORD_TASK_COMPLETION_TOKEN.to_string());
+                        match self.barriers.create_barrier(
+                            &barrier,
+                            expected,
+                            COORD_TASK_BARRIER_TIMEOUT,
+                        ) {
+                            Ok(()) => debug!(task_id = %task_id, "coordinator: opened task barrier"),
+                            Err(e) => warn!(
+                                task_id = %task_id,
+                                error = %e,
+                                "coordinator: failed to open task barrier"
+                            ),
+                        }
+                    }
+                    TaskDelegationAction::Completed | TaskDelegationAction::Failed => {
+                        let succeeded = matches!(action, TaskDelegationAction::Completed);
+                        match self.barriers.arrive(&barrier, COORD_TASK_COMPLETION_TOKEN) {
+                            BarrierResult::Released => {
+                                debug!(
+                                    task_id = %task_id,
+                                    agent = %event.source,
+                                    "coordinator: task barrier released"
+                                );
+                                self.ratify_outcome(
+                                    &format!("task-outcome:{task_id}"),
+                                    &event.source,
+                                    succeeded,
+                                );
+                            }
+                            BarrierResult::NotFound => {
+                                self.ratify_outcome(
+                                    &format!("task-outcome:{task_id}"),
+                                    &event.source,
+                                    succeeded,
+                                );
+                            }
+                            other => debug!(
+                                task_id = %task_id,
+                                ?other,
+                                "coordinator: task barrier state"
+                            ),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            EventPayload::Coordination { action, topic, .. } => {
+                trace!(
+                    ?action,
+                    %topic,
+                    source = %event.source,
+                    "coordinator observed coordination event"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn ratify_outcome(&self, session_id: &str, agent: &str, success: bool) {
+        let mut eligible = HashSet::new();
+        eligible.insert(agent.to_string());
+        self.voting.start_session(
+            session_id,
+            "delegation outcome ratification",
+            agent,
+            eligible,
+            COORD_OUTCOME_VOTE_TIMEOUT,
+            COORD_RATIFY_MAJORITY,
+        );
+        let value = if success { "success" } else { "failure" };
+        match self.voting.cast_vote(session_id, agent, value) {
+            VotingResult::Consensus { winning_value, .. } => info!(
+                session = %session_id,
+                agent = %agent,
+                outcome = %winning_value,
+                "coordinator: delegation outcome ratified"
+            ),
+            other => debug!(
+                session = %session_id,
+                ?other,
+                "coordinator: delegation outcome vote state"
+            ),
+        }
     }
 }
 
@@ -1215,6 +1530,10 @@ impl CoordinatorHandle {
 
     pub fn maintenance(&self) -> (usize, usize, usize) {
         self.inner.maintenance()
+    }
+
+    pub fn spawn_event_subscriber(&self) {
+        Coordinator::spawn_event_subscriber(Arc::clone(&self.inner));
     }
 }
 

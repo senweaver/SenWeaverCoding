@@ -459,7 +459,13 @@ impl Tool for NotebookEditTool {
                 }
             }
             EditMode::Insert => {
-                let ct = cell_type.expect("validated above").to_string();
+                let Some(ct) = cell_type.map(|s| s.to_string()) else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("cell_type is required for insert mode".into()),
+                    });
+                };
                 if cell_index > cells_view.len() {
                     return Ok(ToolResult {
                         success: false,

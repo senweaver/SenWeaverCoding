@@ -2531,12 +2531,23 @@ impl SlackChannel {
                     }
                 };
 
-                if let Some(envelope_id) = envelope.get("envelope_id").and_then(|v| v.as_str()) {
-                    let ack = serde_json::json!({ "envelope_id": envelope_id });
-                    if let Err(e) = write.send(WsMessage::Text(ack.to_string().into())).await {
-                        tracing::warn!("Slack Socket Mode: ack send failed: {e}");
-                        break;
-                    }
+                let envelope_id = envelope
+                    .get("envelope_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+
+                macro_rules! ack_envelope {
+                    () => {{
+                        if let Some(ref eid) = envelope_id {
+                            let ack = serde_json::json!({ "envelope_id": eid });
+                            if let Err(e) =
+                                write.send(WsMessage::Text(ack.to_string().into())).await
+                            {
+                                tracing::warn!("Slack Socket Mode: ack send failed: {e}");
+                                break;
+                            }
+                        }
+                    }};
                 }
 
                 let envelope_type = envelope
@@ -2544,20 +2555,27 @@ impl SlackChannel {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if envelope_type == "disconnect" {
+                    ack_envelope!();
                     tracing::warn!("Slack Socket Mode: received disconnect event");
                     break;
                 }
 
                 if envelope_type == "interactive" {
-                    if let Some(msg) = Self::parse_block_action_as_command(&envelope, bot_user_id) {
-                        if tx.send(msg).await.is_err() {
-                            return Ok(());
+                    match Self::parse_block_action_as_command(&envelope, bot_user_id) {
+                        Some(msg) => {
+                            match crate::channels::forward_channel_message("slack", &tx, msg) {
+                                crate::channels::ForwardOutcome::Delivered => ack_envelope!(),
+                                crate::channels::ForwardOutcome::Dropped => break,
+                                crate::channels::ForwardOutcome::Closed => return Ok(()),
+                            }
                         }
+                        None => ack_envelope!(),
                     }
                     continue;
                 }
 
                 if envelope_type != "events_api" {
+                    ack_envelope!();
                     continue;
                 }
 
@@ -2565,6 +2583,7 @@ impl SlackChannel {
                     .get("payload")
                     .and_then(|payload| payload.get("event"))
                 else {
+                    ack_envelope!();
                     continue;
                 };
                 let event_type = event
@@ -2591,14 +2610,17 @@ impl SlackChannel {
                             }
                         }
                     }
+                    ack_envelope!();
                     continue;
                 }
 
                 if event_type != "message" {
+                    ack_envelope!();
                     continue;
                 }
                 let subtype = event.get("subtype").and_then(|v| v.as_str());
                 if !Self::is_supported_message_subtype(subtype) {
+                    ack_envelope!();
                     continue;
                 }
 
@@ -2608,10 +2630,12 @@ impl SlackChannel {
                     .map(str::to_string)
                     .unwrap_or_default();
                 if channel_id.is_empty() {
+                    ack_envelope!();
                     continue;
                 }
                 if let Some(ref configured_channels) = scoped_channels {
                     if !configured_channels.iter().any(|id| id == &channel_id) {
+                        ack_envelope!();
                         continue;
                     }
                 }
@@ -2621,15 +2645,18 @@ impl SlackChannel {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if user.is_empty() || user == bot_user_id {
+                    ack_envelope!();
                     continue;
                 }
                 if !self.is_user_allowed(user) {
                     tracing::warn!("Slack: ignoring message from unauthorized user: {user}");
+                    ack_envelope!();
                     continue;
                 }
 
                 let ts = event.get("ts").and_then(|v| v.as_str()).unwrap_or_default();
                 if ts.is_empty() {
+                    ack_envelope!();
                     continue;
                 }
                 let last_ts = last_ts_by_channel
@@ -2637,6 +2664,7 @@ impl SlackChannel {
                     .map(String::as_str)
                     .unwrap_or_default();
                 if ts <= last_ts {
+                    ack_envelope!();
                     continue;
                 }
 
@@ -2653,10 +2681,10 @@ impl SlackChannel {
                     .build_incoming_content(event, require_mention, bot_user_id)
                     .await
                 else {
+                    ack_envelope!();
                     continue;
                 };
 
-                last_ts_by_channel.insert(channel_id.clone(), ts.to_string());
                 let sender = self.resolve_sender_identity(user).await;
 
                 let channel_msg = ChannelMessage {
@@ -2683,8 +2711,13 @@ impl SlackChannel {
                     map.insert(channel_id.clone(), tts.clone());
                 }
 
-                if tx.send(channel_msg).await.is_err() {
-                    return Ok(());
+                match crate::channels::forward_channel_message("slack", &tx, channel_msg) {
+                    crate::channels::ForwardOutcome::Delivered => {
+                        last_ts_by_channel.insert(channel_id.clone(), ts.to_string());
+                        ack_envelope!();
+                    }
+                    crate::channels::ForwardOutcome::Dropped => break,
+                    crate::channels::ForwardOutcome::Closed => return Ok(()),
                 }
             }
 
@@ -3612,7 +3645,6 @@ impl Channel for SlackChannel {
                             continue;
                         };
 
-                        last_ts_by_channel.insert(channel_id.clone(), ts.to_string());
                         let sender = self.resolve_sender_identity(user).await;
 
                         let channel_msg = ChannelMessage {
@@ -3634,8 +3666,12 @@ impl Channel for SlackChannel {
                             attachments: vec![],
                         };
 
-                        if tx.send(channel_msg).await.is_err() {
-                            return Ok(());
+                        match crate::channels::forward_channel_message("slack", &tx, channel_msg) {
+                            crate::channels::ForwardOutcome::Delivered => {
+                                last_ts_by_channel.insert(channel_id.clone(), ts.to_string());
+                            }
+                            crate::channels::ForwardOutcome::Dropped => break,
+                            crate::channels::ForwardOutcome::Closed => return Ok(()),
                         }
                     }
                 }
@@ -3690,13 +3726,6 @@ impl Channel for SlackChannel {
                         continue;
                     };
 
-                    if let Some(entry) = active_threads.get_mut(&thread_ts) {
-                        if reply_ts > entry.1.as_str() {
-                            entry.1 = reply_ts.to_string();
-                        }
-                        entry.2 = Instant::now();
-                    }
-
                     let sender = self.resolve_sender_identity(user).await;
 
                     let channel_msg = ChannelMessage {
@@ -3714,8 +3743,17 @@ impl Channel for SlackChannel {
                         attachments: vec![],
                     };
 
-                    if tx.send(channel_msg).await.is_err() {
-                        return Ok(());
+                    match crate::channels::forward_channel_message("slack", &tx, channel_msg) {
+                        crate::channels::ForwardOutcome::Delivered => {
+                            if let Some(entry) = active_threads.get_mut(&thread_ts) {
+                                if reply_ts > entry.1.as_str() {
+                                    entry.1 = reply_ts.to_string();
+                                }
+                                entry.2 = Instant::now();
+                            }
+                        }
+                        crate::channels::ForwardOutcome::Dropped => break,
+                        crate::channels::ForwardOutcome::Closed => return Ok(()),
                     }
                 }
             }

@@ -96,7 +96,10 @@ impl DiagnosticsTool {
         };
 
         let mut command = crate::util::hidden_async_command(cmd);
-        command.args(&args).current_dir(&workspace);
+        command
+            .args(&args)
+            .current_dir(&workspace)
+            .kill_on_drop(true);
 
         if let Some(file_path) = path {
 

@@ -94,3 +94,11 @@ pub fn thinking_style() -> Style {
 }
 
 pub const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒", "◐", "◓", "◑", "◒", "◐", "◓"];
+
+pub fn spinner_frame_now() -> &'static str {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    SPINNER_FRAMES[((millis / 100) as usize) % SPINNER_FRAMES.len()]
+}

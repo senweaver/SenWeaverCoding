@@ -5,9 +5,42 @@ use super::super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-pub type PlanModeFlag = Arc<RwLock<bool>>;
+fn plan_mode_session_key() -> String {
+    crate::session::current_session_context()
+        .map(|c| c.session_id)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+#[derive(Clone, Default)]
+pub struct PlanModeFlag {
+    inner: Arc<RwLock<HashMap<String, bool>>>,
+}
+
+impl PlanModeFlag {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, active: bool) {
+        let key = plan_mode_session_key();
+        if active {
+            self.inner.write().insert(key, true);
+        } else {
+            self.inner.write().remove(&key);
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.inner
+            .read()
+            .get(&plan_mode_session_key())
+            .copied()
+            .unwrap_or(false)
+    }
+}
 
 pub struct EnterPlanModeTool {
     flag: PlanModeFlag,
@@ -38,7 +71,7 @@ impl Tool for EnterPlanModeTool {
     }
 
     async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        *self.flag.write() = true;
+        self.flag.set(true);
         Ok(ToolResult {
             success: true,
             output: "Entered plan mode. Only read-only tools are now available.".to_string(),

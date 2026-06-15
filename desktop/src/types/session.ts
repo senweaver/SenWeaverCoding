@@ -27,6 +27,11 @@ export type MessageEntry = {
   isSidechain?: boolean
 
   tombstoned?: boolean
+
+  designRef?: string
+  designRefName?: string
+  designRefElement?: string
+  designRefElementLabel?: string
 }
 
 export type PendingRewindSummary = {

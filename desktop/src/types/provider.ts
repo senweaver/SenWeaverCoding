@@ -19,6 +19,11 @@ export type CustomHttpHeader = {
   enabled: boolean
 }
 
+export type ModelPricingEntry = {
+  input: number
+  output: number
+}
+
 export type SavedProvider = {
   id: string
   presetId: string
@@ -31,6 +36,8 @@ export type SavedProvider = {
 
   modelEnabled?: Record<string, boolean>
   modelContextWindows?: Record<string, number>
+  modelTypes?: Record<string, string[]>
+  modelPricing?: Record<string, ModelPricingEntry>
   customHeaders?: CustomHttpHeader[]
   notes?: string
 }
@@ -45,6 +52,8 @@ export type CreateProviderInput = {
   models: string[]
   modelEnabled?: Record<string, boolean>
   modelContextWindows?: Record<string, number>
+  modelTypes?: Record<string, string[]>
+  modelPricing?: Record<string, ModelPricingEntry>
   customHeaders?: CustomHttpHeader[]
   notes?: string
 }
@@ -57,6 +66,8 @@ export type UpdateProviderInput = {
   models?: string[]
   modelEnabled?: Record<string, boolean>
   modelContextWindows?: Record<string, number>
+  modelTypes?: Record<string, string[]>
+  modelPricing?: Record<string, ModelPricingEntry>
   customHeaders?: CustomHttpHeader[]
   notes?: string
 }

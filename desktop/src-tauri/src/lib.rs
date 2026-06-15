@@ -5,6 +5,7 @@
 mod bootstrap_diag;
 mod browser_dock;
 mod fetch_worker;
+mod gateway_bridge;
 mod process_lifetime;
 mod terminal;
 
@@ -36,7 +37,174 @@ const HEALTH_PROBE_HEADER_VALUE: &str = "1";
 const BACKEND_STATE_EVENT: &str = "backend://state-change";
 const AGENT_WORKER_STACK_SIZE: usize = 32 * 1024 * 1024;
 
-fn adapters_restart_client() -> &'static reqwest::Client {
+static GATEWAY_CHILD_PID: Mutex<Option<u32>> = Mutex::new(None);
+
+pub(crate) fn warn_emit_failure(
+    counter: &std::sync::atomic::AtomicU64,
+    site: &str,
+    err: &dyn std::fmt::Display,
+) {
+    let occurrence = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if occurrence == 1 || occurrence % 100 == 0 {
+        tracing::warn!("[sen-desktop] {site} emit failed (occurrence {occurrence}): {err}");
+    }
+}
+
+pub(crate) fn kill_gateway_child() {
+    let pid_opt = GATEWAY_CHILD_PID.lock().take();
+    let Some(pid) = pid_opt else { return };
+    tracing::info!("[sen-desktop] terminating isolated gateway child pid={pid}");
+    #[cfg(windows)]
+    {
+        let _ = senweavercoding::util::hidden_sync_command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+fn locate_sen_binary() -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) { "sen.exe" } else { "sen" };
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let candidate = dir.join(exe_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn generate_bridge_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = u128::from(std::process::id());
+    format!("{:x}{:x}", nanos ^ (pid << 64), pid)
+}
+
+fn try_start_isolated_gateway(
+    handle: &AppHandle,
+    server_state: &ServerState,
+    generation: u64,
+    host: &str,
+    port: u16,
+    url: &str,
+    gateway_exit: &GatewayExitChannel,
+) -> Option<Result<String, String>> {
+    let sen_path = match locate_sen_binary() {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                "[sen-desktop] gateway.isolated=true but the `sen` binary was not found next to \
+                 the desktop executable; falling back to the in-process gateway"
+            );
+            return None;
+        }
+    };
+
+    let token = generate_bridge_token();
+    let log_path = sen_log_dir().map(|d| d.join("gateway-child.log"));
+    let mut cmd = senweavercoding::util::hidden_sync_command(sen_path.as_os_str());
+    cmd.args(["gateway", "start", "-p", &port.to_string(), "--host", host])
+        .env(
+            senweavercoding::gateway::desktop_bridge::BRIDGE_MODE_ENV,
+            "1",
+        )
+        .env(
+            senweavercoding::gateway::desktop_bridge::BRIDGE_TOKEN_ENV,
+            &token,
+        );
+    if let Some(ref path) = log_path {
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(out_file) => {
+                if let Ok(err_file) = out_file.try_clone() {
+                    cmd.stdout(out_file).stderr(err_file);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "[sen-desktop] could not open gateway child log file {}: {err}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                "[sen-desktop] failed to spawn isolated gateway ({err}); falling back to the \
+                 in-process gateway"
+            );
+            return None;
+        }
+    };
+    let pid = child.id();
+    *GATEWAY_CHILD_PID.lock() = Some(pid);
+    tracing::info!(
+        "[sen-desktop] isolated gateway child spawned pid={pid} addr={host}:{port} bin={}",
+        sen_path.display()
+    );
+
+    let exit_for_watch = Arc::clone(gateway_exit);
+    let _ = thread::Builder::new()
+        .name("sen-gateway-child-watch".into())
+        .spawn(move || {
+            let status = child.wait();
+            let mut slot = GATEWAY_CHILD_PID.lock();
+            if *slot == Some(pid) {
+                *slot = None;
+            }
+            drop(slot);
+            record_gateway_exit(
+                &exit_for_watch,
+                format!("isolated gateway child exited: {status:?}"),
+            );
+        });
+
+    let result = match wait_for_server_until_ready(
+        handle,
+        server_state,
+        generation,
+        host,
+        port,
+        gateway_exit,
+    ) {
+        Ok(()) => {
+            gateway_bridge::spawn_bridge_client(
+                url.to_string(),
+                token,
+                gateway_bridge::next_bridge_generation(),
+            );
+            Ok(url.to_string())
+        }
+        Err(err) => {
+            kill_gateway_child();
+            if let Some(early_err) = gateway_exit.lock().clone() {
+                Err(format!("{err}; gateway exit detail: {early_err}"))
+            } else {
+                Err(err)
+            }
+        }
+    };
+    Some(result)
+}
+
+pub(crate) fn current_gateway_url(app: &AppHandle) -> Option<String> {
+    app.try_state::<ServerState>()
+        .and_then(|s| s.0.lock().url.clone())
+}
+
+pub(crate) fn adapters_restart_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -340,6 +508,8 @@ struct ServerStatus {
     last_bootstrap_started_at: Option<Instant>,
 
     last_error: Option<String>,
+
+    auto_restart_attempts: u32,
 }
 
 #[derive(Clone, Serialize)]
@@ -426,7 +596,7 @@ async fn restart_adapters_sidecar(state: State<'_, ServerState>) -> Result<(), S
 }
 
 #[tauri::command]
-fn restart_embedded_gateway(
+async fn restart_embedded_gateway(
     handle: AppHandle,
     state: State<'_, ServerState>,
     force: Option<bool>,
@@ -441,9 +611,7 @@ fn restart_embedded_gateway(
                 );
             }
 
-            guard.bootstrap_generation = guard.bootstrap_generation.saturating_add(1);
             guard.bootstrap_in_progress = false;
-            guard.url = None;
             guard.last_error = Some(
                 "previous bootstrap forcibly invalidated by restart request".to_string(),
             );
@@ -460,8 +628,58 @@ fn restart_embedded_gateway(
                 }
             }
         }
+        guard.bootstrap_generation = guard.bootstrap_generation.saturating_add(1);
+        guard.auto_restart_attempts = 0;
+        guard.url = None;
     }
+    emit_backend_state(&handle, state.inner());
+    stop_running_gateway_instance().await;
     spawn_gateway_bootstrap_thread(handle, state.inner().clone())
+}
+
+async fn stop_running_gateway_instance() {
+    if senweavercoding::gateway::request_embedded_shutdown() {
+        tracing::info!(
+            "[sen-desktop] restart: shutdown requested for the embedded gateway; waiting for it to stop"
+        );
+        let stopped =
+            senweavercoding::gateway::wait_embedded_stopped(Duration::from_secs(10)).await;
+        if stopped {
+            tracing::info!("[sen-desktop] restart: embedded gateway stopped cleanly");
+        } else {
+            tracing::warn!(
+                "[sen-desktop] restart: embedded gateway did not stop within 10s; continuing restart anyway"
+            );
+        }
+    }
+    if let Err(err) = tauri::async_runtime::spawn_blocking(kill_gateway_child).await {
+        tracing::warn!("[sen-desktop] restart: gateway child kill task failed: {err}");
+    }
+}
+
+fn stop_running_gateway_instance_blocking() {
+    if senweavercoding::gateway::request_embedded_shutdown() {
+        tracing::info!(
+            "[sen-desktop] auto-restart: shutdown requested for the embedded gateway; waiting for it to stop"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stopped = false;
+        while Instant::now() < deadline {
+            if !senweavercoding::gateway::is_running() {
+                stopped = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if stopped {
+            tracing::info!("[sen-desktop] auto-restart: embedded gateway stopped cleanly");
+        } else {
+            tracing::warn!(
+                "[sen-desktop] auto-restart: embedded gateway did not stop within 10s; continuing restart anyway"
+            );
+        }
+    }
+    kill_gateway_child();
 }
 
 #[tauri::command]
@@ -509,6 +727,7 @@ fn sen_config_dir() -> Option<PathBuf> {
 async fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         process_lifetime::run_full_shutdown(&handle, Duration::from_secs(8));
+        kill_gateway_child();
     })
     .await
     .map_err(|err| format!("update shutdown task failed: {err}"))?;
@@ -565,6 +784,88 @@ fn schedule_main_window_show_fallback(window: tauri::WebviewWindow) {
             show_main_window_now(&win_for_closure);
         });
     });
+}
+
+#[derive(serde::Deserialize)]
+struct CuratorDiagramInput {
+    code: String,
+    png_base64: String,
+}
+
+fn strip_extended_length_prefix(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    raw.to_string()
+}
+
+#[tauri::command]
+async fn curator_render_docx_with_diagrams(
+    final_md_path: String,
+    template: String,
+    diagrams: Vec<CuratorDiagramInput>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        curator_render_docx_with_diagrams_blocking(final_md_path, template, diagrams)
+    })
+    .await
+    .map_err(|err| format!("docx render task failed: {err}"))?
+}
+
+fn curator_render_docx_with_diagrams_blocking(
+    final_md_path: String,
+    template: String,
+    diagrams: Vec<CuratorDiagramInput>,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    use senweavercoding::tools::curator::docx::render_docx_with_diagrams;
+    use senweavercoding::tools::curator::CuratorTemplateKind;
+
+    let md_path = PathBuf::from(&final_md_path);
+    let markdown = std::fs::read_to_string(&md_path)
+        .map_err(|e| format!("failed to read final.md at {}: {e}", md_path.display()))?;
+    let parent = md_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "final.md has no parent directory".to_string())?;
+
+    let assets_dir = parent.join(".curator-assets");
+    std::fs::create_dir_all(&assets_dir)
+        .map_err(|e| format!("failed to create assets dir: {e}"))?;
+
+    let mut decoded: Vec<(String, PathBuf)> = Vec::with_capacity(diagrams.len());
+    for (idx, diagram) in diagrams.iter().enumerate() {
+        let raw = diagram
+            .png_base64
+            .split_once("base64,")
+            .map(|(_, rest)| rest)
+            .unwrap_or(diagram.png_base64.as_str())
+            .trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .map_err(|e| format!("failed to decode diagram {idx} png: {e}"))?;
+        let png_path = assets_dir.join(format!("mermaid-{idx}.png"));
+        std::fs::write(&png_path, &bytes)
+            .map_err(|e| format!("failed to write diagram {idx} png: {e}"))?;
+        decoded.push((diagram.code.clone(), png_path));
+    }
+
+    if decoded.is_empty() {
+        return Err("no usable diagrams were provided".to_string());
+    }
+
+    let docx_path = parent.join("final.docx");
+    let kind = CuratorTemplateKind::from_str_loose(&template);
+    render_docx_with_diagrams(&markdown, kind, &docx_path, &decoded)
+        .map_err(|e| format!("docx render failed: {e}"))?;
+
+    Ok(strip_extended_length_prefix(&docx_path.to_string_lossy()))
 }
 
 #[tauri::command]
@@ -676,6 +977,7 @@ pub fn run() {
             prepare_for_update_install,
             signal_frontend_ready,
             reveal_in_explorer,
+            curator_render_docx_with_diagrams,
             terminal::terminal_spawn,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -708,8 +1010,6 @@ pub fn run() {
             browser_dock::browser_dock_clear_test_target,
             browser_dock::browser_dock_get_test_target,
             browser_dock::browser_dock_release_agent_tab_for_session,
-            browser_dock::browser_dock_bind_tab_to_session,
-            browser_dock::browser_dock_unbind_tab_from_session,
             browser_dock::browser_dock_present_session,
             browser_dock::browser_dock_set_foreground_session,
         ]);
@@ -810,10 +1110,12 @@ pub fn run() {
         RunEvent::ExitRequested { .. } => {
 
             process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(8));
+            kill_gateway_child();
         }
         RunEvent::Exit => {
 
             process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(2));
+            kill_gateway_child();
         }
         _ => {}
     });
@@ -868,13 +1170,13 @@ fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handl
         }
     }
     match start_embedded_gateway_once(handle.clone(), &server_state, generation) {
-        Ok(url) => {
+        Ok(launch) => {
             {
                 let mut g = server_state.0.lock();
                 if g.bootstrap_generation != generation {
                     return;
                 }
-                g.url = Some(url);
+                g.url = Some(launch.url.clone());
                 g.bootstrap_in_progress = false;
             }
             tracing::info!(
@@ -882,6 +1184,13 @@ fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handl
                 "[sen-desktop] embedded gateway is HTTP-ready"
             );
             emit_backend_state(&handle, &server_state);
+            spawn_gateway_crash_watcher(
+                handle,
+                server_state,
+                generation,
+                launch.exit_channel,
+                launch.in_process,
+            );
         }
         Err(err) => {
             let combined = match bootstrap_diag::last_panic_message() {
@@ -959,10 +1268,126 @@ fn probe_health_once(addr: SocketAddr, timeout_ms: u64) -> bool {
 
 type GatewayExitChannel = Arc<Mutex<Option<String>>>;
 
+struct GatewayLaunch {
+    url: String,
+    exit_channel: GatewayExitChannel,
+    in_process: bool,
+}
+
 fn record_gateway_exit(channel: &GatewayExitChannel, err: String) {
     let mut slot = channel.lock();
     if slot.is_none() {
         *slot = Some(err);
+    }
+}
+
+const GATEWAY_AUTO_RESTART_MAX_ATTEMPTS: u32 = 3;
+const GATEWAY_STABLE_UPTIME_RESET: Duration = Duration::from_secs(600);
+const GATEWAY_CRASH_POLL_INTERVAL_MS: u64 = 500;
+
+fn spawn_gateway_crash_watcher(
+    handle: AppHandle,
+    server_state: ServerState,
+    generation: u64,
+    exit_channel: GatewayExitChannel,
+    in_process: bool,
+) {
+    let spawn_result = thread::Builder::new()
+        .name("sen-gateway-watch".into())
+        .spawn(move || {
+            let ready_at = Instant::now();
+            loop {
+                thread::sleep(Duration::from_millis(GATEWAY_CRASH_POLL_INTERVAL_MS));
+                if process_lifetime::is_shutting_down() {
+                    return;
+                }
+                {
+                    let g = server_state.0.lock();
+                    if g.bootstrap_generation != generation {
+                        return;
+                    }
+                }
+                let mut exit_reason = exit_channel.lock().clone();
+                if exit_reason.is_none()
+                    && in_process
+                    && senweavercoding::gateway::is_fully_stopped()
+                {
+                    exit_reason =
+                        Some("embedded gateway stopped without an exit report".to_string());
+                }
+                let Some(reason) = exit_reason else {
+                    continue;
+                };
+                handle_gateway_exit_after_ready(
+                    handle,
+                    server_state,
+                    generation,
+                    reason,
+                    ready_at.elapsed(),
+                );
+                return;
+            }
+        });
+    if let Err(err) = spawn_result {
+        tracing::warn!("[sen-desktop] could not spawn gateway crash watcher: {err}");
+    }
+}
+
+fn handle_gateway_exit_after_ready(
+    handle: AppHandle,
+    server_state: ServerState,
+    generation: u64,
+    reason: String,
+    uptime: Duration,
+) {
+    tracing::error!(
+        uptime_ms = uptime.as_millis() as u64,
+        "[sen-desktop] gateway exited after becoming ready: {reason}"
+    );
+    let attempt = {
+        let mut g = server_state.0.lock();
+        if g.bootstrap_generation != generation {
+            return;
+        }
+        if uptime >= GATEWAY_STABLE_UPTIME_RESET {
+            g.auto_restart_attempts = 0;
+        }
+        g.url = None;
+        g.bootstrap_in_progress = false;
+        g.last_error = Some(format!("gateway exited unexpectedly: {reason}"));
+        g.auto_restart_attempts = g.auto_restart_attempts.saturating_add(1);
+        g.auto_restart_attempts
+    };
+    emit_backend_state(&handle, &server_state);
+    if attempt > GATEWAY_AUTO_RESTART_MAX_ATTEMPTS {
+        tracing::error!(
+            "[sen-desktop] gateway crashed more than {GATEWAY_AUTO_RESTART_MAX_ATTEMPTS} times; \
+             staying in the failed state until the user restarts manually"
+        );
+        return;
+    }
+    let delay = match attempt {
+        1 => Duration::from_secs(2),
+        2 => Duration::from_secs(5),
+        _ => Duration::from_secs(15),
+    };
+    tracing::warn!(
+        "[sen-desktop] auto-restarting gateway (attempt {attempt}/{GATEWAY_AUTO_RESTART_MAX_ATTEMPTS}) in {}s",
+        delay.as_secs()
+    );
+    thread::sleep(delay);
+    if process_lifetime::is_shutting_down() {
+        return;
+    }
+    {
+        let g = server_state.0.lock();
+        if g.bootstrap_generation != generation {
+            return;
+        }
+    }
+    stop_running_gateway_instance_blocking();
+    if let Err(err) = spawn_gateway_bootstrap_thread(handle, server_state) {
+        tracing::error!("[sen-desktop] gateway auto-restart could not spawn bootstrap: {err}");
     }
 }
 
@@ -1048,29 +1473,132 @@ fn wait_for_server_until_ready(
     }
 }
 
+fn is_port_bind_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("bind")
+        || lower.contains("address already in use")
+        || lower.contains("addrinuse")
+        || lower.contains("10048")
+        || lower.contains("os error 98")
+}
+
+fn start_isolated_gateway_with_port_retry(
+    handle: &AppHandle,
+    server_state: &ServerState,
+    generation: u64,
+    host: &'static str,
+    first_port: u16,
+) -> Result<Option<GatewayLaunch>, String> {
+    const ISOLATED_PORT_ATTEMPTS: usize = 3;
+    let mut port = first_port;
+    for attempt in 0..ISOLATED_PORT_ATTEMPTS {
+        let url = format!("http://{host}:{port}");
+        let gateway_exit: GatewayExitChannel = Arc::new(Mutex::new(None));
+        match try_start_isolated_gateway(
+            handle,
+            server_state,
+            generation,
+            host,
+            port,
+            &url,
+            &gateway_exit,
+        ) {
+            Some(Ok(ready_url)) => {
+                return Ok(Some(GatewayLaunch {
+                    url: ready_url,
+                    exit_channel: gateway_exit,
+                    in_process: false,
+                }));
+            }
+            Some(Err(err)) => {
+                if attempt + 1 < ISOLATED_PORT_ATTEMPTS && is_port_bind_error(&err) {
+                    tracing::warn!(
+                        "[sen-desktop] isolated gateway attempt {} failed with a bind-class error on {host}:{port} ({err}); retrying on a fresh port",
+                        attempt + 1
+                    );
+                    let (next_port, next_listener) = reserve_local_port().map_err(|e| {
+                        format!("re-reserve local port for isolated gateway retry: {e}")
+                    })?;
+                    drop(next_listener);
+                    port = next_port;
+                    continue;
+                }
+                return Err(err);
+            }
+            None => return Ok(None),
+        }
+    }
+    Err("isolated gateway could not bind a local port after retries".to_string())
+}
+
 fn start_embedded_gateway_once(
     handle: AppHandle,
     server_state: &ServerState,
     generation: u64,
-) -> Result<String, String> {
+) -> Result<GatewayLaunch, String> {
     let host = "127.0.0.1";
     let (port, std_listener) = reserve_local_port()
         .map_err(|err| format!("reserve local port for embedded gateway: {err}"))?;
     std_listener
         .set_nonblocking(true)
         .map_err(|err| format!("listen socket non-blocking: {err}"))?;
-    let url = format!("http://{host}:{port}");
 
+    kill_gateway_child();
+    let _ = gateway_bridge::next_bridge_generation();
+
+    if senweavercoding::config::sniff_gateway_isolated() {
+        drop(std_listener);
+        match start_isolated_gateway_with_port_retry(
+            &handle,
+            server_state,
+            generation,
+            host,
+            port,
+        )? {
+            Some(launch) => return Ok(launch),
+            None => {
+                let (port_retry, listener_retry) = reserve_local_port()
+                    .map_err(|err| format!("re-reserve local port for embedded gateway: {err}"))?;
+                listener_retry
+                    .set_nonblocking(true)
+                    .map_err(|err| format!("listen socket non-blocking: {err}"))?;
+                return start_in_process_gateway(
+                    handle,
+                    server_state,
+                    generation,
+                    host,
+                    port_retry,
+                    listener_retry,
+                );
+            }
+        }
+    }
+
+    start_in_process_gateway(handle, server_state, generation, host, port, std_listener)
+}
+
+fn start_in_process_gateway(
+    handle: AppHandle,
+    server_state: &ServerState,
+    generation: u64,
+    host: &'static str,
+    port: u16,
+    std_listener: TcpListener,
+) -> Result<GatewayLaunch, String> {
     let gateway_exit: GatewayExitChannel = Arc::new(Mutex::new(None));
     let exit_for_thread = Arc::clone(&gateway_exit);
-
+    let url = format!("http://{host}:{port}");
     let spawn_result = thread::Builder::new()
         .name("sen-gateway".into())
         .spawn(move || {
             let exit_for_panic = Arc::clone(&exit_for_thread);
             let work = AssertUnwindSafe(|| {
+                let gateway_workers = std::thread::available_parallelism()
+                    .map(|n| n.get().saturating_sub(2).max(2))
+                    .unwrap_or(2);
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
+                    .worker_threads(gateway_workers)
                     .thread_stack_size(AGENT_WORKER_STACK_SIZE)
                     .build()
                 {
@@ -1156,7 +1684,11 @@ fn start_embedded_gateway_once(
         port,
         &gateway_exit,
     ) {
-        Ok(()) => Ok(url),
+        Ok(()) => Ok(GatewayLaunch {
+            url,
+            exit_channel: gateway_exit,
+            in_process: true,
+        }),
         Err(err) => {
             if let Some(early_err) = gateway_exit.lock().clone() {
                 Err(format!("{err}; gateway exit detail: {early_err}"))

@@ -19,14 +19,20 @@ impl BoundedSubscriber {
 
         let forwarder =
             crate::runtime::spawn_supervised("event_bus.backpressure.forwarder", async move {
+                let mut dropped: u64 = 0;
                 loop {
                     match broadcast_rx.recv().await {
-                        Ok(event) => {
-
-                            if tx.send(event).await.is_err() {
-                                break;
+                        Ok(event) => match tx.try_send(event) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                dropped += 1;
+                                tracing::warn!(
+                                    dropped_total = dropped,
+                                    "bounded subscriber queue full  -  dropping event to keep broadcast reader alive"
+                                );
                             }
-                        }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        },
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(
                                 skipped,

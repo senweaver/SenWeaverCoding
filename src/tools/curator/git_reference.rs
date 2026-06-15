@@ -99,8 +99,7 @@ impl Tool for CuratorGitReferenceTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let active = self
             .state
-            .read()
-            .clone()
+            .get()
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "curator_git_reference requires an active Curator session (call enter_curator_mode first)."
@@ -531,7 +530,8 @@ async fn ensure_clone(
     let mut cmd: Command = crate::util::hidden_async_command("git");
     cmd.args(&args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never");
+        .env("GCM_INTERACTIVE", "Never")
+        .kill_on_drop(true);
 
     let started = std::time::Instant::now();
     let output = match tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await {
@@ -560,7 +560,8 @@ async fn ensure_clone(
 async fn resolve_commit_sha(target_dir: &Path) -> anyhow::Result<String> {
     let mut cmd: Command = crate::util::hidden_async_command("git");
     cmd.args(["rev-parse", "HEAD"])
-        .current_dir(target_dir);
+        .current_dir(target_dir)
+        .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(15), cmd.output())
         .await
         .map_err(|_| anyhow::anyhow!("git rev-parse timed out"))?

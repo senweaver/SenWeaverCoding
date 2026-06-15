@@ -51,7 +51,7 @@ impl GitOperationsTool {
         )
     }
 
-    fn resolve_working_dir(&self, path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    async fn resolve_working_dir(&self, path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
         let workspace_dir = self.security.workspace_dir();
         let base = match path {
             Some(p) if !p.is_empty() => {
@@ -60,8 +60,9 @@ impl GitOperationsTool {
                 } else {
                     workspace_dir.join(p)
                 };
-                let resolved = candidate
-                    .canonicalize()
+                let resolved = tokio::task::spawn_blocking(move || candidate.canonicalize())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("path resolution task failed: {e}"))?
                     .map_err(|e| anyhow::anyhow!("Cannot resolve path '{}': {}", p, e))?;
                 if !self.security.is_resolved_path_allowed(&resolved) {
                     anyhow::bail!("Path '{}' resolves outside the workspace directory", p);
@@ -78,11 +79,20 @@ impl GitOperationsTool {
         args: &[&str],
         working_dir: &std::path::Path,
     ) -> anyhow::Result<String> {
-        let output = crate::util::hidden_async_command("git")
-            .args(args)
-            .current_dir(working_dir)
-            .output()
-            .await?;
+        let mut cmd = crate::util::hidden_async_command("git");
+        cmd.args(args).current_dir(working_dir).kill_on_drop(true);
+        let timeout_secs = crate::services::try_get_services()
+            .and_then(|s| s.config().pacing.tool_timeout_secs)
+            .unwrap_or(120);
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Git command timed out after {timeout_secs}s: git {}",
+                        args.join(" ")
+                    )
+                })??;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -97,9 +107,19 @@ impl GitOperationsTool {
         _args: serde_json::Value,
         working_dir: &std::path::Path,
     ) -> anyhow::Result<ToolResult> {
-        let output = self
+        let output = match self
             .run_git_command(&["status", "--porcelain=2", "--branch"], working_dir)
-            .await?;
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Status failed: {e}")),
+                });
+            }
+        };
 
         let mut result = serde_json::Map::new();
         let mut branch = String::new();
@@ -166,7 +186,16 @@ impl GitOperationsTool {
         git_args.push("--");
         git_args.push(files);
 
-        let output = self.run_git_command(&git_args, working_dir).await?;
+        let output = match self.run_git_command(&git_args, working_dir).await {
+            Ok(out) => out,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Diff failed: {e}")),
+                });
+            }
+        };
 
         let mut result = serde_json::Map::new();
         let mut hunks = Vec::new();
@@ -236,7 +265,7 @@ impl GitOperationsTool {
         let limit = usize::try_from(limit_raw).unwrap_or(usize::MAX).min(1000);
         let limit_str = limit.to_string();
 
-        let output = self
+        let output = match self
             .run_git_command(
                 &[
                     "log",
@@ -246,7 +275,17 @@ impl GitOperationsTool {
                 ],
                 working_dir,
             )
-            .await?;
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Log failed: {e}")),
+                });
+            }
+        };
 
         let mut commits = Vec::new();
 
@@ -276,12 +315,22 @@ impl GitOperationsTool {
         _args: serde_json::Value,
         working_dir: &std::path::Path,
     ) -> anyhow::Result<ToolResult> {
-        let output = self
+        let output = match self
             .run_git_command(
                 &["branch", "--format=%(refname:short)|%(HEAD)"],
                 working_dir,
             )
-            .await?;
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Branch failed: {e}")),
+                });
+            }
+        };
 
         let mut branches = Vec::new();
         let mut current = String::new();
@@ -548,7 +597,7 @@ impl Tool for GitOperationsTool {
         };
 
         let path = args.get("path").and_then(|v| v.as_str());
-        let working_dir = match self.resolve_working_dir(path) {
+        let working_dir = match self.resolve_working_dir(path).await {
             Ok(d) => d,
             Err(e) => {
                 return Ok(ToolResult {

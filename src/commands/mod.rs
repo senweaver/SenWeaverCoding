@@ -16,6 +16,7 @@ pub mod config_cmd;
 pub mod context;
 pub mod cost;
 pub mod diff;
+pub mod dispatch;
 pub mod doctor_cmd;
 pub mod effort;
 pub mod export;

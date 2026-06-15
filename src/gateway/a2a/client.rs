@@ -20,20 +20,20 @@ pub struct A2aClient {
 
 impl A2aClient {
 
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, A2aClientError> {
         Self::with_timeout(Duration::from_secs(30))
     }
 
-    pub fn with_timeout(timeout: Duration) -> Self {
+    pub fn with_timeout(timeout: Duration) -> Result<Self, A2aClientError> {
         let http = Client::builder()
             .timeout(timeout)
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(|e| A2aClientError::ClientBuild { source: e })?;
 
-        Self {
+        Ok(Self {
             http,
             default_timeout: timeout,
-        }
+        })
     }
 
     pub async fn discover_agent(&self, url: &str) -> Result<AgentCard, A2aClientError> {
@@ -324,14 +324,11 @@ impl A2aClient {
     }
 }
 
-impl Default for A2aClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum A2aClientError {
+    #[error("Failed to build A2A HTTP client: {source}")]
+    ClientBuild { source: reqwest::Error },
+
     #[error("Request failed to {url}: {source}")]
     RequestFailed { url: String, source: reqwest::Error },
 
@@ -386,6 +383,7 @@ impl crate::error::ErrorClassification for A2aClientError {
     fn category(&self) -> crate::error::ErrorCategory {
         use crate::error::ErrorCategory;
         match self {
+            A2aClientError::ClientBuild { .. } => ErrorCategory::Internal,
             A2aClientError::RequestFailed { source, .. } => {
                 if source.is_timeout() {
                     ErrorCategory::Timeout

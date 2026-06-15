@@ -639,7 +639,8 @@ pub(crate) fn map_tool_name_alias(tool_name: &str) -> &str {
 
         "fileread" | "file_read" | "readfile" | "read_file" | "file" => "file_read",
         "filewrite" | "file_write" | "writefile" | "write_file" => "file_write",
-        "filelist" | "file_list" | "listfiles" | "list_files" => "file_list",
+        "filelist" | "file_list" | "listfiles" | "list_files" | "dir_list" | "listdir"
+        | "list_dir" => "dir_list",
 
         "memoryrecall" | "memory_recall" | "recall" | "memrecall" | "memory_search" => {
             "memory_recall"
@@ -716,7 +717,8 @@ pub(crate) fn default_param_for_tool(tool: &str) -> &'static str {
 
         "file_read" | "fileread" | "readfile" | "read_file" | "file" | "file_write"
         | "filewrite" | "writefile" | "write_file" | "file_edit" | "fileedit" | "editfile"
-        | "edit_file" | "file_list" | "filelist" | "listfiles" | "list_files" => "path",
+        | "edit_file" | "file_list" | "filelist" | "listfiles" | "list_files" | "dir_list"
+        | "listdir" | "list_dir" => "path",
 
         "memory_recall" | "memoryrecall" | "recall" | "memrecall" | "memory_forget"
         | "memoryforget" | "forget" | "memforget" | "web_search_tool" | "web_search"

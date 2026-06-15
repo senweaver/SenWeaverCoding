@@ -638,44 +638,80 @@ impl Tool for IncrementalOptimizeTool {
                     let shell = if cfg!(windows) { "cmd" } else { "sh" };
                     let shell_arg = if cfg!(windows) { "/C" } else { "-c" };
 
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
-                        crate::util::hidden_async_command(shell)
-                            .args([shell_arg, cmd])
-                            .current_dir(self.project_workspace())
-                            .env_clear()
-                            .envs(std::env::vars().filter(|(k, _)| {
-                                matches!(
-                                    k.as_str(),
-                                    "PATH"
-                                        | "HOME"
-                                        | "USER"
-                                        | "LANG"
-                                        | "TERM"
-                                        | "USERPROFILE"
-                                        | "SYSTEMROOT"
-                                        | "COMSPEC"
-                                        | "TEMP"
-                                        | "TMP"
-                                        | "CARGO_HOME"
-                                        | "RUSTUP_HOME"
-                                )
-                            }))
-                            .output(),
-                    )
-                    .await;
+                    let mut verify_cmd = crate::util::hidden_async_command(shell);
+                    verify_cmd
+                        .args([shell_arg, cmd])
+                        .current_dir(self.project_workspace())
+                        .env_clear()
+                        .envs(std::env::vars().filter(|(k, _)| {
+                            matches!(
+                                k.as_str(),
+                                "PATH"
+                                    | "HOME"
+                                    | "USER"
+                                    | "LANG"
+                                    | "TERM"
+                                    | "USERPROFILE"
+                                    | "SYSTEMROOT"
+                                    | "COMSPEC"
+                                    | "TEMP"
+                                    | "TMP"
+                                    | "CARGO_HOME"
+                                    | "RUSTUP_HOME"
+                            )
+                        }))
+                        .kill_on_drop(true);
 
-                    let result = match result {
-                        Ok(r) => r,
-                        Err(_) => {
-                            return Ok(ToolResult {
-                                success: false,
-                                output: String::new(),
-                                error: Some(format!(
-                                    "Verification command '{cmd}' timed out after 120 seconds"
-                                )),
+                    verify_cmd
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped());
+
+                    let result = match verify_cmd.spawn() {
+                        Ok(mut child) => {
+                            let stdout_pipe = child.stdout.take();
+                            let stderr_pipe = child.stderr.take();
+                            let stdout_task = tokio::spawn(async move {
+                                let mut buf = Vec::new();
+                                if let Some(mut pipe) = stdout_pipe {
+                                    use tokio::io::AsyncReadExt;
+                                    let _ = pipe.read_to_end(&mut buf).await;
+                                }
+                                buf
                             });
+                            let stderr_task = tokio::spawn(async move {
+                                let mut buf = Vec::new();
+                                if let Some(mut pipe) = stderr_pipe {
+                                    use tokio::io::AsyncReadExt;
+                                    let _ = pipe.read_to_end(&mut buf).await;
+                                }
+                                buf
+                            });
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(120),
+                                child.wait(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(status)) => Ok(std::process::Output {
+                                    status,
+                                    stdout: stdout_task.await.unwrap_or_default(),
+                                    stderr: stderr_task.await.unwrap_or_default(),
+                                }),
+                                Ok(Err(e)) => Err(e),
+                                Err(_) => {
+                                    let _ = child.start_kill();
+                                    let _ = child.wait().await;
+                                    return Ok(ToolResult {
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(format!(
+                                            "Verification command '{cmd}' timed out after 120 seconds and was killed"
+                                        )),
+                                    });
+                                }
+                            }
                         }
+                        Err(e) => Err(e),
                     };
 
                     match result {

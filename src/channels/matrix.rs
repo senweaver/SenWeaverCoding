@@ -436,15 +436,22 @@ impl MatrixChannel {
         target_room_id == incoming_room_id
     }
 
-    fn cache_event_id(
+    fn is_event_duplicate(
+        event_id: &str,
+        recent_lookup: &std::collections::HashSet<String>,
+    ) -> bool {
+        recent_lookup.contains(event_id)
+    }
+
+    fn mark_event_processed(
         event_id: &str,
         recent_order: &mut std::collections::VecDeque<String>,
         recent_lookup: &mut std::collections::HashSet<String>,
-    ) -> bool {
+    ) {
         const MAX_RECENT_EVENT_IDS: usize = 2048;
 
         if recent_lookup.contains(event_id) {
-            return true;
+            return;
         }
 
         let event_id_owned = event_id.to_string();
@@ -456,8 +463,6 @@ impl MatrixChannel {
                 recent_lookup.remove(&evicted);
             }
         }
-
-        false
     }
 
     async fn target_room_id(&self) -> anyhow::Result<String> {
@@ -1127,26 +1132,11 @@ impl Channel for MatrixChannel {
 
                 let event_id = event.event_id.to_string();
                 {
-                    let mut guard = dedupe.lock().await;
-                    let (recent_order, recent_lookup) = &mut *guard;
-                    if MatrixChannel::cache_event_id(&event_id, recent_order, recent_lookup) {
+                    let guard = dedupe.lock().await;
+                    let (_recent_order, recent_lookup) = &*guard;
+                    if MatrixChannel::is_event_duplicate(&event_id, recent_lookup) {
                         return;
                     }
-                }
-
-                if let Err(error) = room
-                    .send_single_receipt(
-                        create_receipt::v3::ReceiptType::Read,
-                        ReceiptThread::Unthreaded,
-                        event.event_id.clone(),
-                    )
-                    .await
-                {
-                    tracing::warn!("Matrix failed to send read receipt: {error}");
-                }
-
-                if let Err(error) = room.typing_notice(true).await {
-                    tracing::warn!("Matrix failed to start typing notification: {error}");
                 }
 
                 let thread_ts = match &event.content.relates_to {
@@ -1154,7 +1144,7 @@ impl Channel for MatrixChannel {
                     _ => None,
                 };
                 let msg = ChannelMessage {
-                    id: event_id,
+                    id: event_id.clone(),
                     sender: sender.clone(),
                     reply_target: format!("{}||{}", sender, room.room_id()),
                     content: body,
@@ -1168,7 +1158,40 @@ impl Channel for MatrixChannel {
                     attachments: vec![],
                 };
 
-                let _ = tx.send(msg).await;
+                match crate::channels::forward_channel_message("matrix", &tx, msg) {
+                    crate::channels::ForwardOutcome::Delivered => {
+                        {
+                            let mut guard = dedupe.lock().await;
+                            let (recent_order, recent_lookup) = &mut *guard;
+                            MatrixChannel::mark_event_processed(
+                                &event_id,
+                                recent_order,
+                                recent_lookup,
+                            );
+                        }
+
+                        if let Err(error) = room
+                            .send_single_receipt(
+                                create_receipt::v3::ReceiptType::Read,
+                                ReceiptThread::Unthreaded,
+                                event.event_id.clone(),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Matrix failed to send read receipt: {error}");
+                        }
+
+                        if let Err(error) = room.typing_notice(true).await {
+                            tracing::warn!("Matrix failed to start typing notification: {error}");
+                        }
+                    }
+                    crate::channels::ForwardOutcome::Dropped => {}
+                    crate::channels::ForwardOutcome::Closed => {
+                        tracing::info!(
+                            "Matrix: message receiver closed; sync loop will stop on next cycle"
+                        );
+                    }
+                }
             }
         });
 

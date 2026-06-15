@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -148,6 +148,7 @@ pub struct GuardrailsEngine {
     config: GuardrailsConfig,
     call_counts: Arc<RwLock<HashMap<String, Vec<Instant>>>>,
     session_total: Arc<RwLock<usize>>,
+    bypass_warned: Arc<RwLock<HashSet<String>>>,
 }
 
 impl GuardrailsEngine {
@@ -156,6 +157,7 @@ impl GuardrailsEngine {
             config,
             call_counts: Arc::new(RwLock::new(HashMap::new())),
             session_total: Arc::new(RwLock::new(0)),
+            bypass_warned: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -180,12 +182,17 @@ impl GuardrailsEngine {
             return GuardrailVerdict::allow();
         }
 
-        if self
-            .config
-            .bypass_tools
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case(tool_name))
-        {
+        let fallback = GuardrailContext {
+            tool_name: Some(tool_name),
+            ..GuardrailContext::default()
+        };
+        let active_ctx = context.unwrap_or(&fallback);
+
+        if self.is_bypass_tool(tool_name) {
+            self.warn_bypass_once(tool_name);
+            if let Some(deny) = self.explicit_deny_verdict(tool_name, active_ctx) {
+                return deny;
+            }
             return GuardrailVerdict::allow();
         }
 
@@ -203,12 +210,126 @@ impl GuardrailsEngine {
             return verdict;
         }
 
+        self.rule_verdict(tool_name, active_ctx)
+    }
+
+    pub fn authorize_with_context(
+        &self,
+        tool_name: &str,
+        context: Option<&GuardrailContext<'_>>,
+    ) -> GuardrailVerdict {
+        if !self.config.enabled {
+            return GuardrailVerdict::allow();
+        }
+
         let fallback = GuardrailContext {
             tool_name: Some(tool_name),
             ..GuardrailContext::default()
         };
         let active_ctx = context.unwrap_or(&fallback);
 
+        if self.is_bypass_tool(tool_name) {
+            self.warn_bypass_once(tool_name);
+            if let Some(deny) = self.explicit_deny_verdict(tool_name, active_ctx) {
+                return deny;
+            }
+            self.record_call(tool_name);
+            return GuardrailVerdict::allow();
+        }
+
+        let verdict = self.rule_verdict(tool_name, active_ctx);
+
+        let now = Instant::now();
+        let mut counts = self.call_counts.write();
+        let mut total = self.session_total.write();
+
+        if self.config.max_calls_per_session > 0 && *total >= self.config.max_calls_per_session {
+            return GuardrailVerdict::deny(format!(
+                "Session tool call limit ({}) reached",
+                self.config.max_calls_per_session
+            ));
+        }
+
+        for rule in &self.config.rate_limits {
+            if Self::matches_pattern(&rule.tool_pattern, tool_name) {
+                if let Some(calls) = counts.get(tool_name) {
+                    let window = Duration::from_secs(rule.window_secs);
+                    let recent = calls
+                        .iter()
+                        .filter(|t| now.duration_since(**t) < window)
+                        .count();
+                    if recent >= rule.max_calls {
+                        return GuardrailVerdict::deny(format!(
+                            "Rate limit exceeded: {} calls in {}s (max {})",
+                            recent, rule.window_secs, rule.max_calls
+                        ));
+                    }
+                }
+            }
+        }
+
+        if verdict.allowed {
+            let max_window = Duration::from_secs(3600);
+            let timestamps = counts.entry(tool_name.to_string()).or_default();
+            timestamps.push(now);
+            timestamps.retain(|t| now.duration_since(*t) < max_window);
+            *total += 1;
+        }
+
+        verdict
+    }
+
+    fn is_bypass_tool(&self, tool_name: &str) -> bool {
+        self.config
+            .bypass_tools
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(tool_name))
+    }
+
+    fn warn_bypass_once(&self, tool_name: &str) {
+        {
+            let warned = self.bypass_warned.read();
+            if warned.contains(tool_name) {
+                return;
+            }
+        }
+        let mut warned = self.bypass_warned.write();
+        if warned.insert(tool_name.to_string()) {
+            tracing::warn!(
+                tool = %tool_name,
+                "guardrails bypass_tools matched: rate limits are skipped for this tool, but explicit deny rules still apply"
+            );
+        }
+    }
+
+    fn explicit_deny_verdict(
+        &self,
+        tool_name: &str,
+        active_ctx: &GuardrailContext<'_>,
+    ) -> Option<GuardrailVerdict> {
+        for rule in &self.config.rules {
+            if Self::matches_pattern(&rule.tool_pattern, tool_name) {
+                if !active_ctx.matches(&rule.contexts) {
+                    continue;
+                }
+                if rule.policy == GuardrailPolicy::Deny {
+                    return Some(GuardrailVerdict::deny(
+                        rule.reason
+                            .as_deref()
+                            .unwrap_or("Blocked by guardrail rule"),
+                    ));
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    fn rule_verdict(
+        &self,
+        tool_name: &str,
+        active_ctx: &GuardrailContext<'_>,
+    ) -> GuardrailVerdict {
         for rule in &self.config.rules {
             if Self::matches_pattern(&rule.tool_pattern, tool_name) {
                 if !active_ctx.matches(&rule.contexts) {
@@ -333,18 +454,39 @@ impl GuardrailContext<'_> {
     }
 }
 
-pub fn check_tool_guardrails(tool_name: &str, ctx: Option<&GuardrailContext<'_>>) -> Result<(), String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardrailDecision {
+    Allow,
+    Deny(String),
+    RequireApproval(String),
+}
+
+pub fn evaluate_tool_guardrails(
+    tool_name: &str,
+    ctx: Option<&GuardrailContext<'_>>,
+) -> GuardrailDecision {
     let guard = GLOBAL_GUARDRAILS.read();
     match guard.as_ref() {
         Some(engine) => {
-            let verdict = engine.check_with_context(tool_name, ctx);
-            if verdict.allowed {
-                engine.record_call(tool_name);
-                Ok(())
+            let verdict = engine.authorize_with_context(tool_name, ctx);
+            if verdict.needs_approval {
+                GuardrailDecision::RequireApproval(verdict.reason)
+            } else if verdict.allowed {
+                GuardrailDecision::Allow
             } else {
-                Err(verdict.reason)
+                GuardrailDecision::Deny(verdict.reason)
             }
         }
-        None => Ok(()),
+        None => GuardrailDecision::Allow,
+    }
+}
+
+pub fn check_tool_guardrails(
+    tool_name: &str,
+    ctx: Option<&GuardrailContext<'_>>,
+) -> Result<(), String> {
+    match evaluate_tool_guardrails(tool_name, ctx) {
+        GuardrailDecision::Allow => Ok(()),
+        GuardrailDecision::Deny(reason) | GuardrailDecision::RequireApproval(reason) => Err(reason),
     }
 }

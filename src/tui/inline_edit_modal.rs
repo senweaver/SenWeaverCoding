@@ -24,6 +24,7 @@ pub struct InlineEditModal {
     pub instruction: String,
     pub focus: ModalField,
     pub status: Option<String>,
+    pub submitting: bool,
 
     pub last_batch_id: Option<String>,
 }
@@ -36,6 +37,7 @@ impl Default for InlineEditModal {
             instruction: String::new(),
             focus: ModalField::Path,
             status: None,
+            submitting: false,
             last_batch_id: None,
         }
     }
@@ -44,6 +46,7 @@ impl Default for InlineEditModal {
 impl InlineEditModal {
     pub fn open_with_path(&mut self, path: Option<PathBuf>) {
         self.is_open = true;
+        self.submitting = false;
         self.focus = if path.is_some() {
             ModalField::Instruction
         } else {
@@ -56,6 +59,7 @@ impl InlineEditModal {
 
     pub fn close(&mut self) {
         self.is_open = false;
+        self.submitting = false;
         self.instruction.clear();
         self.status = None;
     }
@@ -159,6 +163,9 @@ pub fn handle_key(modal: &mut InlineEditModal, key: event::KeyEvent) -> ModalAct
             ModalAction::Noop
         }
         KeyCode::Enter => {
+            if modal.submitting {
+                return ModalAction::Noop;
+            }
             let path = modal.path.trim();
             let instruction = modal.instruction.trim();
             if path.is_empty() || instruction.is_empty() {
@@ -173,10 +180,10 @@ pub fn handle_key(modal: &mut InlineEditModal, key: event::KeyEvent) -> ModalAct
         KeyCode::Backspace => {
             match modal.focus {
                 ModalField::Path => {
-                    modal.path.pop();
+                    super::pop_last_char(&mut modal.path);
                 }
                 ModalField::Instruction => {
-                    modal.instruction.pop();
+                    super::pop_last_char(&mut modal.instruction);
                 }
             }
             ModalAction::Noop

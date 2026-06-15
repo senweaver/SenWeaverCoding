@@ -16,6 +16,8 @@ type Props = {
   sessionId?: string | null
 }
 
+const EMPTY_TODOS: ActiveTracker['todos'] = []
+
 type ActiveTracker = {
   kind: 'plan' | 'curator'
   title: string
@@ -63,7 +65,7 @@ export function ActivePlanStickyBar({ sessionId }: Props) {
           title: curator.card.title || t('curator.untitled'),
           fileName: curator.card.slug || '',
           overview: '',
-          todos: curator.card.todos ?? [],
+          todos: curator.card.todos ?? EMPTY_TODOS,
           resumePath: curator.card.implBlueprintPath || curator.card.finalMdPath,
           pendingHydration: !!curator.card.pendingHydration,
           state: curator.state,

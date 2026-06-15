@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
 use super::budget::ContextBudget;
-use super::handlers::resolve_tag;
+use super::handlers::resolve_tag_async;
 use super::types::{ContextItem, ContextResolveError, ContextTag};
 
 #[async_trait]
@@ -56,13 +56,14 @@ impl ContextResolver for DefaultResolver {
         let mut out = Vec::with_capacity(tags.len());
         for tag in tags {
             let before_used = budget.used();
-            let item = resolve_tag(
+            let item = resolve_tag_async(
                 &tag,
                 &self.workspace_root as &Path,
                 &self.recent_files,
                 &self.current_selection,
                 budget,
-            )?;
+            )
+            .await?;
             crate::observability::subsystem_metrics::incr_context_resolution();
 
             let consumed = budget.used().saturating_sub(before_used);

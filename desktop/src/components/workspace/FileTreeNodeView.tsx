@@ -184,8 +184,8 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   }, [aiFresh])
 
   const filterActive = filter?.active ?? false
-  const isAncestorMatch = filterActive ? filter!.ancestors.has(node.relPath) : false
-  const isSelfMatch = filterActive ? filter!.matches.has(node.relPath) : false
+  const isAncestorMatch = filterActive ? (filter?.ancestors.has(node.relPath) ?? false) : false
+  const isSelfMatch = filterActive ? (filter?.matches.has(node.relPath) ?? false) : false
   const visibleByFilter = !filterActive || isSelfMatch || isAncestorMatch
   const expanded = node.isDir && (
     filterActive && isAncestorMatch
@@ -199,7 +199,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     const list = dirState?.loaded ? dirState.children ?? [] : node.children ?? []
     if (!filterActive) return list
     return list.filter(
-      (c) => filter!.matches.has(c.relPath) || filter!.ancestors.has(c.relPath),
+      (c) => (filter?.matches.has(c.relPath) ?? false) || (filter?.ancestors.has(c.relPath) ?? false),
     )
   }, [dirState, filter, filterActive, node.children, node.isDir, node.loaded])
 
@@ -342,8 +342,8 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
           </span>
         )}
         <span className="truncate">
-          {filterActive && filter!.needle
-            ? renderHighlight(node.name, filter!.needle)
+          {filterActive && filter?.needle
+            ? renderHighlight(node.name, filter.needle)
             : node.name}
         </span>
         <div className="ml-auto flex flex-shrink-0 items-center gap-1.5">

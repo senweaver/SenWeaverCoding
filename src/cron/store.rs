@@ -12,7 +12,7 @@ use rusqlite::types::{FromSqlResult, ValueRef};
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
-const MAX_CRON_OUTPUT_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_CRON_OUTPUT_BYTES: usize = 16 * 1024;
 const TRUNCATED_OUTPUT_MARKER: &str = "\n...[truncated]";
 
 impl rusqlite::types::FromSql for JobType {
@@ -32,6 +32,12 @@ pub fn add_shell_job(
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
     validate_delivery_config(delivery.as_ref())?;
+    if let Schedule::Cron { expr, tz: None } = &schedule {
+        tracing::info!(
+            expression = %expr,
+            "cron shell job added without timezone; schedule will be evaluated in UTC"
+        );
+    }
     let next_run = next_run_for_schedule(&schedule, now)?;
     let id = Uuid::new_v4().to_string();
     let expression = schedule_cron_expression(&schedule).unwrap_or_default();
@@ -89,6 +95,12 @@ pub fn add_agent_job(
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
     validate_delivery_config(delivery.as_ref())?;
+    if let Schedule::Cron { expr, tz: None } = &schedule {
+        tracing::info!(
+            expression = %expr,
+            "cron agent job added without timezone; schedule will be evaluated in UTC"
+        );
+    }
     let next_run = next_run_for_schedule(&schedule, now)?;
     let id = Uuid::new_v4().to_string();
     let expression = schedule_cron_expression(&schedule).unwrap_or_default();
@@ -197,6 +209,10 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
                     task_description
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM cron_runs r
+                 WHERE r.job_id = cron_jobs.id AND r.status = 'running'
+               )
              ORDER BY next_run ASC
              LIMIT ?2",
         )?;
@@ -211,6 +227,53 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
             }
         }
         Ok(jobs)
+    })
+}
+
+pub fn claim_job(config: &Config, job: &CronJob, now: DateTime<Utc>) -> Result<bool> {
+    let next_run = next_run_for_schedule(&job.schedule, job.next_run)?;
+    let changed = with_connection(config, |conn| {
+        conn.execute(
+            "UPDATE cron_jobs
+             SET next_run = ?1
+             WHERE id = ?2 AND enabled = 1 AND next_run <= ?3",
+            params![next_run.to_rfc3339(), job.id, now.to_rfc3339()],
+        )
+        .context("Failed to claim cron job for execution")
+    })?;
+    Ok(changed == 1)
+}
+
+pub fn reset_running_runs(config: &Config, now: DateTime<Utc>) -> Result<usize> {
+    with_connection(config, |conn| {
+        let changed = conn
+            .execute(
+                "UPDATE cron_runs
+                 SET status = 'interrupted', finished_at = ?1
+                 WHERE status = 'running'",
+                params![now.to_rfc3339()],
+            )
+            .context("Failed to reset stale running cron runs")?;
+        Ok(changed)
+    })
+}
+
+pub fn reset_stale_running(
+    config: &Config,
+    now: DateTime<Utc>,
+    threshold: chrono::Duration,
+) -> Result<usize> {
+    let cutoff = now - threshold;
+    with_connection(config, |conn| {
+        let changed = conn
+            .execute(
+                "UPDATE cron_runs
+                 SET status = 'interrupted', finished_at = ?1
+                 WHERE status = 'running' AND started_at < ?2",
+                params![now.to_rfc3339(), cutoff.to_rfc3339()],
+            )
+            .context("Failed to reset stale running cron runs past threshold")?;
+        Ok(changed)
     })
 }
 
@@ -391,7 +454,40 @@ pub fn reschedule_after_run(
             Ok(())
         })
     } else {
-        let next_run = next_run_for_schedule(&job.schedule, now)?;
+        const MAX_SKIP_ITERATIONS: u64 = 100_000;
+        const MAX_CATCH_UP_BACKLOG: u64 = 1_000;
+
+        let mut next_run = next_run_for_schedule(&job.schedule, job.next_run)?;
+
+        if next_run <= now {
+
+            let mut probe = next_run;
+            let mut backlog: u64 = 0;
+            while probe <= now && backlog < MAX_SKIP_ITERATIONS {
+                probe = next_run_for_schedule(&job.schedule, probe)?;
+                backlog += 1;
+            }
+
+            if backlog > MAX_CATCH_UP_BACKLOG {
+
+                next_run = next_run_for_schedule(&job.schedule, now)?;
+                tracing::warn!(
+                    job_id = %job.id,
+                    backlog,
+                    next_run = %next_run.to_rfc3339(),
+                    "cron reschedule: overdue backlog exceeds catch-up limit; fast-forwarding past missed trigger points"
+                );
+            } else {
+
+                tracing::info!(
+                    job_id = %job.id,
+                    backlog,
+                    next_run = %next_run.to_rfc3339(),
+                    "cron reschedule: catching up missed trigger point (scheduler will re-run remaining overdue points)"
+                );
+            }
+        }
+
         with_connection(config, |conn| {
             conn.execute(
                 "UPDATE cron_jobs

@@ -41,7 +41,7 @@ pub use none::NoneMemory;
 pub use policy::PolicyEnforcer;
 pub use qdrant::QdrantMemory;
 pub use response_cache::ResponseCache;
-pub use retrieval::{RetrievalConfig, RetrievalPipeline};
+pub use retrieval::{PipelinedMemory, RetrievalConfig, RetrievalPipeline};
 pub use sqlite::SqliteMemory;
 pub use traits::Memory;
 pub use traits::{ExportFilter, MemoryCategory, MemoryEntry, ProceduralMessage};
@@ -315,6 +315,26 @@ pub async fn create_memory_with_storage_and_routes_async(
     .map_err(|e| anyhow::anyhow!("memory initialization task failed: {e}"))?
 }
 
+fn wrap_with_retrieval_pipeline(
+    mem: Box<dyn Memory>,
+    config: &MemoryConfig,
+) -> Box<dyn Memory> {
+    if retrieval::RetrievalConfig::matches_direct_path(config) {
+        return mem;
+    }
+    tracing::info!(
+        stages = ?config.retrieval_stages,
+        rerank_enabled = config.rerank_enabled,
+        rerank_threshold = config.rerank_threshold,
+        fts_early_return_score = config.fts_early_return_score,
+        "memory retrieval pipeline enabled for recall path"
+    );
+    Box::new(retrieval::PipelinedMemory::new(
+        Arc::from(mem),
+        retrieval::RetrievalConfig::from_memory_config(config),
+    ))
+}
+
 pub fn create_memory_with_storage_and_routes(
     config: &MemoryConfig,
     embedding_routes: &[EmbeddingRouteConfig],
@@ -421,12 +441,15 @@ pub fn create_memory_with_storage_and_routes(
             url,
             collection
         );
-        return Ok(Box::new(QdrantMemory::new_lazy(
-            &url,
-            &collection,
-            qdrant_api_key,
-            embedder,
-        )?));
+        return Ok(wrap_with_retrieval_pipeline(
+            Box::new(QdrantMemory::new_lazy(
+                &url,
+                &collection,
+                qdrant_api_key,
+                embedder,
+            )?),
+            config,
+        ));
     }
 
     let mem = create_memory_with_builders(
@@ -442,7 +465,9 @@ pub fn create_memory_with_storage_and_routes(
         if matches!(backend_kind, MemoryBackendKind::Sqlite) {
             match build_sqlite_memory(config, workspace_dir, &resolved_embedding) {
                 Ok(sqlite_mem) => match audit::AuditedMemory::new(sqlite_mem, workspace_dir) {
-                    Ok(audited) => return Ok(Box::new(audited)),
+                    Ok(audited) => {
+                        return Ok(wrap_with_retrieval_pipeline(Box::new(audited), config));
+                    }
                     Err(e) => tracing::warn!("Failed to enable memory audit: {e}"),
                 },
                 Err(e) => tracing::warn!("Failed to build audited memory: {e}"),
@@ -452,7 +477,7 @@ pub fn create_memory_with_storage_and_routes(
         }
     }
 
-    Ok(mem)
+    Ok(wrap_with_retrieval_pipeline(mem, config))
 }
 
 pub fn create_memory_for_migration(

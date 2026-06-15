@@ -2,7 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../shared/Modal'
@@ -52,12 +53,23 @@ export function PlanCard({
   const cardRef = useRef<HTMLDivElement>(null)
   const announcedCompletionRef = useRef(false)
 
-  const execState = useChatStore((s): PlanExecutionState => {
-    if (!sessionId) return 'idle'
-    const session = s.sessions[sessionId]
-    if (!session) return 'idle'
-    return selectPlanCardExecutionState(session.messages, messageId, session.chatState)
-  })
+  const planInputs = useChatStore(
+    useShallow((s) => {
+      const session = sessionId ? s.sessions[sessionId] : undefined
+      return {
+        messages: session?.messages,
+        chatState: session?.chatState,
+      }
+    }),
+  )
+  const execState = useMemo<PlanExecutionState>(() => {
+    if (!sessionId || !planInputs.messages) return 'idle'
+    return selectPlanCardExecutionState(
+      planInputs.messages,
+      messageId,
+      planInputs.chatState ?? 'idle',
+    )
+  }, [sessionId, planInputs.messages, planInputs.chatState, messageId])
   const resumePlanExecution = useChatStore((s) => s.resumePlanExecution)
 
   const completed = status === 'completed'

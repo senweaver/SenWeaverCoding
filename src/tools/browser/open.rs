@@ -130,10 +130,31 @@ impl Tool for BrowserOpenTool {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn launch_status(
+    mut command: tokio::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    command.kill_on_drop(true);
+    let mut child = command.spawn()?;
+    match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait()).await {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "system browser launcher timed out after 15s",
+            ))
+        }
+    }
+}
+
 async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let primary_error = match crate::util::hidden_async_command("open").arg(url).status().await {
+        let mut command = crate::util::hidden_async_command("open");
+        command.arg(url);
+        let primary_error = match launch_status(command).await {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => format!("open exited with status {status}"),
             Err(error) => format!("open not runnable: {error}"),
@@ -141,13 +162,9 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
 
         let mut brave_error = String::new();
         for app in ["Brave Browser", "Brave"] {
-            match crate::util::hidden_async_command("open")
-                .arg("-a")
-                .arg(app)
-                .arg(url)
-                .status()
-                .await
-            {
+            let mut command = crate::util::hidden_async_command("open");
+            command.arg("-a").arg(app).arg(url);
+            match launch_status(command).await {
                 Ok(status) if status.success() => return Ok(()),
                 Ok(status) => {
                     brave_error = format!("open -a '{app}' exited with status {status}");
@@ -178,7 +195,7 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
                 command.arg("open");
             }
             command.arg(url);
-            match command.status().await {
+            match launch_status(command).await {
                 Ok(status) if status.success() => return Ok(()),
                 Ok(status) => {
                     last_error = format!("{cmd} exited with status {status}");
@@ -196,13 +213,9 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-
-        let primary_error = match crate::util::hidden_async_command("rundll32")
-            .arg("url.dll,FileProtocolHandler")
-            .arg(url)
-            .status()
-            .await
-        {
+        let mut command = crate::util::hidden_async_command("rundll32");
+        command.arg("url.dll,FileProtocolHandler").arg(url);
+        let primary_error = match launch_status(command).await {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => format!("rundll32 default-browser launcher exited with status {status}"),
             Err(error) => format!("rundll32 default-browser launcher not runnable: {error}"),
@@ -210,7 +223,9 @@ async fn open_in_system_browser(url: &str) -> anyhow::Result<()> {
 
         let mut brave_error = String::new();
         for cmd in ["brave", "brave.exe"] {
-            match crate::util::hidden_async_command(cmd).arg(url).status().await {
+            let mut command = crate::util::hidden_async_command(cmd);
+            command.arg(url);
+            match launch_status(command).await {
                 Ok(status) if status.success() => return Ok(()),
                 Ok(status) => {
                     brave_error = format!("{cmd} exited with status {status}");

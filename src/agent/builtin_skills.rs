@@ -85,6 +85,21 @@ When the user requests professional QA / regression testing or any structured \
   Failures do NOT throw  -  record `{passed, actual, expected, kind, selector, elapsed_ms}` as evidence.
 - Capture runtime errors with `console_logs` + `assert_kind=console_clean` after each case.
 - Use `clear_storage` between independent cases; use `back`/`forward`/`reload` for history-driven checks.
+- For visual QA, use `get_styles` (with `selector` for a component's computed styles, without for a \
+  page-level palette/typography audit) so color and typography verdicts cite exact values instead of \
+  screenshot impressions; drain `network_errors` per page to catch broken assets.
+- For performance QA, run `perf_vitals` once per key page after `network_idle`  -  it returns real \
+  LCP/FCP/CLS/INP, long tasks, TTFB and transfer bytes with verdicts; quote the numbers in findings.
+- For data QA, wrap data-driven flows with `network_capture` (`mode=start` → exercise → \
+  `mode=dump api_only=true` → `mode=body request_id=<id>`) and diff the API payload against the \
+  rendered UI (record counts, key values). `mode=stop` when done.
+- For responsive / degraded-network QA, use `emulate` (`viewport={width,height,mobile}`, \
+  `network=offline|slow-3g|fast-3g`, `cpu_rate`) and ALWAYS finish with `emulate reset=true`.
+- Probe `web_tools_list` once per app: if the page registers WebMCP tools (`navigator.modelContext`), \
+  `web_tools_call` is a deterministic fast path for setup/data probing  -  but always re-verify the \
+  visible UI afterwards.
+- Batch linear flows with `run_steps` (max 20 steps, stops on first failure) to cut round-trips on \
+  smoke passes.
 
 ### 4. Persist evidence
 - `debug_test_report` action=`add_case` after each flow (`status`, `steps`, `assertions`, `screenshots`).

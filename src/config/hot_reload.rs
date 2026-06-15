@@ -65,8 +65,11 @@ impl LiveConfig {
 
     #[inline]
     pub fn swap(&self, config: Config) -> Config {
-        Arc::into_inner(ArcSwap::swap(&self.inner.inner, Arc::new(config)))
-            .expect("ArcSwap must hold the only reference after swap")
+        let old = ArcSwap::swap(&self.inner.inner, Arc::new(config));
+        match Arc::try_unwrap(old) {
+            Ok(config) => config,
+            Err(shared) => (*shared).clone(),
+        }
     }
 
     pub fn provider_changed_since(
@@ -146,7 +149,10 @@ impl SharedConfig {
         let _ = self.notify.send(ConfigChangedEvent {
             changed_fields: vec!["manual_swap".into()],
         });
-        Arc::into_inner(old).expect("ArcSwap must hold the only reference after swap")
+        match Arc::try_unwrap(old) {
+            Ok(config) => config,
+            Err(shared) => (*shared).clone(),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ConfigChangedEvent> {
@@ -156,21 +162,33 @@ impl SharedConfig {
     pub fn subscribe_filtered<F>(
         self: &std::sync::Arc<Self>,
         prefixes: Vec<String>,
-        mut callback: F,
+        callback: F,
     ) -> crate::runtime::TaskHandle
     where
         F: FnMut(std::sync::Arc<Config>) + Send + 'static,
     {
-        let mut rx = self.subscribe();
         let store = self.clone();
-        crate::runtime::spawn_supervised("config.hot_reload.subscriber", async move {
-            while let Ok(event) = rx.recv().await {
-                let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
-                if event.affects(&refs) {
-                    callback(store.load());
+        let callback = std::sync::Arc::new(std::sync::Mutex::new(callback));
+        crate::runtime::spawn_supervised_restartable(
+            "config.hot_reload.subscriber",
+            3,
+            move || {
+                let store = store.clone();
+                let prefixes = prefixes.clone();
+                let callback = std::sync::Arc::clone(&callback);
+                async move {
+                    let mut rx = store.subscribe();
+                    while let Ok(event) = rx.recv().await {
+                        let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+                        if event.affects(&refs) {
+                            if let Ok(mut cb) = callback.lock() {
+                                cb(store.load());
+                            }
+                        }
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
     pub fn store_validated(

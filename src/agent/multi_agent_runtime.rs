@@ -63,6 +63,22 @@ impl MultiAgentRuntime {
             &SubagentLimitConfig::default(),
         ));
 
+        if tokio::runtime::Handle::try_current().is_ok() {
+            if let Some(svc) = crate::services::try_get_services() {
+                let _ = supervisor
+                    .inner()
+                    .spawn_health_subscriber(&svc.health_broadcaster);
+                let _ = task_router.spawn_health_subscriber(&svc.health_broadcaster);
+                debug!("Multi-agent runtime: provider health subscribers attached");
+            } else {
+                debug!(
+                    "Multi-agent runtime: services not initialized; provider health subscribers not attached"
+                );
+            }
+            Self::spawn_event_registry_bridge(registry.clone());
+            coordinator.spawn_event_subscriber();
+        }
+
         info!("Multi-agent runtime initialized");
 
         Self {
@@ -74,6 +90,65 @@ impl MultiAgentRuntime {
             task_router,
             subagent_limiter,
         }
+    }
+
+    fn spawn_event_registry_bridge(registry: AgentRegistryHandle) {
+        crate::runtime::task_manager::spawn_supervised(
+            "multi_agent.event_registry_bridge",
+            async move {
+                let mut rx = loop {
+                    if let Some(bus) = crate::event_bus::integration::global_bus() {
+                        break bus.subscribe_all();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                };
+
+                loop {
+                    let event = match rx.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            debug!(
+                                skipped,
+                                "event registry bridge lagged behind event bus; continuing"
+                            );
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            match crate::event_bus::integration::global_bus() {
+                                Some(bus) => {
+                                    rx = bus.subscribe_all();
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                                None => break,
+                            }
+                        }
+                    };
+
+                    match &event.payload {
+                        crate::event_bus::types::EventPayload::AgentRequest {
+                            request_id, ..
+                        } => {
+                            if let crate::event_bus::types::EventTarget::Agent(agent_id) =
+                                &event.target
+                            {
+                                let _ = registry.assign_task(agent_id, request_id);
+                            }
+                        }
+                        crate::event_bus::types::EventPayload::AgentResponse {
+                            success, ..
+                        } => {
+                            registry.complete_task(&event.source, *success);
+                        }
+                        crate::event_bus::types::EventPayload::TaskDelegation { .. }
+                        | crate::event_bus::types::EventPayload::Coordination { .. } => {
+                            let _ = registry.heartbeat(&event.source);
+                        }
+                        _ => {}
+                    }
+                }
+            },
+        );
     }
 
     pub fn cancel_subtree(&self, agent_id: &str) -> usize {
@@ -306,11 +381,14 @@ pub struct RuntimeHealthSummary {
     pub blackboard_entries: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MultiAgentRuntimeConfig {
     pub supervisor_config: SupervisorConfig,
 
     pub sub_agent_identities: Vec<(String, String)>,
+
+    #[serde(default)]
+    pub allow_shared_identity: bool,
 }
 
 impl Default for MultiAgentRuntimeConfig {
@@ -318,6 +396,7 @@ impl Default for MultiAgentRuntimeConfig {
         Self {
             supervisor_config: SupervisorConfig::default(),
             sub_agent_identities: Vec::new(),
+            allow_shared_identity: false,
         }
     }
 }
@@ -332,6 +411,17 @@ pub enum MultiAgentRuntimeManagerError {
 
     #[error("runtime shutdown failed: {0}")]
     ShutdownFailed(String),
+
+    #[error(
+        "sub-agents '{agent_a}' and '{agent_b}' share CallerIdentity user_id '{user_id}'; \
+         per-agent RBAC workspace isolation cannot be enforced. Assign distinct identities, \
+         or set allow_shared_identity=true in the multi-agent runtime config to permit this explicitly"
+    )]
+    SharedIdentityConflict {
+        agent_a: String,
+        agent_b: String,
+        user_id: String,
+    },
 }
 
 pub struct MultiAgentRuntimeManager {
@@ -485,30 +575,38 @@ static MANAGER: LazyLock<MultiAgentRuntimeManager> = LazyLock::new(MultiAgentRun
 
 pub fn init_global_runtime() -> Arc<MultiAgentRuntime> {
     init_global_runtime_with_config(MultiAgentRuntimeConfig::default())
+        .unwrap_or_else(|_| MANAGER.get_or_init(MultiAgentRuntimeConfig::default()))
 }
 
-pub fn init_global_runtime_with_config(config: MultiAgentRuntimeConfig) -> Arc<MultiAgentRuntime> {
+pub fn init_global_runtime_with_config(
+    config: MultiAgentRuntimeConfig,
+) -> Result<Arc<MultiAgentRuntime>, MultiAgentRuntimeManagerError> {
 
-    if config.sub_agent_identities.len() > 1 {
+    if config.sub_agent_identities.len() > 1 && !config.allow_shared_identity {
         let mut seen: std::collections::HashMap<&str, &str> =
             std::collections::HashMap::with_capacity(config.sub_agent_identities.len());
         for (agent_id, caller_user_id) in &config.sub_agent_identities {
             if let Some(prior_agent) = seen.insert(caller_user_id.as_str(), agent_id.as_str()) {
-                tracing::warn!(
+                tracing::error!(
                     agent_id = %agent_id,
                     conflicting_agent_id = %prior_agent,
                     caller_user_id = %caller_user_id,
                     "Multi-agent runtime: sub-agents share the same CallerIdentity \
-                     user_id  -  per-agent RBAC workspace isolation cannot be enforced. \
-                     Assign each sub-agent a distinct CallerIdentity."
+                     user_id  -  refusing to initialize. Assign each sub-agent a distinct \
+                     CallerIdentity, or set allow_shared_identity=true to permit explicitly."
                 );
+                return Err(MultiAgentRuntimeManagerError::SharedIdentityConflict {
+                    agent_a: prior_agent.to_string(),
+                    agent_b: agent_id.clone(),
+                    user_id: caller_user_id.clone(),
+                });
             }
         }
     }
 
     let runtime = MANAGER.get_or_init(config.clone());
     info!("Global multi-agent runtime initialized");
-    runtime
+    Ok(runtime)
 }
 
 pub fn global_runtime() -> Option<Arc<MultiAgentRuntime>> {

@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
@@ -18,7 +18,9 @@ import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { QuestionStrip } from '../components/chat/QuestionStrip'
 import { ActivePlanStickyBar } from '../components/chat/ActivePlanStickyBar'
 import { ResourceWaitBanner } from '../components/chat/ResourceWaitBanner'
-const TASK_POLL_INTERVAL_MS = 1000
+const TASK_POLL_INTERVAL_MS = 10_000
+const EMPTY_TOKEN_USAGE = { input_tokens: 0, output_tokens: 0 }
+const KEEP_ALIVE_SESSION_LIMIT = 3
 
 export function ActiveSession() {
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -28,7 +30,7 @@ export function ActiveSession() {
     useChatStore(
       useShallow((s) => {
         const st = activeTabId ? s.sessions[activeTabId] : undefined
-        const usage = st?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
+        const usage = st?.tokenUsage ?? EMPTY_TOKEN_USAGE
         return {
           chatState: st?.chatState ?? 'idle',
           totalTokens: usage.input_tokens + usage.output_tokens,
@@ -56,6 +58,26 @@ export function ActiveSession() {
     }
   }, [activeTabId, isMemberSession, connectToSession])
 
+  const [aliveSessions, setAliveSessions] = useState<string[]>([])
+  const openTabIds = useTabStore(
+    useShallow((s) => s.tabs.filter((t) => t.type === 'session').map((t) => t.sessionId)),
+  )
+  useEffect(() => {
+    if (!activeTabId || isMemberSession) return
+    setAliveSessions((prev) => {
+      const next = [activeTabId, ...prev.filter((id) => id !== activeTabId)]
+      return next.length > KEEP_ALIVE_SESSION_LIMIT
+        ? next.slice(0, KEEP_ALIVE_SESSION_LIMIT)
+        : next
+    })
+  }, [activeTabId, isMemberSession])
+  useEffect(() => {
+    setAliveSessions((prev) => {
+      const next = prev.filter((id) => openTabIds.includes(id))
+      return next.length === prev.length ? prev : next
+    })
+  }, [openTabIds])
+
   useEffect(() => {
     if (!activeTabId || isMemberSession) return
 
@@ -69,6 +91,7 @@ export function ActiveSession() {
     void fetchSessionTasks(activeTabId)
 
     const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       void fetchSessionTasks(activeTabId)
     }, TASK_POLL_INTERVAL_MS)
 
@@ -215,25 +238,59 @@ export function ActiveSession() {
             </div>
           )}
 
-          <SectionErrorBoundary label="MessageList" resetKeys={[activeTabId]}>
-            <MessageList />
-          </SectionErrorBoundary>
+          {isMemberSession ? (
+            <SectionErrorBoundary label="MessageList" resetKeys={[activeTabId]}>
+              <MessageList />
+            </SectionErrorBoundary>
+          ) : (
+            <div className="relative flex-1 min-h-0">
+              {(aliveSessions.includes(activeTabId)
+                ? aliveSessions
+                : [activeTabId, ...aliveSessions]
+              ).map((id) => (
+                <div
+                  key={id}
+                  className={
+                    id === activeTabId
+                      ? 'absolute inset-0 flex flex-col'
+                      : 'absolute inset-0 flex flex-col invisible pointer-events-none'
+                  }
+                >
+                  <SectionErrorBoundary label="MessageList" resetKeys={[id]}>
+                    <MessageList sessionId={id} />
+                  </SectionErrorBoundary>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
 
       {!isMemberSession && <SessionTaskBar />}
 
-      {!isMemberSession && <ActivePlanStickyBar sessionId={activeTabId} />}
+      {!isMemberSession && (
+        <SectionErrorBoundary label="ActivePlanStickyBar" resetKeys={[activeTabId]}>
+          <ActivePlanStickyBar sessionId={activeTabId} />
+        </SectionErrorBoundary>
+      )}
 
-      {!isMemberSession && <QuestionStrip />}
+      {!isMemberSession && (
+        <SectionErrorBoundary label="QuestionStrip" resetKeys={[activeTabId]}>
+          <QuestionStrip />
+        </SectionErrorBoundary>
+      )}
 
       <TeamStatusBar />
 
       {!isMemberSession && activeTabId && (
-        <ResourceWaitBanner sessionId={activeTabId} />
+        <SectionErrorBoundary label="ResourceWaitBanner" resetKeys={[activeTabId]}>
+          <ResourceWaitBanner sessionId={activeTabId} />
+        </SectionErrorBoundary>
       )}
 
-      <ChatInput variant={isEmpty && !isMemberSession ? 'hero' : 'default'} />
+      <SectionErrorBoundary label="ChatInput" resetKeys={[activeTabId]}>
+        <ChatInput variant={isEmpty && !isMemberSession ? 'hero' : 'default'} />
+      </SectionErrorBoundary>
     </div>
   )
 }

@@ -119,7 +119,17 @@ impl Tool for ClaudeCodeRunnerTool {
         let work_dir = if let Some(wd) = args.get("working_directory").and_then(|v| v.as_str()) {
             let wd_path = std::path::PathBuf::from(wd);
             let workspace = self.security.workspace_dir();
-            let canonical_wd = match wd_path.canonicalize() {
+            let wd_for_blocking = wd_path.clone();
+            let workspace_for_blocking = workspace.clone();
+            let (wd_canon, ws_canon) = tokio::task::spawn_blocking(move || {
+                (
+                    wd_for_blocking.canonicalize(),
+                    workspace_for_blocking.canonicalize(),
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("path resolution task failed: {e}"))?;
+            let canonical_wd = match wd_canon {
                 Ok(p) => p,
                 Err(_) => {
                     return Ok(ToolResult {
@@ -132,7 +142,7 @@ impl Tool for ClaudeCodeRunnerTool {
                     });
                 }
             };
-            let canonical_workspace_dir = match workspace.canonicalize() {
+            let canonical_workspace_dir = match ws_canon {
                 Ok(p) => p,
                 Err(_) => {
                     return Ok(ToolResult {
@@ -206,12 +216,15 @@ impl Tool for ClaudeCodeRunnerTool {
         }
         let _ = write!(env_exports, "CLAUDE_CODE_HOOK_URL={} ", &hook_url);
 
-        let create_result = crate::util::hidden_async_command("tmux")
-            .args(["new-session", "-d", "-s", &session_name])
-            .arg("-c")
-            .arg(work_dir.to_str().unwrap_or("."))
-            .output()
-            .await;
+        let create_result = tmux_output_with_timeout(&[
+            "new-session",
+            "-d",
+            "-s",
+            &session_name,
+            "-c",
+            work_dir.to_str().unwrap_or("."),
+        ])
+        .await;
 
         match create_result {
             Ok(output) if !output.status.success() => {
@@ -244,17 +257,17 @@ impl Tool for ClaudeCodeRunnerTool {
                 .join(" ")
         );
 
-        let send_result = crate::util::hidden_async_command("tmux")
-            .args(["send-keys", "-t", &session_name, &full_command, "Enter"])
-            .output()
-            .await;
+        let send_result = tmux_output_with_timeout(&[
+            "send-keys",
+            "-t",
+            &session_name,
+            &full_command,
+            "Enter",
+        ])
+        .await;
 
         if let Err(e) = send_result {
-
-            let _ = crate::util::hidden_async_command("tmux")
-                .args(["kill-session", "-t", &session_name])
-                .output()
-                .await;
+            let _ = tmux_output_with_timeout(&["kill-session", "-t", &session_name]).await;
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -268,10 +281,7 @@ impl Tool for ClaudeCodeRunnerTool {
             format!("tools.claude_code_runner.ttl_cleanup.{}", session_name),
             async move {
                 tokio::time::sleep(std::time::Duration::from_secs(ttl)).await;
-                let _ = crate::util::hidden_async_command("tmux")
-                    .args(["kill-session", "-t", &cleanup_session])
-                    .output()
-                    .await;
+                let _ = tmux_output_with_timeout(&["kill-session", "-t", &cleanup_session]).await;
                 tracing::info!(
                     session = cleanup_session,
                     "Claude Code runner session TTL expired, cleaned up"
@@ -303,6 +313,53 @@ impl Tool for ClaudeCodeRunnerTool {
             error: None,
         })
     }
+}
+
+async fn tmux_output_with_timeout(args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut command = crate::util::hidden_async_command("tmux");
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            use tokio::io::AsyncReadExt;
+            let _ = pipe.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            use tokio::io::AsyncReadExt;
+            let _ = pipe.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await
+    {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "tmux command timed out after 30s",
+            ));
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_task.await.unwrap_or_default(),
+        stderr: stderr_task.await.unwrap_or_default(),
+    })
 }
 
 fn shell_escape(s: &str) -> String {

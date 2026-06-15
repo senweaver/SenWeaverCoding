@@ -53,9 +53,10 @@ export function resolveEffectiveRuntimeSelection(
   settingsModelId: string | undefined,
 ): RuntimeSelection | null {
   const selections = useSessionRuntimeStore.getState().selections
+  const allowDraftFallback = !sessionKey || sessionKey === DRAFT_RUNTIME_SELECTION_KEY
   const keysToTry: string[] = []
   if (sessionKey) keysToTry.push(sessionKey)
-  if (sessionKey !== DRAFT_RUNTIME_SELECTION_KEY) {
+  if (allowDraftFallback && sessionKey !== DRAFT_RUNTIME_SELECTION_KEY) {
     keysToTry.push(DRAFT_RUNTIME_SELECTION_KEY)
   }
 
@@ -82,8 +83,11 @@ export function persistRuntimeSelection(
   sessionKey: string | null | undefined,
   selection: RuntimeSelection,
 ): void {
+  const isDraftScenario = !sessionKey || sessionKey === DRAFT_RUNTIME_SELECTION_KEY
   if (sessionKey) {
     useSessionRuntimeStore.getState().setSelection(sessionKey, selection)
   }
-  useSessionRuntimeStore.getState().setSelection(DRAFT_RUNTIME_SELECTION_KEY, selection)
+  if (isDraftScenario) {
+    useSessionRuntimeStore.getState().setSelection(DRAFT_RUNTIME_SELECTION_KEY, selection)
+  }
 }

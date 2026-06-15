@@ -2,8 +2,10 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '../../i18n'
+import { useChatStore } from '../../stores/chatStore'
 
 type Props = {
   content: string
@@ -128,6 +130,37 @@ export function ThinkingBlock({
         </div>
       )}
     </div>
+  )
+}
+
+export function ActiveThinkingBlock({
+  sessionId,
+  compact,
+  onContentGrow,
+}: {
+  sessionId: string | null
+  compact?: boolean
+  onContentGrow?: () => void
+}) {
+  const { content, startedAt } = useChatStore(
+    useShallow((s) => {
+      const st = sessionId ? s.sessions[sessionId] : undefined
+      return {
+        content: st?.activeThinkingContent ?? '',
+        startedAt: st?.activeThinkingStartedAt ?? null,
+      }
+    }),
+  )
+  useLayoutEffect(() => {
+    onContentGrow?.()
+  }, [content, onContentGrow])
+  return (
+    <ThinkingBlock
+      content={content}
+      isActive
+      startedAt={startedAt ?? undefined}
+      compact={compact}
+    />
   )
 }
 

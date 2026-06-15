@@ -1,8 +1,20 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-use super::registry::{CommandContext, CommandResult};
+use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use anyhow::Result;
+
+inventory::submit!(StaticSlashCommand {
+    name: "jobs",
+    aliases: &["bg"],
+    description: "Manage background CLI sessions (list, kill, inspect); distinct from /tasks which shows the multi-agent task queue",
+    usage: "/jobs [list|kill <id>|inspect <id>]",
+    category: CommandCategory::Tasks,
+    hidden: false,
+    requires_interactive: false,
+    remote_safe: false,
+    handler: make_handler!(handle),
+});
 
 pub async fn handle(ctx: CommandContext) -> CommandResult {
     let subcmd = ctx.args.first().map(|s| s.as_str()).unwrap_or("list");
@@ -36,7 +48,7 @@ pub async fn handle(ctx: CommandContext) -> CommandResult {
         "kill" => {
             let id = ctx.args.get(1).map(|s| s.as_str()).unwrap_or("");
             if id.is_empty() {
-                return CommandResult::err("Usage: /tasks kill <task_id>");
+                return CommandResult::err("Usage: /jobs kill <task_id>");
             }
             let cwd = std::env::current_dir().unwrap_or_default();
             match kill_session_sync(&cwd, id).await {
@@ -47,7 +59,7 @@ pub async fn handle(ctx: CommandContext) -> CommandResult {
         "inspect" => {
             let id = ctx.args.get(1).map(|s| s.as_str()).unwrap_or("");
             if id.is_empty() {
-                return CommandResult::err("Usage: /tasks inspect <task_id>");
+                return CommandResult::err("Usage: /jobs inspect <task_id>");
             }
             let cwd = std::env::current_dir().unwrap_or_default();
             match inspect_session(&cwd, id).await {

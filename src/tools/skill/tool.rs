@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 const SKILL_SHELL_TIMEOUT_SECS: u64 = 60;
 
@@ -137,53 +138,96 @@ impl Tool for SkillShellTool {
             }
         }
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(SKILL_SHELL_TIMEOUT_SECS), cmd.output()).await;
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
-        match result {
-            Ok(Ok(output)) => {
-                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                if stdout.len() > MAX_OUTPUT_BYTES {
-                    let mut b = MAX_OUTPUT_BYTES.min(stdout.len());
-                    while b > 0 && !stdout.is_char_boundary(b) {
-                        b -= 1;
-                    }
-                    stdout.truncate(b);
-                    stdout.push_str("\n... [output truncated at 1MB]");
-                }
-                if stderr.len() > MAX_OUTPUT_BYTES {
-                    let mut b = MAX_OUTPUT_BYTES.min(stderr.len());
-                    while b > 0 && !stderr.is_char_boundary(b) {
-                        b -= 1;
-                    }
-                    stderr.truncate(b);
-                    stderr.push_str("\n... [stderr truncated at 1MB]");
-                }
-
-                Ok(ToolResult {
-                    success: output.status.success(),
-                    output: stdout,
-                    error: if stderr.is_empty() {
-                        None
-                    } else {
-                        Some(stderr)
-                    },
-                })
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to execute command: {e}")),
+                });
             }
-            Ok(Err(e)) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to execute command: {e}")),
-            }),
-            Err(_) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Command timed out after {SKILL_SHELL_TIMEOUT_SECS}s and was killed"
-                )),
-            }),
+        };
+
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        let status = match tokio::time::timeout(
+            Duration::from_secs(SKILL_SHELL_TIMEOUT_SECS),
+            child.wait(),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to execute command: {e}")),
+                });
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Command timed out after {SKILL_SHELL_TIMEOUT_SECS}s and was killed"
+                    )),
+                });
+            }
+        };
+
+        let stdout_bytes = stdout_task.await.unwrap_or_default();
+        let stderr_bytes = stderr_task.await.unwrap_or_default();
+
+        let mut stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+        let mut stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+
+        if stdout.len() > MAX_OUTPUT_BYTES {
+            let mut b = MAX_OUTPUT_BYTES.min(stdout.len());
+            while b > 0 && !stdout.is_char_boundary(b) {
+                b -= 1;
+            }
+            stdout.truncate(b);
+            stdout.push_str("\n... [output truncated at 1MB]");
         }
+        if stderr.len() > MAX_OUTPUT_BYTES {
+            let mut b = MAX_OUTPUT_BYTES.min(stderr.len());
+            while b > 0 && !stderr.is_char_boundary(b) {
+                b -= 1;
+            }
+            stderr.truncate(b);
+            stderr.push_str("\n... [stderr truncated at 1MB]");
+        }
+
+        Ok(ToolResult {
+            success: status.success(),
+            output: stdout,
+            error: if stderr.is_empty() {
+                None
+            } else {
+                Some(stderr)
+            },
+        })
     }
 }

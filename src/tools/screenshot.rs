@@ -105,6 +105,7 @@ impl ScreenshotTool {
             Duration::from_secs(SCREENSHOT_TIMEOUT_SECS),
             crate::util::hidden_async_command(&program)
                 .args(&cmd_args)
+                .kill_on_drop(true)
                 .output(),
         )
         .await;

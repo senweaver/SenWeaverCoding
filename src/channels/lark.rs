@@ -170,7 +170,6 @@ struct LarkEvent {
 #[derive(Debug, serde::Deserialize)]
 struct LarkEventHeader {
     event_type: String,
-    event_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -673,6 +672,16 @@ impl LarkChannel {
 
     #[allow(clippy::too_many_lines)]
     async fn listen_ws(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        let mut reconnect_attempt: u32 = 0;
+
+        loop {
+            if tx.is_closed() {
+                tracing::info!("Lark: message channel closed; stopping listener");
+                return Ok(());
+            }
+
+            let session_started = std::time::Instant::now();
+            let session: anyhow::Result<bool> = async {
         self.ensure_bot_open_id().await;
         let (wss_url, client_config) = self.get_ws_endpoint().await?;
         let service_id = wss_url
@@ -973,11 +982,44 @@ impl LarkChannel {
                     };
 
                     tracing::debug!("Lark WS: message in {}", lark_msg.chat_id);
-                    if tx.send(channel_msg).await.is_err() { break; }
+                    if crate::channels::forward_channel_message(
+                        self.channel_name(),
+                        &tx,
+                        channel_msg,
+                    )
+                    .is_closed()
+                    {
+                        return Ok(true);
+                    }
                 }
             }
         }
-        Ok(())
+        Ok(false)
+            }
+            .await;
+
+            match session {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    tracing::warn!("Lark: WS connection lost");
+                }
+                Err(e) => {
+                    tracing::warn!("Lark: WS session error: {e:#}");
+                }
+            }
+
+            if session_started.elapsed() >= std::time::Duration::from_secs(60) {
+                reconnect_attempt = 0;
+            }
+            let wait = crate::channels::reconnect_backoff_delay(reconnect_attempt, 2, 60, 500);
+            tracing::warn!(
+                "Lark: reconnecting in {:.3}s (attempt #{})",
+                wait.as_secs_f64(),
+                reconnect_attempt.saturating_add(1),
+            );
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            tokio::time::sleep(wait).await;
+        }
     }
 
     fn is_user_allowed(&self, open_id: &str) -> bool {
@@ -1815,7 +1857,7 @@ impl LarkChannel {
             }
 
             for msg in messages {
-                if state.tx.send(msg).await.is_err() {
+                if crate::channels::forward_channel_message("lark", &state.tx, msg).is_closed() {
                     tracing::warn!("Lark: message channel closed");
                     break;
                 }
@@ -2214,10 +2256,6 @@ fn parse_post_content_details(content: &str) -> Option<ParsedPostContent> {
             mentioned_open_ids,
         })
     }
-}
-
-fn parse_post_content(content: &str) -> Option<String> {
-    parse_post_content_details(content).map(|details| details.text)
 }
 
 fn parse_list_content(content: &str) -> Option<String> {

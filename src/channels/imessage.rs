@@ -222,15 +222,17 @@ end tell"#
             match poll_result {
                 Ok(messages) => {
                     for (rowid, sender, text) in messages {
-                        if rowid > last_rowid {
-                            last_rowid = rowid;
-                        }
-
                         if !self.is_contact_allowed(&sender) {
+                            if rowid > last_rowid {
+                                last_rowid = rowid;
+                            }
                             continue;
                         }
 
                         if text.trim().is_empty() {
+                            if rowid > last_rowid {
+                                last_rowid = rowid;
+                            }
                             continue;
                         }
 
@@ -249,8 +251,18 @@ end tell"#
                             attachments: vec![],
                         };
 
-                        if tx.send(msg).await.is_err() {
-                            return Ok(());
+                        match crate::channels::forward_channel_message("imessage", &tx, msg) {
+                            crate::channels::ForwardOutcome::Delivered => {
+                                if rowid > last_rowid {
+                                    last_rowid = rowid;
+                                }
+                            }
+                            crate::channels::ForwardOutcome::Dropped => {
+                                break;
+                            }
+                            crate::channels::ForwardOutcome::Closed => {
+                                return Ok(());
+                            }
                         }
                     }
                 }

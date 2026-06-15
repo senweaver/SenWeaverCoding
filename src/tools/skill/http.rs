@@ -77,23 +77,39 @@ impl Tool for SkillHttpTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let url = self.substitute_args(&args);
+        let raw_url = self.substitute_args(&args);
 
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Only http:// and https:// URLs are allowed, got: {url}"
-                )),
-            });
-        }
+        let (allowed_domains, allow_private_hosts) = crate::services::try_get_services()
+            .map(|svc| {
+                let cfg = svc.config();
+                (
+                    cfg.http_request.allowed_domains.clone(),
+                    cfg.http_request.allow_private_hosts,
+                )
+            })
+            .unwrap_or_default();
+
+        let url = match crate::tools::http_request::validate_outbound_url(
+            &raw_url,
+            &allowed_domains,
+            allow_private_hosts,
+            false,
+        ) {
+            Ok(u) => u,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        };
 
         let client = crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("tool.skill_http", HTTP_TIMEOUT_SECS, 10);
 
-        let response = match client.get(&url).send().await {
+        let mut response = match client.get(&url).send().await {
             Ok(resp) => resp,
             Err(e) => {
                 return Ok(ToolResult {
@@ -105,27 +121,35 @@ impl Tool for SkillHttpTool {
         };
 
         let status = response.status();
-        let body = match response.bytes().await {
-            Ok(bytes) => {
-                let mut text = String::from_utf8_lossy(&bytes).to_string();
-                if text.len() > MAX_RESPONSE_BYTES {
-                    let mut b = MAX_RESPONSE_BYTES.min(text.len());
-                    while b > 0 && !text.is_char_boundary(b) {
-                        b -= 1;
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                        let take = MAX_RESPONSE_BYTES.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..take]);
+                        truncated = true;
+                        break;
                     }
-                    text.truncate(b);
-                    text.push_str("\n... [response truncated at 1MB]");
+                    buf.extend_from_slice(&chunk);
                 }
-                text
+                Ok(None) => break,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to read response body: {e}")),
+                    });
+                }
             }
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to read response body: {e}")),
-                });
-            }
-        };
+        }
+
+        let mut body = String::from_utf8_lossy(&buf).to_string();
+        if truncated {
+            body.push_str("\n... [response truncated at 1MB]");
+        }
 
         Ok(ToolResult {
             success: status.is_success(),

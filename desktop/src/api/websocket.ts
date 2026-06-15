@@ -24,6 +24,8 @@ const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'approval_decision',
   'permission_response',
   'set_runtime_config',
+  'start_design_generation',
+  'start_plan_execution',
 ])
 
 function isCriticalMessage(message: ClientMessage): boolean {
@@ -177,13 +179,34 @@ class WebSocketManager {
     return [...this.connections.keys()]
   }
 
-  connect(sessionId: string, options?: { pathPrefix?: string }) {
+  connect(sessionId: string, options?: { pathPrefix?: string; force?: boolean }) {
     const existing = this.connections.get(sessionId)
     if (existing && existing.state === 'abandoned') {
       existing.state = 'idle'
       existing.reconnectAttempt = 0
     }
+    if (options?.force && existing) {
+      existing.intentionalClose = true
+      this.stopPingLoop(sessionId)
+      this.stopPongWatcher(sessionId)
+      if (existing.reconnectTimer) {
+        clearTimeout(existing.reconnectTimer)
+        existing.reconnectTimer = null
+      }
+      if (existing.connectTimer) {
+        clearTimeout(existing.connectTimer)
+        existing.connectTimer = null
+      }
+      existing.reconnectAttempt = 0
+      try {
+        existing.ws.onmessage = null
+        existing.ws.close()
+      } catch (err) {
+        console.warn('[wsManager] force reconnect close failed', err)
+      }
+    }
     if (
+      !options?.force &&
       existing &&
       !existing.intentionalClose &&
       (
@@ -393,6 +416,14 @@ class WebSocketManager {
   disconnectAll() {
     for (const sessionId of [...this.connections.keys()]) {
       this.disconnect(sessionId)
+    }
+  }
+
+  forceReconnectAll() {
+    for (const sessionId of [...this.connections.keys()]) {
+      const conn = this.connections.get(sessionId)
+      if (!conn || conn.state === 'abandoned') continue
+      this.connect(sessionId, { force: true })
     }
   }
 

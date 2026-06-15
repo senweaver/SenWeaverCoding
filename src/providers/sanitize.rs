@@ -257,11 +257,93 @@ pub fn normalize_chat_messages_for_provider(
     let mirrored = mirror_tool_ids_in_chat_messages(messages);
     let cleaned = clean_empty_assistant_tool_calls_in_chat_messages(mirrored);
     let non_empty = drop_payloadless_assistant_messages(cleaned);
+    let reasoning_normalized = match kind {
+        ProviderKind::Anthropic => non_empty,
+        _ => promote_reasoning_only_assistants_for_openai(non_empty),
+    };
     let no_orphans = match kind {
-        ProviderKind::Anthropic => coerce_orphan_tool_messages_for_anthropic(non_empty),
-        _ => coerce_orphan_tool_messages_in_chat_messages(non_empty),
+        ProviderKind::Anthropic => coerce_orphan_tool_messages_for_anthropic(reasoning_normalized),
+        _ => coerce_orphan_tool_messages_in_chat_messages(reasoning_normalized),
     };
     repair_dangling_tool_pairs_for_provider(no_orphans, kind)
+}
+
+pub fn promote_reasoning_only_assistants_for_openai(
+    messages: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut promoted: usize = 0;
+    let mut dropped: usize = 0;
+
+    for mut msg in messages {
+        if msg.role != "assistant" {
+            out.push(msg);
+            continue;
+        }
+
+        let trimmed = msg.content.trim_start();
+        if !trimmed.starts_with('{') {
+            out.push(msg);
+            continue;
+        }
+
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) else {
+            out.push(msg);
+            continue;
+        };
+
+        let is_envelope = !obj.is_empty()
+            && obj.keys().all(|key| {
+                matches!(key.as_str(), "content" | "tool_calls" | "reasoning_content")
+            });
+        if !is_envelope {
+            out.push(msg);
+            continue;
+        }
+
+        let has_tool_calls = obj
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+        let content_empty = obj
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+
+        if has_tool_calls || !content_empty {
+            out.push(msg);
+            continue;
+        }
+
+        let reasoning = obj
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        match reasoning {
+            Some(text) => {
+                msg.content = text.to_string();
+                promoted += 1;
+                out.push(msg);
+            }
+            None => {
+                dropped += 1;
+            }
+        }
+    }
+
+    if promoted > 0 || dropped > 0 {
+        tracing::warn!(
+            target: "providers.sanitize",
+            promoted,
+            dropped,
+            "normalized reasoning-only assistant messages for OpenAI-style wire (no content/tool_calls)"
+        );
+    }
+    out
 }
 
 pub fn drop_payloadless_assistant_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
