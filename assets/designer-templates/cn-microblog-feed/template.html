@@ -1,0 +1,454 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>热浪 · 随时随地看热点</title>
+<style>
+:root {
+  --od-accent: #ff5c38;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #e64523;
+  --brand-soft: #fff0eb;
+  --bg: #f2f2f2;
+  --surface: #ffffff;
+  --fg: #1c1c1e;
+  --muted: #93959b;
+  --faint: #c7c9cf;
+  --border: #ececee;
+  --badge-bao: #ff3324;
+  --badge-re: #ff8d1a;
+  --badge-xin: #3a86ff;
+  --vip-gold: #f5a623;
+  --tile-1a: #ffd6a8;
+  --tile-1b: #ff9c5b;
+  --tile-2a: #bfe3ff;
+  --tile-2b: #6cb1f0;
+  --tile-3a: #c8efd4;
+  --tile-3b: #62c98b;
+  --tile-4a: #ffd3df;
+  --tile-4b: #f58aa8;
+  --on-brand: #ffffff;
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --pad-page: calc(12px * var(--od-density));
+  --gap-xs: calc(6px * var(--od-density));
+  --gap-sm: calc(10px * var(--od-density));
+  --gap-md: calc(14px * var(--od-density));
+  --dur-fast: calc(0.15s * var(--od-motion));
+  --radius: 8px;
+  --radius-lg: 12px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: #101013;
+  --surface: #1b1b20;
+  --fg: #e7e7ea;
+  --muted: #85878d;
+  --faint: #4b4d54;
+  --border: #2a2a30;
+  --brand-soft: #33201a;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-14);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+.phone {
+  max-width: 480px;
+  margin-inline: auto;
+  min-height: 100vh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding-bottom: calc(64px * var(--od-density));
+  box-shadow: 0 0 32px rgba(0, 0, 0, 0.08);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad-page) calc(4px * var(--od-density));
+  font-size: var(--fs-13);
+  font-weight: 600;
+  font-family: var(--font-num);
+  background: var(--surface);
+}
+.sb-icons { display: flex; align-items: center; gap: 5px; }
+.searchbar {
+  background: var(--surface);
+  padding: var(--gap-xs) var(--pad-page) var(--gap-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+.searchbar .pill {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  background: var(--bg);
+  border-radius: 999px;
+  padding: calc(7px * var(--od-density)) calc(12px * var(--od-density));
+  color: var(--muted);
+  font-size: var(--fs-13);
+}
+.searchbar .pill b { color: var(--brand); font-weight: 600; }
+.searchbar .scan { color: var(--fg); }
+.feedtabs {
+  background: var(--surface);
+  display: flex;
+  gap: calc(24px * var(--od-density));
+  padding: 0 var(--pad-page);
+  border-bottom: 1px solid var(--border);
+}
+.feedtabs button {
+  padding: var(--gap-xs) 2px calc(9px * var(--od-density));
+  font-size: var(--fs-15);
+  color: var(--muted);
+  position: relative;
+  transition: color var(--dur-fast) ease;
+}
+.feedtabs button.active { color: var(--fg); font-weight: 700; }
+.feedtabs button.active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 0;
+  width: 20px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--brand);
+}
+.hot-card {
+  margin: var(--gap-sm) var(--pad-page);
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: var(--gap-md);
+}
+.hot-card h2 {
+  margin: 0 0 var(--gap-xs);
+  font-size: var(--fs-15);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--brand);
+}
+.hot-list { list-style: none; margin: 0; padding: 0; }
+.hot-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: calc(7px * var(--od-density)) 0;
+  font-size: var(--fs-14);
+}
+.hot-list .rank {
+  font-family: var(--font-num);
+  font-weight: 700;
+  color: var(--faint);
+  min-width: 16px;
+  font-size: var(--fs-14);
+}
+.hot-list li:nth-child(1) .rank { color: var(--badge-bao); }
+.hot-list li:nth-child(2) .rank { color: var(--badge-re); }
+.hot-list li:nth-child(3) .rank { color: var(--vip-gold); }
+.hot-list .topic { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hot-badge {
+  font-size: var(--fs-11);
+  font-weight: 700;
+  color: var(--on-brand);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 1.5;
+}
+.hot-badge.bao { background: var(--badge-bao); }
+.hot-badge.re { background: var(--badge-re); }
+.hot-badge.xin { background: var(--badge-xin); }
+.post {
+  margin: var(--gap-sm) var(--pad-page);
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: var(--gap-md);
+}
+.post-head { display: flex; align-items: center; gap: var(--gap-sm); }
+.post-head .avatar { width: 42px; height: 42px; border-radius: 50%; }
+.post.p1 .avatar { background: linear-gradient(135deg, var(--tile-1a), var(--tile-1b)); }
+.post.p2 .avatar { background: linear-gradient(135deg, var(--tile-2a), var(--tile-2b)); }
+.post-head .who { flex: 1; line-height: 1.35; }
+.post-head .name {
+  font-size: var(--fs-15);
+  font-weight: 600;
+  color: var(--brand-deep);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.post-head .name .crown { color: var(--vip-gold); }
+.post-head .meta { font-size: var(--fs-12); color: var(--muted); }
+.follow-btn {
+  font-size: var(--fs-13);
+  color: var(--brand);
+  border: 1px solid var(--brand);
+  border-radius: 999px;
+  padding: calc(3px * var(--od-density)) calc(12px * var(--od-density));
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.follow-btn:active { background: var(--brand); color: var(--on-brand); }
+.post-text { margin: var(--gap-sm) 0 0; font-size: var(--fs-15); }
+.post-text .topic-link { color: var(--badge-xin); }
+.img-grid {
+  margin-top: var(--gap-sm);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+.img-grid i { aspect-ratio: 1; border-radius: 6px; display: block; }
+.img-grid i:nth-child(1) { background: linear-gradient(135deg, var(--tile-1a), var(--tile-1b)); }
+.img-grid i:nth-child(2) { background: linear-gradient(160deg, var(--tile-3a), var(--tile-3b)); }
+.img-grid i:nth-child(3) { background: linear-gradient(120deg, var(--tile-2a), var(--tile-2b)); }
+.img-grid i:nth-child(4) { background: linear-gradient(150deg, var(--tile-4a), var(--tile-4b)); }
+.img-grid i:nth-child(5) { background: linear-gradient(135deg, var(--tile-2b), var(--tile-3b)); }
+.img-grid i:nth-child(6) { background: linear-gradient(145deg, var(--tile-1b), var(--tile-4b)); }
+.img-grid i:nth-child(7) { background: linear-gradient(135deg, var(--tile-3a), var(--tile-2a)); }
+.img-grid i:nth-child(8) { background: linear-gradient(160deg, var(--tile-4a), var(--tile-1a)); }
+.img-grid i:nth-child(9) { background: linear-gradient(125deg, var(--tile-3b), var(--tile-2b)); }
+.quote {
+  margin-top: var(--gap-sm);
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: var(--gap-sm) var(--gap-md);
+  font-size: var(--fs-14);
+}
+.quote .q-name { color: var(--badge-xin); font-weight: 600; margin-right: 4px; }
+.quote .q-strip {
+  margin-top: var(--gap-xs);
+  height: 64px;
+  border-radius: 6px;
+  background: linear-gradient(110deg, var(--tile-2a), var(--tile-2b) 60%, var(--tile-3b));
+}
+.post-actions {
+  display: flex;
+  margin-top: var(--gap-sm);
+  padding-top: var(--gap-sm);
+  border-top: 1px solid var(--border);
+}
+.post-actions button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: var(--fs-13);
+  color: var(--muted);
+  transition: color var(--dur-fast) ease;
+}
+.post-actions button:active { color: var(--brand); }
+.post-actions button.liked { color: var(--brand); font-weight: 600; }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: calc(6px * var(--od-density)) 0 calc(10px * var(--od-density));
+}
+.tabbar .item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-11);
+  color: var(--muted);
+  transition: color var(--dur-fast) ease;
+}
+.tabbar .item.active { color: var(--brand); font-weight: 600; }
+.tabbar .compose {
+  width: 44px;
+  height: 30px;
+  border-radius: 10px;
+  background: var(--brand);
+  color: var(--on-brand);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 10px var(--brand-soft);
+}
+.tabbar .compose:active { background: var(--brand-deep); }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="手机外框">
+  <header data-od-id="app-header" data-od-label="顶部区域">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>12:30</span>
+      <span class="sb-icons">
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+        <svg width="14" height="11" viewBox="0 0 14 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 4.5a7 7 0 0 1 10 0M4.3 6.8a3.8 3.8 0 0 1 5.4 0" stroke-linecap="round"/><circle cx="7" cy="9.2" r="0.8" fill="currentColor" stroke="none"/></svg>
+        <svg width="20" height="11" viewBox="0 0 20 11" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1.5" width="14" height="8" rx="2.2"/><path d="M17.5 4.2v2.6" stroke-linecap="round"/><rect x="2.6" y="3.1" width="9.5" height="4.8" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="searchbar" data-od-id="search-bar" data-od-label="搜索栏">
+      <span class="pill">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14" stroke-linecap="round"/></svg>
+        大家都在搜：<b>城市夜跑安全指南</b>
+      </span>
+      <button class="scan" data-od-id="scan-entry" data-od-label="扫一扫入口">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" stroke-linecap="round"/><path d="M4 12h16" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <nav class="feedtabs" data-od-id="feed-tabs" data-od-label="信息流标签">
+      <button>关注</button>
+      <button class="active">推荐</button>
+      <button>同城</button>
+      <button>榜单</button>
+    </nav>
+  </header>
+  <main>
+    <section class="hot-card" data-od-id="hot-search-card" data-od-label="热搜榜卡片">
+      <h2>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3c1 3-1.5 4.5-1.5 7a3.5 3.5 0 0 0 7 .3C19.5 13 21 14.8 21 17a8 8 0 0 1-16 0c0-3 1.8-4.6 3-7 .8-1.6 1-3.4 4-7z" stroke-linejoin="round"/></svg>
+        实时热搜
+      </h2>
+      <ol class="hot-list">
+        <li data-od-id="hot-item-1" data-od-label="热搜第1条">
+          <span class="rank">1</span>
+          <span class="topic">江城马拉松三万名额两小时报满</span>
+          <span class="hot-badge bao">爆</span>
+        </li>
+        <li data-od-id="hot-item-2" data-od-label="热搜第2条">
+          <span class="rank">2</span>
+          <span class="topic">高校食堂推出一人食小锅菜窗口</span>
+          <span class="hot-badge re">热</span>
+        </li>
+        <li data-od-id="hot-item-3" data-od-label="热搜第3条">
+          <span class="rank">3</span>
+          <span class="topic">沙漠光伏电站迎来首批迁徙候鸟</span>
+          <span class="hot-badge xin">新</span>
+        </li>
+        <li data-od-id="hot-item-4" data-od-label="热搜第4条">
+          <span class="rank">4</span>
+          <span class="topic">老字号糕点店排队三小时只为一盒青团</span>
+        </li>
+        <li data-od-id="hot-item-5" data-od-label="热搜第5条">
+          <span class="rank">5</span>
+          <span class="topic">新能源车主自发组建高速充电互助群</span>
+        </li>
+      </ol>
+    </section>
+    <section class="post p1" data-od-id="feed-post-1" data-od-label="动态-山野俱乐部">
+      <div class="post-head">
+        <span class="avatar"></span>
+        <div class="who">
+          <div class="name">
+            山野徒步俱乐部
+            <svg class="crown" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9.5 8 12l4-5.5L16 12l4-2.5L18.5 17h-13z" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="meta">18分钟前 · 来自 江城</div>
+        </div>
+        <button class="follow-btn" data-od-id="follow-button-1" data-od-label="关注按钮-1">+ 关注</button>
+      </div>
+      <p class="post-text">
+        周末带队走了一趟云岭古道，秋色比预想的还要浓。九张图记录从山脚到垭口的全程，最后一张的云海值得你点开大图。
+        <a class="topic-link" href="#">#秋日徒步路线#</a>
+      </p>
+      <div class="img-grid" data-od-id="post-image-grid" data-od-label="九宫格图片">
+        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      </div>
+      <div class="post-actions" data-od-id="post-actions-1" data-od-label="互动行-1">
+        <button>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 8h10l-3-3M17 16H7l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          1268
+        </button>
+        <button>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9l-4 3.5v-3.5h-.5A2.5 2.5 0 0 1 2 14.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          3402
+        </button>
+        <button class="liked">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5S4 15.2 4 9.8C4 6.9 6.2 5 8.6 5c1.5 0 2.7.7 3.4 1.9C12.7 5.7 13.9 5 15.4 5 17.8 5 20 6.9 20 9.8c0 5.4-8 10.7-8 10.7z" stroke-linejoin="round"/></svg>
+          2.1万
+        </button>
+      </div>
+    </section>
+    <section class="post p2" data-od-id="feed-post-2" data-od-label="动态-城市观察员">
+      <div class="post-head">
+        <span class="avatar"></span>
+        <div class="who">
+          <div class="name">
+            晚风城市观察
+            <svg class="crown" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9.5 8 12l4-5.5L16 12l4-2.5L18.5 17h-13z" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="meta">1小时前 · 来自 海州</div>
+        </div>
+        <button class="follow-btn" data-od-id="follow-button-2" data-od-label="关注按钮-2">+ 关注</button>
+      </div>
+      <p class="post-text">转发这条：江边步道的夜间照明终于改造完成，跑步的朋友们再也不用打手电了。</p>
+      <div class="quote" data-od-id="repost-quote" data-od-label="转发引用卡">
+        <span class="q-name">@海州发布</span>
+        滨江夜跑道一期今晚亮灯，全长 6.2 公里，沿线新增 14 处直饮水点与紧急呼叫桩，欢迎市民体验反馈。
+        <span class="q-strip"></span>
+      </div>
+      <div class="post-actions" data-od-id="post-actions-2" data-od-label="互动行-2">
+        <button>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 8h10l-3-3M17 16H7l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          486
+        </button>
+        <button>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9l-4 3.5v-3.5h-.5A2.5 2.5 0 0 1 2 14.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          951
+        </button>
+        <button>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5S4 15.2 4 9.8C4 6.9 6.2 5 8.6 5c1.5 0 2.7.7 3.4 1.9C12.7 5.7 13.9 5 15.4 5 17.8 5 20 6.9 20 9.8c0 5.4-8 10.7-8 10.7z" stroke-linejoin="round"/></svg>
+          6520
+        </button>
+      </div>
+    </section>
+  </main>
+  <nav class="tabbar" data-od-id="bottom-tabbar" data-od-label="底部导航">
+    <button class="item active" data-od-id="tab-home" data-od-label="首页标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19z" stroke-linejoin="round"/><path d="M9.5 20v-6h5v6"/></svg>
+      首页
+    </button>
+    <button class="item" data-od-id="tab-video" data-od-label="视频标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z" stroke-linejoin="round"/></svg>
+      视频
+    </button>
+    <button class="item" data-od-id="tab-compose" data-od-label="发布按钮">
+      <span class="compose">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5.5v13M5.5 12h13" stroke-linecap="round"/></svg>
+      </span>
+    </button>
+    <button class="item" data-od-id="tab-discover" data-od-label="发现标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="m15 9-1.8 4.2L9 15l1.8-4.2z" stroke-linejoin="round"/></svg>
+      发现
+    </button>
+    <button class="item" data-od-id="tab-mine" data-od-label="我的标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8.5" r="3.5"/><path d="M4.5 19.5c1.2-3.4 4-5 7.5-5s6.3 1.6 7.5 5" stroke-linecap="round"/></svg>
+      我的
+    </button>
+  </nav>
+</div>
+</body>
+</html>

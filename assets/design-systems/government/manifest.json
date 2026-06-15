@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "government",
+  "name": "Civic",
+  "category": "Government & Public Sector",
+  "description": "Accessibility-first public-service system for government portals, forms, and civic services — high contrast, plain layout, a yellow focus highlight, and zero decoration.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding original design package"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "usage": "USAGE.md",
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized",
+  "craft": {
+    "applies": [],
+    "suggested": [
+      "color",
+      "accessibility-baseline"
+    ],
+    "exemptions": []
+  }
+}

@@ -1,0 +1,108 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/healthcare/tokens.css
+ *
+ * Token contract for Vital — a calm clinical system for patient portals,
+ * telehealth, and care dashboards. Pristine white surfaces, a single
+ * trustworthy medical teal accent, generous legibility, and contrast that
+ * leans toward WCAG AAA. The interface should feel reassuring and precise,
+ * never alarming: status color is rationed, motion is gentle, and every
+ * reading surface is comfortable for long clinical sessions.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>, then
+ * resolve every value through var(--*).
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface (3 levels) ───────────────────────────────────────── */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-warm: #f1f6f8;
+
+  /* ─── Foreground ramp (4 levels) ───────────────────────────────── */
+  --fg: #16323a;
+  --fg-2: #2c4a52;
+  --muted: #5a7178;
+  --meta: #87a0a7;
+
+  /* ─── Border (2 levels) ────────────────────────────────────────── */
+  --border: #d4e1e6;
+  --border-soft: #e6eff2;
+
+  /* ─── Accent — medical teal ────────────────────────────────────── */
+  --accent: #0e7490;
+  --accent-on: #ffffff;
+  --accent-hover: #0c6379;
+  --accent-active: #0a5063;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #1f9d55;
+  --warn: #b9770b;
+  --danger: #c0392b;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 19px;
+  --text-xl: 23px;
+  --text-2xl: 30px;
+  --text-3xl: 40px;
+  --text-4xl: 52px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.55;
+  --leading-tight: 1.22;
+  --tracking-display: -0.01em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 64px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+
+  /* ─── Radius ───────────────────────────────────────────────────── */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — soft, low, reassuring ────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(16, 50, 58, 0.04) 0 1px 2px 0,
+    rgba(16, 50, 58, 0.06) 0 4px 12px -2px;
+
+  /* ─── Focus ring — accent-tinted, clearly visible ──────────────── */
+  --focus-ring: 0 0 0 3px rgba(14, 116, 144, 0.35);
+
+  /* ─── Motion — gentle ──────────────────────────────────────────── */
+  --motion-fast: 160ms;
+  --motion-base: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1200px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

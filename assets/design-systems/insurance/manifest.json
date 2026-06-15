@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "insurance",
+  "name": "Assured",
+  "category": "Insurance & Risk",
+  "description": "Reassuring system for insurance, claims, and risk products — stable navy on clean surfaces, a calm trust-teal accent, clear coverage cards, and confident, jargon-free hierarchy.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

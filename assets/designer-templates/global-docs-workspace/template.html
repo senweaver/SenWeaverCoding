@@ -1,0 +1,465 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Q2 Platform Roadmap — Inkpage</title>
+<style>
+:root {
+  --od-accent: #2f6f4f;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: color-mix(in srgb, var(--brand) 10%, transparent);
+  --bg: #ffffff;
+  --side-bg: #f7f7f5;
+  --side-hover: #efefed;
+  --side-active: #e8e8e5;
+  --fg: #37352f;
+  --muted: #787774;
+  --faint: #9b9a97;
+  --border: #e9e9e7;
+  --hover-block: #f1f1ef;
+  --callout-bg: #f1f1ef;
+  --check-done: var(--brand);
+  --table-head: #f7f7f5;
+  --kbd-bg: #f7f7f5;
+  --kbd-border: #dcdcda;
+  --chip-bg: #f1f1ef;
+  --tag-amber-bg: #fbf3db;
+  --tag-amber-fg: #9f6b18;
+  --tag-green-bg: #e7f3ec;
+  --tag-green-fg: #1f6f4a;
+  --tag-gray-bg: #f1f1ef;
+  --tag-gray-fg: #5f5e5b;
+  --focus-ring: color-mix(in srgb, var(--brand) 40%, transparent);
+  --dk-bg: #191919;
+  --dk-side-bg: #202020;
+  --dk-side-hover: #2c2c2c;
+  --dk-side-active: #333333;
+  --dk-fg: #d4d4d2;
+  --dk-muted: #9b9a97;
+  --dk-faint: #6f6e6b;
+  --dk-border: #2e2e2e;
+  --dk-hover-block: #262626;
+  --dk-callout-bg: #262626;
+  --dk-table-head: #232323;
+  --dk-kbd-bg: #262626;
+  --dk-kbd-border: #3a3a3a;
+  --dk-chip-bg: #2c2c2c;
+  --fs-page-title: calc(40px * var(--od-scale));
+  --fs-h2: calc(24px * var(--od-scale));
+  --fs-body: calc(16px * var(--od-scale));
+  --fs-side: calc(14px * var(--od-scale));
+  --fs-sm: calc(13px * var(--od-scale));
+  --fs-xs: calc(12px * var(--od-scale));
+  --pad-1: calc(4px * var(--od-density));
+  --pad-2: calc(8px * var(--od-density));
+  --pad-3: calc(12px * var(--od-density));
+  --pad-4: calc(16px * var(--od-density));
+  --pad-6: calc(24px * var(--od-density));
+  --t-fast: calc(0.1s * var(--od-motion));
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: var(--dk-bg);
+  --side-bg: var(--dk-side-bg);
+  --side-hover: var(--dk-side-hover);
+  --side-active: var(--dk-side-active);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --hover-block: var(--dk-hover-block);
+  --callout-bg: var(--dk-callout-bg);
+  --table-head: var(--dk-table-head);
+  --kbd-bg: var(--dk-kbd-bg);
+  --kbd-border: var(--dk-kbd-border);
+  --chip-bg: var(--dk-chip-bg);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; cursor: pointer; background: none; border: 0; color: inherit; padding: 0; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+svg { display: block; }
+.icon { width: calc(16px * var(--od-scale)); height: calc(16px * var(--od-scale)); stroke: currentColor; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.icon-sm { width: calc(13px * var(--od-scale)); height: calc(13px * var(--od-scale)); }
+.app { display: grid; grid-template-columns: calc(244px * var(--od-density)) 1fr; height: 100vh; overflow: hidden; }
+.sidebar { background: var(--side-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.ws-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-2);
+  margin: var(--pad-2);
+  padding: var(--pad-2) var(--pad-2);
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: var(--fs-side);
+  transition: background var(--t-fast) ease;
+  width: calc(100% - 2 * var(--pad-2));
+  text-align: left;
+}
+.ws-switch:hover { background: var(--side-hover); }
+.ws-mark {
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  background: var(--brand);
+  color: var(--bg);
+  display: grid; place-items: center;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  flex: none;
+}
+.side-scroll { overflow-y: auto; flex: 1; padding: 0 var(--pad-2) var(--pad-4); }
+.side-label { font-size: var(--fs-xs); font-weight: 600; color: var(--faint); padding: var(--pad-3) var(--pad-2) var(--pad-1); }
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-1);
+  width: 100%;
+  text-align: left;
+  padding: var(--pad-1) var(--pad-2);
+  border-radius: 6px;
+  font-size: var(--fs-side);
+  color: var(--muted);
+  transition: background var(--t-fast) ease, color var(--t-fast) ease;
+}
+.tree-row:hover { background: var(--side-hover); color: var(--fg); }
+.tree-row.active { background: var(--side-active); color: var(--fg); font-weight: 600; }
+.tree-row .toggle { color: var(--faint); flex: none; transition: transform var(--t-fast) ease; }
+.tree-row .toggle.open { transform: rotate(90deg); }
+.tree-row .pg-icon { color: var(--faint); flex: none; }
+.tree-row.lvl-2 { padding-left: calc(22px * var(--od-density)); }
+.tree-row.lvl-3 { padding-left: calc(40px * var(--od-density)); }
+.main { display: flex; flex-direction: column; overflow: hidden; }
+.doc-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-2);
+  padding: var(--pad-2) var(--pad-4);
+  font-size: var(--fs-side);
+  color: var(--muted);
+  flex: none;
+}
+.doc-topbar .crumb { padding: var(--pad-1) var(--pad-2); border-radius: 5px; transition: background var(--t-fast) ease; }
+.doc-topbar .crumb:hover { background: var(--hover-block); }
+.doc-topbar .crumb-sep { color: var(--faint); }
+.doc-topbar .right { margin-left: auto; display: flex; align-items: center; gap: var(--pad-1); }
+.doc-topbar .right button { padding: var(--pad-1) var(--pad-2); border-radius: 5px; transition: background var(--t-fast) ease; }
+.doc-topbar .right button:hover { background: var(--hover-block); }
+.doc-topbar .share { font-weight: 500; color: var(--fg); }
+.doc-scroll { overflow-y: auto; flex: 1; }
+.doc { max-width: calc(708px * var(--od-scale)); margin: 0 auto; padding: calc(48px * var(--od-density)) var(--pad-6) calc(120px * var(--od-density)); }
+.page-title { font-size: var(--fs-page-title); font-weight: 800; letter-spacing: -0.02em; margin: 0 0 var(--pad-2); line-height: 1.15; }
+.page-meta { display: flex; gap: var(--pad-4); color: var(--faint); font-size: var(--fs-sm); margin-bottom: var(--pad-6); }
+.page-meta span { display: inline-flex; align-items: center; gap: var(--pad-1); }
+.block { position: relative; padding: 3px 2px; margin: 1px 0; border-radius: 4px; }
+.block:hover { background: color-mix(in srgb, var(--hover-block) 55%, transparent); }
+.block .handles {
+  position: absolute;
+  left: calc(-46px * var(--od-density));
+  top: 3px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--t-fast) ease;
+}
+.block:hover .handles { opacity: 1; }
+.handles button { color: var(--faint); padding: 2px; border-radius: 4px; }
+.handles button:hover { background: var(--hover-block); color: var(--muted); }
+.block p { margin: 0; line-height: 1.55; }
+.block h2 { font-size: var(--fs-h2); font-weight: 700; margin: var(--pad-4) 0 var(--pad-1); letter-spacing: -0.01em; }
+.todo { display: flex; align-items: flex-start; gap: var(--pad-2); line-height: 1.55; }
+.todo .box {
+  width: 16px; height: 16px;
+  border: 1.4px solid var(--muted);
+  border-radius: 3px;
+  margin-top: 4px;
+  flex: none;
+  display: grid; place-items: center;
+  color: var(--bg);
+  transition: background var(--t-fast) ease, border-color var(--t-fast) ease;
+}
+.todo .box:hover { border-color: var(--fg); }
+.todo.done .box { background: var(--check-done); border-color: var(--check-done); }
+.todo.done .label { color: var(--faint); text-decoration: line-through; }
+.callout {
+  display: flex;
+  gap: var(--pad-3);
+  background: var(--callout-bg);
+  border-radius: 6px;
+  padding: var(--pad-4);
+  margin: var(--pad-2) 0;
+}
+.callout .c-icon { color: var(--brand); flex: none; margin-top: 2px; }
+.callout p { margin: 0; line-height: 1.5; font-size: calc(15px * var(--od-scale)); }
+.doc-table { width: 100%; border-collapse: collapse; font-size: calc(14px * var(--od-scale)); margin: var(--pad-2) 0; }
+.doc-table th, .doc-table td { border: 1px solid var(--border); padding: var(--pad-2) var(--pad-3); text-align: left; vertical-align: top; }
+.doc-table th { background: var(--table-head); color: var(--muted); font-weight: 500; }
+.doc-table tr:hover td { background: color-mix(in srgb, var(--hover-block) 50%, transparent); }
+.tag { display: inline-flex; align-items: center; border-radius: 4px; padding: 1px var(--pad-2); font-size: var(--fs-xs); font-weight: 500; }
+.tag.amber { background: var(--tag-amber-bg); color: var(--tag-amber-fg); }
+.tag.green { background: var(--tag-green-bg); color: var(--tag-green-fg); }
+.tag.gray { background: var(--tag-gray-bg); color: var(--tag-gray-fg); }
+.slash-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pad-2);
+  color: var(--faint);
+  font-size: calc(15px * var(--od-scale));
+  padding: var(--pad-1) 0;
+}
+kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  background: var(--kbd-bg);
+  border: 1px solid var(--kbd-border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 5px;
+  color: var(--muted);
+}
+.person { display: inline-flex; align-items: center; gap: 5px; background: var(--chip-bg); border-radius: 999px; padding: 1px var(--pad-2) 1px 2px; font-size: var(--fs-sm); }
+.person .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--brand); color: var(--bg); display: grid; place-items: center; font-size: 9px; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="app" data-od-id="app-frame" data-od-label="App frame">
+  <aside class="sidebar" data-od-id="page-sidebar" data-od-label="Page tree sidebar">
+    <button class="ws-switch" data-od-id="workspace-switcher" data-od-label="Workspace switcher">
+      <span class="ws-mark">I</span>
+      Inkpage Labs
+      <svg class="icon icon-sm" viewBox="0 0 20 20" style="margin-left: auto; color: var(--faint);"><path d="M6 8l4 4 4-4"/></svg>
+    </button>
+    <div class="side-scroll">
+      <section data-od-id="sidebar-quick" data-od-label="Quick actions">
+        <button class="tree-row">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.5 13.5L17 17"/></svg>
+          Search
+          <kbd style="margin-left: auto;">Ctrl K</kbd>
+        </button>
+        <button class="tree-row">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 6.5v3.5l2.5 1.5"/></svg>
+          Updates
+        </button>
+        <button class="tree-row">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M10 4.5a3.4 3.4 0 013.4 3.4c0 3.2 1.4 4.3 2.1 4.9H4.5c.7-.6 2.1-1.7 2.1-4.9A3.4 3.4 0 0110 4.5zM8.5 15.5a1.6 1.6 0 003 0"/></svg>
+          Inbox
+        </button>
+      </section>
+      <section data-od-id="sidebar-pages" data-od-label="Workspace pages">
+        <div class="side-label">Workspace</div>
+        <button class="tree-row">
+          <svg class="icon icon-sm toggle open" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3"/></svg>
+          Product
+        </button>
+        <button class="tree-row lvl-2 active" aria-current="page">
+          <svg class="icon icon-sm toggle" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M4 5.5h12M4 10h12M4 14.5h8"/></svg>
+          Q2 Platform Roadmap
+        </button>
+        <button class="tree-row lvl-2">
+          <svg class="icon icon-sm toggle" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 7v6M7 10h6"/></svg>
+          Feature briefs
+        </button>
+        <button class="tree-row lvl-3">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3"/></svg>
+          Workspace audit log
+        </button>
+        <button class="tree-row">
+          <svg class="icon icon-sm toggle" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M3.5 6.5a2 2 0 012-2h3l1.5 2h6a2 2 0 012 2v6a2 2 0 01-2 2h-10.5a2 2 0 01-2-2z"/></svg>
+          Engineering
+        </button>
+        <button class="tree-row">
+          <svg class="icon icon-sm toggle" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M4 16V8.5L10 4l6 4.5V16h-4v-4.5H8V16z"/></svg>
+          Company home
+        </button>
+        <button class="tree-row">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+          New page
+        </button>
+      </section>
+      <section data-od-id="sidebar-private" data-od-label="Private pages">
+        <div class="side-label">Private</div>
+        <button class="tree-row">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3"/></svg>
+          Weekly notes
+        </button>
+        <button class="tree-row">
+          <svg class="icon icon-sm pg-icon" viewBox="0 0 20 20"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3"/></svg>
+          Reading list
+        </button>
+      </section>
+    </div>
+  </aside>
+  <main class="main" data-od-id="document-pane" data-od-label="Document pane">
+    <header class="doc-topbar" data-od-id="doc-topbar" data-od-label="Document toolbar">
+      <button class="crumb">Product</button>
+      <span class="crumb-sep">/</span>
+      <button class="crumb" style="color: var(--fg); font-weight: 500;">Q2 Platform Roadmap</button>
+      <div class="right">
+        <span style="color: var(--faint); font-size: var(--fs-xs);">Edited 2h ago</span>
+        <button class="share" data-od-id="share-button" data-od-label="Share button">Share</button>
+        <button aria-label="Comments"><svg class="icon" viewBox="0 0 20 20"><path d="M3.5 5.5a2 2 0 012-2h9a2 2 0 012 2v6a2 2 0 01-2 2H9l-3.5 3v-3h-1a2 2 0 01-2-2z"/></svg></button>
+        <button aria-label="Page history"><svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 7v3.5l2.5 1.5"/></svg></button>
+        <button aria-label="More options"><svg class="icon" viewBox="0 0 20 20"><path d="M5 10h.01M10 10h.01M15 10h.01"/></svg></button>
+      </div>
+    </header>
+    <div class="doc-scroll">
+      <article class="doc" data-od-id="document-body" data-od-label="Document body">
+        <h1 class="page-title">Q2 Platform Roadmap</h1>
+        <div class="page-meta" data-od-id="page-meta" data-od-label="Page metadata">
+          <span>
+            <span class="person"><span class="dot">LH</span>Lena Hartwig</span>
+          </span>
+          <span>
+            <svg class="icon icon-sm" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="12" rx="2"/><path d="M3.5 8.5h13M7 3v3M13 3v3"/></svg>
+            April 2 — June 27
+          </span>
+          <span>
+            <svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 3.5l1.8 3.8 4.2.6-3 3 .7 4.1-3.7-2-3.7 2 .7-4.1-3-3 4.2-.6z"/></svg>
+            Pinned in Product
+          </span>
+        </div>
+        <section data-od-id="block-intro" data-od-label="Intro paragraph">
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <p>This page tracks the three platform bets for Q2: workspace-level permissions, the import pipeline rewrite, and public API rate-limit tiers. Each bet has a single accountable owner and a weekly check-in row in the table below.</p>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <div class="callout" data-od-id="block-callout" data-od-label="Callout block">
+              <span class="c-icon"><svg class="icon" viewBox="0 0 20 20"><path d="M10 3.5a4.5 4.5 0 014.5 4.5c0 1.8-.9 2.9-1.8 3.8-.5.6-.7 1-.7 1.7H8c0-.7-.2-1.1-.7-1.7-.9-.9-1.8-2-1.8-3.8A4.5 4.5 0 0110 3.5zM8.2 16h3.6"/></svg></span>
+              <p>Decision history lives in the weekly check-in thread, not in this page. If a scope change affects a launch date, update the table here the same day and tag the owner.</p>
+            </div>
+          </div>
+        </section>
+        <section data-od-id="block-priorities" data-od-label="Priorities section">
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <h2>April milestones</h2>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <div class="todo done" data-od-id="todo-permissions-spec" data-od-label="To-do item">
+              <button class="box" aria-label="Toggle to-do"><svg class="icon icon-sm" viewBox="0 0 20 20" style="stroke-width: 2.4;"><path d="M5 10.5l3.5 3.5L15 6.5"/></svg></button>
+              <span class="label">Ship permissions data model spec and migration plan</span>
+            </div>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <div class="todo done">
+              <button class="box" aria-label="Toggle to-do"><svg class="icon icon-sm" viewBox="0 0 20 20" style="stroke-width: 2.4;"><path d="M5 10.5l3.5 3.5L15 6.5"/></svg></button>
+              <span class="label">Import pipeline: benchmark current throughput on 50GB workspaces</span>
+            </div>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <div class="todo">
+              <button class="box" aria-label="Toggle to-do"></button>
+              <span class="label">Roll guest-role permissions to 5% of workspaces behind the flag</span>
+            </div>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <div class="todo">
+              <button class="box" aria-label="Toggle to-do"></button>
+              <span class="label">Draft public pricing note for API rate-limit tiers with finance</span>
+            </div>
+          </div>
+        </section>
+        <section data-od-id="block-table" data-od-label="Status table section">
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <h2>Bet status</h2>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <table class="doc-table" data-od-id="status-table" data-od-label="Bet status table">
+              <thead>
+                <tr><th>Bet</th><th>Owner</th><th>Status</th><th>Target</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Workspace permissions</td>
+                  <td><span class="person"><span class="dot">LH</span>Lena Hartwig</span></td>
+                  <td><span class="tag green">On track</span></td>
+                  <td>May 16</td>
+                </tr>
+                <tr>
+                  <td>Import pipeline rewrite</td>
+                  <td><span class="person"><span class="dot">OA</span>Owen Achebe</span></td>
+                  <td><span class="tag amber">At risk</span></td>
+                  <td>June 6</td>
+                </tr>
+                <tr>
+                  <td>API rate-limit tiers</td>
+                  <td><span class="person"><span class="dot">SK</span>Saoirse Kelly</span></td>
+                  <td><span class="tag gray">Not started</span></td>
+                  <td>June 27</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="block">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <p>The import rewrite is at risk because the chunked-upload path still fails on workspaces with deeply nested page trees. Owen is pairing with infra this week; if the fix lands by Friday the June 6 target holds.</p>
+          </div>
+          <div class="block" data-od-id="slash-hint-block" data-od-label="Slash command hint">
+            <div class="handles">
+              <button aria-label="Add block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg></button>
+              <button aria-label="Drag block"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01"/></svg></button>
+            </div>
+            <span class="slash-hint">Type <kbd>/</kbd> for commands, or <kbd>@</kbd> to mention a teammate</span>
+          </div>
+        </section>
+      </article>
+    </div>
+  </main>
+</div>
+</body>
+</html>

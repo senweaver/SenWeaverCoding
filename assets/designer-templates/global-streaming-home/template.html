@@ -1,0 +1,426 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nightreel — Home</title>
+<style>
+:root {
+  --od-accent: #e50914;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --bg-page: #000000;
+  --bg-app: #0b0b0b;
+  --bg-card: #1c1c1c;
+  --fg: #ffffff;
+  --fg-muted: #b3b3b3;
+  --fg-dim: #777777;
+  --hairline: #262626;
+  --on-light: #0b0b0b;
+  --hero-sky: #1f3a4a;
+  --hero-glow: #c9772e;
+  --hero-ground: #120b07;
+  --poster-1a: #25455c;
+  --poster-1b: #0d1722;
+  --poster-2a: #6e2630;
+  --poster-2b: #1c0a0d;
+  --poster-3a: #2e5c3f;
+  --poster-3b: #0c1b10;
+  --poster-4a: #7a5a23;
+  --poster-4b: #211606;
+  --poster-5a: #4a4a55;
+  --poster-5b: #131318;
+  --progress-track: #4d4d4d;
+  --fs-logo: calc(24px * var(--od-scale));
+  --fs-hero: calc(30px * var(--od-scale));
+  --fs-section: calc(17px * var(--od-scale));
+  --fs-body: calc(14px * var(--od-scale));
+  --fs-meta: calc(12px * var(--od-scale));
+  --pad: calc(14px * var(--od-density));
+  --gap: calc(10px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+}
+html[data-od-mode="dark"] {
+  --bg-app: #000000;
+  --bg-card: #161616;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.phone {
+  max-width: 480px;
+  min-height: 100dvh;
+  margin-inline: auto;
+  background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(4px * var(--od-density));
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .glyphs { display: flex; gap: 5px; align-items: center; }
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: calc(6px * var(--od-density)) var(--pad);
+}
+.logo {
+  font-size: var(--fs-logo);
+  font-weight: 900;
+  letter-spacing: -0.05em;
+  color: var(--brand);
+  text-transform: uppercase;
+  flex: 1;
+}
+.topbar-icon { padding: 6px; transition: opacity var(--dur) ease; }
+.topbar-icon:active { opacity: 0.5; }
+.profile-chip { width: 26px; height: 26px; border-radius: 4px; background: linear-gradient(140deg, var(--poster-3a), var(--poster-3b)); }
+.cats {
+  display: flex;
+  gap: calc(8px * var(--od-density));
+  padding: calc(6px * var(--od-density)) var(--pad) calc(12px * var(--od-density));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.cats::-webkit-scrollbar { display: none; }
+.cat {
+  flex: none;
+  padding: calc(6px * var(--od-density)) calc(14px * var(--od-density));
+  border: 1px solid var(--fg-dim);
+  border-radius: 999px;
+  font-size: calc(13px * var(--od-scale));
+  color: var(--fg);
+  transition: background var(--dur) ease, border-color var(--dur) ease;
+}
+.cat:active { background: var(--bg-card); }
+.cat.active { background: var(--bg-card); border-color: var(--bg-card); font-weight: 600; }
+.content { flex: 1; overflow-y: auto; padding-bottom: calc(86px * var(--od-density)); }
+.hero {
+  margin: 0 var(--pad);
+  border-radius: 14px;
+  overflow: hidden;
+  aspect-ratio: 2 / 2.6;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background:
+    radial-gradient(90% 50% at 50% 28%, var(--hero-glow) 0%, transparent 62%),
+    linear-gradient(180deg, var(--hero-sky) 0%, var(--hero-ground) 78%);
+  border: 1px solid var(--hairline);
+}
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 22%;
+  height: 26%;
+  background:
+    radial-gradient(40% 90% at 28% 100%, var(--hero-ground) 56%, transparent 60%),
+    radial-gradient(48% 100% at 72% 100%, var(--hero-ground) 52%, transparent 57%);
+  opacity: 0.9;
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  inset: 55% 0 0;
+  background: linear-gradient(180deg, transparent, var(--bg-app) 96%);
+}
+.hero-inner { position: relative; z-index: 1; padding: var(--pad); text-align: center; }
+.hero-title {
+  font-size: var(--fs-hero);
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin: 0 0 4px;
+  line-height: 1.05;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.7);
+}
+.hero-tags {
+  font-size: var(--fs-meta);
+  color: var(--fg-muted);
+  margin: 0 0 calc(14px * var(--od-density));
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.hero-tags i { font-style: normal; color: var(--fg-dim); }
+.hero-cta { display: flex; gap: var(--gap); justify-content: center; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: calc(9px * var(--od-density)) calc(20px * var(--od-density));
+  border-radius: 5px;
+  font-size: calc(14px * var(--od-scale));
+  font-weight: 700;
+  transition: transform var(--dur) ease, opacity var(--dur) ease;
+}
+.btn:active { transform: scale(0.96); opacity: 0.85; }
+.btn-play { background: var(--fg); color: var(--on-light); }
+.btn-list { background: rgba(255, 255, 255, 0.16); color: var(--fg); backdrop-filter: blur(6px); }
+.rank-badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 1;
+  background: var(--brand);
+  color: var(--fg);
+  font-size: calc(11px * var(--od-scale));
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: calc(22px * var(--od-density)) var(--pad) calc(10px * var(--od-density));
+}
+.section-title { font-size: var(--fs-section); font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.section-more { color: var(--fg-muted); font-size: var(--fs-meta); }
+.rail {
+  display: flex;
+  gap: calc(9px * var(--od-density));
+  padding: 0 var(--pad);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+.rail::-webkit-scrollbar { display: none; }
+.poster {
+  flex: none;
+  width: calc(112px * var(--od-density));
+  aspect-ratio: 2 / 3;
+  border-radius: 6px;
+  scroll-snap-align: start;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transition: transform var(--dur) ease;
+}
+.poster:active { transform: scale(0.96); }
+.poster-title {
+  position: relative;
+  z-index: 1;
+  font-size: calc(12px * var(--od-scale));
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  text-align: center;
+  padding: 0 8px 12px;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+  line-height: 1.25;
+}
+.p-1 { background: radial-gradient(120% 70% at 50% 12%, var(--poster-1a), var(--poster-1b) 75%); }
+.p-2 { background: radial-gradient(120% 70% at 50% 12%, var(--poster-2a), var(--poster-2b) 75%); }
+.p-3 { background: radial-gradient(120% 70% at 50% 12%, var(--poster-3a), var(--poster-3b) 75%); }
+.p-4 { background: radial-gradient(120% 70% at 50% 12%, var(--poster-4a), var(--poster-4b) 75%); }
+.p-5 { background: radial-gradient(120% 70% at 50% 12%, var(--poster-5a), var(--poster-5b) 75%); }
+.poster .top-tag {
+  position: absolute;
+  top: 0;
+  right: 8px;
+  background: var(--brand);
+  font-size: calc(9px * var(--od-scale));
+  font-weight: 700;
+  padding: 5px 4px 6px;
+  border-radius: 0 0 3px 3px;
+  text-align: center;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+.cw .progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--progress-track);
+}
+.cw .progress i { display: block; height: 100%; background: var(--brand); }
+.cw .poster-title { padding-bottom: 16px; }
+.cw .resume {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--fg);
+}
+.cw .resume span {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1.6px solid var(--fg);
+  background: rgba(0, 0, 0, 0.4);
+  display: grid;
+  place-items: center;
+}
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin-inline: auto;
+  display: flex;
+  justify-content: space-around;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(20px * var(--od-density));
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.7), var(--bg-page) 60%);
+  border-top: 1px solid var(--hairline);
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: var(--fg-dim);
+  font-size: calc(10px * var(--od-scale));
+  transition: color var(--dur) ease, transform var(--dur) ease;
+}
+.tab:active { transform: scale(0.92); }
+.tab.active { color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="App shell">
+  <header class="statusbar" data-od-id="status-bar" data-od-label="Status bar">
+    <span>9:41</span>
+    <span class="glyphs">
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 4.2a8.5 8.5 0 0 1 12 0M3.8 6.6a5.2 5.2 0 0 1 7.4 0M6.2 8.9a1.9 1.9 0 0 1 2.6 0" stroke-linecap="round"/></svg>
+      <svg width="22" height="11" viewBox="0 0 22 11" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1" y="1.5" width="17" height="8" rx="2.4"/><rect x="2.6" y="3.1" width="11" height="4.8" rx="1.2" fill="currentColor" stroke="none"/><path d="M19.6 4v3" stroke-linecap="round"/></svg>
+    </span>
+  </header>
+
+  <section class="topbar" data-od-id="top-bar" data-od-label="Top bar">
+    <span class="logo">Nightreel</span>
+    <button class="topbar-icon" data-od-id="cta-downloads" data-od-label="Downloads" aria-label="Downloads">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5v11M7.5 10.5l4.5 4.5 4.5-4.5M4.5 19.5h15" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="topbar-icon" data-od-id="cta-search" data-od-label="Search" aria-label="Search">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20.5 20.5-4.9-4.9" stroke-linecap="round"/></svg>
+    </button>
+    <button class="topbar-icon" data-od-id="cta-profile" data-od-label="Profile switcher" aria-label="Profile">
+      <span class="profile-chip"></span>
+    </button>
+  </section>
+
+  <section class="cats" data-od-id="category-pills" data-od-label="Category filters">
+    <button class="cat active" data-od-id="cat-foryou">For You</button>
+    <button class="cat" data-od-id="cat-series">Series</button>
+    <button class="cat" data-od-id="cat-films">Films</button>
+    <button class="cat" data-od-id="cat-docs">Documentaries</button>
+    <button class="cat" data-od-id="cat-kids">Kids</button>
+  </section>
+
+  <main class="content" data-od-id="home-content">
+    <section class="hero" data-od-id="hero-billboard" data-od-label="Hero billboard">
+      <span class="rank-badge">#1 in Series Today</span>
+      <div class="hero-inner">
+        <h1 class="hero-title">The Hollow Meridian</h1>
+        <p class="hero-tags">Mystery <i>·</i> Slow burn <i>·</i> Coastal noir <i>·</i> 2 Seasons</p>
+        <div class="hero-cta">
+          <button class="btn btn-play" data-od-id="cta-play" data-od-label="Play hero title">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5Z"/></svg>
+            Play
+          </button>
+          <button class="btn btn-list" data-od-id="cta-mylist" data-od-label="Add to my list">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2.5v11M2.5 8h11" stroke-linecap="round"/></svg>
+            My List
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section data-od-id="trending-rail" data-od-label="Trending now rail">
+      <div class="section-head">
+        <h2 class="section-title">Trending Now</h2>
+        <span class="section-more">See all</span>
+      </div>
+      <div class="rail">
+        <button class="poster p-1" data-od-id="poster-tideline" data-od-label="Tideline poster"><span class="top-tag">New<br/>Season</span><span class="poster-title">Tideline</span></button>
+        <button class="poster p-2" data-od-id="poster-emberfall" data-od-label="Emberfall poster"><span class="poster-title">Emberfall</span></button>
+        <button class="poster p-3" data-od-id="poster-verdant" data-od-label="The Verdant Line poster"><span class="poster-title">The Verdant Line</span></button>
+        <button class="poster p-4" data-od-id="poster-goldhour" data-od-label="Gold Hour Heist poster"><span class="top-tag">Top<br/>10</span><span class="poster-title">Gold Hour Heist</span></button>
+        <button class="poster p-5" data-od-id="poster-statics" data-od-label="Statics poster"><span class="poster-title">Statics</span></button>
+      </div>
+    </section>
+
+    <section data-od-id="continue-rail" data-od-label="Continue watching rail">
+      <div class="section-head">
+        <h2 class="section-title">Continue Watching for Dana</h2>
+        <span class="section-more">Edit</span>
+      </div>
+      <div class="rail">
+        <button class="poster cw p-3" data-od-id="cw-verdant" data-od-label="Resume The Verdant Line">
+          <span class="resume"><span><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5Z"/></svg></span></span>
+          <span class="poster-title">The Verdant Line</span>
+          <span class="progress"><i style="width: 64%"></i></span>
+        </button>
+        <button class="poster cw p-2" data-od-id="cw-emberfall" data-od-label="Resume Emberfall">
+          <span class="resume"><span><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5Z"/></svg></span></span>
+          <span class="poster-title">Emberfall</span>
+          <span class="progress"><i style="width: 22%"></i></span>
+        </button>
+        <button class="poster cw p-5" data-od-id="cw-statics" data-od-label="Resume Statics">
+          <span class="resume"><span><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5Z"/></svg></span></span>
+          <span class="poster-title">Statics</span>
+          <span class="progress"><i style="width: 87%"></i></span>
+        </button>
+        <button class="poster cw p-1" data-od-id="cw-tideline" data-od-label="Resume Tideline">
+          <span class="resume"><span><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5Z"/></svg></span></span>
+          <span class="poster-title">Tideline</span>
+          <span class="progress"><i style="width: 45%"></i></span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="Bottom tab bar">
+    <button class="tab active" data-od-id="tab-home" data-od-label="Home tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10.2 12 3.5l8 6.7V20a1 1 0 0 1-1 1h-4.6v-6.2H9.6V21H5a1 1 0 0 1-1-1v-9.8Z" stroke-linejoin="round"/></svg>
+      Home
+    </button>
+    <button class="tab" data-od-id="tab-new" data-od-label="New and hot tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M8 2.5v4M16 2.5v4M3.8 9.5h16.4" stroke-linecap="round"/></svg>
+      New &amp; Hot
+    </button>
+    <button class="tab" data-od-id="tab-laughs" data-od-label="Quick clips tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4.5" y="3.5" width="15" height="17" rx="3"/><path d="m10.2 9 5 3-5 3V9Z" stroke-linejoin="round"/></svg>
+      Quick Reels
+    </button>
+    <button class="tab" data-od-id="tab-mystuff" data-od-label="My library tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5v11M7.5 10.5l4.5 4.5 4.5-4.5M4.5 19.5h15" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      My Reel
+    </button>
+  </nav>
+</div>
+</body>
+</html>

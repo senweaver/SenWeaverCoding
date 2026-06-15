@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "real-estate",
+  "name": "Estate",
+  "category": "Real Estate & Property",
+  "description": "Premium system for real-estate listings and property platforms — warm neutral surfaces, a refined deep-green accent, serif display, and large photo-forward listing cards.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

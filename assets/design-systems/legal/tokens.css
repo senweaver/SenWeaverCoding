@@ -1,0 +1,106 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/legal/tokens.css
+ *
+ * Token contract for Counsel — an authoritative system for law firms,
+ * professional services, advisory, and compliance products. Deep navy ink,
+ * parchment surfaces, a serif display voice, a discreet gold hairline, and
+ * restrained geometry. The mood is established, discreet, and credible:
+ * trust signaled through typographic discipline and generous whitespace, not
+ * color or motion.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface ──────────────────────────────────────────────────── */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-warm: #f4f2ec;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #16213a;
+  --fg-2: #2c3650;
+  --muted: #5a6478;
+  --meta: #8590a3;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #d9dde4;
+  --border-soft: #ebedf1;
+
+  /* ─── Accent — deep navy (discreet gold kept inline) ───────────── */
+  --accent: #1a3a6b;
+  --accent-on: #ffffff;
+  --accent-hover: #142e54;
+  --accent-active: #0f233f;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #2f7d4f;
+  --warn: #9a6b16;
+  --danger: #a32f2f;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Lora", "Tiempos", Georgia, "Times New Roman", serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 25px;
+  --text-2xl: 32px;
+  --text-3xl: 44px;
+  --text-4xl: 58px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.6;
+  --leading-tight: 1.18;
+  --tracking-display: 0.005em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 80px;
+  --section-y-tablet: 56px;
+  --section-y-phone: 36px;
+
+  /* ─── Radius — restrained ──────────────────────────────────────── */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — minimal ──────────────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(22, 33, 58, 0.04) 0 1px 2px 0,
+    rgba(22, 33, 58, 0.06) 0 6px 18px -6px;
+
+  /* ─── Focus ring ───────────────────────────────────────────────── */
+  --focus-ring: 0 0 0 3px rgba(26, 58, 107, 0.35);
+
+  /* ─── Motion — measured ────────────────────────────────────────── */
+  --motion-fast: 160ms;
+  --motion-base: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1100px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

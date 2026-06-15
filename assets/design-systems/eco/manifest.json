@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "eco",
+  "name": "Terra",
+  "category": "Sustainability & Environment",
+  "description": "Earthy sustainability system for climate, impact-reporting, and conscious-commerce products — recycled-paper warmth, forest-green accent, and a calm serif voice.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding original design package"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "usage": "USAGE.md",
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized",
+  "craft": {
+    "applies": [],
+    "suggested": [
+      "color",
+      "accessibility-baseline"
+    ],
+    "exemptions": []
+  }
+}

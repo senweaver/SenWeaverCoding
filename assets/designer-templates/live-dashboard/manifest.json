@@ -1,0 +1,7 @@
+{
+  "id": "live-dashboard",
+  "title": "Analytics Dashboard",
+  "category": "Dashboard",
+  "tags": ["dashboard", "analytics", "data", "admin"],
+  "summary": "Analytics dashboard with sidebar nav, KPI cards, charts, and data tables."
+}

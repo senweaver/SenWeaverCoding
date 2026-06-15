@@ -1,0 +1,380 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Soundrift — Home</title>
+<style>
+:root {
+  --od-accent: #1ed760;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --bg-page: #000000;
+  --bg-app: #121212;
+  --bg-raised: #1f1f1f;
+  --bg-tile: #2a2a2a;
+  --bg-tile-press: #383838;
+  --fg: #ffffff;
+  --fg-muted: #a7a7a7;
+  --on-brand: #0b1a0f;
+  --cover-1a: #e8b04b;
+  --cover-1b: #8a4a18;
+  --cover-2a: #4ba3c7;
+  --cover-2b: #143b52;
+  --cover-3a: #c75b4b;
+  --cover-3b: #4e1410;
+  --cover-4a: #7fae6e;
+  --cover-4b: #1f3d22;
+  --cover-5a: #b08bc9;
+  --cover-5b: #2e1d44;
+  --cover-6a: #d2d2d2;
+  --cover-6b: #4a4a4a;
+  --progress-track: #5a5a5a;
+  --fs-greet: calc(23px * var(--od-scale));
+  --fs-section: calc(20px * var(--od-scale));
+  --fs-tile: calc(13px * var(--od-scale));
+  --fs-body: calc(14px * var(--od-scale));
+  --fs-meta: calc(12px * var(--od-scale));
+  --pad: calc(16px * var(--od-density));
+  --gap: calc(12px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+}
+html[data-od-mode="dark"] {
+  --bg-page: #000000;
+  --bg-app: #0a0a0a;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.phone {
+  max-width: 480px;
+  min-height: 100dvh;
+  margin-inline: auto;
+  background: linear-gradient(180deg, var(--bg-raised) 0%, var(--bg-app) 220px);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: 0 0 0 1px var(--bg-raised);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(4px * var(--od-density));
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .glyphs { display: flex; gap: 5px; align-items: center; }
+.home-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: calc(10px * var(--od-density)) var(--pad) calc(4px * var(--od-density));
+}
+.greeting { font-size: var(--fs-greet); font-weight: 700; letter-spacing: -0.02em; flex: 1; }
+.head-icon { color: var(--fg); padding: 6px; transition: opacity var(--dur) ease; }
+.head-icon:active { opacity: 0.5; }
+.filter-row { display: flex; gap: calc(8px * var(--od-density)); padding: calc(8px * var(--od-density)) var(--pad); }
+.filter {
+  padding: calc(7px * var(--od-density)) calc(14px * var(--od-density));
+  border-radius: 999px;
+  background: var(--bg-tile);
+  font-size: calc(12.5px * var(--od-scale));
+  font-weight: 500;
+  transition: background var(--dur) ease;
+}
+.filter:active { background: var(--bg-tile-press); }
+.filter.active { background: var(--brand); color: var(--on-brand); font-weight: 600; }
+.content { flex: 1; overflow-y: auto; padding-bottom: calc(140px * var(--od-density)); }
+.recent-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(8px * var(--od-density));
+  padding: calc(8px * var(--od-density)) var(--pad);
+}
+.recent-tile {
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--od-density));
+  background: var(--bg-tile);
+  border-radius: 5px;
+  overflow: hidden;
+  height: calc(56px * var(--od-density));
+  font-size: var(--fs-tile);
+  font-weight: 600;
+  text-align: left;
+  transition: background var(--dur) ease;
+}
+.recent-tile:active { background: var(--bg-tile-press); }
+.recent-tile .thumb { width: calc(56px * var(--od-density)); height: 100%; flex: none; }
+.recent-tile span { padding-right: 8px; line-height: 1.25; }
+.thumb-1 { background: linear-gradient(140deg, var(--cover-1a), var(--cover-1b)); }
+.thumb-2 { background: linear-gradient(140deg, var(--cover-2a), var(--cover-2b)); }
+.thumb-3 { background: linear-gradient(140deg, var(--cover-3a), var(--cover-3b)); }
+.thumb-4 { background: linear-gradient(140deg, var(--cover-4a), var(--cover-4b)); }
+.thumb-5 { background: linear-gradient(140deg, var(--cover-5a), var(--cover-5b)); }
+.thumb-6 { background: linear-gradient(140deg, var(--cover-6a), var(--cover-6b)); }
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: calc(22px * var(--od-density)) var(--pad) calc(12px * var(--od-density));
+}
+.section-title { font-size: var(--fs-section); font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+.section-more { color: var(--fg-muted); font-size: var(--fs-meta); font-weight: 600; }
+.rail {
+  display: flex;
+  gap: calc(14px * var(--od-density));
+  padding: 0 var(--pad) calc(6px * var(--od-density));
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+.rail::-webkit-scrollbar { display: none; }
+.rail-card { flex: none; width: calc(146px * var(--od-density)); scroll-snap-align: start; text-align: left; }
+.rail-cover {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  margin-bottom: calc(8px * var(--od-density));
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+}
+.rail-cover .mix-num {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  font-size: calc(26px * var(--od-scale));
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+.cover-disc::after {
+  content: "";
+  position: absolute;
+  right: -22%;
+  top: 14%;
+  width: 72%;
+  aspect-ratio: 1;
+  border-radius: 999px;
+  background: radial-gradient(circle at 50% 50%, transparent 28%, rgba(0, 0, 0, 0.35) 30%, transparent 32%, rgba(0, 0, 0, 0.3) 46%, transparent 48%, rgba(0, 0, 0, 0.25) 62%, transparent 64%);
+}
+.rail-title { font-size: var(--fs-tile); font-weight: 600; margin: 0 0 2px; }
+.rail-sub {
+  font-size: var(--fs-meta);
+  color: var(--fg-muted);
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dock {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin-inline: auto;
+}
+.nowplaying {
+  margin: 0 calc(8px * var(--od-density)) calc(6px * var(--od-density));
+  background: linear-gradient(120deg, var(--cover-3b), var(--bg-tile));
+  border-radius: 8px;
+  padding: calc(8px * var(--od-density)) calc(10px * var(--od-density));
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--od-density));
+  position: relative;
+  overflow: hidden;
+}
+.np-art { width: 40px; height: 40px; border-radius: 4px; flex: none; }
+.np-meta { flex: 1; min-width: 0; }
+.np-track { font-size: calc(13px * var(--od-scale)); font-weight: 600; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-artist { font-size: calc(11.5px * var(--od-scale)); color: var(--fg-muted); margin: 1px 0 0; }
+.np-device { color: var(--brand); padding: 6px; }
+.np-play { padding: 6px; transition: transform var(--dur) ease; }
+.np-play:active { transform: scale(0.85); }
+.np-progress {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--progress-track);
+}
+.np-progress i {
+  display: block;
+  height: 100%;
+  width: 38%;
+  border-radius: 2px;
+  background: var(--fg);
+}
+.tabbar {
+  display: flex;
+  justify-content: space-around;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(20px * var(--od-density));
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.6), var(--bg-page) 55%);
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: var(--fg-muted);
+  font-size: calc(10px * var(--od-scale));
+  font-weight: 500;
+  transition: color var(--dur) ease, transform var(--dur) ease;
+}
+.tab:active { transform: scale(0.92); }
+.tab.active { color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="App shell">
+  <header class="statusbar" data-od-id="status-bar" data-od-label="Status bar">
+    <span>9:41</span>
+    <span class="glyphs">
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 4.2a8.5 8.5 0 0 1 12 0M3.8 6.6a5.2 5.2 0 0 1 7.4 0M6.2 8.9a1.9 1.9 0 0 1 2.6 0" stroke-linecap="round"/></svg>
+      <svg width="22" height="11" viewBox="0 0 22 11" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1" y="1.5" width="17" height="8" rx="2.4"/><rect x="2.6" y="3.1" width="11" height="4.8" rx="1.2" fill="currentColor" stroke="none"/><path d="M19.6 4v3" stroke-linecap="round"/></svg>
+    </span>
+  </header>
+
+  <section class="home-head" data-od-id="home-header" data-od-label="Greeting header">
+    <h1 class="greeting">Good evening</h1>
+    <button class="head-icon" data-od-id="cta-recents" data-od-label="Listening history" aria-label="Listening history">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="head-icon" data-od-id="cta-settings" data-od-label="Settings" aria-label="Settings">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M19.2 12a7.2 7.2 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7.3 7.3 0 0 0-2.1-1.2L14.3 3h-4l-.4 2.7a7.3 7.3 0 0 0-2.1 1.2l-2.3-1-2 3.4 2 1.5a7.2 7.2 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7.3 7.3 0 0 0 2.1 1.2l.4 2.7h4l.4-2.7a7.3 7.3 0 0 0 2.1-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2Z" stroke-linejoin="round"/></svg>
+    </button>
+  </section>
+
+  <section class="filter-row" data-od-id="filter-pills" data-od-label="Content filters">
+    <button class="filter active" data-od-id="filter-all">All</button>
+    <button class="filter" data-od-id="filter-music">Music</button>
+    <button class="filter" data-od-id="filter-podcasts">Podcasts</button>
+    <button class="filter" data-od-id="filter-audiobooks">Audiobooks</button>
+  </section>
+
+  <main class="content" data-od-id="home-content">
+    <section class="recent-grid" data-od-id="recent-grid" data-od-label="Recently played grid">
+      <button class="recent-tile" data-od-id="recent-liked"><span class="thumb thumb-5"></span><span>Liked Songs</span></button>
+      <button class="recent-tile" data-od-id="recent-daily"><span class="thumb thumb-2"></span><span>Daily Drift 01</span></button>
+      <button class="recent-tile" data-od-id="recent-lofi"><span class="thumb thumb-4"></span><span>Low Tide Beats</span></button>
+      <button class="recent-tile" data-od-id="recent-album"><span class="thumb thumb-1"></span><span>Amber Hours</span></button>
+      <button class="recent-tile" data-od-id="recent-run"><span class="thumb thumb-3"></span><span>Tempo Run 165</span></button>
+      <button class="recent-tile" data-od-id="recent-pod"><span class="thumb thumb-6"></span><span>The Long Take</span></button>
+    </section>
+
+    <section data-od-id="made-for-you" data-od-label="Made for you rail">
+      <div class="section-head">
+        <h2 class="section-title">Made for you</h2>
+        <span class="section-more">Show all</span>
+      </div>
+      <div class="rail">
+        <button class="rail-card" data-od-id="mix-01" data-od-label="Daily Drift 01">
+          <span class="rail-cover cover-disc thumb-2"><span class="mix-num">01</span></span>
+          <p class="rail-title">Daily Drift 01</p>
+          <p class="rail-sub">Nadia Vance, Cold Harbour, Rio Tanaka and more</p>
+        </button>
+        <button class="rail-card" data-od-id="mix-02" data-od-label="Daily Drift 02">
+          <span class="rail-cover cover-disc thumb-1"><span class="mix-num">02</span></span>
+          <p class="rail-title">Daily Drift 02</p>
+          <p class="rail-sub">Field Notes, Asha Bel, The Paper Suns and more</p>
+        </button>
+        <button class="rail-card" data-od-id="mix-03" data-od-label="Daily Drift 03">
+          <span class="rail-cover cover-disc thumb-4"><span class="mix-num">03</span></span>
+          <p class="rail-title">Daily Drift 03</p>
+          <p class="rail-sub">Mireille, Glass Harbor, Ten Fathoms and more</p>
+        </button>
+        <button class="rail-card" data-od-id="mix-04" data-od-label="Daily Drift 04">
+          <span class="rail-cover cover-disc thumb-5"><span class="mix-num">04</span></span>
+          <p class="rail-title">Daily Drift 04</p>
+          <p class="rail-sub">Juno Park, Wren &amp; Webb, Salt Theory and more</p>
+        </button>
+      </div>
+    </section>
+
+    <section data-od-id="recent-rail" data-od-label="Jump back in rail">
+      <div class="section-head">
+        <h2 class="section-title">Jump back in</h2>
+        <span class="section-more">Show all</span>
+      </div>
+      <div class="rail">
+        <button class="rail-card" data-od-id="jump-amber" data-od-label="Amber Hours album">
+          <span class="rail-cover thumb-1"></span>
+          <p class="rail-title">Amber Hours</p>
+          <p class="rail-sub">Album · Nadia Vance</p>
+        </button>
+        <button class="rail-card" data-od-id="jump-longtake" data-od-label="The Long Take podcast">
+          <span class="rail-cover thumb-6"></span>
+          <p class="rail-title">The Long Take</p>
+          <p class="rail-sub">Podcast · New episode Tuesdays</p>
+        </button>
+        <button class="rail-card" data-od-id="jump-lowtide" data-od-label="Low Tide Beats playlist">
+          <span class="rail-cover thumb-4"></span>
+          <p class="rail-title">Low Tide Beats</p>
+          <p class="rail-sub">Playlist · Updated weekly for late focus</p>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <div class="dock" data-od-id="bottom-dock" data-od-label="Now playing and tabs">
+    <section class="nowplaying" data-od-id="now-playing" data-od-label="Mini player">
+      <span class="np-art thumb-3"></span>
+      <div class="np-meta">
+        <p class="np-track">Signal Fires</p>
+        <p class="np-artist">Cold Harbour</p>
+      </div>
+      <button class="np-device" data-od-id="cta-devices" data-od-label="Connect device" aria-label="Connect to a device">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="3.5" width="11" height="17" rx="2"/><circle cx="9.5" cy="15.5" r="2.4"/><path d="M9.5 8.2h.01" stroke-linecap="round" stroke-width="2.2"/><path d="M18.5 8.5a8 8 0 0 1 0 7" stroke-linecap="round"/></svg>
+      </button>
+      <button class="np-play" data-od-id="cta-play" data-od-label="Play pause" aria-label="Pause">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5h3.4v15H7zM13.6 4.5H17v15h-3.4z"/></svg>
+      </button>
+      <span class="np-progress"><i></i></span>
+    </section>
+
+    <nav class="tabbar" data-od-id="tab-bar" data-od-label="Bottom tab bar">
+      <button class="tab active" data-od-id="tab-home" data-od-label="Home tab">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10.2 12 3.5l8 6.7V20a1 1 0 0 1-1 1h-4.6v-6.2H9.6V21H5a1 1 0 0 1-1-1v-9.8Z" stroke-linejoin="round"/></svg>
+        Home
+      </button>
+      <button class="tab" data-od-id="tab-search" data-od-label="Search tab">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20.5 20.5-4.9-4.9" stroke-linecap="round"/></svg>
+        Search
+      </button>
+      <button class="tab" data-od-id="tab-library" data-od-label="Library tab">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 3.5v17M9.5 3.5v17M13.5 4.5l5.5 16" stroke-linecap="round"/></svg>
+        Your Library
+      </button>
+      <button class="tab" data-od-id="tab-premium" data-od-label="Upgrade tab">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M7.5 10c3-1.8 6-1.8 9 0M8.2 13c2.5-1.4 5.1-1.4 7.6 0M9 15.8c2-1 4-1 6 0" stroke-linecap="round"/></svg>
+        Upgrade
+      </button>
+    </nav>
+  </div>
+</div>
+</body>
+</html>

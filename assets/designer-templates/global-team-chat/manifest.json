@@ -1,0 +1,7 @@
+{
+  "id": "global-team-chat",
+  "title": "团队协作聊天 · Team Chat Workspace",
+  "category": "Web App",
+  "tags": ["聊天", "团队协作", "即时通讯", "chat", "messaging", "workspace", "channels", "threads", "channel-chat"],
+  "summary": "Full-viewport team messaging workspace: aubergine workspace rail and channel sidebar, grouped message pane with day dividers, reaction chips and thread indicators, plus a rich-text composer."
+}

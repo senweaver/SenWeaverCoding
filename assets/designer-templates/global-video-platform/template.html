@@ -1,0 +1,400 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Streamora — Home</title>
+<style>
+:root {
+  --od-accent: #cc1b32;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: color-mix(in srgb, var(--brand) 10%, transparent);
+  --bg: #ffffff;
+  --fg: #0f0f0f;
+  --muted: #606060;
+  --faint: #909090;
+  --border: #e5e5e5;
+  --hover: #f2f2f2;
+  --chip-bg: #f2f2f2;
+  --chip-active-bg: #0f0f0f;
+  --chip-active-fg: #ffffff;
+  --badge-bg: color-mix(in srgb, var(--fg) 80%, transparent);
+  --badge-fg: #ffffff;
+  --live-bg: var(--brand);
+  --search-border: #cccccc;
+  --search-btn: #f8f8f8;
+  --kbd-bg: #f2f2f2;
+  --kbd-border: #d6d6d6;
+  --focus-ring: color-mix(in srgb, var(--brand) 45%, transparent);
+  --th-a1: #1d3a4f;
+  --th-a2: #4f7e8f;
+  --th-b1: #5a2c1d;
+  --th-b2: #c97b4a;
+  --th-c1: #233a23;
+  --th-c2: #6f9e57;
+  --th-d1: #3c2f4e;
+  --th-d2: #8d7aa8;
+  --th-e1: #4e3a17;
+  --th-e2: #c2a14e;
+  --th-f1: #11424a;
+  --th-f2: #4ba8a0;
+  --av-a: #c96442;
+  --av-b: #2d7d6e;
+  --av-c: #ba4a7d;
+  --av-d: #4a6db5;
+  --dk-bg: #0f0f0f;
+  --dk-fg: #f1f1f1;
+  --dk-muted: #aaaaaa;
+  --dk-faint: #717171;
+  --dk-border: #272727;
+  --dk-hover: #272727;
+  --dk-chip-bg: #272727;
+  --dk-chip-active-bg: #f1f1f1;
+  --dk-chip-active-fg: #0f0f0f;
+  --dk-search-border: #303030;
+  --dk-search-btn: #222222;
+  --dk-kbd-bg: #272727;
+  --dk-kbd-border: #3f3f3f;
+  --fs-base: calc(14px * var(--od-scale));
+  --fs-title: calc(15px * var(--od-scale));
+  --fs-sm: calc(13px * var(--od-scale));
+  --fs-xs: calc(12px * var(--od-scale));
+  --fs-logo: calc(18px * var(--od-scale));
+  --pad-1: calc(4px * var(--od-density));
+  --pad-2: calc(8px * var(--od-density));
+  --pad-3: calc(12px * var(--od-density));
+  --pad-4: calc(16px * var(--od-density));
+  --pad-6: calc(24px * var(--od-density));
+  --t-fast: calc(0.12s * var(--od-motion));
+  --t-med: calc(0.2s * var(--od-motion));
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: var(--dk-bg);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --hover: var(--dk-hover);
+  --chip-bg: var(--dk-chip-bg);
+  --chip-active-bg: var(--dk-chip-active-bg);
+  --chip-active-fg: var(--dk-chip-active-fg);
+  --search-border: var(--dk-search-border);
+  --search-btn: var(--dk-search-btn);
+  --kbd-bg: var(--dk-kbd-bg);
+  --kbd-border: var(--dk-kbd-border);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-ui); font-size: var(--fs-base); color: var(--fg); background: var(--bg); -webkit-font-smoothing: antialiased; }
+button { font: inherit; cursor: pointer; background: none; border: 0; color: inherit; padding: 0; }
+button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 8px; }
+svg { display: block; }
+.icon { width: calc(20px * var(--od-scale)); height: calc(20px * var(--od-scale)); stroke: currentColor; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.icon-sm { width: calc(16px * var(--od-scale)); height: calc(16px * var(--od-scale)); }
+.app { display: grid; grid-template-rows: calc(56px * var(--od-density)) 1fr; height: 100vh; overflow: hidden; }
+.topbar { display: flex; align-items: center; gap: var(--pad-4); padding: 0 var(--pad-4); border-bottom: 1px solid var(--border); }
+.burger { padding: var(--pad-2); border-radius: 50%; transition: background var(--t-fast) ease; }
+.burger:hover { background: var(--hover); }
+.logo { display: flex; align-items: center; gap: var(--pad-1); font-weight: 800; font-size: var(--fs-logo); letter-spacing: -0.04em; }
+.logo .play { width: 28px; height: 20px; border-radius: 5px; background: var(--brand); display: grid; place-items: center; }
+.logo .play svg { width: 9px; height: 11px; fill: var(--badge-fg); stroke: none; }
+.search-zone { flex: 1; display: flex; justify-content: center; }
+.search { display: flex; width: min(560px, 100%); }
+.search input {
+  flex: 1;
+  border: 1px solid var(--search-border);
+  border-right: 0;
+  border-radius: 20px 0 0 20px;
+  padding: var(--pad-2) var(--pad-4);
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  outline: none;
+  transition: border-color var(--t-fast) ease;
+}
+.search input:focus { border-color: var(--brand); }
+.search .go {
+  border: 1px solid var(--search-border);
+  border-radius: 0 20px 20px 0;
+  background: var(--search-btn);
+  padding: 0 var(--pad-4);
+  color: var(--muted);
+  transition: background var(--t-fast) ease;
+}
+.search .go:hover { background: var(--hover); color: var(--fg); }
+.topbar .right { display: flex; align-items: center; gap: var(--pad-2); }
+.topbar .right > button { padding: var(--pad-2); border-radius: 50%; transition: background var(--t-fast) ease; }
+.topbar .right > button:hover { background: var(--hover); }
+.avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--av-d); color: var(--badge-fg); display: grid; place-items: center; font-size: var(--fs-sm); font-weight: 700; }
+.shell { display: grid; grid-template-columns: calc(72px * var(--od-density)) 1fr; overflow: hidden; }
+.mini-side { display: flex; flex-direction: column; align-items: center; padding: var(--pad-2) 0; gap: var(--pad-1); overflow-y: auto; }
+.mini-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: calc(64px * var(--od-density));
+  padding: var(--pad-3) 0 var(--pad-2);
+  border-radius: 10px;
+  font-size: calc(10px * var(--od-scale));
+  color: var(--fg);
+  transition: background var(--t-fast) ease;
+}
+.mini-item:hover { background: var(--hover); }
+.mini-item.active { background: var(--hover); font-weight: 600; }
+.feed { overflow-y: auto; padding: 0 var(--pad-6) var(--pad-6); }
+.chips {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: var(--pad-2);
+  padding: var(--pad-3) 0;
+  background: var(--bg);
+  overflow-x: auto;
+}
+.chip {
+  flex: none;
+  background: var(--chip-bg);
+  border-radius: 8px;
+  padding: var(--pad-1) var(--pad-3);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  transition: background var(--t-fast) ease;
+}
+.chip:hover { background: var(--border); }
+.chip.on { background: var(--chip-active-bg); color: var(--chip-active-fg); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--pad-4) var(--pad-4); padding-top: var(--pad-2); }
+.vcard { display: flex; flex-direction: column; gap: var(--pad-3); border-radius: 12px; }
+.thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-radius var(--t-med) ease, transform var(--t-med) ease;
+}
+.vcard:hover .thumb { border-radius: 4px; }
+.thumb .dur {
+  position: absolute;
+  right: var(--pad-2);
+  bottom: var(--pad-2);
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-family: var(--font-mono);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.thumb .dur.live { background: var(--live-bg); font-family: var(--font-ui); display: inline-flex; align-items: center; gap: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.thumb .dur.live i { width: 6px; height: 6px; border-radius: 50%; background: var(--badge-fg); }
+.th-a { background: linear-gradient(135deg, var(--th-a1), var(--th-a2)); }
+.th-b { background: linear-gradient(135deg, var(--th-b1), var(--th-b2)); }
+.th-c { background: linear-gradient(135deg, var(--th-c1), var(--th-c2)); }
+.th-d { background: linear-gradient(135deg, var(--th-d1), var(--th-d2)); }
+.th-e { background: linear-gradient(135deg, var(--th-e1), var(--th-e2)); }
+.th-f { background: linear-gradient(135deg, var(--th-f1), var(--th-f2)); }
+.thumb .glyph { position: absolute; inset: 0; display: grid; place-items: center; color: var(--badge-fg); opacity: 0.5; }
+.thumb .glyph svg { width: 42px; height: 42px; stroke-width: 1.4; }
+.meta-row { display: flex; gap: var(--pad-3); }
+.ch-av { width: 36px; height: 36px; border-radius: 50%; flex: none; color: var(--badge-fg); display: grid; place-items: center; font-size: var(--fs-sm); font-weight: 700; }
+.v-meta { min-width: 0; }
+.v-title {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.v-sub { color: var(--muted); font-size: var(--fs-sm); margin-top: 3px; line-height: 1.35; }
+.v-sub .ch:hover { color: var(--fg); }
+.kebab { margin-left: auto; align-self: flex-start; color: var(--muted); padding: var(--pad-1); border-radius: 50%; opacity: 0; transition: opacity var(--t-fast) ease, background var(--t-fast) ease; }
+.vcard:hover .kebab { opacity: 1; }
+.kebab:hover { background: var(--hover); }
+kbd { font-family: var(--font-mono); font-size: var(--fs-xs); background: var(--kbd-bg); border: 1px solid var(--kbd-border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--muted); }
+.search-hint { display: flex; align-items: center; gap: var(--pad-1); color: var(--faint); font-size: var(--fs-xs); padding-left: var(--pad-2); }
+</style>
+</head>
+<body>
+<div class="app" data-od-id="app-frame" data-od-label="App frame">
+  <header class="topbar" data-od-id="top-bar" data-od-label="Top bar">
+    <button class="burger" aria-label="Main menu"><svg class="icon" viewBox="0 0 20 20"><path d="M3.5 6h13M3.5 10h13M3.5 14h13"/></svg></button>
+    <a href="#" class="logo" data-od-id="logo" data-od-label="Logo">
+      <span class="play"><svg viewBox="0 0 9 11"><path d="M0 0l9 5.5L0 11z"/></svg></span>
+      Streamora
+    </a>
+    <div class="search-zone" data-od-id="search-field" data-od-label="Search field">
+      <div class="search">
+        <input type="text" placeholder="Search" aria-label="Search" />
+        <button class="go" aria-label="Run search"><svg class="icon" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.5 13.5L17 17"/></svg></button>
+      </div>
+      <span class="search-hint"><kbd>/</kbd></span>
+    </div>
+    <div class="right">
+      <button aria-label="Create"><svg class="icon" viewBox="0 0 20 20"><rect x="3" y="5" width="11" height="10" rx="2"/><path d="M14 9l3.5-2v6L14 11M7 8.5v3M5.5 10h3"/></svg></button>
+      <button aria-label="Notifications"><svg class="icon" viewBox="0 0 20 20"><path d="M10 4.5a3.4 3.4 0 013.4 3.4c0 3.2 1.4 4.3 2.1 4.9H4.5c.7-.6 2.1-1.7 2.1-4.9A3.4 3.4 0 0110 4.5zM8.5 15.5a1.6 1.6 0 003 0"/></svg></button>
+      <span class="avatar" data-od-id="account-avatar" data-od-label="Account avatar">JM</span>
+    </div>
+  </header>
+  <div class="shell">
+    <nav class="mini-side" data-od-id="icon-sidebar" data-od-label="Collapsed sidebar">
+      <button class="mini-item active" aria-current="page">
+        <svg class="icon" viewBox="0 0 20 20"><path d="M4 16V8.5L10 4l6 4.5V16h-4v-4.5H8V16z"/></svg>
+        Home
+      </button>
+      <button class="mini-item">
+        <svg class="icon" viewBox="0 0 20 20"><path d="M4 5.5l8.5 4.5L4 14.5zM14.5 4.5l3 1.7v7.6l-3 1.7"/></svg>
+        Shorts
+      </button>
+      <button class="mini-item">
+        <svg class="icon" viewBox="0 0 20 20"><rect x="3" y="6" width="14" height="10" rx="2"/><path d="M6 3.5h8M7.5 9.5l4 1.5-4 1.5z"/></svg>
+        Subs
+      </button>
+      <button class="mini-item">
+        <svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 6.5v3.5l2.5 1.5"/></svg>
+        History
+      </button>
+      <button class="mini-item">
+        <svg class="icon" viewBox="0 0 20 20"><path d="M4 5h12v9H8l-4 3z"/></svg>
+        You
+      </button>
+    </nav>
+    <main class="feed" data-od-id="video-feed" data-od-label="Video feed">
+      <section class="chips" data-od-id="filter-chips" data-od-label="Filter chip row">
+        <button class="chip on">All</button>
+        <button class="chip">Workshop builds</button>
+        <button class="chip">Synth music</button>
+        <button class="chip">Trail running</button>
+        <button class="chip">Cooking</button>
+        <button class="chip">Game dev</button>
+        <button class="chip">Astronomy</button>
+        <button class="chip">Recently uploaded</button>
+        <button class="chip">Watched</button>
+      </section>
+      <section class="grid" data-od-id="video-grid" data-od-label="Video grid">
+        <article class="vcard" data-od-id="video-card-1" data-od-label="Video card">
+          <a href="#" class="thumb th-a" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M3.5 10c2-3.8 4.1-5.7 6.5-5.7s4.5 1.9 6.5 5.7c-2 3.8-4.1 5.7-6.5 5.7S5.5 13.8 3.5 10z"/><circle cx="10" cy="10" r="2.2"/></svg></span>
+            <span class="dur">18:42</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-a);">WD</span>
+            <div class="v-meta">
+              <h3 class="v-title">I built a floating walnut desk with hidden cable trays — full process</h3>
+              <div class="v-sub"><a class="ch" href="#">Wexford Drift Workshop</a><br />412K views · 6 days ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-2" data-od-label="Video card">
+          <a href="#" class="thumb th-b" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M7 5.5l8 4.5-8 4.5z"/></svg></span>
+            <span class="dur">32:08</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-b);">KT</span>
+            <div class="v-meta">
+              <h3 class="v-title">Why your sourdough collapses: hydration, timing and oven steam explained</h3>
+              <div class="v-sub"><a class="ch" href="#">Kiln &amp; Table</a><br />1.1M views · 2 weeks ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-live" data-od-label="Live video card">
+          <a href="#" class="thumb th-c" aria-label="Watch live stream">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M6.5 7a5 5 0 000 6M4 4.5a8.5 8.5 0 000 11M13.5 7a5 5 0 010 6M16 4.5a8.5 8.5 0 010 11"/><circle cx="10" cy="10" r="1.6"/></svg></span>
+            <span class="dur live"><i></i>Live</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-c);">PV</span>
+            <div class="v-meta">
+              <h3 class="v-title">Ridgeline 50K championship — lead pack enters the summit section</h3>
+              <div class="v-sub"><a class="ch" href="#">Pinevale Trail Series</a><br />23K watching now</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-4" data-od-label="Video card">
+          <a href="#" class="thumb th-d" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M5 14V8M10 14V5.5M15 14v-4"/><path d="M3.5 16.5h13"/></svg></span>
+            <span class="dur">12:55</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-d);">OS</span>
+            <div class="v-meta">
+              <h3 class="v-title">Recreating a 1983 polysynth pad with three free plugins</h3>
+              <div class="v-sub"><a class="ch" href="#">Oscillate Sessions</a><br />87K views · 3 days ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-5" data-od-label="Video card">
+          <a href="#" class="thumb th-e" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M7 6l-4 4 4 4M13 6l4 4-4 4"/></svg></span>
+            <span class="dur">41:17</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-b);">LD</span>
+            <div class="v-meta">
+              <h3 class="v-title">Devlog 14: rewriting our voxel renderer cut frame time from 19ms to 6ms</h3>
+              <div class="v-sub"><a class="ch" href="#">Lanternfall Devlog</a><br />203K views · 1 week ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-6" data-od-label="Video card">
+          <a href="#" class="thumb th-f" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4"/></svg></span>
+            <span class="dur">26:30</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-a);">NS</span>
+            <div class="v-meta">
+              <h3 class="v-title">Imaging the Veil Nebula from a light-polluted backyard, start to finish</h3>
+              <div class="v-sub"><a class="ch" href="#">Northshore Skies</a><br />64K views · 5 days ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-7" data-od-label="Video card">
+          <a href="#" class="thumb th-b" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M4 15.5c1.5-4 3-9 6-9s4.5 5 6 9"/><path d="M3.5 15.5h13"/></svg></span>
+            <span class="dur">9:48</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-c);">KT</span>
+            <div class="v-meta">
+              <h3 class="v-title">Five pantry sauces that outperform anything in a jar</h3>
+              <div class="v-sub"><a class="ch" href="#">Kiln &amp; Table</a><br />540K views · 3 weeks ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+        <article class="vcard" data-od-id="video-card-8" data-od-label="Video card">
+          <a href="#" class="thumb th-d" aria-label="Play video">
+            <span class="glyph"><svg class="icon" viewBox="0 0 20 20"><path d="M5.5 16V8.5l4.5-4 4.5 4V16h-3.5v-4h-2v4z"/></svg></span>
+            <span class="dur">15:21</span>
+          </a>
+          <div class="meta-row">
+            <span class="ch-av" style="background: var(--av-d);">WD</span>
+            <div class="v-meta">
+              <h3 class="v-title">Small shop layout tour: every jig within two steps of the bench</h3>
+              <div class="v-sub"><a class="ch" href="#">Wexford Drift Workshop</a><br />156K views · 1 month ago</div>
+            </div>
+            <button class="kebab" aria-label="More actions"><svg class="icon-sm icon" viewBox="0 0 20 20"><path d="M10 5h.01M10 10h.01M10 15h.01"/></svg></button>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+</div>
+</body>
+</html>

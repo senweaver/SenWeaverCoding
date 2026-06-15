@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "scaffolds": [
+    {
+      "id": "aurora-mesh-bg",
+      "category": "background",
+      "format": "css",
+      "path": "backgrounds/aurora-mesh.css",
+      "description": "Layered aurora mesh gradient background with soft radial blooms."
+    },
+    {
+      "id": "glassmorphism-bg",
+      "category": "background",
+      "format": "css",
+      "path": "backgrounds/glassmorphism.css",
+      "description": "Frosted glass surface treatment with blur, border and highlight tokens."
+    },
+    {
+      "id": "bento-grid-bg",
+      "category": "background",
+      "format": "css",
+      "path": "backgrounds/bento-grid.css",
+      "description": "Bento-style modular grid scaffold for feature and stat layouts."
+    },
+    {
+      "id": "noise-grain-bg",
+      "category": "background",
+      "format": "css",
+      "path": "backgrounds/noise-grain.css",
+      "description": "Subtle film-grain noise overlay that removes flat digital sterility."
+    },
+    {
+      "id": "dot-grid-bg",
+      "category": "background",
+      "format": "css",
+      "path": "backgrounds/dot-grid.css",
+      "description": "Engineering dot-grid backdrop for canvas and tool-style surfaces."
+    },
+    {
+      "id": "animated-gradient-bg",
+      "category": "background",
+      "format": "css",
+      "path": "backgrounds/animated-gradient.css",
+      "description": "Slow animated multi-stop gradient with reduced-motion fallback."
+    },
+    {
+      "id": "neubrutalism-surface",
+      "category": "surface",
+      "format": "css",
+      "path": "surfaces/neubrutalism.css",
+      "description": "Neubrutalist card surface: hard offset shadow, thick border, flat fills."
+    },
+    {
+      "id": "cmdk-palette",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/cmdk-palette.jsx",
+      "description": "Command palette (cmd-k) with search field, grouped results, kbd hints."
+    },
+    {
+      "id": "kanban-board",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/kanban-board.jsx",
+      "description": "Kanban board with columns, cards, labels, counts and add affordances."
+    },
+    {
+      "id": "toast",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/toast.jsx",
+      "description": "Toast notification stack with success/error/info variants and actions."
+    },
+    {
+      "id": "drawer",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/drawer.jsx",
+      "description": "Side drawer with overlay, header, scrollable body and footer actions."
+    },
+    {
+      "id": "skeleton-set",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/skeleton-set.jsx",
+      "description": "Loading skeleton set: text rows, avatar blocks, card and table shimmer."
+    },
+    {
+      "id": "empty-states",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/empty-states.jsx",
+      "description": "Empty-state patterns: first-run, no-results, error, permission-gated."
+    },
+    {
+      "id": "stepper",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/stepper.jsx",
+      "description": "Multi-step progress stepper with completed, active and upcoming states."
+    },
+    {
+      "id": "file-tree",
+      "category": "ui-primitive",
+      "format": "jsx",
+      "path": "ui-primitives/file-tree.jsx",
+      "description": "Collapsible file tree with folder/file icons and selection state."
+    },
+    {
+      "id": "saas-sidebar-shell",
+      "category": "app-shell",
+      "format": "jsx",
+      "path": "app-shells/saas-sidebar.jsx",
+      "description": "SaaS app shell: collapsible sidebar nav, topbar, content region, user menu."
+    },
+    {
+      "id": "landing-hero",
+      "category": "landing",
+      "format": "jsx",
+      "path": "landing/hero.jsx",
+      "description": "Marketing hero with headline, subcopy, dual CTAs and product visual slot."
+    },
+    {
+      "id": "vscode-mockup",
+      "category": "dev-mockup",
+      "format": "jsx",
+      "path": "dev-mockups/vscode.jsx",
+      "description": "Code-editor mockup with activity bar, file tree, tabs and syntax panel."
+    },
+    {
+      "id": "iphone-15-pro-frame",
+      "category": "device-frame",
+      "format": "html",
+      "path": "device-frames/iphone-15-pro.html",
+      "description": "Pixel-accurate iPhone 15 Pro frame (390x844) with Dynamic Island, status bar, side buttons and a multi-screen flow layout — self-contained HTML/CSS, ready to inline."
+    },
+    {
+      "id": "android-frame-html",
+      "category": "device-frame",
+      "format": "html",
+      "path": "device-frames/android.html",
+      "description": "Android phone frame (412x892) with punch-hole camera, status bar, gesture bar and a multi-screen flow layout — self-contained HTML/CSS, ready to inline."
+    },
+    {
+      "id": "ipad-frame-html",
+      "category": "device-frame",
+      "format": "html",
+      "path": "device-frames/ipad.html",
+      "description": "iPad frame (834x1194) with uniform bezels, status bar, home indicator and a multi-screen flow layout — self-contained HTML/CSS, ready to inline."
+    },
+    {
+      "id": "iphone-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/iphone.jsx",
+      "description": "iPhone device frame with notch, rounded screen and hardware buttons."
+    },
+    {
+      "id": "iphone-16-pro-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/iphone-16-pro.jsx",
+      "description": "iPhone 16 Pro frame with dynamic island and titanium edge detail."
+    },
+    {
+      "id": "ipad-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/ipad.jsx",
+      "description": "iPad device frame with uniform bezels for tablet-size mockups."
+    },
+    {
+      "id": "android-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/android.jsx",
+      "description": "Android phone frame with punch-hole camera and gesture bar."
+    },
+    {
+      "id": "watch-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/watch.jsx",
+      "description": "Smartwatch frame with crown and strap for wearable UI mockups."
+    },
+    {
+      "id": "macbook-pro-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/macbook-pro-16-2024.jsx",
+      "description": "MacBook Pro 16 frame with display lid and deck for desktop mockups."
+    },
+    {
+      "id": "vision-pro-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/vision-pro.jsx",
+      "description": "Spatial headset frame with floating glass panels for spatial UI."
+    },
+    {
+      "id": "foldable-frame",
+      "category": "device-frame",
+      "format": "jsx",
+      "path": "device-frames/foldable.jsx",
+      "description": "Foldable phone frame with hinge crease and dual-pane layout."
+    },
+    {
+      "id": "macos-safari-frame",
+      "category": "browser",
+      "format": "jsx",
+      "path": "device-frames/macos-safari.jsx",
+      "description": "macOS Safari window chrome with traffic lights, tabs and URL bar."
+    },
+    {
+      "id": "browser-chrome",
+      "category": "browser",
+      "format": "jsx",
+      "path": "browser/chrome.jsx",
+      "description": "Chrome browser window chrome for staging web page mockups."
+    },
+    {
+      "id": "browser-safari",
+      "category": "browser",
+      "format": "jsx",
+      "path": "browser/safari.jsx",
+      "description": "Compact Safari window chrome for staging web page mockups."
+    },
+    {
+      "id": "browser-arc",
+      "category": "browser",
+      "format": "jsx",
+      "path": "browser/arc.jsx",
+      "description": "Arc-style sidebar browser chrome for modern product mockups."
+    },
+    {
+      "id": "design-system-starter",
+      "category": "design-system",
+      "format": "markdown",
+      "path": "design-systems/DESIGN.md",
+      "description": "Neutral DESIGN.md starter baton: token frontmatter plus usage sections."
+    }
+  ]
+}

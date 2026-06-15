@@ -1,0 +1,365 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tidemark Supply — Admin home</title>
+<style>
+:root {
+  --od-accent: #1a7f5a;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: color-mix(in srgb, var(--brand) 11%, transparent);
+  --brand-deep: color-mix(in srgb, var(--brand) 78%, var(--fg));
+  --topbar-bg: #1a1a1a;
+  --topbar-fg: #e3e3e3;
+  --topbar-input: #303030;
+  --topbar-border: #4a4a4a;
+  --bg: #f1f1f1;
+  --surface: #ffffff;
+  --fg: #303030;
+  --muted: #616161;
+  --faint: #8a8a8a;
+  --border: #e3e3e3;
+  --hover: #f6f6f7;
+  --nav-active-bg: #ffffff;
+  --count-bg: #e3e3e3;
+  --ok-bg: #cdfee1;
+  --ok-fg: #0c5132;
+  --warn-bg: #ffd6a4;
+  --warn-fg: #5e4200;
+  --info-bg: #e0f0ff;
+  --info-fg: #00527c;
+  --neutral-bg: #ebebeb;
+  --neutral-fg: #5c5c5c;
+  --spark: var(--brand);
+  --spark-soft: color-mix(in srgb, var(--brand) 18%, transparent);
+  --progress-track: #e3e3e3;
+  --live-dot: #29845a;
+  --kbd-bg: #f1f1f1;
+  --kbd-border: #d4d4d4;
+  --focus-ring: color-mix(in srgb, var(--brand) 45%, transparent);
+  --shadow-card: 0 1px 0 color-mix(in srgb, var(--fg) 7%, transparent), 0 1px 3px color-mix(in srgb, var(--fg) 6%, transparent);
+  --dk-bg: #161616;
+  --dk-surface: #212121;
+  --dk-fg: #e3e3e3;
+  --dk-muted: #a3a3a3;
+  --dk-faint: #757575;
+  --dk-border: #3a3a3a;
+  --dk-hover: #2a2a2a;
+  --dk-nav-active-bg: #2e2e2e;
+  --dk-count-bg: #3a3a3a;
+  --dk-neutral-bg: #333333;
+  --dk-neutral-fg: #bdbdbd;
+  --dk-progress-track: #3a3a3a;
+  --dk-kbd-bg: #2a2a2a;
+  --dk-kbd-border: #444444;
+  --fs-h1: calc(20px * var(--od-scale));
+  --fs-metric: calc(22px * var(--od-scale));
+  --fs-base: calc(13px * var(--od-scale));
+  --fs-sm: calc(12px * var(--od-scale));
+  --fs-xs: calc(11px * var(--od-scale));
+  --pad-1: calc(4px * var(--od-density));
+  --pad-2: calc(8px * var(--od-density));
+  --pad-3: calc(12px * var(--od-density));
+  --pad-4: calc(16px * var(--od-density));
+  --pad-5: calc(20px * var(--od-density));
+  --t-fast: calc(0.12s * var(--od-motion));
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: var(--dk-bg);
+  --surface: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --hover: var(--dk-hover);
+  --nav-active-bg: var(--dk-nav-active-bg);
+  --count-bg: var(--dk-count-bg);
+  --neutral-bg: var(--dk-neutral-bg);
+  --neutral-fg: var(--dk-neutral-fg);
+  --progress-track: var(--dk-progress-track);
+  --kbd-bg: var(--dk-kbd-bg);
+  --kbd-border: var(--dk-kbd-border);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-ui); font-size: var(--fs-base); color: var(--fg); background: var(--bg); -webkit-font-smoothing: antialiased; }
+button { font: inherit; cursor: pointer; background: none; border: 0; color: inherit; padding: 0; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 8px; }
+svg { display: block; }
+.icon { width: calc(16px * var(--od-scale)); height: calc(16px * var(--od-scale)); stroke: currentColor; stroke-width: 1.7; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.icon-sm { width: calc(13px * var(--od-scale)); height: calc(13px * var(--od-scale)); }
+.num { font-variant-numeric: tabular-nums; }
+.app { display: grid; grid-template-rows: calc(48px * var(--od-density)) 1fr; height: 100vh; overflow: hidden; }
+.topbar { display: flex; align-items: center; gap: var(--pad-4); background: var(--topbar-bg); color: var(--topbar-fg); padding: 0 var(--pad-4); }
+.store-mark { display: flex; align-items: center; gap: var(--pad-2); font-weight: 700; }
+.store-mark .m { width: 24px; height: 24px; border-radius: 6px; background: var(--brand); color: var(--surface); display: grid; place-items: center; font-size: var(--fs-sm); font-weight: 800; }
+.top-search {
+  flex: 1;
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--pad-2);
+  background: var(--topbar-input);
+  border: 1px solid var(--topbar-border);
+  border-radius: 8px;
+  padding: var(--pad-1) var(--pad-3);
+  color: var(--faint);
+  transition: border-color var(--t-fast) ease;
+}
+.top-search:focus-within { border-color: var(--topbar-fg); }
+.top-search input { flex: 1; border: 0; outline: none; background: transparent; color: var(--topbar-fg); font: inherit; }
+.topbar .right { display: flex; align-items: center; gap: var(--pad-3); }
+.topbar .right button { display: flex; align-items: center; gap: var(--pad-2); padding: var(--pad-1) var(--pad-2); border-radius: 8px; transition: background var(--t-fast) ease; }
+.topbar .right button:hover { background: var(--topbar-input); }
+.topbar .avatar { width: 26px; height: 26px; border-radius: 6px; background: var(--brand-deep); color: var(--surface); display: grid; place-items: center; font-size: var(--fs-xs); font-weight: 700; }
+.shell { display: grid; grid-template-columns: calc(232px * var(--od-density)) 1fr; overflow: hidden; }
+.nav { overflow-y: auto; padding: var(--pad-3) var(--pad-2); }
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-2);
+  width: 100%;
+  text-align: left;
+  padding: var(--pad-1) var(--pad-2);
+  border-radius: 8px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: var(--fs-base);
+  transition: background var(--t-fast) ease, color var(--t-fast) ease;
+}
+.nav-item:hover { background: var(--hover); color: var(--fg); }
+.nav-item.active { background: var(--nav-active-bg); color: var(--fg); box-shadow: var(--shadow-card); }
+.nav-item .count { margin-left: auto; background: var(--count-bg); color: var(--muted); border-radius: 8px; padding: 0 var(--pad-2); font-size: var(--fs-xs); font-weight: 600; }
+.nav-group { font-size: var(--fs-xs); font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: 0.05em; padding: var(--pad-4) var(--pad-2) var(--pad-1); }
+.nav-sub { padding-left: calc(28px * var(--od-density)); font-weight: 500; }
+.content { overflow-y: auto; padding: var(--pad-5); }
+.content-inner { max-width: 950px; margin: 0 auto; }
+.page-head { display: flex; align-items: center; gap: var(--pad-3); margin-bottom: var(--pad-4); }
+.page-head h1 { font-size: var(--fs-h1); font-weight: 700; margin: 0; }
+.live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pad-2);
+  background: var(--surface);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+  padding: var(--pad-1) var(--pad-3);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.live-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--live-dot); animation: pulse calc(1.8s * var(--od-motion)) ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.range-chip { margin-left: auto; display: inline-flex; align-items: center; gap: var(--pad-1); background: var(--surface); border-radius: 8px; box-shadow: var(--shadow-card); padding: var(--pad-1) var(--pad-3); font-weight: 600; font-size: var(--fs-sm); color: var(--muted); transition: color var(--t-fast) ease; }
+.range-chip:hover { color: var(--fg); }
+.card { background: var(--surface); border-radius: 12px; box-shadow: var(--shadow-card); }
+.setup-card { padding: var(--pad-4); margin-bottom: var(--pad-4); }
+.setup-head { display: flex; align-items: center; gap: var(--pad-3); }
+.setup-head h2 { font-size: calc(14px * var(--od-scale)); font-weight: 650; margin: 0; }
+.setup-head .pct { margin-left: auto; color: var(--muted); font-size: var(--fs-sm); }
+.progress { height: 6px; border-radius: 999px; background: var(--progress-track); margin: var(--pad-3) 0; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 60%; border-radius: 999px; background: var(--brand); }
+.setup-task { display: flex; align-items: center; gap: var(--pad-3); padding: var(--pad-2); border-radius: 8px; width: 100%; text-align: left; transition: background var(--t-fast) ease; }
+.setup-task:hover { background: var(--hover); }
+.setup-task .ring { width: 18px; height: 18px; border-radius: 50%; border: 1.6px dashed var(--faint); flex: none; display: grid; place-items: center; color: var(--surface); }
+.setup-task.done .ring { background: var(--brand); border: 0; }
+.setup-task.done .t { color: var(--faint); text-decoration: line-through; }
+.setup-task .t { font-weight: 600; }
+.setup-task .arrow { margin-left: auto; color: var(--faint); }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--pad-3); margin-bottom: var(--pad-4); }
+.metric { padding: var(--pad-4); transition: box-shadow var(--t-fast) ease; }
+.metric:hover { box-shadow: 0 0 0 2px var(--brand-soft), var(--shadow-card); }
+.metric .label { display: flex; align-items: center; gap: var(--pad-2); color: var(--muted); font-weight: 600; font-size: var(--fs-sm); }
+.metric .label u { text-decoration-style: dotted; text-underline-offset: 3px; }
+.metric .value { font-size: var(--fs-metric); font-weight: 700; margin-top: var(--pad-1); }
+.metric .delta { font-size: var(--fs-xs); font-weight: 600; color: var(--ok-fg); }
+.metric .delta.down { color: var(--warn-fg); }
+.spark { width: 100%; height: 36px; margin-top: var(--pad-2); }
+.orders-card { overflow: hidden; }
+.orders-head { display: flex; align-items: center; padding: var(--pad-4); }
+.orders-head h2 { font-size: calc(14px * var(--od-scale)); font-weight: 650; margin: 0; }
+.orders-head .hint { margin-left: auto; color: var(--faint); font-size: var(--fs-xs); display: flex; align-items: center; gap: var(--pad-1); }
+kbd { font-family: var(--font-mono); font-size: var(--fs-xs); background: var(--kbd-bg); border: 1px solid var(--kbd-border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: var(--fs-xs); font-weight: 600; color: var(--muted); padding: var(--pad-2) var(--pad-4); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--hover); }
+td { padding: var(--pad-3) var(--pad-4); border-bottom: 1px solid var(--border); }
+tbody tr { cursor: pointer; transition: background var(--t-fast) ease; }
+tbody tr:hover { background: var(--hover); }
+tbody tr:last-child td { border-bottom: 0; }
+.order-no { font-weight: 650; color: var(--fg); }
+.badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 8px; padding: 2px var(--pad-2); font-size: var(--fs-xs); font-weight: 600; }
+.badge i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
+.badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.badge.info { background: var(--info-bg); color: var(--info-fg); }
+.badge.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+.right-cell { text-align: right; font-weight: 650; }
+th.right-cell { font-weight: 600; }
+@media (max-width: 900px) { .metrics { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="app" data-od-id="app-frame" data-od-label="App frame">
+  <header class="topbar" data-od-id="top-bar" data-od-label="Top bar">
+    <span class="store-mark" data-od-id="store-mark" data-od-label="Store identity"><span class="m">T</span>Tidemark Supply</span>
+    <div class="top-search" data-od-id="admin-search" data-od-label="Admin search">
+      <svg class="icon" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.5 13.5L17 17"/></svg>
+      <input type="text" placeholder="Search orders, products, customers" aria-label="Search" />
+      <kbd style="background: var(--topbar-input); border-color: var(--topbar-border); color: var(--faint);">Ctrl K</kbd>
+    </div>
+    <div class="right">
+      <button aria-label="Notifications"><svg class="icon" viewBox="0 0 20 20"><path d="M10 4.5a3.4 3.4 0 013.4 3.4c0 3.2 1.4 4.3 2.1 4.9H4.5c.7-.6 2.1-1.7 2.1-4.9A3.4 3.4 0 0110 4.5zM8.5 15.5a1.6 1.6 0 003 0"/></svg></button>
+      <button data-od-id="account-menu" data-od-label="Account menu"><span class="avatar">EV</span>Evi</button>
+    </div>
+  </header>
+  <div class="shell">
+    <nav class="nav" data-od-id="side-nav" data-od-label="Side navigation">
+      <button class="nav-item active" aria-current="page"><svg class="icon" viewBox="0 0 20 20"><path d="M4 16V8.5L10 4l6 4.5V16h-4v-4.5H8V16z"/></svg>Home</button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><path d="M4 6.5h12l-1.2 8a2 2 0 01-2 1.7H7.2a2 2 0 01-2-1.7zM7 6.5V6a3 3 0 016 0v.5"/></svg>Orders<span class="count">23</span></button>
+      <button class="nav-item nav-sub">Drafts<span class="count">4</span></button>
+      <button class="nav-item nav-sub">Abandoned checkouts</button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><path d="M10 3.5l6 3v7l-6 3-6-3v-7z"/><path d="M4 6.5l6 3 6-3M10 9.5V16"/></svg>Products<span class="count">112</span></button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="7" r="3"/><path d="M4.5 16.5a5.5 5.5 0 0111 0"/></svg>Customers<span class="count">1.9K</span></button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><path d="M4 16h12M5.5 12.5v3M9 9v6.5M12.5 11v4.5M16 7v9.5"/></svg>Analytics</button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><path d="M11 4L6 10.5h4L9 16l5-6.5h-4z"/></svg>Marketing</button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><path d="M5.5 4.5h9l1 4.5a2.3 2.3 0 01-4.6 0 2.3 2.3 0 01-1.9 1 2.3 2.3 0 01-1.9-1 2.3 2.3 0 01-4.6 0z"/><path d="M5 10v5.5h10V10"/></svg>Discounts</button>
+      <div class="nav-group">Sales channels</div>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M3.5 10h13M10 3.5c-1.8 1.8-2.7 4-2.7 6.5s.9 4.7 2.7 6.5c1.8-1.8 2.7-4 2.7-6.5s-.9-4.7-2.7-6.5z"/></svg>Online store</button>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><rect x="3.5" y="5.5" width="13" height="10" rx="2"/><path d="M3.5 9h13"/></svg>Point of sale</button>
+      <div class="nav-group">Apps</div>
+      <button class="nav-item"><svg class="icon" viewBox="0 0 20 20"><path d="M7 4.5H4.5V7M13 4.5h2.5V7M7 15.5H4.5V13M13 15.5h2.5V13M8 10h4"/></svg>Loyalty engine</button>
+    </nav>
+    <main class="content" data-od-id="dashboard-content" data-od-label="Dashboard content">
+      <div class="content-inner">
+        <div class="page-head" data-od-id="page-header" data-od-label="Page header">
+          <h1>Good morning, Evi</h1>
+          <span class="live-chip" data-od-id="live-visitors" data-od-label="Live visitors chip"><span class="dot"></span>37 visitors on your store now</span>
+          <button class="range-chip">
+            <svg class="icon icon-sm" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="12" rx="2"/><path d="M3.5 8.5h13M7 3v3M13 3v3"/></svg>
+            Today
+            <svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M6 8l4 4 4-4"/></svg>
+          </button>
+        </div>
+        <section class="card setup-card" data-od-id="onboarding-card" data-od-label="Setup guide card">
+          <div class="setup-head">
+            <h2>Finish setting up your store</h2>
+            <span class="pct num">3 of 5 complete</span>
+          </div>
+          <div class="progress"><i></i></div>
+          <button class="setup-task done">
+            <span class="ring"><svg class="icon icon-sm" viewBox="0 0 20 20" style="stroke-width: 2.4;"><path d="M5 10.5l3.5 3.5L15 6.5"/></svg></span>
+            <span class="t">Add your first product</span>
+          </button>
+          <button class="setup-task done">
+            <span class="ring"><svg class="icon icon-sm" viewBox="0 0 20 20" style="stroke-width: 2.4;"><path d="M5 10.5l3.5 3.5L15 6.5"/></svg></span>
+            <span class="t">Connect a payment provider</span>
+          </button>
+          <button class="setup-task done">
+            <span class="ring"><svg class="icon icon-sm" viewBox="0 0 20 20" style="stroke-width: 2.4;"><path d="M5 10.5l3.5 3.5L15 6.5"/></svg></span>
+            <span class="t">Set shipping rates for Europe</span>
+          </button>
+          <button class="setup-task">
+            <span class="ring"></span>
+            <span class="t">Add a custom domain</span>
+            <svg class="icon arrow" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          </button>
+          <button class="setup-task">
+            <span class="ring"></span>
+            <span class="t">Review tax settings before your first payout</span>
+            <svg class="icon arrow" viewBox="0 0 20 20"><path d="M8 6l4 4-4 4"/></svg>
+          </button>
+        </section>
+        <section class="metrics" data-od-id="metric-row" data-od-label="Metric cards">
+          <div class="card metric" data-od-id="metric-sales" data-od-label="Total sales metric">
+            <div class="label"><u>Total sales</u></div>
+            <div class="value num">€2,418.90 <span class="delta">+14%</span></div>
+            <svg class="spark" viewBox="0 0 200 36" preserveAspectRatio="none" role="img" aria-label="Sales trend today">
+              <path d="M0 30 L25 26 L50 28 L75 19 L100 22 L125 13 L150 16 L175 8 L200 10 L200 36 L0 36 Z" fill="var(--spark-soft)"/>
+              <path d="M0 30 L25 26 L50 28 L75 19 L100 22 L125 13 L150 16 L175 8 L200 10" fill="none" stroke="var(--spark)" stroke-width="1.8"/>
+            </svg>
+          </div>
+          <div class="card metric" data-od-id="metric-sessions" data-od-label="Sessions metric">
+            <div class="label"><u>Sessions</u></div>
+            <div class="value num">1,286 <span class="delta">+6%</span></div>
+            <svg class="spark" viewBox="0 0 200 36" preserveAspectRatio="none" role="img" aria-label="Sessions trend today">
+              <path d="M0 24 L25 27 L50 20 L75 23 L100 15 L125 18 L150 12 L175 15 L200 9 L200 36 L0 36 Z" fill="var(--spark-soft)"/>
+              <path d="M0 24 L25 27 L50 20 L75 23 L100 15 L125 18 L150 12 L175 15 L200 9" fill="none" stroke="var(--spark)" stroke-width="1.8"/>
+            </svg>
+          </div>
+          <div class="card metric" data-od-id="metric-conversion" data-od-label="Conversion metric">
+            <div class="label"><u>Conversion rate</u></div>
+            <div class="value num">2.4% <span class="delta down">-0.3 pts</span></div>
+            <svg class="spark" viewBox="0 0 200 36" preserveAspectRatio="none" role="img" aria-label="Conversion trend today">
+              <path d="M0 14 L25 18 L50 12 L75 20 L100 17 L125 24 L150 20 L175 26 L200 22 L200 36 L0 36 Z" fill="var(--spark-soft)"/>
+              <path d="M0 14 L25 18 L50 12 L75 20 L100 17 L125 24 L150 20 L175 26 L200 22" fill="none" stroke="var(--spark)" stroke-width="1.8"/>
+            </svg>
+          </div>
+        </section>
+        <section class="card orders-card" data-od-id="orders-table" data-od-label="Recent orders table">
+          <div class="orders-head">
+            <h2>Recent orders</h2>
+            <span class="hint">Press <kbd>O</kbd> then <kbd>N</kbd> to create an order</span>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Order</th><th>Customer</th><th>Payment</th><th>Fulfillment</th><th class="right-cell">Total</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="order-no">#2417</td>
+                <td>Ingrid Sollien</td>
+                <td><span class="badge ok"><i></i>Paid</span></td>
+                <td><span class="badge ok"><i></i>Fulfilled</span></td>
+                <td class="right-cell num">€86.00</td>
+              </tr>
+              <tr>
+                <td class="order-no">#2416</td>
+                <td>Caleb Mwangi</td>
+                <td><span class="badge ok"><i></i>Paid</span></td>
+                <td><span class="badge warn"><i></i>Unfulfilled</span></td>
+                <td class="right-cell num">€212.50</td>
+              </tr>
+              <tr>
+                <td class="order-no">#2415</td>
+                <td>Roos van Dijk</td>
+                <td><span class="badge warn"><i></i>Payment pending</span></td>
+                <td><span class="badge warn"><i></i>Unfulfilled</span></td>
+                <td class="right-cell num">€48.90</td>
+              </tr>
+              <tr>
+                <td class="order-no">#2414</td>
+                <td>Theo Marchetti</td>
+                <td><span class="badge ok"><i></i>Paid</span></td>
+                <td><span class="badge info"><i></i>In transit</span></td>
+                <td class="right-cell num">€129.00</td>
+              </tr>
+              <tr>
+                <td class="order-no">#2413</td>
+                <td>Anouk Berger</td>
+                <td><span class="badge neutral"><i></i>Refunded</span></td>
+                <td><span class="badge neutral"><i></i>Returned</span></td>
+                <td class="right-cell num">€64.20</td>
+              </tr>
+              <tr>
+                <td class="order-no">#2412</td>
+                <td>Jonas Lindqvist</td>
+                <td><span class="badge ok"><i></i>Paid</span></td>
+                <td><span class="badge ok"><i></i>Fulfilled</span></td>
+                <td class="right-cell num">€310.75</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

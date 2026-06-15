@@ -1,0 +1,7 @@
+{
+  "id": "cn-qa-knowledge-feed",
+  "title": "问答知识社区 · Q&A Knowledge Feed",
+  "category": "Web",
+  "tags": ["问答", "知识", "社区", "热榜", "qa", "knowledge", "community", "feed", "web", "blue"],
+  "summary": "Desktop knowledge community page with a search-centric top nav, a main column of answer cards with vote and fold actions, and a sidebar hot-ranking list following the design language of mainstream Chinese Q&A platforms."
+}

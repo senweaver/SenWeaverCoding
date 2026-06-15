@@ -1,0 +1,105 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/fitness/tokens.css
+ *
+ * Token contract for Pulse — a high-energy athletic system for workout
+ * trackers, training plans, run/ride dashboards, and sports apps. A charcoal
+ * canvas with an electric volt accent, bold condensed display type, mono
+ * metrics, and tight uppercase labels. The mood is motivating and kinetic:
+ * the accent reads like a power line, reserved for effort, records, and
+ * "go" moments.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface — charcoal stack ─────────────────────────────────── */
+  --bg: #0f1115;
+  --surface: #181b21;
+  --surface-warm: #20242c;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #f4f6f8;
+  --fg-2: #c9cfd6;
+  --muted: #8b939d;
+  --meta: #636b75;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #2a2f38;
+  --border-soft: #1f242c;
+
+  /* ─── Accent — electric volt ───────────────────────────────────── */
+  --accent: #c8ff00;
+  --accent-on: #0f1115;
+  --accent-hover: #d7ff3a;
+  --accent-active: #aadb00;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #38d96a;
+  --warn: #ffb020;
+  --danger: #ff4d4d;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Archivo", "Oswald", "Inter", -apple-system, system-ui, sans-serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 19px;
+  --text-xl: 25px;
+  --text-2xl: 34px;
+  --text-3xl: 50px;
+  --text-4xl: 72px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.5;
+  --leading-tight: 1.0;
+  --tracking-display: 0.02em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 64px;
+  --section-y-tablet: 44px;
+  --section-y-phone: 28px;
+
+  /* ─── Radius ───────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation ────────────────────────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(0, 0, 0, 0.45) 0 8px 24px -6px,
+    rgba(255, 255, 255, 0.03) 0 0 0 1px;
+
+  /* ─── Focus ring — volt ────────────────────────────────────────── */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* ─── Motion — kinetic ─────────────────────────────────────────── */
+  --motion-fast: 110ms;
+  --motion-base: 190ms;
+  --ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1240px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

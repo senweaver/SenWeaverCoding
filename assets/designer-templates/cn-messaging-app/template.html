@@ -1,0 +1,424 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>栖语 · 消息</title>
+<style>
+:root {
+  --od-accent: #07c160;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: #e7f7ee;
+  --bubble-out: #a9ea7a;
+  --bubble-out-fg: #15240b;
+  --page-bg: #ededed;
+  --surface: #ffffff;
+  --pinned-bg: #f5f5f5;
+  --chat-bg: #f1f0ee;
+  --fg: #181818;
+  --muted: #8c8c8c;
+  --faint: #b2b2b2;
+  --border: #e4e4e4;
+  --badge: #fa5151;
+  --on-badge: #ffffff;
+  --ava-a1: #6d8fa6;
+  --ava-a2: #44637a;
+  --ava-b1: #c98e5f;
+  --ava-b2: #9c6437;
+  --ava-c1: #7d9c5e;
+  --ava-c2: #56713c;
+  --ava-d1: #92739f;
+  --ava-d2: #6a4f77;
+  --ava-e1: #c97a6d;
+  --ava-e2: #9c5147;
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --fs-10: calc(10px * var(--od-scale));
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --sp-1: calc(4px * var(--od-density));
+  --sp-2: calc(8px * var(--od-density));
+  --sp-3: calc(12px * var(--od-density));
+  --sp-4: calc(16px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+  --radius: 8px;
+  --dk-page-bg: #111111;
+  --dk-surface: #191919;
+  --dk-pinned-bg: #202020;
+  --dk-chat-bg: #141414;
+  --dk-fg: #e6e6e6;
+  --dk-muted: #909090;
+  --dk-faint: #5e5e5e;
+  --dk-border: #2a2a2a;
+  --dk-brand-soft: #12301f;
+  --dk-bubble-out: #3eb575;
+  --dk-bubble-out-fg: #0c1a10;
+}
+html[data-od-mode="dark"] {
+  --page-bg: var(--dk-page-bg);
+  --surface: var(--dk-surface);
+  --pinned-bg: var(--dk-pinned-bg);
+  --chat-bg: var(--dk-chat-bg);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --brand-soft: var(--dk-brand-soft);
+  --bubble-out: var(--dk-bubble-out);
+  --bubble-out-fg: var(--dk-bubble-out-fg);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; padding: 0; color: inherit; }
+.phone {
+  max-width: 480px;
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+}
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(8px * var(--od-density)) var(--sp-4) calc(4px * var(--od-density));
+  font-size: var(--fs-12);
+  font-weight: 600;
+  background: var(--page-bg);
+}
+.statusbar .sb-icons { display: flex; align-items: center; gap: 5px; }
+.statusbar svg { width: 15px; height: 12px; }
+.app-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  background: var(--page-bg);
+}
+.app-titlebar h1 { margin: 0; font-size: var(--fs-17); font-weight: 600; }
+.titlebar-actions {
+  position: absolute;
+  right: var(--sp-4);
+  display: flex;
+  gap: var(--sp-4);
+}
+.titlebar-actions button { color: var(--fg); transition: opacity var(--dur) ease; }
+.titlebar-actions button:active { opacity: 0.5; }
+.titlebar-actions svg { width: 21px; height: 21px; }
+.convo-list { background: var(--surface); }
+.convo {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  width: 100%;
+  text-align: left;
+  transition: background var(--dur) ease;
+}
+.convo:active { background: var(--pinned-bg); }
+.convo.pinned { background: var(--pinned-bg); }
+.convo + .convo { box-shadow: inset 0 0.5px 0 var(--border); }
+.ava {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  color: var(--on-badge);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  position: relative;
+}
+.ava-a { background: linear-gradient(140deg, var(--ava-a1), var(--ava-a2)); }
+.ava-b { background: linear-gradient(140deg, var(--ava-b1), var(--ava-b2)); }
+.ava-c { background: linear-gradient(140deg, var(--ava-c1), var(--ava-c2)); }
+.ava-d { background: linear-gradient(140deg, var(--ava-d1), var(--ava-d2)); }
+.ava-e { background: linear-gradient(140deg, var(--ava-e1), var(--ava-e2)); }
+.badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: var(--badge);
+  color: var(--on-badge);
+  font-size: var(--fs-10);
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+  padding: 0 4px;
+}
+.badge.mute {
+  width: 9px;
+  height: 9px;
+  min-width: 0;
+  top: -3px;
+  right: -3px;
+  padding: 0;
+}
+.convo-main { flex: 1; min-width: 0; }
+.convo-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
+.convo-name {
+  font-size: var(--fs-16);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.convo-time { font-size: var(--fs-11); color: var(--faint); flex: none; }
+.convo-last {
+  margin-top: 2px;
+  font-size: var(--fs-13);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.convo-last .who { color: var(--muted); }
+.chat-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--chat-bg);
+  border-top: 0.5px solid var(--border);
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--page-bg);
+  border-bottom: 0.5px solid var(--border);
+  font-size: var(--fs-16);
+  font-weight: 600;
+}
+.chat-head .back, .chat-head .dots {
+  position: absolute;
+  color: var(--fg);
+  transition: opacity var(--dur) ease;
+}
+.chat-head .back { left: var(--sp-3); }
+.chat-head .dots { right: var(--sp-3); }
+.chat-head .back:active, .chat-head .dots:active { opacity: 0.5; }
+.chat-head svg { width: 21px; height: 21px; }
+.chat-scroll {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3) var(--sp-4);
+}
+.time-divider {
+  align-self: center;
+  font-size: var(--fs-11);
+  color: var(--faint);
+}
+.msg {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  max-width: 86%;
+}
+.msg .m-ava {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--on-badge);
+  font-size: var(--fs-13);
+  font-weight: 600;
+}
+.msg.in { align-self: flex-start; }
+.msg.out { align-self: flex-end; flex-direction: row-reverse; }
+.bubble {
+  position: relative;
+  padding: calc(9px * var(--od-density)) var(--sp-3);
+  border-radius: var(--radius);
+  font-size: var(--fs-14);
+  line-height: 1.45;
+  word-break: break-word;
+}
+.msg.in .bubble { background: var(--surface); color: var(--fg); }
+.msg.in .bubble::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 13px;
+  border: 5px solid transparent;
+  border-right-color: var(--surface);
+  border-left: 0;
+}
+.msg.out .bubble { background: var(--bubble-out); color: var(--bubble-out-fg); }
+.msg.out .bubble::before {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: 13px;
+  border: 5px solid transparent;
+  border-left-color: var(--bubble-out);
+  border-right: 0;
+}
+.bubble.voice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 110px;
+  cursor: pointer;
+  transition: opacity var(--dur) ease;
+}
+.bubble.voice:active { opacity: 0.7; }
+.bubble.voice svg { width: 17px; height: 17px; }
+.bubble.voice .dur-tag { font-size: var(--fs-12); }
+.input-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) calc(16px * var(--od-density));
+  background: var(--page-bg);
+  border-top: 0.5px solid var(--border);
+}
+.input-bar .ib-icon { color: var(--fg); transition: opacity var(--dur) ease; }
+.input-bar .ib-icon:active { opacity: 0.5; }
+.input-bar .ib-icon svg { width: 26px; height: 26px; }
+.input-field {
+  flex: 1;
+  background: var(--surface);
+  border-radius: 6px;
+  padding: calc(8px * var(--od-density)) var(--sp-3);
+  font-size: var(--fs-14);
+  color: var(--faint);
+  min-height: calc(20px * var(--od-density));
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-frame" data-od-label="手机外框">
+  <header data-od-id="app-head" data-od-label="顶部栏">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>14:52</span>
+      <span class="sb-icons">
+        <svg viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 9.5v1M6 7v3.5M10 4.5v6M14 2v8.5"/></svg>
+        <svg viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5a8.5 8.5 0 0 1 12 0M4.4 7.4a5 5 0 0 1 7.2 0M7 9.8l1 1 1-1"/></svg>
+        <svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="2" width="15" height="8" rx="2.5"/><path d="M18 5v2" stroke-linecap="round"/><rect x="3" y="4" width="10" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="app-titlebar" data-od-id="title-bar" data-od-label="标题栏">
+      <h1>栖语（5）</h1>
+      <span class="titlebar-actions">
+        <button data-od-id="search-entry" data-od-label="搜索入口">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        </button>
+        <button data-od-id="add-entry" data-od-label="新建入口">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+        </button>
+      </span>
+    </div>
+  </header>
+  <section class="convo-list" data-od-id="conversation-list" data-od-label="会话列表">
+    <button class="convo pinned" data-od-id="convo-family" data-od-label="置顶家庭群">
+      <span class="ava ava-b">家<span class="badge">4</span></span>
+      <span class="convo-main">
+        <span class="convo-top"><span class="convo-name">一家人就要整整齐齐</span><span class="convo-time">14:47</span></span>
+        <span class="convo-last"><span class="who">老妈：</span>周末回来吃饭吗，炖了你爱喝的汤</span>
+      </span>
+    </button>
+    <button class="convo pinned" data-od-id="convo-project" data-od-label="置顶项目群">
+      <span class="ava ava-a">设<span class="badge">12</span></span>
+      <span class="convo-main">
+        <span class="convo-top"><span class="convo-name">改版项目组（9）</span><span class="convo-time">14:32</span></span>
+        <span class="convo-last"><span class="who">周明远：</span>首页方案 B 定了，今晚发评审纪要</span>
+      </span>
+    </button>
+    <button class="convo" data-od-id="convo-lin" data-od-label="同事会话">
+      <span class="ava ava-c">林<span class="badge mute"></span></span>
+      <span class="convo-main">
+        <span class="convo-top"><span class="convo-name">林晚秋</span><span class="convo-time">13:58</span></span>
+        <span class="convo-last">[语音] 12''</span>
+      </span>
+    </button>
+    <button class="convo" data-od-id="convo-delivery" data-od-label="通知会话">
+      <span class="ava ava-d">递</span>
+      <span class="convo-main">
+        <span class="convo-top"><span class="convo-name">驿站取件通知</span><span class="convo-time">11:20</span></span>
+        <span class="convo-last">您的包裹已到 3 号柜，取件码 8-2046</span>
+      </span>
+    </button>
+    <button class="convo" data-od-id="convo-coach" data-od-label="好友会话">
+      <span class="ava ava-e">阿</span>
+      <span class="convo-main">
+        <span class="convo-top"><span class="convo-name">阿岩教练</span><span class="convo-time">昨天</span></span>
+        <span class="convo-last">明早 7 点老地方，记得带护膝</span>
+      </span>
+    </button>
+  </section>
+  <section class="chat-pane" data-od-id="chat-detail" data-od-label="聊天详情">
+    <div class="chat-head" data-od-id="chat-head" data-od-label="聊天标题栏">
+      <button class="back" data-od-id="chat-back" data-od-label="返回按钮">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5L8 12l6.5 6.5"/></svg>
+      </button>
+      林晚秋
+      <button class="dots" data-od-id="chat-more" data-od-label="更多按钮">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>
+      </button>
+    </div>
+    <div class="chat-scroll" data-od-id="message-stream" data-od-label="消息流">
+      <span class="time-divider">下午 1:42</span>
+      <div class="msg in" data-od-id="msg-in-question" data-od-label="对方文字消息">
+        <span class="m-ava ava-c">林</span>
+        <span class="bubble">周四的设计走查改到几点了？我下午还有个面试要带</span>
+      </div>
+      <div class="msg out" data-od-id="msg-out-reply" data-od-label="我方文字消息">
+        <span class="m-ava ava-a">我</span>
+        <span class="bubble">改到四点半了，会议室还是 12 楼那间，纪要我提前发你</span>
+      </div>
+      <div class="msg in" data-od-id="msg-in-voice" data-od-label="对方语音消息">
+        <span class="m-ava ava-c">林</span>
+        <span class="bubble voice">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M5 10v4M9 7v10M13 4.5v15M17 8v8M21 10.5v3"/></svg>
+          <span class="dur-tag">12''</span>
+        </span>
+      </div>
+      <div class="msg out" data-od-id="msg-out-confirm" data-od-label="我方确认消息">
+        <span class="m-ava ava-a">我</span>
+        <span class="bubble">收到，那我把组件标注的部分压缩到二十分钟以内</span>
+      </div>
+    </div>
+    <div class="input-bar" data-od-id="input-bar" data-od-label="输入栏">
+      <button class="ib-icon" data-od-id="voice-toggle" data-od-label="语音切换">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3"/></svg>
+      </button>
+      <span class="input-field" data-od-id="text-input" data-od-label="文本输入框">说点什么…</span>
+      <button class="ib-icon" data-od-id="sticker-entry" data-od-label="表情入口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 10h.01M15.5 10h.01M8.5 14.5c1 1.3 2.2 2 3.5 2s2.5-.7 3.5-2"/></svg>
+      </button>
+      <button class="ib-icon" data-od-id="attach-entry" data-od-label="附件入口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+      </button>
+    </div>
+  </section>
+</div>
+</body>
+</html>

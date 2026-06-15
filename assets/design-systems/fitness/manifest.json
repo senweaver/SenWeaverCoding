@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "fitness",
+  "name": "Pulse",
+  "category": "Sports & Fitness",
+  "description": "High-energy athletic system for workout trackers, training apps, and sports dashboards — charcoal canvas, electric volt accent, and bold condensed display.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding original design package"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "usage": "USAGE.md",
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized",
+  "craft": {
+    "applies": [],
+    "suggested": [
+      "color"
+    ],
+    "exemptions": []
+  }
+}

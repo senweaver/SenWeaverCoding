@@ -1,0 +1,106 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/gaming/tokens.css
+ *
+ * Token contract for Arcade — a dark-native system for game launchers,
+ * tournament hubs, leaderboards, player profiles, and streaming overlays.
+ * A near-black canvas charged with a neon magenta accent and a cyan
+ * secondary, glow-edged surfaces, and a confident geometric display face.
+ * Energy without chaos: the neon is a weapon, used on what matters, never
+ * smeared across the whole screen.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface — dark stack ─────────────────────────────────────── */
+  --bg: #0a0a0f;
+  --surface: #14141f;
+  --surface-warm: #1c1c2b;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #f0f0fa;
+  --fg-2: #c7c7da;
+  --muted: #8a8aa6;
+  --meta: #62627d;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #2a2a3d;
+  --border-soft: #20202f;
+
+  /* ─── Accent — neon magenta (cyan secondary kept inline) ───────── */
+  --accent: #ff2d78;
+  --accent-on: #0a0a0f;
+  --accent-hover: #ff4d8d;
+  --accent-active: #e01464;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #2dd4bf;
+  --warn: #fbbf24;
+  --danger: #ff4757;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Rajdhani", "Orbitron", "Inter", -apple-system, system-ui,
+    sans-serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 19px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 46px;
+  --text-4xl: 64px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.5;
+  --leading-tight: 1.05;
+  --tracking-display: 0.04em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 64px;
+  --section-y-tablet: 44px;
+  --section-y-phone: 28px;
+
+  /* ─── Radius — sharp, technical ────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — neon glow ────────────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(0, 0, 0, 0.5) 0 8px 24px -4px,
+    rgba(255, 45, 120, 0.25) 0 0 0 1px;
+
+  /* ─── Focus ring — neon ────────────────────────────────────────── */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* ─── Motion — snappy ──────────────────────────────────────────── */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1320px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

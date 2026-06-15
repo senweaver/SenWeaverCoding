@@ -1,0 +1,7 @@
+{
+  "id": "cn-ride-hailing",
+  "title": "出行打车 · Ride Hailing",
+  "category": "Mobile",
+  "tags": ["出行", "打车", "地图", "网约车", "ride", "hailing", "map", "taxi", "mobile", "orange"],
+  "summary": "Mobile ride-hailing screen with a stylized map canvas and route polyline on top, plus a bottom sheet holding pickup and destination fields, car class selector cards and a confirm bar following the design language of mainstream Chinese mobility apps."
+}

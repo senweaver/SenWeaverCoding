@@ -1,0 +1,7 @@
+{
+  "id": "global-payments-dashboard",
+  "title": "支付数据仪表盘 · Payments Dashboard",
+  "category": "Dashboard",
+  "tags": ["支付", "仪表盘", "金融", "payments", "dashboard", "fintech", "analytics", "charts", "payments-ops"],
+  "summary": "Clean white payments operations dashboard: test-mode top nav, slim left nav, KPI header with delta chips, a large SVG area chart, a payments table with status badges and a balance summary card."
+}

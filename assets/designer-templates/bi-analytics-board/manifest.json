@@ -1,0 +1,7 @@
+{
+  "id": "bi-analytics-board",
+  "title": "BI Analytics Board",
+  "category": "Dashboard",
+  "tags": ["bi", "dashboard", "analytics", "kpi", "filters", "data"],
+  "summary": "Light product-analytics board: top bar with date-range chip, 260px left filter rail, KPI cards with sparklines and delta pills, 12-column grid of SVG charts and a detail table."
+}

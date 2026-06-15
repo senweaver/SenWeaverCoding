@@ -1,0 +1,64 @@
+/* design-systems/real-estate/tokens.css
+ * Token contract for Estate — Premium real-estate UI: warm neutral surfaces, a refined deep-green accent, serif display, and large photo-forward listing cards.
+ * Paste the :root block verbatim into the artifact's first <style>, then
+ * resolve every value through var(--*).
+ */
+
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --surface-warm: #f2efe8;
+  --fg: #221f1a;
+  --fg-2: #3d3830;
+  --muted: #736d62;
+  --meta: #9c9587;
+  --border: #e4ded2;
+  --border-soft: #efeae0;
+  --accent: #1f5d4c;
+  --accent-on: #ffffff;
+  --accent-hover: #194c3e;
+  --accent-active: #133b30;
+  --success: #2f7d4f;
+  --warn: #a87514;
+  --danger: #a8392f;
+  --font-display: "Fraunces", "Lora", Georgia, "Times New Roman", serif;
+  --font-body: "Inter", -apple-system, system-ui, "Segoe UI", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 19px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 44px;
+  --text-4xl: 64px;
+  --leading-body: 1.55;
+  --leading-tight: 1.18;
+  --tracking-display: -0.01em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 80px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: rgba(34,31,26,.05) 0 2px 6px 0, rgba(34,31,26,.1) 0 12px 32px -8px;
+  --focus-ring: 0 0 0 3px rgba(31,93,76,.35);
+  --motion-fast: 150ms;
+  --motion-base: 230ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1280px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

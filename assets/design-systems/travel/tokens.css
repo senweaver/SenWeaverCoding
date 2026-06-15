@@ -1,0 +1,106 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/travel/tokens.css
+ *
+ * Token contract for Atlas — a wanderlust system for travel, booking, and
+ * hospitality products: destination guides, trip planners, hotel and
+ * itinerary pages. Warm sand surfaces instead of cold white, a sunset-coral
+ * accent, an editorial serif headline voice, and generous photo-forward
+ * radii. The mood is inviting and aspirational: the photography leads, the
+ * interface frames it warmly and gets out of the way.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface — warm sand ──────────────────────────────────────── */
+  --bg: #fffdf9;
+  --surface: #ffffff;
+  --surface-warm: #fbf2e6;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #2a2018;
+  --fg-2: #43372c;
+  --muted: #7a6c5d;
+  --meta: #a3978a;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #ecdfce;
+  --border-soft: #f4ecdf;
+
+  /* ─── Accent — sunset coral (ocean teal kept inline) ───────────── */
+  --accent: #e0563b;
+  --accent-on: #ffffff;
+  --accent-hover: #c84a2c;
+  --accent-active: #ad3d22;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #2f9e6f;
+  --warn: #d08a1a;
+  --danger: #c4452f;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Fraunces", "Playfair Display", Georgia, "Times New Roman", serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 26px;
+  --text-2xl: 36px;
+  --text-3xl: 52px;
+  --text-4xl: 72px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.58;
+  --leading-tight: 1.1;
+  --tracking-display: -0.02em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 80px;
+  --section-y-tablet: 56px;
+  --section-y-phone: 36px;
+
+  /* ─── Radius — generous, inviting ──────────────────────────────── */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — warm, soft ───────────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(42, 32, 24, 0.05) 0 2px 6px 0,
+    rgba(42, 32, 24, 0.1) 0 12px 32px -8px;
+
+  /* ─── Focus ring ───────────────────────────────────────────────── */
+  --focus-ring: 0 0 0 3px rgba(224, 86, 59, 0.4);
+
+  /* ─── Motion ───────────────────────────────────────────────────── */
+  --motion-fast: 160ms;
+  --motion-base: 260ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1280px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

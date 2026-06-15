@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "brandId": "education",
+  "source": {
+    "tokensCss": "tokens.css"
+  },
+  "fixture": {
+    "title": "Campus — reference components",
+    "description": "Component inventory for the Campus learning system. Every value resolves from tokens.css: warm-tinted white canvas, a single indigo accent, soft rounded geometry, progress and quiz cues, and reading-optimized type.",
+    "styleBlockCount": 1
+  },
+  "tokens": {
+    "declared": [
+      "--accent", "--accent-active", "--accent-hover", "--accent-on",
+      "--bg", "--border", "--border-soft",
+      "--container-gutter-desktop", "--container-gutter-phone", "--container-gutter-tablet", "--container-max",
+      "--danger", "--ease-standard", "--elev-flat", "--elev-raised", "--elev-ring",
+      "--fg", "--fg-2", "--focus-ring", "--font-body", "--font-display", "--font-mono",
+      "--leading-body", "--leading-tight", "--meta", "--motion-base", "--motion-fast", "--muted",
+      "--radius-lg", "--radius-md", "--radius-pill", "--radius-sm",
+      "--section-y-desktop", "--section-y-phone", "--section-y-tablet",
+      "--space-1", "--space-12", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8",
+      "--success", "--surface", "--surface-warm",
+      "--text-2xl", "--text-3xl", "--text-4xl", "--text-base", "--text-lg", "--text-sm", "--text-xl", "--text-xs",
+      "--tracking-display", "--warn"
+    ],
+    "undeclaredReferenced": []
+  },
+  "groups": [
+    {
+      "id": "buttons",
+      "label": "Buttons and calls to action",
+      "present": true,
+      "classes": ["btn", "btn-primary", "btn-secondary"],
+      "elements": ["button"],
+      "tokenReferences": ["--accent", "--accent-on", "--accent-hover", "--focus-ring", "--radius-sm", "--space-3", "--surface-warm", "--text-base"]
+    },
+    {
+      "id": "inputs",
+      "label": "Form fields and controls",
+      "present": true,
+      "classes": ["field", "field-label", "field-help", "field-error"],
+      "elements": ["form", "input", "label", "select"],
+      "tokenReferences": ["--accent", "--border", "--danger", "--focus-ring", "--meta", "--radius-sm", "--surface"]
+    },
+    {
+      "id": "cards",
+      "label": "Lesson tiles and cards",
+      "present": true,
+      "classes": ["card", "lesson-tile", "quiz-option", "quiz-option-selected"],
+      "elements": ["article", "section"],
+      "tokenReferences": ["--accent", "--border", "--elev-raised", "--radius-md", "--surface", "--space-6"]
+    },
+    {
+      "id": "progress",
+      "label": "Progress and achievement",
+      "present": true,
+      "classes": ["progress", "progress-fill", "ring-meter", "badge", "badge-done"],
+      "elements": ["div", "span"],
+      "tokenReferences": ["--accent", "--radius-pill", "--success", "--surface-warm", "--warn"]
+    },
+    {
+      "id": "links",
+      "label": "Links and inline actions",
+      "present": true,
+      "classes": [],
+      "elements": ["a"],
+      "tokenReferences": ["--accent", "--accent-hover", "--focus-ring"]
+    },
+    {
+      "id": "typography",
+      "label": "Typography scale and text utilities",
+      "present": true,
+      "classes": ["eyebrow", "lede", "lesson-body", "caption"],
+      "elements": ["h1", "h2", "h3", "p"],
+      "tokenReferences": ["--fg", "--font-display", "--leading-body", "--leading-tight", "--muted", "--text-2xl", "--tracking-display"]
+    },
+    {
+      "id": "layout",
+      "label": "Layout primitives",
+      "present": true,
+      "classes": ["container", "lesson-layout", "lesson-rail", "stack"],
+      "elements": ["main", "nav", "aside", "section"],
+      "tokenReferences": ["--container-gutter-desktop", "--container-max", "--section-y-desktop", "--space-4"]
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/education/tokens.css
+ *
+ * Token contract for Campus — a friendly, focus-driven system for
+ * e-learning platforms, courseware, lesson players, and student dashboards.
+ * Approachable indigo on warm-tinted white, type tuned for sustained
+ * reading and comprehension, soft rounded geometry, and encouraging
+ * progress cues. The mood is supportive and motivating without being
+ * childish — it respects learners of every age.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface ──────────────────────────────────────────────────── */
+  --bg: #fbfaff;
+  --surface: #ffffff;
+  --surface-warm: #f3f1fd;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #1e1b3a;
+  --fg-2: #34305a;
+  --muted: #635e84;
+  --meta: #8b86a8;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #e1ddf2;
+  --border-soft: #eeebf8;
+
+  /* ─── Accent — approachable indigo ─────────────────────────────── */
+  --accent: #4f46e5;
+  --accent-on: #ffffff;
+  --accent-hover: #4338ca;
+  --accent-active: #3730a3;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #16a34a;
+  --warn: #d97706;
+  --danger: #dc2626;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Lexend", "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    sans-serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 42px;
+  --text-4xl: 56px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.62;
+  --leading-tight: 1.2;
+  --tracking-display: -0.015em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 72px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+
+  /* ─── Radius — soft, friendly ──────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation ────────────────────────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(79, 70, 229, 0.05) 0 1px 2px 0,
+    rgba(30, 27, 58, 0.08) 0 8px 24px -6px;
+
+  /* ─── Focus ring ───────────────────────────────────────────────── */
+  --focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.4);
+
+  /* ─── Motion ───────────────────────────────────────────────────── */
+  --motion-fast: 150ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1140px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

@@ -1,0 +1,354 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>捷行出行 · 呼叫快车</title>
+<style>
+:root {
+  --od-accent: #ff7a1a;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #e8650a;
+  --brand-soft: #fff1e5;
+  --bg: #eef0f2;
+  --surface: #ffffff;
+  --fg: #1b1d21;
+  --muted: #8c919a;
+  --faint: #c5c9d0;
+  --border: #e6e8eb;
+  --map-base: #e9eef0;
+  --map-line: #d6dee2;
+  --map-block-a: #dde6e9;
+  --map-block-b: #d2e4d6;
+  --map-water: #cfe3ee;
+  --route: #2aab5c;
+  --pin-start: #2aab5c;
+  --pin-end: #ff5040;
+  --safety: #1f9d62;
+  --on-brand: #ffffff;
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-18: calc(18px * var(--od-scale));
+  --pad-page: calc(16px * var(--od-density));
+  --gap-xs: calc(6px * var(--od-density));
+  --gap-sm: calc(10px * var(--od-density));
+  --gap-md: calc(14px * var(--od-density));
+  --gap-lg: calc(20px * var(--od-density));
+  --dur-fast: calc(0.15s * var(--od-motion));
+  --radius: 10px;
+  --radius-lg: 16px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: #0f1114;
+  --surface: #1b1e23;
+  --fg: #e6e8ea;
+  --muted: #868b94;
+  --faint: #4a4f57;
+  --border: #2a2e34;
+  --brand-soft: #34230f;
+  --map-base: #1d2226;
+  --map-line: #272e33;
+  --map-block-a: #232a2e;
+  --map-block-b: #213029;
+  --map-water: #1d2c38;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+.phone {
+  max-width: 480px;
+  margin-inline: auto;
+  min-height: 100vh;
+  background: var(--map-base);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: 0 0 32px rgba(0, 0, 0, 0.1);
+}
+.statusbar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad-page) calc(4px * var(--od-density));
+  font-size: var(--fs-13);
+  font-weight: 600;
+  font-family: var(--font-num);
+}
+.sb-icons { display: flex; align-items: center; gap: 5px; }
+.map {
+  position: relative;
+  height: calc(300px * var(--od-density));
+  margin-top: calc(-34px * var(--od-density));
+  background:
+    repeating-linear-gradient(0deg, transparent 0 46px, var(--map-line) 46px 48px),
+    repeating-linear-gradient(90deg, transparent 0 46px, var(--map-line) 46px 48px),
+    var(--map-base);
+  overflow: hidden;
+}
+.map .block { position: absolute; border-radius: 8px; }
+.map .block.a { left: 6%; top: 14%; width: 24%; height: 22%; background: var(--map-block-a); }
+.map .block.b { right: 8%; top: 10%; width: 20%; height: 18%; background: var(--map-block-b); }
+.map .block.c { left: 12%; bottom: 12%; width: 18%; height: 20%; background: var(--map-block-b); }
+.map .block.d { right: 14%; bottom: 18%; width: 26%; height: 16%; background: var(--map-block-a); }
+.map .water {
+  position: absolute;
+  right: -8%;
+  top: 36%;
+  width: 42%;
+  height: 26%;
+  border-radius: 50% 40% 55% 45%;
+  background: var(--map-water);
+}
+.map svg.route-layer { position: absolute; inset: 0; width: 100%; height: 100%; }
+.map .locate {
+  position: absolute;
+  right: var(--pad-page);
+  bottom: var(--gap-lg);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--surface);
+  display: grid;
+  place-items: center;
+  color: var(--fg);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+.sheet {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  margin-top: calc(-20px * var(--od-density));
+  background: var(--surface);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--gap-sm) var(--pad-page) calc(96px * var(--od-density));
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.08);
+}
+.sheet .handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--faint);
+  margin: 0 auto var(--gap-md);
+}
+.route-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap-xs) var(--gap-md);
+}
+.route-box .row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: calc(10px * var(--od-density)) 0;
+}
+.route-box .row + .row { border-top: 1px dashed var(--border); }
+.route-box .dot { width: 9px; height: 9px; border-radius: 50%; }
+.route-box .dot.start { background: var(--pin-start); }
+.route-box .dot.end { background: var(--pin-end); }
+.route-box .place { flex: 1; font-size: var(--fs-15); font-weight: 500; }
+.route-box .place small { display: block; font-weight: 400; font-size: var(--fs-12); color: var(--muted); }
+.route-box .swap {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+.route-box .swap:active { color: var(--brand); border-color: var(--brand); }
+.safety {
+  margin-top: var(--gap-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-12);
+  color: var(--safety);
+  background: var(--brand-soft);
+  border-radius: 999px;
+  padding: calc(5px * var(--od-density)) calc(12px * var(--od-density));
+}
+.classes {
+  margin-top: var(--gap-md);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap-sm);
+}
+.cls {
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap-sm);
+  text-align: left;
+  transition: border-color var(--dur-fast) ease, background var(--dur-fast) ease;
+}
+.cls .cls-name { font-size: var(--fs-14); font-weight: 600; display: flex; align-items: center; gap: 5px; }
+.cls .eta { font-size: var(--fs-11); color: var(--muted); margin-top: 2px; }
+.cls .price {
+  margin-top: var(--gap-xs);
+  font-family: var(--font-num);
+  font-size: var(--fs-16);
+  font-weight: 700;
+}
+.cls .price small { font-size: var(--fs-11); font-weight: 400; color: var(--muted); }
+.cls.selected {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.cls.selected .price { color: var(--brand-deep); }
+.cls:active { border-color: var(--brand); }
+.coupon {
+  margin-top: var(--gap-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-13);
+  color: var(--muted);
+  padding: calc(8px * var(--od-density)) 2px 0;
+}
+.coupon b { color: var(--brand-deep); font-weight: 600; }
+.cta-bar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: var(--gap-sm) var(--pad-page) calc(18px * var(--od-density));
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+}
+.cta-bar .fare { line-height: 1.3; }
+.cta-bar .fare .amount {
+  font-family: var(--font-num);
+  font-size: var(--fs-18);
+  font-weight: 700;
+}
+.cta-bar .fare small { font-size: var(--fs-11); color: var(--muted); display: block; }
+.cta-bar .confirm {
+  flex: 1;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  border-radius: 999px;
+  padding: calc(13px * var(--od-density)) 0;
+  text-align: center;
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease;
+  box-shadow: 0 6px 16px var(--brand-soft);
+}
+.cta-bar .confirm:active { background: var(--brand-deep); transform: scale(0.98); }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="手机外框">
+  <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+    <span>18:05</span>
+    <span class="sb-icons">
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+      <svg width="14" height="11" viewBox="0 0 14 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 4.5a7 7 0 0 1 10 0M4.3 6.8a3.8 3.8 0 0 1 5.4 0" stroke-linecap="round"/><circle cx="7" cy="9.2" r="0.8" fill="currentColor" stroke="none"/></svg>
+      <svg width="20" height="11" viewBox="0 0 20 11" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1.5" width="14" height="8" rx="2.2"/><path d="M17.5 4.2v2.6" stroke-linecap="round"/><rect x="2.6" y="3.1" width="7" height="4.8" rx="1" fill="currentColor" stroke="none"/></svg>
+    </span>
+  </div>
+  <section class="map" data-od-id="map-canvas" data-od-label="地图画布">
+    <span class="block a"></span>
+    <span class="block b"></span>
+    <span class="block c"></span>
+    <span class="block d"></span>
+    <span class="water"></span>
+    <svg class="route-layer" viewBox="0 0 480 300" fill="none" preserveAspectRatio="xMidYMid slice">
+      <path d="M86 236 C 130 218, 132 172, 188 160 S 300 130, 332 96 S 386 70, 398 56" stroke="var(--route)" stroke-width="5" stroke-linecap="round" stroke-dasharray="1 0"/>
+      <circle cx="86" cy="236" r="9" fill="var(--surface)" stroke="var(--pin-start)" stroke-width="4"/>
+      <g transform="translate(398 56)">
+        <path d="M0 0c-9-9-14-15-14-23a14 14 0 0 1 28 0c0 8-5 14-14 23z" fill="var(--pin-end)" transform="translate(0 -2)"/>
+        <circle cx="0" cy="-25" r="5" fill="var(--surface)"/>
+      </g>
+    </svg>
+    <button class="locate" data-od-id="locate-button" data-od-label="定位按钮">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" stroke-linecap="round"/></svg>
+    </button>
+  </section>
+  <section class="sheet" data-od-id="ride-sheet" data-od-label="叫车底部面板">
+    <div class="handle"></div>
+    <div class="route-box" data-od-id="route-fields" data-od-label="起终点输入">
+      <div class="row">
+        <span class="dot start"></span>
+        <div class="place">梧桐里地铁站 C 口<small>距您 80 米 · 推荐上车点</small></div>
+        <button class="swap" data-od-id="swap-button" data-od-label="交换起终点">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M8 4v13M8 4 4.5 7.5M8 4l3.5 3.5M16 20V7M16 20l-3.5-3.5M16 20l3.5-3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div class="row">
+        <span class="dot end"></span>
+        <div class="place">云栖科创园 2 号楼<small>全程约 12.6 公里 · 26 分钟</small></div>
+      </div>
+    </div>
+    <span class="safety" data-od-id="safety-chip" data-od-label="安全中心入口">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z" stroke-linejoin="round"/><path d="m8.5 12 2.4 2.4 4.6-4.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      行程已开启安全保护
+    </span>
+    <div class="classes" data-od-id="car-class-selector" data-od-label="车型选择">
+      <button class="cls" data-od-id="class-economy" data-od-label="经济型卡片">
+        <span class="cls-name">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13.5 5.5 9a2 2 0 0 1 1.9-1.4h9.2A2 2 0 0 1 18.5 9l1.5 4.5M4 13.5h16v4a1 1 0 0 1-1 1h-1.5a1 1 0 0 1-1-1v-.5h-9v.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" stroke-linejoin="round"/></svg>
+          经济型
+        </span>
+        <span class="eta">约 4 分钟接驾</span>
+        <span class="price">¥23<small> 起</small></span>
+      </button>
+      <button class="cls selected" data-od-id="class-comfort" data-od-label="舒适型卡片">
+        <span class="cls-name">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13.5 5.5 9a2 2 0 0 1 1.9-1.4h9.2A2 2 0 0 1 18.5 9l1.5 4.5M4 13.5h16v4a1 1 0 0 1-1 1h-1.5a1 1 0 0 1-1-1v-.5h-9v.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" stroke-linejoin="round"/><path d="M8 11h8" stroke-linecap="round"/></svg>
+          舒适型
+        </span>
+        <span class="eta">约 3 分钟接驾</span>
+        <span class="price">¥31<small> 起</small></span>
+      </button>
+      <button class="cls" data-od-id="class-premium" data-od-label="豪华型卡片">
+        <span class="cls-name">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13.5 5.5 9a2 2 0 0 1 1.9-1.4h9.2A2 2 0 0 1 18.5 9l1.5 4.5M4 13.5h16v4a1 1 0 0 1-1 1h-1.5a1 1 0 0 1-1-1v-.5h-9v.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" stroke-linejoin="round"/><path d="m10.5 10 1.5-1.8 1.5 1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          豪华型
+        </span>
+        <span class="eta">约 6 分钟接驾</span>
+        <span class="price">¥58<small> 起</small></span>
+      </button>
+    </div>
+    <div class="coupon" data-od-id="coupon-row" data-od-label="优惠提示行">
+      <span>已自动抵扣晚高峰优惠券 <b>-¥6</b></span>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m9 6 6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+  </section>
+  <div class="cta-bar" data-od-id="confirm-bar" data-od-label="确认呼叫栏">
+    <div class="fare">
+      <span class="amount">¥25</span>
+      <small>预估到付 · 已含优惠</small>
+    </div>
+    <button class="confirm" data-od-id="confirm-button" data-od-label="确认呼叫按钮">确认呼叫舒适型</button>
+  </div>
+</div>
+</body>
+</html>

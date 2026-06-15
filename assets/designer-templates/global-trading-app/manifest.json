@@ -1,0 +1,7 @@
+{
+  "id": "global-trading-app",
+  "title": "极简股票交易 · Minimal Trading App",
+  "category": "Mobile",
+  "tags": ["mobile", "finance", "trading", "stocks", "金融", "股票", "交易", "portfolio", "chart"],
+  "summary": "Dark minimal mobile trading screen in the lineage of mainstream retail investing apps: oversized portfolio value hero with green delta, smooth SVG line chart with gradient fill, time-range pill row, and watchlist rows with mini sparklines and direction-colored price chips."
+}

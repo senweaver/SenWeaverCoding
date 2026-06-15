@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>[REPLACE] 数据指挥中心</title>
+<style>
+:root {
+  --od-accent: #19d3f5;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --bg-0: #050e1f;
+  --bg-1: #0a1a33;
+  --panel: rgba(255, 255, 255, 0.03);
+  --line: rgba(25, 211, 245, 0.32);
+  --line-soft: rgba(25, 211, 245, 0.14);
+  --fg: #e8f4ff;
+  --muted: #7e96b3;
+  --warn: #ffb347;
+  --ok: #35e08c;
+  --font-num: 'DIN Alternate', 'Bahnschrift', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+}
+html[data-od-mode="dark"] :root { --bg-0: #03060f; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body {
+  background: radial-gradient(120% 90% at 50% 0%, var(--bg-1) 0%, var(--bg-0) 62%);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: calc(14px * var(--od-scale));
+  -webkit-font-smoothing: antialiased;
+}
+.stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1920px;
+  height: 1080px;
+  transform: translate(-50%, -50%) scale(1);
+  transform-origin: center center;
+  display: flex;
+  flex-direction: column;
+  padding: calc(18px * var(--od-density)) calc(28px * var(--od-density)) calc(24px * var(--od-density));
+  gap: calc(16px * var(--od-density));
+}
+.header {
+  flex: 0 0 72px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 10px;
+}
+.header .status {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+.header .status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 10px var(--ok);
+  animation: breathe calc(2.4s / var(--od-motion)) ease-in-out infinite;
+}
+.header h1 {
+  justify-self: center;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  background: linear-gradient(180deg, #ffffff 20%, var(--od-accent) 130%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 28px rgba(25, 211, 245, 0.25);
+}
+.header .clock {
+  justify-self: end;
+  text-align: right;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+.header .clock .time { font-size: 24px; letter-spacing: 0.08em; }
+.header .clock .date { font-size: 12px; color: var(--muted); letter-spacing: 0.12em; }
+.kpis {
+  flex: 0 0 118px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: calc(16px * var(--od-density));
+}
+.panel {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  padding: calc(14px * var(--od-density)) calc(18px * var(--od-density));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.panel .corner {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--line);
+  border-style: solid;
+  border-width: 0;
+  pointer-events: none;
+}
+.panel .corner.tl { top: -1px; left: -1px; border-top-width: 2px; border-left-width: 2px; }
+.panel .corner.tr { top: -1px; right: -1px; border-top-width: 2px; border-right-width: 2px; }
+.panel .corner.bl { bottom: -1px; left: -1px; border-bottom-width: 2px; border-left-width: 2px; }
+.panel .corner.br { bottom: -1px; right: -1px; border-bottom-width: 2px; border-right-width: 2px; }
+.panel-title {
+  font-size: 14px;
+  letter-spacing: 0.14em;
+  color: var(--od-accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: calc(10px * var(--od-density));
+}
+.panel-title::before {
+  content: '';
+  width: 4px;
+  height: 14px;
+  background: linear-gradient(180deg, var(--od-accent), transparent);
+}
+.kpi .label { font-size: 12px; color: var(--muted); letter-spacing: 0.1em; }
+.kpi .value {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 40px;
+  line-height: 1.15;
+  margin-top: 6px;
+  color: #fff;
+  text-shadow: 0 0 18px rgba(25, 211, 245, 0.45);
+}
+.kpi .value .unit { font-size: 15px; color: var(--muted); margin-left: 6px; }
+.kpi .delta { margin-top: 4px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.kpi .delta.up { color: var(--ok); }
+.kpi .delta.down { color: #ff5d5d; }
+.grid {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 430px 1fr 430px;
+  grid-template-rows: 1fr 1fr;
+  gap: calc(16px * var(--od-density));
+  min-height: 0;
+}
+.center {
+  grid-row: 1 / 3;
+  grid-column: 2;
+  align-items: stretch;
+}
+.center .hero {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+.center svg { width: 100%; height: 100%; }
+.list { display: flex; flex-direction: column; gap: 10px; overflow: hidden; flex: 1; min-height: 0; }
+.list .row {
+  display: grid;
+  grid-template-columns: 30px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid var(--line-soft);
+}
+.list .row .idx {
+  font-family: var(--font-num);
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.list .row:nth-child(-n+3) .idx { color: var(--od-accent); }
+.list .row .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: #fff; }
+.bars { flex: 1; display: flex; flex-direction: column; gap: 12px; justify-content: center; min-height: 0; }
+.bars .bar { display: grid; grid-template-columns: 64px 1fr 56px; gap: 10px; align-items: center; font-size: 13px; }
+.bars .bar .name { color: var(--muted); }
+.bars .bar .track { height: 8px; background: rgba(255, 255, 255, 0.05); overflow: hidden; }
+.bars .bar .fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(25, 211, 245, 0.25), var(--od-accent));
+  box-shadow: 0 0 10px rgba(25, 211, 245, 0.5);
+}
+.bars .bar .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; text-align: right; }
+.chart-wrap { flex: 1; min-height: 0; }
+.chart-wrap svg { width: 100%; height: 100%; }
+.footer-note {
+  flex: 0 0 22px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+}
+.refresh {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--od-accent);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 2px 12px;
+  cursor: pointer;
+}
+.refresh:hover { background: rgba(25, 211, 245, 0.1); }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .header .status .dot { animation: none; }
+}
+</style>
+</head>
+<body>
+<div class="stage" id="stage" data-od-id="stage" data-od-label="大屏舞台">
+  <header class="header" data-od-id="header" data-od-label="标题栏">
+    <span class="status"><span class="dot"></span>系统运行正常</span>
+    <h1>[REPLACE] 城市运行数据指挥中心</h1>
+    <div class="clock">
+      <div class="time" id="clock-time">09:41:00</div>
+      <div class="date" id="clock-date">2026-06-12 星期五</div>
+    </div>
+  </header>
+
+  <section class="kpis" data-od-id="kpi-band" data-od-label="核心指标带">
+    <div class="panel kpi" data-od-id="kpi-1">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="label">今日接入量</div>
+      <div class="value">1,284,520<span class="unit">条</span></div>
+      <div class="delta up">▲ 12.4% 较昨日</div>
+    </div>
+    <div class="panel kpi" data-od-id="kpi-2">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="label">在线终端</div>
+      <div class="value">86,342<span class="unit">台</span></div>
+      <div class="delta up">▲ 3.1% 较昨日</div>
+    </div>
+    <div class="panel kpi" data-od-id="kpi-3">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="label">处理成功率</div>
+      <div class="value">99.62<span class="unit">%</span></div>
+      <div class="delta up">▲ 0.08pt</div>
+    </div>
+    <div class="panel kpi" data-od-id="kpi-4">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="label">平均响应</div>
+      <div class="value">238<span class="unit">ms</span></div>
+      <div class="delta down">▼ 14ms 较昨日</div>
+    </div>
+    <div class="panel kpi" data-od-id="kpi-5">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="label">告警事件</div>
+      <div class="value" style="color: var(--warn); text-shadow: 0 0 18px rgba(255, 179, 71, 0.45);">17<span class="unit">起</span></div>
+      <div class="delta down">▼ 5 起较昨日</div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="panel" data-od-id="rank-left" data-od-label="区域排行">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="panel-title">区域接入排行 TOP 8</div>
+      <div class="list">
+        <div class="row"><span class="idx">01</span><span>[REPLACE] 高新区</span><span class="val">214,392</span></div>
+        <div class="row"><span class="idx">02</span><span>[REPLACE] 滨江区</span><span class="val">198,247</span></div>
+        <div class="row"><span class="idx">03</span><span>[REPLACE] 中心城区</span><span class="val">176,805</span></div>
+        <div class="row"><span class="idx">04</span><span>[REPLACE] 经开区</span><span class="val">152,118</span></div>
+        <div class="row"><span class="idx">05</span><span>[REPLACE] 临港新城</span><span class="val">128,463</span></div>
+        <div class="row"><span class="idx">06</span><span>[REPLACE] 北部新区</span><span class="val">104,927</span></div>
+        <div class="row"><span class="idx">07</span><span>[REPLACE] 西南片区</span><span class="val">88,560</span></div>
+        <div class="row"><span class="idx">08</span><span>[REPLACE] 东湖片区</span><span class="val">73,288</span></div>
+      </div>
+    </div>
+
+    <div class="panel center" data-od-id="center-zone" data-od-label="中心趋势区">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="panel-title">24 小时接入趋势</div>
+      <div class="hero">
+        <svg viewBox="0 0 900 560" preserveAspectRatio="none" role="img" aria-label="24小时接入趋势面积图">
+          <defs>
+            <linearGradient id="cc-area" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="rgba(25,211,245,0.42)"/>
+              <stop offset="100%" stop-color="rgba(25,211,245,0)"/>
+            </linearGradient>
+          </defs>
+          <g stroke="rgba(255,255,255,0.07)" stroke-width="1">
+            <line x1="60" y1="80" x2="880" y2="80"/>
+            <line x1="60" y1="180" x2="880" y2="180"/>
+            <line x1="60" y1="280" x2="880" y2="280"/>
+            <line x1="60" y1="380" x2="880" y2="380"/>
+            <line x1="60" y1="480" x2="880" y2="480"/>
+          </g>
+          <g fill="#7e96b3" font-size="16" font-family="system-ui">
+            <text x="50" y="86" text-anchor="end">120k</text>
+            <text x="50" y="286" text-anchor="end">60k</text>
+            <text x="50" y="486" text-anchor="end">0</text>
+            <text x="60" y="516">00:00</text>
+            <text x="265" y="516">06:00</text>
+            <text x="470" y="516">12:00</text>
+            <text x="675" y="516">18:00</text>
+            <text x="858" y="516">24:00</text>
+          </g>
+          <path d="M60 430 L128 414 L196 422 L264 380 L332 330 L400 288 L468 196 L536 168 L604 210 L672 176 L740 232 L808 268 L880 246 L880 480 L60 480 Z" fill="url(#cc-area)"/>
+          <path d="M60 430 L128 414 L196 422 L264 380 L332 330 L400 288 L468 196 L536 168 L604 210 L672 176 L740 232 L808 268 L880 246" fill="none" stroke="var(--od-accent)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+          <circle cx="536" cy="168" r="6" fill="#031021" stroke="var(--od-accent)" stroke-width="3"/>
+          <text x="536" y="140" text-anchor="middle" fill="#ffffff" font-size="20" font-family="system-ui" font-weight="600">峰值 112,480</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="panel" data-od-id="channel-share" data-od-label="渠道占比">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="panel-title">渠道占比</div>
+      <div class="chart-wrap">
+        <svg viewBox="0 0 380 230" role="img" aria-label="渠道占比环形图">
+          <g transform="translate(105,115)">
+            <circle r="72" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="22"/>
+            <circle r="72" fill="none" stroke="var(--od-accent)" stroke-width="22" stroke-dasharray="208 452" transform="rotate(-90)" stroke-linecap="butt"/>
+            <circle r="72" fill="none" stroke="#35e08c" stroke-width="22" stroke-dasharray="113 452" stroke-dashoffset="-208" transform="rotate(-90)"/>
+            <circle r="72" fill="none" stroke="#ffb347" stroke-width="22" stroke-dasharray="77 452" stroke-dashoffset="-321" transform="rotate(-90)"/>
+            <circle r="72" fill="none" stroke="#8b7cf6" stroke-width="22" stroke-dasharray="54 452" stroke-dashoffset="-398" transform="rotate(-90)"/>
+            <text y="-2" text-anchor="middle" fill="#ffffff" font-size="26" font-weight="700" font-family="system-ui">128.5w</text>
+            <text y="22" text-anchor="middle" fill="#7e96b3" font-size="12" font-family="system-ui">总接入</text>
+          </g>
+          <g font-size="13" font-family="system-ui" fill="#e8f4ff">
+            <rect x="215" y="48" width="10" height="10" fill="var(--od-accent)"/><text x="232" y="58">移动端 46%</text>
+            <rect x="215" y="86" width="10" height="10" fill="#35e08c"/><text x="232" y="96">PC 端 25%</text>
+            <rect x="215" y="124" width="10" height="10" fill="#ffb347"/><text x="232" y="134">小程序 17%</text>
+            <rect x="215" y="162" width="10" height="10" fill="#8b7cf6"/><text x="232" y="172">开放接口 12%</text>
+          </g>
+        </svg>
+      </div>
+    </div>
+
+    <div class="panel" data-od-id="alerts" data-od-label="实时告警">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="panel-title">实时告警</div>
+      <div class="list">
+        <div class="row" style="border-left-color: #ff5d5d;"><span class="idx">严重</span><span>[REPLACE] 节点 A-12 响应超时</span><span class="val">09:32</span></div>
+        <div class="row" style="border-left-color: var(--warn);"><span class="idx">警告</span><span>[REPLACE] 队列积压超过阈值</span><span class="val">09:18</span></div>
+        <div class="row" style="border-left-color: var(--warn);"><span class="idx">警告</span><span>[REPLACE] 磁盘使用率 86%</span><span class="val">08:54</span></div>
+        <div class="row"><span class="idx">提示</span><span>[REPLACE] 夜间批处理完成</span><span class="val">06:00</span></div>
+        <div class="row"><span class="idx">提示</span><span>[REPLACE] 证书将于 14 天后到期</span><span class="val">05:12</span></div>
+      </div>
+    </div>
+
+    <div class="panel" data-od-id="capacity" data-od-label="资源水位">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <div class="panel-title">资源水位</div>
+      <div class="bars">
+        <div class="bar"><span class="name">计算</span><span class="track"><span class="fill" style="width: 72%;"></span></span><span class="num">72%</span></div>
+        <div class="bar"><span class="name">存储</span><span class="track"><span class="fill" style="width: 58%;"></span></span><span class="num">58%</span></div>
+        <div class="bar"><span class="name">带宽</span><span class="track"><span class="fill" style="width: 81%;"></span></span><span class="num">81%</span></div>
+        <div class="bar"><span class="name">队列</span><span class="track"><span class="fill" style="width: 34%;"></span></span><span class="num">34%</span></div>
+        <div class="bar"><span class="name">缓存</span><span class="track"><span class="fill" style="width: 66%;"></span></span><span class="num">66%</span></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer-note" data-od-id="footer" data-od-label="页脚">
+    <span>数据来源：data.json · 每 30 秒自动刷新</span>
+    <button class="refresh" id="refresh-btn" type="button">手动刷新</button>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  function fit() {
+    var s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    stage.style.transform = 'translate(-50%, -50%) scale(' + s + ')';
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  var timeEl = document.getElementById('clock-time');
+  var dateEl = document.getElementById('clock-date');
+  var weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  function tick() {
+    var d = new Date();
+    timeEl.textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    dateEl.textContent = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + weekdays[d.getDay()];
+  }
+  setInterval(tick, 1000);
+  tick();
+
+  document.getElementById('refresh-btn').addEventListener('click', function () {
+    fetch('data.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function () { window.location.reload(); })
+      .catch(function () { window.location.reload(); });
+  });
+})();
+</script>
+</body>
+</html>

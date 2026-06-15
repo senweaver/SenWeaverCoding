@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "healthcare",
+  "name": "Vital",
+  "category": "Healthcare & Medical",
+  "description": "Calm clinical interface system for patient portals, telehealth, and medical dashboards — trustworthy teal, high-legibility type, and AAA-leaning contrast.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding original design package"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "usage": "USAGE.md",
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized",
+  "craft": {
+    "applies": [],
+    "suggested": [
+      "color",
+      "accessibility-baseline"
+    ],
+    "exemptions": []
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "id": "bi-insight-feed",
+  "title": "BI Insight Feed",
+  "category": "Dashboard",
+  "tags": ["bi", "dashboard", "ai", "insight", "answer", "data"],
+  "summary": "Conversational analytics feed: AI answer card with inline key numbers and data preview table, recommended question chips, and a 6-column pinned chart grid with refresh stamps."
+}

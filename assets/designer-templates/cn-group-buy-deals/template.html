@@ -1,0 +1,483 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>聚省团 · 限时拼团</title>
+<style>
+:root {
+  --od-accent: #e02e24;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #c01e15;
+  --brand-soft: #ffece9;
+  --flame: #ff6a2b;
+  --page-bg: #f5f3f2;
+  --surface: #ffffff;
+  --fg: #25211f;
+  --muted: #8a8480;
+  --faint: #bab4b0;
+  --border: #efebe8;
+  --price: #e02e24;
+  --gold: #ffd84d;
+  --on-gold: #5e3c00;
+  --on-brand: #ffffff;
+  --progress-bg: #ffe1d3;
+  --countdown-bg: #3a2420;
+  --prod-a1: #f0e3d4;
+  --prod-a2: #b08a5f;
+  --prod-b1: #dde9e3;
+  --prod-b2: #5f9478;
+  --prod-c1: #e0e7ee;
+  --prod-c2: #66839c;
+  --prod-d1: #efe0e0;
+  --prod-d2: #ad6262;
+  --prod-e1: #ece8d8;
+  --prod-e2: #a39a5c;
+  --prod-f1: #e6e0ee;
+  --prod-f2: #84709c;
+  --shadow: 0 2px 10px rgba(37, 33, 31, 0.06);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --fs-10: calc(10px * var(--od-scale));
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --fs-19: calc(19px * var(--od-scale));
+  --fs-22: calc(22px * var(--od-scale));
+  --sp-1: calc(4px * var(--od-density));
+  --sp-2: calc(8px * var(--od-density));
+  --sp-3: calc(12px * var(--od-density));
+  --sp-4: calc(16px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+  --radius: 8px;
+  --radius-lg: 12px;
+  --dk-page-bg: #131110;
+  --dk-surface: #1e1b19;
+  --dk-fg: #ece8e5;
+  --dk-muted: #9b948f;
+  --dk-faint: #696460;
+  --dk-border: #2c2724;
+  --dk-brand-soft: #3c1714;
+  --dk-progress-bg: #452214;
+  --dk-countdown-bg: #211412;
+  --dk-prod-a1: #3a3126;
+  --dk-prod-b1: #22322a;
+  --dk-prod-c1: #232e38;
+  --dk-prod-d1: #382424;
+  --dk-prod-e1: #34301d;
+  --dk-prod-f1: #2e2738;
+}
+html[data-od-mode="dark"] {
+  --page-bg: var(--dk-page-bg);
+  --surface: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --brand-soft: var(--dk-brand-soft);
+  --progress-bg: var(--dk-progress-bg);
+  --countdown-bg: var(--dk-countdown-bg);
+  --prod-a1: var(--dk-prod-a1);
+  --prod-b1: var(--dk-prod-b1);
+  --prod-c1: var(--dk-prod-c1);
+  --prod-d1: var(--dk-prod-d1);
+  --prod-e1: var(--dk-prod-e1);
+  --prod-f1: var(--dk-prod-f1);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; padding: 0; color: inherit; }
+.phone {
+  max-width: 480px;
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.app-head {
+  background: linear-gradient(170deg, var(--brand) 0%, var(--flame) 120%);
+  color: var(--on-brand);
+  padding-bottom: var(--sp-3);
+}
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(8px * var(--od-density)) var(--sp-4) calc(4px * var(--od-density));
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.statusbar .sb-icons { display: flex; align-items: center; gap: 5px; }
+.statusbar svg { width: 15px; height: 12px; }
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+.search-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: calc(7px * var(--od-density)) var(--sp-2) calc(7px * var(--od-density)) var(--sp-3);
+  color: var(--muted);
+  font-size: var(--fs-13);
+}
+.search-box svg { width: 16px; height: 16px; flex: none; }
+.search-box .kw { flex: 1; text-align: left; }
+.search-box .go {
+  background: var(--brand);
+  color: var(--on-brand);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: var(--fs-12);
+  font-weight: 700;
+  transition: transform var(--dur) ease;
+}
+.search-box .go:active { transform: scale(0.94); }
+.channel-row {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4) 0;
+  font-size: var(--fs-14);
+}
+.channel {
+  color: var(--on-brand);
+  opacity: 0.78;
+  padding-bottom: 6px;
+  position: relative;
+  transition: opacity var(--dur) ease;
+}
+.channel.active { opacity: 1; font-weight: 700; }
+.channel.active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 18px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--gold);
+}
+.channel:active { opacity: 1; }
+.countdown-bar {
+  margin: var(--sp-3) var(--sp-3) 0;
+  background: var(--countdown-bg);
+  color: var(--on-brand);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-13);
+}
+.countdown-bar svg { width: 17px; height: 17px; color: var(--gold); }
+.countdown-bar b { color: var(--gold); font-weight: 800; }
+.cd-digits { margin-left: auto; display: flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
+.cd-digits i {
+  font-style: normal;
+  background: var(--brand);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-weight: 800;
+  font-size: var(--fs-12);
+}
+.prod-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-2) calc(76px * var(--od-density));
+}
+.prod-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  transition: transform var(--dur) ease;
+}
+.prod-card:active { transform: scale(0.97); }
+.prod-cover {
+  aspect-ratio: 1 / 1;
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: var(--surface);
+  font-size: var(--fs-15);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.pc-a { background: linear-gradient(145deg, var(--prod-a1), var(--prod-a2)); }
+.pc-b { background: linear-gradient(145deg, var(--prod-b1), var(--prod-b2)); }
+.pc-c { background: linear-gradient(145deg, var(--prod-c1), var(--prod-c2)); }
+.pc-d { background: linear-gradient(145deg, var(--prod-d1), var(--prod-d2)); }
+.pc-e { background: linear-gradient(145deg, var(--prod-e1), var(--prod-e2)); }
+.pc-f { background: linear-gradient(145deg, var(--prod-f1), var(--prod-f2)); }
+.corner-flag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-size: var(--fs-10);
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 0 0 var(--radius) 0;
+}
+.corner-flag.subsidy { background: var(--countdown-bg); color: var(--gold); }
+.prod-body { padding: var(--sp-2) var(--sp-2) var(--sp-3); }
+.prod-name {
+  margin: 0;
+  font-size: var(--fs-13);
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.group-chip {
+  margin-top: var(--sp-1);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--progress-bg);
+  color: var(--brand-deep);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: var(--fs-10);
+  font-weight: 600;
+}
+.group-chip svg { width: 11px; height: 11px; }
+.price-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+.price {
+  color: var(--price);
+  font-weight: 800;
+  font-size: var(--fs-19);
+  font-variant-numeric: tabular-nums;
+}
+.price small { font-size: var(--fs-11); font-weight: 700; margin-right: 1px; }
+.price-old { color: var(--faint); font-size: var(--fs-10); text-decoration: line-through; }
+.go-group {
+  margin-left: auto;
+  background: linear-gradient(110deg, var(--brand), var(--flame));
+  color: var(--on-brand);
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: var(--fs-11);
+  font-weight: 700;
+  flex: none;
+  transition: transform var(--dur) ease;
+}
+.go-group:active { transform: scale(0.92); }
+.float-coupon {
+  position: fixed;
+  right: calc(50% - 240px + 12px);
+  bottom: calc(96px * var(--od-density));
+  z-index: 11;
+  background: linear-gradient(160deg, var(--gold), var(--flame));
+  color: var(--on-gold);
+  border-radius: 999px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  font-size: var(--fs-10);
+  font-weight: 800;
+  box-shadow: var(--shadow);
+  line-height: 1.25;
+  transition: transform var(--dur) ease;
+  animation: bob calc(2.6s * var(--od-motion)) ease-in-out infinite;
+}
+.float-coupon b { font-size: var(--fs-13); }
+.float-coupon:active { transform: scale(0.9); }
+@keyframes bob { 50% { translate: 0 -5px; } }
+@media (max-width: 500px) { .float-coupon { right: 12px; } }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 0.5px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding: calc(6px * var(--od-density)) 0 calc(14px * var(--od-density));
+  z-index: 10;
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-10);
+  color: var(--muted);
+  transition: color var(--dur) ease;
+}
+.tab svg { width: 23px; height: 23px; }
+.tab.active { color: var(--brand); font-weight: 700; }
+.tab:active { opacity: 0.6; }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-frame" data-od-label="手机外框">
+  <header class="app-head" data-od-id="app-head" data-od-label="顶部促销区">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>19:55</span>
+      <span class="sb-icons">
+        <svg viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 9.5v1M6 7v3.5M10 4.5v6M14 2v8.5"/></svg>
+        <svg viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5a8.5 8.5 0 0 1 12 0M4.4 7.4a5 5 0 0 1 7.2 0M7 9.8l1 1 1-1"/></svg>
+        <svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="2" width="15" height="8" rx="2.5"/><path d="M18 5v2" stroke-linecap="round"/><rect x="3" y="4" width="7" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="search-row" data-od-id="search-row" data-od-label="搜索栏">
+      <div class="search-box" data-od-id="search-box" data-od-label="搜索框">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        <button class="kw" data-od-id="search-keyword" data-od-label="搜索热词">纸巾整箱 24 包</button>
+        <button class="go" data-od-id="search-cta" data-od-label="搜索按钮">搜索</button>
+      </div>
+    </div>
+    <nav class="channel-row" data-od-id="channel-row" data-od-label="频道切换">
+      <button class="channel active" data-od-id="channel-recommend" data-od-label="推荐频道">推荐</button>
+      <button class="channel" data-od-id="channel-subsidy" data-od-label="补贴频道">官方补贴</button>
+      <button class="channel" data-od-id="channel-grocery" data-od-label="食品频道">食品生鲜</button>
+      <button class="channel" data-od-id="channel-home" data-od-label="百货频道">日用百货</button>
+      <button class="channel" data-od-id="channel-digital" data-od-label="数码频道">数码家电</button>
+    </nav>
+  </header>
+  <main data-od-id="deals-main" data-od-label="特卖主体">
+    <section class="countdown-bar" data-od-id="countdown-bar" data-od-label="场次倒计时">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2M9.5 3.5h5"/></svg>
+      <span><b>20 点场</b> 整点开抢 · 全场拼单价再打 9 折</span>
+      <span class="cd-digits" data-od-id="countdown-digits" data-od-label="倒计时数字"><i>00</i>:<i>04</i>:<i>37</i></span>
+    </section>
+    <section class="prod-grid" data-od-id="deal-grid" data-od-label="拼团商品网格">
+      <article class="prod-card" data-od-id="deal-tissue" data-od-label="纸巾商品卡">
+        <div class="prod-cover pc-a"><span class="corner-flag">万人团</span>竹浆纸巾</div>
+        <div class="prod-body">
+          <h3 class="prod-name">竹浆本色抽纸 24 包整箱 4 层加厚 母婴可用</h3>
+          <span class="group-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.4"/><path d="M3.5 19c.8-2.8 2.8-4.2 5.5-4.2s4.7 1.4 5.5 4.2M14.5 14.6c2 .2 3.5 1.4 4.2 3.4"/></svg>已拼 2.3万件</span>
+          <div class="price-row">
+            <span class="price"><small>¥</small>19.9</span>
+            <span class="price-old">¥39.9</span>
+            <button class="go-group" data-od-id="deal-tissue-cta" data-od-label="去拼单按钮">去拼单</button>
+          </div>
+        </div>
+      </article>
+      <article class="prod-card" data-od-id="deal-eggs" data-od-label="鸡蛋商品卡">
+        <div class="prod-cover pc-b"><span class="corner-flag subsidy">官方补贴</span>鲜鸡蛋</div>
+        <div class="prod-body">
+          <h3 class="prod-name">山林散养土鸡蛋 40 枚 破损包赔 顺丰冷链发货</h3>
+          <span class="group-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.4"/><path d="M3.5 19c.8-2.8 2.8-4.2 5.5-4.2s4.7 1.4 5.5 4.2M14.5 14.6c2 .2 3.5 1.4 4.2 3.4"/></svg>已拼 8967 件</span>
+          <div class="price-row">
+            <span class="price"><small>¥</small>29.8</span>
+            <span class="price-old">¥45.8</span>
+            <button class="go-group" data-od-id="deal-eggs-cta" data-od-label="去拼单按钮">去拼单</button>
+          </div>
+        </div>
+      </article>
+      <article class="prod-card" data-od-id="deal-socks" data-od-label="袜子商品卡">
+        <div class="prod-cover pc-c">秋冬棉袜</div>
+        <div class="prod-body">
+          <h3 class="prod-name">精梳棉中筒袜 10 双装 秋冬加厚 防臭吸汗</h3>
+          <span class="group-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.4"/><path d="M3.5 19c.8-2.8 2.8-4.2 5.5-4.2s4.7 1.4 5.5 4.2M14.5 14.6c2 .2 3.5 1.4 4.2 3.4"/></svg>已拼 1.6万件</span>
+          <div class="price-row">
+            <span class="price"><small>¥</small>15.9</span>
+            <span class="price-old">¥29.9</span>
+            <button class="go-group" data-od-id="deal-socks-cta" data-od-label="去拼单按钮">去拼单</button>
+          </div>
+        </div>
+      </article>
+      <article class="prod-card" data-od-id="deal-kettle" data-od-label="电水壶商品卡">
+        <div class="prod-cover pc-d"><span class="corner-flag">限时秒杀</span>电热水壶</div>
+        <div class="prod-body">
+          <h3 class="prod-name">朴白 1.7L 电热水壶 双层防烫 食品级内胆 自动断电</h3>
+          <span class="group-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.4"/><path d="M3.5 19c.8-2.8 2.8-4.2 5.5-4.2s4.7 1.4 5.5 4.2M14.5 14.6c2 .2 3.5 1.4 4.2 3.4"/></svg>已拼 5402 件</span>
+          <div class="price-row">
+            <span class="price"><small>¥</small>39</span>
+            <span class="price-old">¥79</span>
+            <button class="go-group" data-od-id="deal-kettle-cta" data-od-label="去拼单按钮">去拼单</button>
+          </div>
+        </div>
+      </article>
+      <article class="prod-card" data-od-id="deal-nuts" data-od-label="坚果商品卡">
+        <div class="prod-cover pc-e">每日坚果</div>
+        <div class="prod-body">
+          <h3 class="prod-name">混合每日坚果 30 袋礼盒装 独立小包 当季新货</h3>
+          <span class="group-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.4"/><path d="M3.5 19c.8-2.8 2.8-4.2 5.5-4.2s4.7 1.4 5.5 4.2M14.5 14.6c2 .2 3.5 1.4 4.2 3.4"/></svg>已拼 9863 件</span>
+          <div class="price-row">
+            <span class="price"><small>¥</small>49.9</span>
+            <span class="price-old">¥89.9</span>
+            <button class="go-group" data-od-id="deal-nuts-cta" data-od-label="去拼单按钮">去拼单</button>
+          </div>
+        </div>
+      </article>
+      <article class="prod-card" data-od-id="deal-blanket" data-od-label="毛毯商品卡">
+        <div class="prod-cover pc-f"><span class="corner-flag subsidy">官方补贴</span>法兰绒毯</div>
+        <div class="prod-body">
+          <h3 class="prod-name">加厚法兰绒毛毯 200x230 双人冬款 不掉绒不起球</h3>
+          <span class="group-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.4"/><path d="M3.5 19c.8-2.8 2.8-4.2 5.5-4.2s4.7 1.4 5.5 4.2M14.5 14.6c2 .2 3.5 1.4 4.2 3.4"/></svg>已拼 3279 件</span>
+          <div class="price-row">
+            <span class="price"><small>¥</small>59</span>
+            <span class="price-old">¥118</span>
+            <button class="go-group" data-od-id="deal-blanket-cta" data-od-label="去拼单按钮">去拼单</button>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <button class="float-coupon" data-od-id="floating-coupon" data-od-label="现金券浮窗"><b>¥30</b>现金券<span>点击领取</span></button>
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="底部标签栏">
+    <button class="tab active" data-od-id="tab-home" data-od-label="首页标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5"/></svg>
+      首页
+    </button>
+    <button class="tab" data-od-id="tab-video" data-od-label="视频标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="M16 10.5l5-3v9l-5-3"/></svg>
+      短视频
+    </button>
+    <button class="tab" data-od-id="tab-search" data-od-label="搜索标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      搜索
+    </button>
+    <button class="tab" data-od-id="tab-chat" data-od-label="聊天标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1L3.5 20.5l1-4.4A8.5 8.5 0 1 1 21 12z"/></svg>
+      聊天
+    </button>
+    <button class="tab" data-od-id="tab-me" data-od-label="我的标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="4"/><path d="M4.5 20c1.5-3.5 4.2-5 7.5-5s6 1.5 7.5 5"/></svg>
+      我的
+    </button>
+  </nav>
+</div>
+</body>
+</html>

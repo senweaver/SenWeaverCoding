@@ -1,0 +1,64 @@
+/* design-systems/food-delivery/tokens.css
+ * Token contract for Crave — Appetizing food-delivery UI: warm white surfaces, a hungry tomato-red accent, rounded photo-forward cards, and fast friendly ordering.
+ * Paste the :root block verbatim into the artifact's first <style>, then
+ * resolve every value through var(--*).
+ */
+
+:root {
+  --bg: #fffaf6;
+  --surface: #ffffff;
+  --surface-warm: #fdeee4;
+  --fg: #2a1d16;
+  --fg-2: #46352b;
+  --muted: #7c6a5e;
+  --meta: #a8978b;
+  --border: #f0e1d5;
+  --border-soft: #f6ece3;
+  --accent: #e23744;
+  --accent-on: #ffffff;
+  --accent-hover: #c92f3b;
+  --accent-active: #ad2731;
+  --success: #2f9e4f;
+  --warn: #e08b16;
+  --danger: #c4392f;
+  --font-display: "Poppins", "Inter", -apple-system, system-ui, sans-serif;
+  --font-body: "Inter", -apple-system, system-ui, "Segoe UI", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 19px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 44px;
+  --text-4xl: 58px;
+  --leading-body: 1.55;
+  --leading-tight: 1.18;
+  --tracking-display: -0.01em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 72px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: rgba(42,29,22,.06) 0 2px 6px 0, rgba(42,29,22,.1) 0 12px 30px -8px;
+  --focus-ring: 0 0 0 3px rgba(226,55,68,.35);
+  --motion-fast: 150ms;
+  --motion-base: 230ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1240px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

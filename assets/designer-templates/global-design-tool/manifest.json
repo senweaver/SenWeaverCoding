@@ -1,0 +1,7 @@
+{
+  "id": "global-design-tool",
+  "title": "界面设计工具 · Design Tool Canvas",
+  "category": "Web App",
+  "tags": ["设计工具", "画布", "原型", "design", "canvas", "vector", "layers", "editor", "design-canvas"],
+  "summary": "Dark-chrome collaborative design tool: top toolbar with tool icons, nested layers panel with visibility toggles, dot-grid canvas holding two selected artboards with handles and dimension labels, and a properties inspector."
+}

@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "brandId": "legal",
+  "source": {
+    "tokensCss": "tokens.css"
+  },
+  "fixture": {
+    "title": "Counsel — reference components",
+    "description": "Component inventory for the Counsel legal system. Every value resolves from tokens.css: white and parchment surfaces, near-monochrome navy ink, a serif display voice, restrained geometry, and document-grade tables.",
+    "styleBlockCount": 1
+  },
+  "tokens": {
+    "declared": [
+      "--accent", "--accent-active", "--accent-hover", "--accent-on",
+      "--bg", "--border", "--border-soft",
+      "--container-gutter-desktop", "--container-gutter-phone", "--container-gutter-tablet", "--container-max",
+      "--danger", "--ease-standard", "--elev-flat", "--elev-raised", "--elev-ring",
+      "--fg", "--fg-2", "--focus-ring", "--font-body", "--font-display", "--font-mono",
+      "--leading-body", "--leading-tight", "--meta", "--motion-base", "--motion-fast", "--muted",
+      "--radius-lg", "--radius-md", "--radius-pill", "--radius-sm",
+      "--section-y-desktop", "--section-y-phone", "--section-y-tablet",
+      "--space-1", "--space-12", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8",
+      "--success", "--surface", "--surface-warm",
+      "--text-2xl", "--text-3xl", "--text-4xl", "--text-base", "--text-lg", "--text-sm", "--text-xl", "--text-xs",
+      "--tracking-display", "--warn"
+    ],
+    "undeclaredReferenced": []
+  },
+  "groups": [
+    {
+      "id": "buttons",
+      "label": "Buttons and calls to action",
+      "present": true,
+      "classes": ["btn", "btn-primary", "btn-secondary"],
+      "elements": ["button"],
+      "tokenReferences": ["--accent", "--accent-on", "--accent-hover", "--border", "--focus-ring", "--radius-sm", "--space-3", "--text-base"]
+    },
+    {
+      "id": "inputs",
+      "label": "Form fields and controls",
+      "present": true,
+      "classes": ["field", "field-label", "field-help", "field-error"],
+      "elements": ["form", "input", "label", "select"],
+      "tokenReferences": ["--border", "--danger", "--fg", "--focus-ring", "--meta", "--radius-sm", "--surface"]
+    },
+    {
+      "id": "cards",
+      "label": "Document wells and pull-quotes",
+      "present": true,
+      "classes": ["card", "document-well", "pullquote"],
+      "elements": ["article", "section", "blockquote"],
+      "tokenReferences": ["--border", "--elev-raised", "--font-display", "--radius-md", "--surface", "--surface-warm"]
+    },
+    {
+      "id": "tables",
+      "label": "Matters, clauses, and billing tables",
+      "present": true,
+      "classes": ["table", "table-head", "num"],
+      "elements": ["table", "thead", "tr", "td", "th"],
+      "tokenReferences": ["--border-soft", "--meta", "--surface-warm", "--text-sm"]
+    },
+    {
+      "id": "badges",
+      "label": "Status tags",
+      "present": true,
+      "classes": ["tag", "tag-active", "tag-pending", "tag-closed"],
+      "elements": ["span"],
+      "tokenReferences": ["--danger", "--radius-sm", "--success", "--text-xs", "--warn"]
+    },
+    {
+      "id": "links",
+      "label": "Links and inline actions",
+      "present": true,
+      "classes": [],
+      "elements": ["a"],
+      "tokenReferences": ["--accent", "--accent-hover", "--focus-ring"]
+    },
+    {
+      "id": "typography",
+      "label": "Typography scale and text utilities",
+      "present": true,
+      "classes": ["eyebrow", "lede", "body-muted", "citation"],
+      "elements": ["h1", "h2", "h3", "p"],
+      "tokenReferences": ["--fg", "--font-display", "--leading-body", "--leading-tight", "--meta", "--text-2xl"]
+    },
+    {
+      "id": "layout",
+      "label": "Layout primitives",
+      "present": true,
+      "classes": ["container", "stack", "row", "rule-gold"],
+      "elements": ["main", "nav", "section"],
+      "tokenReferences": ["--container-gutter-desktop", "--container-max", "--section-y-desktop", "--space-4"]
+    }
+  ]
+}

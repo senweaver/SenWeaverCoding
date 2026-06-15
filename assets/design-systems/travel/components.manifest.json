@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "brandId": "travel",
+  "source": {
+    "tokensCss": "tokens.css"
+  },
+  "fixture": {
+    "title": "Atlas — reference components",
+    "description": "Component inventory for the Atlas travel system. Every value resolves from tokens.css: warm sand surfaces, a sunset-coral accent with ocean-teal secondary, editorial serif headlines, generous photo-forward radii, and floating booking panels.",
+    "styleBlockCount": 1
+  },
+  "tokens": {
+    "declared": [
+      "--accent", "--accent-active", "--accent-hover", "--accent-on",
+      "--bg", "--border", "--border-soft",
+      "--container-gutter-desktop", "--container-gutter-phone", "--container-gutter-tablet", "--container-max",
+      "--danger", "--ease-standard", "--elev-flat", "--elev-raised", "--elev-ring",
+      "--fg", "--fg-2", "--focus-ring", "--font-body", "--font-display", "--font-mono",
+      "--leading-body", "--leading-tight", "--meta", "--motion-base", "--motion-fast", "--muted",
+      "--radius-lg", "--radius-md", "--radius-pill", "--radius-sm",
+      "--section-y-desktop", "--section-y-phone", "--section-y-tablet",
+      "--space-1", "--space-12", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8",
+      "--success", "--surface", "--surface-warm",
+      "--text-2xl", "--text-3xl", "--text-4xl", "--text-base", "--text-lg", "--text-sm", "--text-xl", "--text-xs",
+      "--tracking-display", "--warn"
+    ],
+    "undeclaredReferenced": []
+  },
+  "groups": [
+    {
+      "id": "buttons",
+      "label": "Buttons and calls to action",
+      "present": true,
+      "classes": ["btn", "btn-primary", "btn-secondary", "btn-icon"],
+      "elements": ["button"],
+      "tokenReferences": ["--accent", "--accent-on", "--accent-hover", "--border", "--focus-ring", "--radius-pill", "--radius-sm", "--text-base"]
+    },
+    {
+      "id": "inputs",
+      "label": "Form fields and controls",
+      "present": true,
+      "classes": ["field", "field-label", "field-help", "field-error", "search-panel"],
+      "elements": ["form", "input", "label", "select"],
+      "tokenReferences": ["--border", "--danger", "--fg", "--focus-ring", "--meta", "--radius-sm", "--surface"]
+    },
+    {
+      "id": "cards",
+      "label": "Destination and stay cards",
+      "present": true,
+      "classes": ["card", "stay-card", "stay-photo", "save-heart"],
+      "elements": ["article", "section"],
+      "tokenReferences": ["--accent", "--border", "--elev-raised", "--font-display", "--radius-md", "--surface"]
+    },
+    {
+      "id": "booking",
+      "label": "Booking panel",
+      "present": true,
+      "classes": ["booking-panel", "booking-price", "booking-row"],
+      "elements": ["aside", "div"],
+      "tokenReferences": ["--accent", "--border", "--elev-raised", "--radius-lg", "--surface", "--space-6"]
+    },
+    {
+      "id": "badges",
+      "label": "Status pills and labels",
+      "present": true,
+      "classes": ["pill", "pill-favorite", "pill-fewleft", "pill-soldout"],
+      "elements": ["span"],
+      "tokenReferences": ["--accent", "--danger", "--radius-pill", "--success", "--text-xs", "--warn"]
+    },
+    {
+      "id": "links",
+      "label": "Links and inline actions",
+      "present": true,
+      "classes": [],
+      "elements": ["a"],
+      "tokenReferences": ["--accent", "--accent-hover", "--focus-ring"]
+    },
+    {
+      "id": "typography",
+      "label": "Typography scale and text utilities",
+      "present": true,
+      "classes": ["eyebrow", "lede", "price", "caption"],
+      "elements": ["h1", "h2", "h3", "p"],
+      "tokenReferences": ["--fg", "--font-display", "--leading-body", "--leading-tight", "--muted", "--text-3xl", "--tracking-display"]
+    },
+    {
+      "id": "layout",
+      "label": "Layout primitives",
+      "present": true,
+      "classes": ["container", "hero", "grid", "stack"],
+      "elements": ["main", "nav", "section"],
+      "tokenReferences": ["--container-gutter-desktop", "--container-max", "--section-y-desktop", "--space-4"]
+    }
+  ]
+}

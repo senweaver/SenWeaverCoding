@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "recruiting",
+  "name": "Talent",
+  "category": "HR & Recruiting",
+  "description": "Modern HR system for recruiting, ATS, and people platforms — light surfaces, a friendly-professional violet accent, clear candidate pipelines, and humane, encouraging hierarchy.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

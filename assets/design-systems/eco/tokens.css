@@ -1,0 +1,106 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/eco/tokens.css
+ *
+ * Token contract for Terra — an earthy system for sustainability and climate
+ * products: impact dashboards, carbon reporting, conscious commerce, and
+ * environmental nonprofits. Recycled-paper warmth instead of stark white, a
+ * grounded forest-green accent, clay and soil neutrals, and a calm serif
+ * display voice. The feeling is honest, natural, and unhurried — credibility
+ * through restraint, never greenwashed neon.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface — recycled paper ─────────────────────────────────── */
+  --bg: #f6f4ee;
+  --surface: #fffdf8;
+  --surface-warm: #ece7da;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #25321f;
+  --fg-2: #3c4a32;
+  --muted: #6b7561;
+  --meta: #94997f;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #d8d2c2;
+  --border-soft: #e7e2d5;
+
+  /* ─── Accent — forest green ────────────────────────────────────── */
+  --accent: #2f6b3f;
+  --accent-on: #fffdf8;
+  --accent-hover: #265834;
+  --accent-active: #1d4528;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #3f8f4f;
+  --warn: #b5791f;
+  --danger: #b23a2e;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "Fraunces", "Lora", Georgia, "Times New Roman", serif;
+  --font-body:
+    "Inter", -apple-system, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 17px;
+  --text-lg: 21px;
+  --text-xl: 26px;
+  --text-2xl: 34px;
+  --text-3xl: 46px;
+  --text-4xl: 60px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.6;
+  --leading-tight: 1.15;
+  --tracking-display: -0.01em;
+
+  /* ─── Spacing — base scale (8px grid) ──────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 80px;
+  --section-y-tablet: 56px;
+  --section-y-phone: 36px;
+
+  /* ─── Radius — soft, organic ───────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — soft, low ────────────────────────────────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(37, 50, 31, 0.05) 0 1px 2px 0,
+    rgba(37, 50, 31, 0.08) 0 10px 28px -8px;
+
+  /* ─── Focus ring ───────────────────────────────────────────────── */
+  --focus-ring: 0 0 0 3px rgba(47, 107, 63, 0.4);
+
+  /* ─── Motion — unhurried ───────────────────────────────────────── */
+  --motion-fast: 180ms;
+  --motion-base: 280ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 1160px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

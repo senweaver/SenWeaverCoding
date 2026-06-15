@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "gaming",
+  "name": "Arcade",
+  "category": "Gaming & Esports",
+  "description": "Dark-native esports system for game launchers, tournament hubs, and streaming overlays — near-black canvas, neon magenta/cyan energy, and glow-edged surfaces.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding original design package"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "usage": "USAGE.md",
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized",
+  "craft": {
+    "applies": [],
+    "suggested": [
+      "color"
+    ],
+    "exemptions": []
+  }
+}

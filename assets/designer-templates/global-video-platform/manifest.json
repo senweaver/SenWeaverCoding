@@ -1,0 +1,7 @@
+{
+  "id": "global-video-platform",
+  "title": "视频平台首页 · Video Platform Home",
+  "category": "Web App",
+  "tags": ["视频", "流媒体", "内容平台", "video", "streaming", "media", "grid", "watch-page"],
+  "summary": "White video platform home: compact top bar with search, collapsed icon sidebar, filter chip row, and a responsive 16:9 thumbnail grid with duration badges, channel avatars, view counts and a live variant."
+}

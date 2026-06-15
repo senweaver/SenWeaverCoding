@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>[REPLACE] NOC 运维监控墙</title>
+<style>
+:root {
+  --od-accent: #33ff66;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --bg: #0a0c0a;
+  --panel: rgba(51, 255, 102, 0.025);
+  --line: rgba(51, 255, 102, 0.25);
+  --line-soft: rgba(51, 255, 102, 0.12);
+  --fg: #d9ffe6;
+  --muted: #5e8a6c;
+  --warn: #ffb347;
+  --crit: #ff4d4d;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', Menlo, monospace;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: calc(13px * var(--od-scale));
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 3px);
+}
+.stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1920px;
+  height: 1080px;
+  transform: translate(-50%, -50%) scale(1);
+  transform-origin: center center;
+  display: flex;
+  flex-direction: column;
+  padding: calc(16px * var(--od-density)) calc(24px * var(--od-density)) calc(16px * var(--od-density));
+  gap: calc(14px * var(--od-density));
+}
+.topbar {
+  flex: 0 0 46px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 8px;
+}
+.topbar .prompt { color: var(--od-accent); }
+.topbar h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.08em; }
+.topbar .summary { display: flex; gap: 22px; margin-left: auto; font-size: 12.5px; color: var(--muted); }
+.topbar .summary b { font-weight: 600; }
+.topbar .summary .ok-b { color: var(--od-accent); }
+.topbar .summary .warn-b { color: var(--warn); }
+.topbar .summary .crit-b { color: var(--crit); }
+.topbar .clock { font-size: 15px; color: var(--fg); }
+.grid {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 1.25fr 1fr 520px;
+  grid-template-rows: 1fr 1fr;
+  gap: calc(14px * var(--od-density));
+  min-height: 0;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: calc(12px * var(--od-density)) calc(14px * var(--od-density));
+}
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--od-accent);
+  margin-bottom: calc(10px * var(--od-density));
+}
+.panel-head .cmd::before { content: '$ '; color: var(--muted); }
+.panel-head .meta { color: var(--muted); font-size: 11px; }
+.matrix {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 8px;
+  min-height: 0;
+}
+.cell {
+  border: 1px solid var(--line-soft);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 11px;
+  min-height: 0;
+}
+.cell .id { color: var(--muted); }
+.cell .state { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.cell .state .dot { width: 7px; height: 7px; border-radius: 50%; }
+.cell.ok .dot { background: var(--od-accent); box-shadow: 0 0 8px var(--od-accent); }
+.cell.ok .state { color: var(--od-accent); }
+.cell.warn { border-color: rgba(255, 179, 71, 0.45); }
+.cell.warn .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse calc(1.6s / var(--od-motion)) ease-in-out infinite; }
+.cell.warn .state { color: var(--warn); }
+.cell.crit { border-color: rgba(255, 77, 77, 0.55); background: rgba(255, 77, 77, 0.06); }
+.cell.crit .dot { background: var(--crit); box-shadow: 0 0 10px var(--crit); animation: pulse calc(0.9s / var(--od-motion)) ease-in-out infinite; }
+.cell.crit .state { color: var(--crit); }
+.sparks { flex: 1; display: flex; flex-direction: column; gap: 10px; justify-content: center; min-height: 0; }
+.spark { display: grid; grid-template-columns: 150px 1fr 92px; align-items: center; gap: 12px; font-size: 12px; }
+.spark .name { color: var(--muted); }
+.spark svg { width: 100%; height: 30px; display: block; }
+.spark .val { text-align: right; font-size: 13px; }
+.gauges { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; align-items: center; min-height: 0; }
+.gauge { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.gauge svg { width: 110px; height: 64px; }
+.gauge .v { font-size: 16px; color: var(--fg); }
+.logfeed { grid-row: 1 / 3; grid-column: 3; }
+.logwrap { flex: 1; overflow: hidden; position: relative; min-height: 0; }
+.lines { display: flex; flex-direction: column; gap: 6px; font-size: 12px; line-height: 1.5; }
+.line { display: grid; grid-template-columns: 58px 52px 1fr; gap: 10px; white-space: nowrap; overflow: hidden; }
+.line .ts { color: var(--muted); }
+.line .lv { font-weight: 600; }
+.line .lv.info { color: var(--od-accent); }
+.line .lv.warn { color: var(--warn); }
+.line .lv.crit { color: var(--crit); }
+.line .msg { overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.cursor::after { content: '▌'; color: var(--od-accent); animation: blink calc(1s / var(--od-motion)) steps(1) infinite; }
+.queue { flex: 1; display: flex; flex-direction: column; gap: 10px; justify-content: center; min-height: 0; }
+.qrow { display: grid; grid-template-columns: 130px 1fr 76px; gap: 10px; align-items: center; font-size: 12px; }
+.qrow .name { color: var(--muted); }
+.qrow .track { height: 9px; background: rgba(51, 255, 102, 0.07); border: 1px solid var(--line-soft); }
+.qrow .fill { height: 100%; background: var(--od-accent); opacity: 0.75; }
+.qrow .fill.warn { background: var(--warn); }
+.qrow .fill.crit { background: var(--crit); }
+.qrow .num { text-align: right; }
+.footer {
+  flex: 0 0 20px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+.refresh {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--od-accent);
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 12px;
+  cursor: pointer;
+}
+.refresh:hover { background: rgba(51, 255, 102, 0.08); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .cell .dot, .cursor::after { animation: none; }
+}
+</style>
+</head>
+<body>
+<div class="stage" id="stage" data-od-id="stage" data-od-label="监控墙舞台">
+  <header class="topbar" data-od-id="topbar" data-od-label="顶栏">
+    <span class="prompt">$</span>
+    <h1>[REPLACE] noc --watch production</h1>
+    <div class="summary">
+      <span>服务 <b class="ok-b">42 正常</b></span>
+      <span><b class="warn-b">3 警告</b></span>
+      <span><b class="crit-b">1 严重</b></span>
+      <span>SLA 本月 <b class="ok-b">99.94%</b></span>
+    </div>
+    <span class="clock" id="clock">09:41:00</span>
+  </header>
+
+  <section class="grid">
+    <div class="panel" data-od-id="service-matrix" data-od-label="服务状态矩阵">
+      <div class="panel-head"><span class="cmd">service-matrix --all</span><span class="meta">46 services</span></div>
+      <div class="matrix">
+        <div class="cell ok"><span class="id">api-core</span><span class="state"><span class="dot"></span>OK 38ms</span></div>
+        <div class="cell ok"><span class="id">api-edge</span><span class="state"><span class="dot"></span>OK 21ms</span></div>
+        <div class="cell ok"><span class="id">auth</span><span class="state"><span class="dot"></span>OK 17ms</span></div>
+        <div class="cell warn"><span class="id">search</span><span class="state"><span class="dot"></span>WARN 412ms</span></div>
+        <div class="cell ok"><span class="id">payment</span><span class="state"><span class="dot"></span>OK 52ms</span></div>
+        <div class="cell ok"><span class="id">billing</span><span class="state"><span class="dot"></span>OK 44ms</span></div>
+        <div class="cell ok"><span class="id">notify</span><span class="state"><span class="dot"></span>OK 29ms</span></div>
+        <div class="cell crit"><span class="id">media-conv</span><span class="state"><span class="dot"></span>DOWN</span></div>
+        <div class="cell ok"><span class="id">user-svc</span><span class="state"><span class="dot"></span>OK 33ms</span></div>
+        <div class="cell ok"><span class="id">order-svc</span><span class="state"><span class="dot"></span>OK 41ms</span></div>
+        <div class="cell ok"><span class="id">inventory</span><span class="state"><span class="dot"></span>OK 36ms</span></div>
+        <div class="cell ok"><span class="id">gateway</span><span class="state"><span class="dot"></span>OK 12ms</span></div>
+        <div class="cell warn"><span class="id">report-gen</span><span class="state"><span class="dot"></span>WARN 1.2s</span></div>
+        <div class="cell ok"><span class="id">scheduler</span><span class="state"><span class="dot"></span>OK 8ms</span></div>
+        <div class="cell ok"><span class="id">webhook</span><span class="state"><span class="dot"></span>OK 26ms</span></div>
+        <div class="cell ok"><span class="id">cdn-sync</span><span class="state"><span class="dot"></span>OK 64ms</span></div>
+        <div class="cell ok"><span class="id">geo-ip</span><span class="state"><span class="dot"></span>OK 9ms</span></div>
+        <div class="cell warn"><span class="id">ml-infer</span><span class="state"><span class="dot"></span>WARN 688ms</span></div>
+      </div>
+    </div>
+
+    <div class="panel" data-od-id="latency" data-od-label="链路延迟">
+      <div class="panel-head"><span class="cmd">latency --p99 --15m</span><span class="meta">ms</span></div>
+      <div class="sparks">
+        <div class="spark"><span class="name">gateway → api</span><svg viewBox="0 0 300 30" preserveAspectRatio="none"><polyline points="0,20 25,18 50,21 75,16 100,17 125,12 150,14 175,10 200,13 225,9 250,12 275,8 300,10" fill="none" stroke="var(--od-accent)" stroke-width="1.5"/></svg><span class="val">p99 86ms</span></div>
+        <div class="spark"><span class="name">api → db-primary</span><svg viewBox="0 0 300 30" preserveAspectRatio="none"><polyline points="0,22 25,21 50,23 75,20 100,22 125,19 150,21 175,18 200,20 225,17 250,19 275,18 300,17" fill="none" stroke="var(--od-accent)" stroke-width="1.5"/></svg><span class="val">p99 24ms</span></div>
+        <div class="spark"><span class="name">api → cache</span><svg viewBox="0 0 300 30" preserveAspectRatio="none"><polyline points="0,25 25,24 50,25 75,23 100,24 125,23 150,24 175,22 200,23 225,22 250,23 275,22 300,22" fill="none" stroke="var(--od-accent)" stroke-width="1.5"/></svg><span class="val">p99 4ms</span></div>
+        <div class="spark"><span class="name">api → search</span><svg viewBox="0 0 300 30" preserveAspectRatio="none"><polyline points="0,18 25,16 50,19 75,14 100,16 125,10 150,15 175,8 200,12 225,6 250,11 275,4 300,9" fill="none" stroke="var(--warn)" stroke-width="1.5"/></svg><span class="val" style="color: var(--warn);">p99 412ms</span></div>
+        <div class="spark"><span class="name">api → media-conv</span><svg viewBox="0 0 300 30" preserveAspectRatio="none"><polyline points="0,14 25,12 50,15 75,10 100,13 125,8 150,12 175,6 200,16 225,26 250,28 275,28 300,28" fill="none" stroke="var(--crit)" stroke-width="1.5"/></svg><span class="val" style="color: var(--crit);">timeout</span></div>
+      </div>
+    </div>
+
+    <div class="panel logfeed" data-od-id="log-feed" data-od-label="日志流">
+      <div class="panel-head"><span class="cmd">tail -f /var/log/prod.log</span><span class="meta">live</span></div>
+      <div class="logwrap">
+        <div class="lines" id="log-lines">
+          <div class="line"><span class="ts">09:40:58</span><span class="lv crit">CRIT</span><span class="msg">[REPLACE] media-conv pod 3/3 CrashLoopBackOff</span></div>
+          <div class="line"><span class="ts">09:40:41</span><span class="lv warn">WARN</span><span class="msg">[REPLACE] search p99 412ms 超过阈值 300ms</span></div>
+          <div class="line"><span class="ts">09:40:22</span><span class="lv info">INFO</span><span class="msg">[REPLACE] deploy api-core v2.18.3 完成滚动发布</span></div>
+          <div class="line"><span class="ts">09:39:57</span><span class="lv info">INFO</span><span class="msg">[REPLACE] autoscaler 扩容 worker 4 → 6</span></div>
+          <div class="line"><span class="ts">09:39:30</span><span class="lv warn">WARN</span><span class="msg">[REPLACE] report-gen 队列深度 1,840</span></div>
+          <div class="line"><span class="ts">09:39:04</span><span class="lv info">INFO</span><span class="msg">[REPLACE] 备份任务 db-primary 完成 (42GB)</span></div>
+          <div class="line"><span class="ts">09:38:46</span><span class="lv info">INFO</span><span class="msg">[REPLACE] cert-manager 续期 *.example.com 成功</span></div>
+          <div class="line"><span class="ts">09:38:12</span><span class="lv warn">WARN</span><span class="msg">[REPLACE] ml-infer GPU 利用率 96%</span></div>
+          <div class="line"><span class="ts">09:37:55</span><span class="lv info">INFO</span><span class="msg">[REPLACE] 灰度流量 5% → 25% (api-edge)</span></div>
+          <div class="line"><span class="ts">09:37:31</span><span class="lv info">INFO</span><span class="msg">[REPLACE] healthcheck 全量通过 (46/46)</span></div>
+          <div class="line cursor"><span class="ts">09:37:08</span><span class="lv info">INFO</span><span class="msg">[REPLACE] watching 1,284 targets</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" data-od-id="uptime" data-od-label="可用性">
+      <div class="panel-head"><span class="cmd">uptime --30d</span><span class="meta">SLO 99.9%</span></div>
+      <div class="gauges">
+        <div class="gauge">
+          <svg viewBox="0 0 110 64"><path d="M10 58 A48 48 0 0 1 100 58" fill="none" stroke="rgba(51,255,102,0.12)" stroke-width="9" stroke-linecap="round"/><path d="M10 58 A48 48 0 0 1 100 58" fill="none" stroke="var(--od-accent)" stroke-width="9" stroke-linecap="round" stroke-dasharray="150.8 151" stroke-dashoffset="0.3"/></svg>
+          <span class="v">99.98%</span><span>API 集群</span>
+        </div>
+        <div class="gauge">
+          <svg viewBox="0 0 110 64"><path d="M10 58 A48 48 0 0 1 100 58" fill="none" stroke="rgba(51,255,102,0.12)" stroke-width="9" stroke-linecap="round"/><path d="M10 58 A48 48 0 0 1 100 58" fill="none" stroke="var(--od-accent)" stroke-width="9" stroke-linecap="round" stroke-dasharray="150.5 151" stroke-dashoffset="0.6"/></svg>
+          <span class="v">99.95%</span><span>数据层</span>
+        </div>
+        <div class="gauge">
+          <svg viewBox="0 0 110 64"><path d="M10 58 A48 48 0 0 1 100 58" fill="none" stroke="rgba(255,179,71,0.15)" stroke-width="9" stroke-linecap="round"/><path d="M10 58 A48 48 0 0 1 100 58" fill="none" stroke="var(--warn)" stroke-width="9" stroke-linecap="round" stroke-dasharray="148.2 151" stroke-dashoffset="2.9"/></svg>
+          <span class="v" style="color: var(--warn);">99.41%</span><span>媒体管线</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" data-od-id="queues" data-od-label="队列水位">
+      <div class="panel-head"><span class="cmd">queues --depth</span><span class="meta">jobs</span></div>
+      <div class="queue">
+        <div class="qrow"><span class="name">events-ingest</span><span class="track"><span class="fill" style="width: 32%;"></span></span><span class="num">3,214</span></div>
+        <div class="qrow"><span class="name">email-out</span><span class="track"><span class="fill" style="width: 18%;"></span></span><span class="num">912</span></div>
+        <div class="qrow"><span class="name">report-gen</span><span class="track"><span class="fill warn" style="width: 74%;"></span></span><span class="num">1,840</span></div>
+        <div class="qrow"><span class="name">media-conv</span><span class="track"><span class="fill crit" style="width: 96%;"></span></span><span class="num">7,468</span></div>
+        <div class="qrow"><span class="name">webhook-retry</span><span class="track"><span class="fill" style="width: 22%;"></span></span><span class="num">486</span></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer" data-od-id="footer" data-od-label="页脚">
+    <span>data source: data.json · refresh interval 30s</span>
+    <button class="refresh" id="refresh-btn" type="button">refresh now</button>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  function fit() {
+    var s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    stage.style.transform = 'translate(-50%, -50%) scale(' + s + ')';
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  var clock = document.getElementById('clock');
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  function tick() {
+    var d = new Date();
+    clock.textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+  setInterval(tick, 1000);
+  tick();
+
+  document.getElementById('refresh-btn').addEventListener('click', function () {
+    fetch('data.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function () { window.location.reload(); })
+      .catch(function () { window.location.reload(); });
+  });
+})();
+</script>
+</body>
+</html>

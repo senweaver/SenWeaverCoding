@@ -1,0 +1,446 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>栖物集 · 发现</title>
+<style>
+:root {
+  --od-accent: #ff2e4d;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: #ffe9ed;
+  --page-bg: #f5f4f2;
+  --surface: #ffffff;
+  --fg: #2b2a28;
+  --muted: #8c8a86;
+  --faint: #b6b3ae;
+  --border: #eeece8;
+  --chip-bg: #f1efec;
+  --cover-a1: #f4e3d3;
+  --cover-a2: #c98e5f;
+  --cover-b1: #dce8df;
+  --cover-b2: #6f9c7d;
+  --cover-c1: #e8e2f0;
+  --cover-c2: #7e6fa0;
+  --cover-d1: #f6e6e2;
+  --cover-d2: #c97a6d;
+  --cover-e1: #e3ecf2;
+  --cover-e2: #6d8fa6;
+  --cover-f1: #f3ecd8;
+  --cover-f2: #b3a05e;
+  --on-cover: #ffffff;
+  --shadow: 0 2px 10px rgba(43, 42, 40, 0.05);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --fs-10: calc(10px * var(--od-scale));
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --sp-1: calc(4px * var(--od-density));
+  --sp-2: calc(8px * var(--od-density));
+  --sp-3: calc(12px * var(--od-density));
+  --sp-4: calc(16px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+  --radius: 10px;
+  --radius-lg: 14px;
+  --dk-page-bg: #121110;
+  --dk-surface: #1d1c1a;
+  --dk-fg: #ece9e4;
+  --dk-muted: #9c9892;
+  --dk-faint: #6d6a64;
+  --dk-border: #2b2a27;
+  --dk-chip-bg: #262522;
+  --dk-brand-soft: #3a1c22;
+  --dk-cover-a1: #4a3826;
+  --dk-cover-b1: #2c3a30;
+  --dk-cover-c1: #352f40;
+  --dk-cover-d1: #43302c;
+  --dk-cover-e1: #2b3640;
+  --dk-cover-f1: #403a26;
+}
+html[data-od-mode="dark"] {
+  --page-bg: var(--dk-page-bg);
+  --surface: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --chip-bg: var(--dk-chip-bg);
+  --brand-soft: var(--dk-brand-soft);
+  --cover-a1: var(--dk-cover-a1);
+  --cover-b1: var(--dk-cover-b1);
+  --cover-c1: var(--dk-cover-c1);
+  --cover-d1: var(--dk-cover-d1);
+  --cover-e1: var(--dk-cover-e1);
+  --cover-f1: var(--dk-cover-f1);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; padding: 0; color: inherit; }
+.phone {
+  max-width: 480px;
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+}
+.app-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--surface);
+  border-bottom: 0.5px solid var(--border);
+}
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(8px * var(--od-density)) var(--sp-4) calc(4px * var(--od-density));
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.statusbar .sb-icons { display: flex; align-items: center; gap: 5px; }
+.statusbar svg { width: 15px; height: 12px; }
+.nav-row {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-4);
+  gap: var(--sp-3);
+}
+.nav-row .burger, .nav-row .search { color: var(--fg); }
+.nav-row .burger svg, .nav-row .search svg { width: 22px; height: 22px; }
+.nav-row .burger:active, .nav-row .search:active { opacity: 0.6; }
+.nav-tabs {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  gap: calc(26px * var(--od-density));
+}
+.nav-tab {
+  font-size: var(--fs-16);
+  color: var(--muted);
+  position: relative;
+  padding-bottom: 6px;
+  transition: color var(--dur) ease;
+}
+.nav-tab.active { color: var(--fg); font-weight: 700; }
+.nav-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--brand);
+}
+.nav-tab:active { color: var(--fg); }
+.chip-row {
+  display: flex;
+  gap: var(--sp-2);
+  overflow-x: auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  scrollbar-width: none;
+}
+.chip-row::-webkit-scrollbar { display: none; }
+.chip {
+  flex: none;
+  padding: calc(6px * var(--od-density)) calc(14px * var(--od-density));
+  border-radius: 999px;
+  background: var(--chip-bg);
+  color: var(--fg);
+  font-size: var(--fs-13);
+  transition: background var(--dur) ease, color var(--dur) ease;
+}
+.chip.active { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+.chip:active { opacity: 0.7; }
+.masonry {
+  columns: 2;
+  column-gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) calc(76px * var(--od-density));
+}
+.note-card {
+  break-inside: avoid;
+  margin-bottom: var(--sp-2);
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  transition: transform var(--dur) ease;
+}
+.note-card:active { transform: scale(0.98); }
+.cover {
+  position: relative;
+  width: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--on-cover);
+}
+.cover .cover-word {
+  font-size: var(--fs-17);
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.22);
+  writing-mode: horizontal-tb;
+}
+.cover-tag {
+  position: absolute;
+  left: var(--sp-2);
+  top: var(--sp-2);
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--on-cover);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: var(--fs-10);
+  letter-spacing: 0.5px;
+}
+.ratio-tall { aspect-ratio: 3 / 4; }
+.ratio-square { aspect-ratio: 1 / 1; }
+.ratio-long { aspect-ratio: 3 / 4.6; }
+.ratio-wide { aspect-ratio: 4 / 3; }
+.cover-a { background: linear-gradient(150deg, var(--cover-a1), var(--cover-a2)); }
+.cover-b { background: linear-gradient(150deg, var(--cover-b1), var(--cover-b2)); }
+.cover-c { background: linear-gradient(150deg, var(--cover-c1), var(--cover-c2)); }
+.cover-d { background: linear-gradient(150deg, var(--cover-d1), var(--cover-d2)); }
+.cover-e { background: linear-gradient(150deg, var(--cover-e1), var(--cover-e2)); }
+.cover-f { background: linear-gradient(150deg, var(--cover-f1), var(--cover-f2)); }
+.note-body { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+.note-title {
+  margin: 0;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.note-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-12);
+  color: var(--muted);
+}
+.author {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.author .ava {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--on-cover);
+}
+.author .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.likes {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--faint);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  transition: color var(--dur) ease;
+}
+.likes svg { width: 14px; height: 14px; }
+.likes:active, .likes.liked { color: var(--brand); }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 0.5px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: center;
+  padding: calc(8px * var(--od-density)) 0 calc(16px * var(--od-density));
+  z-index: 10;
+}
+.tab {
+  text-align: center;
+  font-size: var(--fs-15);
+  color: var(--muted);
+  font-weight: 500;
+  transition: color var(--dur) ease;
+}
+.tab.active { color: var(--fg); font-weight: 700; }
+.tab:active { opacity: 0.6; }
+.tab-plus {
+  justify-self: center;
+  width: 42px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand);
+  color: var(--on-cover);
+  display: grid;
+  place-items: center;
+  transition: transform var(--dur) ease;
+}
+.tab-plus svg { width: 18px; height: 18px; }
+.tab-plus:active { transform: scale(0.92); }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-frame" data-od-label="手机外框">
+  <header class="app-head" data-od-id="app-head" data-od-label="顶部导航区">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>10:24</span>
+      <span class="sb-icons">
+        <svg viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 9.5v1M6 7v3.5M10 4.5v6M14 2v8.5"/></svg>
+        <svg viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5a8.5 8.5 0 0 1 12 0M4.4 7.4a5 5 0 0 1 7.2 0M7 9.8l1 1 1-1"/></svg>
+        <svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="2" width="15" height="8" rx="2.5"/><path d="M18 5v2" stroke-linecap="round"/><rect x="3" y="4" width="9" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="nav-row" data-od-id="nav-row" data-od-label="频道导航">
+      <button class="burger" data-od-id="menu-entry" data-od-label="侧栏入口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+      </button>
+      <nav class="nav-tabs">
+        <button class="nav-tab" data-od-id="tab-follow" data-od-label="关注频道">关注</button>
+        <button class="nav-tab active" data-od-id="tab-discover" data-od-label="发现频道">发现</button>
+        <button class="nav-tab" data-od-id="tab-nearby" data-od-label="同城频道">同城</button>
+      </nav>
+      <button class="search" data-od-id="search-entry" data-od-label="搜索入口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      </button>
+    </div>
+    <div class="chip-row" data-od-id="channel-chips" data-od-label="兴趣频道条">
+      <button class="chip active" data-od-id="chip-recommend" data-od-label="推荐频道">推荐</button>
+      <button class="chip" data-od-id="chip-outfit" data-od-label="穿搭频道">穿搭</button>
+      <button class="chip" data-od-id="chip-food" data-od-label="美食频道">美食</button>
+      <button class="chip" data-od-id="chip-home" data-od-label="家居频道">家居</button>
+      <button class="chip" data-od-id="chip-travel" data-od-label="旅行频道">旅行</button>
+      <button class="chip" data-od-id="chip-fitness" data-od-label="健身频道">健身</button>
+      <button class="chip" data-od-id="chip-beauty" data-od-label="护肤频道">护肤</button>
+    </div>
+  </header>
+  <main data-od-id="feed-main" data-od-label="瀑布流主体">
+    <section class="masonry" data-od-id="masonry-feed" data-od-label="双列卡片流">
+      <article class="note-card" data-od-id="note-autumn-outfit" data-od-label="穿搭笔记">
+        <div class="cover cover-a ratio-tall"><span class="cover-tag">合集</span><span class="cover-word">秋装叠穿</span></div>
+        <div class="note-body">
+          <h3 class="note-title">158 小个子的大衣公式，三套通勤叠穿照着抄就行</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-a2);">梨</i><span class="name">梨白的衣橱</span></span>
+            <button class="likes liked"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>4691</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-bakery" data-od-label="美食笔记">
+        <div class="cover cover-d ratio-square"><span class="cover-word">巴斯克</span></div>
+        <div class="note-body">
+          <h3 class="note-title">零失败巴斯克烧芝士，烤箱新手第一次就成功了</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-d2);">禾</i><span class="name">禾禾小厨房</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>1208</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-homedeco" data-od-label="家居笔记">
+        <div class="cover cover-b ratio-wide"><span class="cover-word">奶油风客厅</span></div>
+        <div class="note-body">
+          <h3 class="note-title">62㎡ 老破小改造完工，全屋奶油风预算 11 万拆解</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-b2);">迟</i><span class="name">迟屿和她的家</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>2.3w</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-travel" data-od-label="旅行笔记">
+        <div class="cover cover-e ratio-long"><span class="cover-tag">攻略</span><span class="cover-word">海岸线两日</span></div>
+        <div class="note-body">
+          <h3 class="note-title">周五下班出发！东海岸两天一夜路线，人均不到 600</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-e2);">远</i><span class="name">远行手记</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>8754</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-fitness" data-od-label="健身笔记">
+        <div class="cover cover-c ratio-tall"><span class="cover-word">晨间拉伸</span></div>
+        <div class="note-body">
+          <h3 class="note-title">久坐党救星：10 分钟晨间拉伸，跟练两周肩颈轻松了</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-c2);">一</i><span class="name">一茶的自习室</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>3015</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-coffee" data-od-label="探店笔记">
+        <div class="cover cover-f ratio-square"><span class="cover-tag">探店</span><span class="cover-word">巷口咖啡</span></div>
+        <div class="note-body">
+          <h3 class="note-title">藏在老巷子里的自烘咖啡馆，桂花拿铁只卖这一季</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-f2);">栗</i><span class="name">栗子地图</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>986</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-skincare" data-od-label="护肤笔记">
+        <div class="cover cover-d ratio-wide"><span class="cover-word">换季维稳</span></div>
+        <div class="note-body">
+          <h3 class="note-title">换季烂脸自救指南：精简护肤七天记录，附成分思路</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-d2);">芮</i><span class="name">芮芮成分日记</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>5532</button>
+          </div>
+        </div>
+      </article>
+      <article class="note-card" data-od-id="note-plants" data-od-label="绿植笔记">
+        <div class="cover cover-b ratio-long"><span class="cover-word">阳台花园</span></div>
+        <div class="note-body">
+          <h3 class="note-title">3㎡ 北向阳台也能养花！耐阴植物清单和浇水节奏表</h3>
+          <div class="note-meta">
+            <span class="author"><i class="ava" style="background: var(--cover-b2);">苔</i><span class="name">苔藓与晴天</span></span>
+            <button class="likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>1764</button>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="底部标签栏">
+    <button class="tab active" data-od-id="tab-home" data-od-label="首页标签">首页</button>
+    <button class="tab" data-od-id="tab-video" data-od-label="视频标签">视频</button>
+    <button class="tab-plus" data-od-id="tab-publish" data-od-label="发布按钮">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="tab" data-od-id="tab-message" data-od-label="消息标签">消息</button>
+    <button class="tab" data-od-id="tab-me" data-od-label="我标签">我</button>
+  </nav>
+</div>
+</body>
+</html>

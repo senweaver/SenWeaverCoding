@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "pets",
+  "name": "Paws",
+  "category": "Pets & Veterinary",
+  "description": "Warm system for pet care, vet, and pet-commerce products — cozy cream surfaces, a friendly teal accent with coral support, rounded shapes, and caring, approachable hierarchy.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

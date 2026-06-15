@@ -1,0 +1,391 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>途悦旅行 · 说走就走</title>
+<style>
+:root {
+  --od-accent: #2b7de9;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #1a64c8;
+  --brand-soft: #e8f1fd;
+  --hero-a: #3f93f5;
+  --hero-b: #1f6ad6;
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --fg: #1c2027;
+  --muted: #8b929d;
+  --faint: #c4cad3;
+  --border: #e8ebef;
+  --price: #ff4d1f;
+  --sale: #ff6a2b;
+  --banner-1a: #ffe2c2;
+  --banner-1b: #ffb066;
+  --banner-2a: #c9e8d8;
+  --banner-2b: #5cbf91;
+  --dest-1a: #bfdcff;
+  --dest-1b: #5f9fe8;
+  --dest-2a: #ffd9c4;
+  --dest-2b: #f59362;
+  --dest-3a: #cdeede;
+  --dest-3b: #57bd8e;
+  --on-brand: #ffffff;
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --fs-20: calc(20px * var(--od-scale));
+  --pad-page: calc(14px * var(--od-density));
+  --gap-xs: calc(6px * var(--od-density));
+  --gap-sm: calc(10px * var(--od-density));
+  --gap-md: calc(14px * var(--od-density));
+  --gap-lg: calc(20px * var(--od-density));
+  --dur-fast: calc(0.15s * var(--od-motion));
+  --radius: 10px;
+  --radius-lg: 14px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: #101317;
+  --surface: #1b1f25;
+  --fg: #e6e8eb;
+  --muted: #858c97;
+  --faint: #494f59;
+  --border: #2a2f37;
+  --brand-soft: #16263c;
+  --hero-a: #1c4f96;
+  --hero-b: #12325e;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+.phone {
+  max-width: 480px;
+  margin-inline: auto;
+  min-height: 100vh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding-bottom: calc(64px * var(--od-density));
+  box-shadow: 0 0 32px rgba(0, 0, 0, 0.08);
+}
+.hero {
+  background: linear-gradient(160deg, var(--hero-a), var(--hero-b));
+  color: var(--on-brand);
+  padding-bottom: calc(54px * var(--od-density));
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad-page) calc(4px * var(--od-density));
+  font-size: var(--fs-13);
+  font-weight: 600;
+  font-family: var(--font-num);
+}
+.sb-icons { display: flex; align-items: center; gap: 5px; }
+.hero-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-xs) var(--pad-page);
+}
+.hero-head .brand { font-size: var(--fs-20); font-weight: 800; letter-spacing: 0.02em; }
+.hero-head .slogan { font-size: var(--fs-12); opacity: 0.85; }
+.search-card {
+  margin: calc(-44px * var(--od-density)) var(--pad-page) 0;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px rgba(16, 49, 94, 0.12);
+  overflow: hidden;
+}
+.seg {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.seg button {
+  flex: 1;
+  padding: calc(12px * var(--od-density)) 0;
+  font-size: var(--fs-15);
+  color: var(--muted);
+  position: relative;
+  transition: color var(--dur-fast) ease;
+}
+.seg button.active { color: var(--brand); font-weight: 700; }
+.seg button.active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 0;
+  width: 24px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--brand);
+}
+.search-body { padding: var(--gap-md); position: relative; }
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(10px * var(--od-density)) 0;
+}
+.field-row + .field-row { border-top: 1px solid var(--border); }
+.field-row .city { font-size: calc(22px * var(--od-scale)); font-weight: 700; }
+.field-row .city small { display: block; font-size: var(--fs-12); font-weight: 400; color: var(--muted); margin-top: 2px; }
+.field-row .city.to { text-align: right; }
+.swap-btn {
+  position: absolute;
+  right: var(--gap-md);
+  top: calc(58px * var(--od-density));
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  color: var(--brand);
+  box-shadow: 0 2px 8px rgba(16, 49, 94, 0.1);
+  transition: transform var(--dur-fast) ease;
+}
+.swap-btn:active { transform: rotate(180deg); }
+.date-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gap-md);
+  padding: calc(10px * var(--od-density)) 0;
+  border-top: 1px solid var(--border);
+}
+.date-row .d { font-size: var(--fs-17); font-weight: 700; }
+.date-row .d small { font-size: var(--fs-12); font-weight: 400; color: var(--muted); margin-left: 4px; }
+.date-row .plus { font-size: var(--fs-12); color: var(--brand); margin-left: auto; }
+.search-go {
+  display: block;
+  width: 100%;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  text-align: center;
+  padding: calc(13px * var(--od-density)) 0;
+  border-radius: 999px;
+  margin-top: var(--gap-xs);
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+.search-go:active { background: var(--brand-deep); transform: scale(0.98); }
+.banners {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-sm);
+  padding: var(--gap-md) var(--pad-page) 0;
+}
+.banner {
+  border-radius: var(--radius);
+  padding: var(--gap-md);
+  color: var(--fg);
+  min-height: calc(72px * var(--od-density));
+}
+.banner h3 { margin: 0; font-size: var(--fs-15); font-weight: 700; }
+.banner p { margin: 3px 0 0; font-size: var(--fs-12); opacity: 0.78; }
+.banner.b1 { background: linear-gradient(120deg, var(--banner-1a), var(--banner-1b)); }
+.banner.b2 { background: linear-gradient(120deg, var(--banner-2a), var(--banner-2b)); }
+.deals { padding: var(--gap-lg) var(--pad-page) var(--gap-sm); }
+.deals-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--gap-sm);
+}
+.deals-head h2 { margin: 0; font-size: var(--fs-17); font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.deals-head h2 .flame { color: var(--sale); }
+.deals-head a { font-size: var(--fs-12); color: var(--muted); text-decoration: none; display: inline-flex; align-items: center; gap: 2px; }
+.deal-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap-sm); }
+.deal {
+  background: var(--surface);
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  transition: transform var(--dur-fast) ease;
+}
+.deal:active { transform: scale(0.97); }
+.deal .pic { position: relative; aspect-ratio: 4 / 3; }
+.deal.d1 .pic { background: linear-gradient(135deg, var(--dest-1a), var(--dest-1b)); }
+.deal.d2 .pic { background: linear-gradient(135deg, var(--dest-2a), var(--dest-2b)); }
+.deal.d3 .pic { background: linear-gradient(135deg, var(--dest-3a), var(--dest-3b)); }
+.deal .sale-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: var(--sale);
+  color: var(--on-brand);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 0 0 8px 0;
+}
+.deal .info { padding: var(--gap-xs) var(--gap-sm) var(--gap-sm); }
+.deal .name { font-size: var(--fs-13); font-weight: 600; }
+.deal .desc { font-size: var(--fs-11); color: var(--muted); margin-top: 1px; }
+.deal .price {
+  margin-top: 4px;
+  color: var(--price);
+  font-family: var(--font-num);
+  font-size: var(--fs-15);
+  font-weight: 700;
+}
+.deal .price small { font-size: var(--fs-11); font-weight: 400; }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: calc(6px * var(--od-density)) 0 calc(10px * var(--od-density));
+}
+.tabbar .item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-11);
+  color: var(--muted);
+  transition: color var(--dur-fast) ease;
+}
+.tabbar .item.active { color: var(--brand); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="手机外框">
+  <header class="hero" data-od-id="hero-header" data-od-label="品牌头部">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>08:24</span>
+      <span class="sb-icons">
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+        <svg width="14" height="11" viewBox="0 0 14 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 4.5a7 7 0 0 1 10 0M4.3 6.8a3.8 3.8 0 0 1 5.4 0" stroke-linecap="round"/><circle cx="7" cy="9.2" r="0.8" fill="currentColor" stroke="none"/></svg>
+        <svg width="20" height="11" viewBox="0 0 20 11" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1.5" width="14" height="8" rx="2.2"/><path d="M17.5 4.2v2.6" stroke-linecap="round"/><rect x="2.6" y="3.1" width="10.5" height="4.8" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="hero-head">
+      <span class="brand">途悦旅行</span>
+      <span class="slogan">清明小长假 · 全场酒店满减进行中</span>
+    </div>
+  </header>
+  <main>
+    <section class="search-card" data-od-id="search-card" data-od-label="搜索卡片">
+      <nav class="seg" data-od-id="product-tabs" data-od-label="品类切换">
+        <button class="active">机票</button>
+        <button>酒店</button>
+        <button>火车票</button>
+        <button>门票</button>
+      </nav>
+      <div class="search-body">
+        <div class="field-row" data-od-id="route-from" data-od-label="出发地">
+          <div class="city">江城<small>JCN · 云岭国际机场</small></div>
+          <div class="city to">海州<small>HZS · 滨海机场 T2</small></div>
+        </div>
+        <button class="swap-btn" data-od-id="swap-route" data-od-label="交换城市按钮">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 8.5h12M17 8.5 13.8 5.3M17 8.5l-3.2 3.2M19 15.5H7M7 15.5l3.2-3.2M7 15.5l3.2 3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="date-row" data-od-id="date-picker-row" data-od-label="日期行">
+          <span class="d">4月3日<small>周五</small></span>
+          <span class="d" style="color: var(--muted); font-weight: 400;">— 单程 —</span>
+          <button class="plus" data-od-id="add-return" data-od-label="添加返程">+ 添加返程享往返特价</button>
+        </div>
+        <button class="search-go" data-od-id="search-button" data-od-label="搜索按钮">搜索特价机票</button>
+      </div>
+    </section>
+    <section class="banners" data-od-id="promo-banners" data-od-label="活动横幅区">
+      <a class="banner b1" href="#" data-od-id="promo-banner-1" data-od-label="横幅-早春赏花">
+        <h3>早春赏花季</h3>
+        <p>近郊花海专线 8 折起</p>
+      </a>
+      <a class="banner b2" href="#" data-od-id="promo-banner-2" data-od-label="横幅-周末民宿">
+        <h3>周末逃离计划</h3>
+        <p>山间民宿连住立减 ¥120</p>
+      </a>
+    </section>
+    <section class="deals" data-od-id="deal-section" data-od-label="特价目的地">
+      <div class="deals-head">
+        <h2>
+          <svg class="flame" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3c1 3-1.5 4.5-1.5 7a3.5 3.5 0 0 0 7 .3C19.5 13 21 14.8 21 17a8 8 0 0 1-16 0c0-3 1.8-4.6 3-7 .8-1.6 1-3.4 4-7z" stroke-linejoin="round"/></svg>
+          本周特价
+        </h2>
+        <a href="#" data-od-id="deal-more" data-od-label="查看更多">
+          更多
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 6 6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+      </div>
+      <div class="deal-grid">
+        <a class="deal d1" href="#" data-od-id="deal-card-1" data-od-label="特价卡-雾屿岛">
+          <span class="pic"><span class="sale-tag">特价</span></span>
+          <span class="info">
+            <span class="name">雾屿岛 3 日游</span>
+            <span class="desc">含船票 · 海景房</span>
+            <span class="price">¥899<small> 起</small></span>
+          </span>
+        </a>
+        <a class="deal d2" href="#" data-od-id="deal-card-2" data-od-label="特价卡-沙洲古镇">
+          <span class="pic"><span class="sale-tag">立减</span></span>
+          <span class="info">
+            <span class="name">沙洲古镇直飞</span>
+            <span class="desc">往返含税机票</span>
+            <span class="price">¥480<small> 起</small></span>
+          </span>
+        </a>
+        <a class="deal d3" href="#" data-od-id="deal-card-3" data-od-label="特价卡-翠峰山">
+          <span class="pic"><span class="sale-tag">尾单</span></span>
+          <span class="info">
+            <span class="name">翠峰山温泉酒店</span>
+            <span class="desc">双人含早晚餐</span>
+            <span class="price">¥666<small> 起</small></span>
+          </span>
+        </a>
+      </div>
+    </section>
+  </main>
+  <nav class="tabbar" data-od-id="bottom-tabbar" data-od-label="底部导航">
+    <button class="item active" data-od-id="tab-home" data-od-label="首页标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19z" stroke-linejoin="round"/><path d="M9.5 20v-6h5v6"/></svg>
+      首页
+    </button>
+    <button class="item" data-od-id="tab-destination" data-od-label="目的地标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11z" stroke-linejoin="round"/><circle cx="12" cy="10" r="2.6"/></svg>
+      目的地
+    </button>
+    <button class="item" data-od-id="tab-trips" data-od-label="行程标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="5" width="16" height="16" rx="2.5"/><path d="M8 3v4M16 3v4M4 10h16" stroke-linecap="round"/></svg>
+      行程
+    </button>
+    <button class="item" data-od-id="tab-mine" data-od-label="我的标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8.5" r="3.5"/><path d="M4.5 19.5c1.2-3.4 4-5 7.5-5s6.3 1.6 7.5 5" stroke-linecap="round"/></svg>
+      我的
+    </button>
+  </nav>
+</div>
+</body>
+</html>

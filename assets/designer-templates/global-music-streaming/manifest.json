@@ -1,0 +1,7 @@
+{
+  "id": "global-music-streaming",
+  "title": "音乐流媒体首页 · Music Streaming Home",
+  "category": "Mobile",
+  "tags": ["mobile", "music", "streaming", "dark", "音乐", "播放器", "流媒体", "now playing", "playlist"],
+  "summary": "Dark-native mobile music streaming home in the lineage of mainstream audio apps: greeting header, two-column recently-played tile grid, horizontal made-for-you card rail with gradient covers, and a pinned mini now-playing bar above the tab bar."
+}

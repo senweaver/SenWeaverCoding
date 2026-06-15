@@ -1,0 +1,311 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ledgerline — Investing</title>
+<style>
+:root {
+  --od-accent: #00c805;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --bg-page: #000000;
+  --bg-app: #0b0d0c;
+  --bg-row: #131614;
+  --fg: #f5f7f5;
+  --fg-muted: #8b918d;
+  --hairline: #1f2421;
+  --up: var(--od-accent);
+  --down: #ff5000;
+  --on-chip: #07140a;
+  --on-chip-down: #1c0c04;
+  --chart-line: var(--od-accent);
+  --fs-hero: calc(34px * var(--od-scale));
+  --fs-section: calc(18px * var(--od-scale));
+  --fs-body: calc(14px * var(--od-scale));
+  --fs-meta: calc(12px * var(--od-scale));
+  --fs-ticker: calc(15px * var(--od-scale));
+  --pad: calc(18px * var(--od-density));
+  --gap: calc(12px * var(--od-density));
+  --dur: calc(0.15s * var(--od-motion));
+}
+html[data-od-mode="dark"] {
+  --bg-app: #000000;
+  --bg-row: #101311;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.num { font-variant-numeric: tabular-nums; }
+.phone {
+  max-width: 480px;
+  min-height: 100dvh;
+  margin-inline: auto;
+  background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(4px * var(--od-density));
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .glyphs { display: flex; gap: 5px; align-items: center; }
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad);
+}
+.topbar h1 { font-size: calc(16px * var(--od-scale)); font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.topbar-actions { display: flex; gap: calc(16px * var(--od-density)); }
+.topbar-actions button { color: var(--fg); transition: opacity var(--dur) ease; }
+.topbar-actions button:active { opacity: 0.5; }
+.content { flex: 1; overflow-y: auto; padding-bottom: calc(86px * var(--od-density)); }
+.portfolio { padding: calc(6px * var(--od-density)) var(--pad) 0; }
+.pf-label { font-size: var(--fs-meta); color: var(--fg-muted); margin: 0 0 2px; font-weight: 500; }
+.pf-value {
+  font-size: var(--fs-hero);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 4px;
+}
+.pf-delta { display: inline-flex; align-items: center; gap: 6px; font-size: calc(14px * var(--od-scale)); font-weight: 600; color: var(--up); margin: 0; }
+.pf-delta .period { color: var(--fg-muted); font-weight: 500; }
+.chart-wrap { padding: calc(10px * var(--od-density)) 0 0; }
+.chart-wrap svg { width: 100%; height: auto; }
+.ranges {
+  display: flex;
+  justify-content: space-between;
+  padding: calc(10px * var(--od-density)) var(--pad);
+  border-bottom: 1px solid var(--hairline);
+}
+.range {
+  padding: calc(5px * var(--od-density)) calc(12px * var(--od-density));
+  border-radius: 999px;
+  font-size: calc(12px * var(--od-scale));
+  font-weight: 700;
+  color: var(--fg-muted);
+  transition: background var(--dur) ease, color var(--dur) ease;
+}
+.range:active { color: var(--fg); }
+.range.active { background: var(--brand); color: var(--on-chip); }
+.buying-power {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(14px * var(--od-density)) var(--pad);
+  border-bottom: 1px solid var(--hairline);
+  font-weight: 600;
+}
+.buying-power .hint { color: var(--fg-muted); font-weight: 500; font-size: var(--fs-meta); display: block; }
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: calc(20px * var(--od-density)) var(--pad) calc(8px * var(--od-density));
+}
+.section-head h2 { font-size: var(--fs-section); font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.section-head button { color: var(--fg-muted); }
+.watch-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: calc(12px * var(--od-density)) var(--pad);
+  text-align: left;
+  transition: background var(--dur) ease;
+}
+.watch-row:active { background: var(--bg-row); }
+.wr-id { flex: 1; min-width: 0; }
+.wr-ticker { font-size: var(--fs-ticker); font-weight: 700; margin: 0; letter-spacing: 0.01em; }
+.wr-name { font-size: var(--fs-meta); color: var(--fg-muted); margin: 1px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wr-spark { flex: none; }
+.wr-spark .up-line { stroke: var(--up); }
+.wr-spark .down-line { stroke: var(--down); }
+.wr-chip {
+  flex: none;
+  min-width: calc(86px * var(--od-density));
+  text-align: center;
+  padding: calc(6px * var(--od-density)) calc(10px * var(--od-density));
+  border-radius: 7px;
+  font-weight: 700;
+  font-size: calc(13px * var(--od-scale));
+  font-variant-numeric: tabular-nums;
+}
+.wr-chip.up { background: var(--up); color: var(--on-chip); }
+.wr-chip.down { background: var(--down); color: var(--on-chip-down); }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin-inline: auto;
+  background: var(--bg-app);
+  border-top: 1px solid var(--hairline);
+  display: flex;
+  justify-content: space-around;
+  padding: calc(9px * var(--od-density)) var(--pad) calc(20px * var(--od-density));
+}
+.tab { color: var(--fg-muted); transition: color var(--dur) ease, transform var(--dur) ease; }
+.tab:active { transform: scale(0.9); }
+.tab.active { color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="App shell">
+  <header class="statusbar" data-od-id="status-bar" data-od-label="Status bar">
+    <span>9:41</span>
+    <span class="glyphs">
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 4.2a8.5 8.5 0 0 1 12 0M3.8 6.6a5.2 5.2 0 0 1 7.4 0M6.2 8.9a1.9 1.9 0 0 1 2.6 0" stroke-linecap="round"/></svg>
+      <svg width="22" height="11" viewBox="0 0 22 11" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1" y="1.5" width="17" height="8" rx="2.4"/><rect x="2.6" y="3.1" width="11" height="4.8" rx="1.2" fill="currentColor" stroke="none"/><path d="M19.6 4v3" stroke-linecap="round"/></svg>
+    </span>
+  </header>
+
+  <section class="topbar" data-od-id="top-bar" data-od-label="Top bar">
+    <h1>Investing</h1>
+    <div class="topbar-actions">
+      <button data-od-id="cta-rewards" data-od-label="Rewards" aria-label="Rewards">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="8.5" width="16" height="11.5" rx="2"/><path d="M4 12.5h16M12 8.5V20M12 8.5c-2.8 0-4.8-1.2-4.8-3a2 2 0 0 1 2-2c1.8 0 2.8 2.2 2.8 5Zm0 0c2.8 0 4.8-1.2 4.8-3a2 2 0 0 0-2-2c-1.8 0-2.8 2.2-2.8 5Z" stroke-linecap="round"/></svg>
+      </button>
+      <button data-od-id="cta-search" data-od-label="Search" aria-label="Search">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20.5 20.5-4.9-4.9" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <main class="content" data-od-id="investing-content">
+    <section class="portfolio" data-od-id="portfolio-hero" data-od-label="Portfolio value">
+      <p class="pf-label">Total portfolio value</p>
+      <p class="pf-value num">$24,718.42</p>
+      <p class="pf-delta num">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M6 2l4.5 6h-9L6 2Z"/></svg>
+        +$312.96 (+1.28%) <span class="period">Today</span>
+      </p>
+    </section>
+
+    <section class="chart-wrap" data-od-id="portfolio-chart" data-od-label="Portfolio chart">
+      <svg viewBox="0 0 390 130" preserveAspectRatio="none" role="img" aria-label="Portfolio value over the last day">
+        <defs>
+          <linearGradient id="fillArea" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="var(--chart-line)" stop-opacity="0.22"/>
+            <stop offset="100%" stop-color="var(--chart-line)" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <path d="M0 96 C 22 90, 38 102, 56 94 S 88 64, 108 68 S 138 88, 158 78 S 186 42, 208 46 S 238 70, 258 60 S 286 28, 308 34 S 344 52, 362 40 L 390 28 L 390 130 L 0 130 Z" fill="url(#fillArea)"/>
+        <path d="M0 96 C 22 90, 38 102, 56 94 S 88 64, 108 68 S 138 88, 158 78 S 186 42, 208 46 S 238 70, 258 60 S 286 28, 308 34 S 344 52, 362 40 L 390 28" fill="none" stroke="var(--chart-line)" stroke-width="2.2" stroke-linecap="round"/>
+        <circle cx="390" cy="28" r="3.4" fill="var(--chart-line)"/>
+      </svg>
+    </section>
+
+    <section class="ranges" data-od-id="range-pills" data-od-label="Time range selector">
+      <button class="range active num" data-od-id="range-1d">1D</button>
+      <button class="range num" data-od-id="range-1w">1W</button>
+      <button class="range num" data-od-id="range-1m">1M</button>
+      <button class="range num" data-od-id="range-3m">3M</button>
+      <button class="range num" data-od-id="range-1y">1Y</button>
+      <button class="range" data-od-id="range-all">All</button>
+    </section>
+
+    <section class="buying-power" data-od-id="buying-power" data-od-label="Buying power row">
+      <span>Buying power<span class="hint">Instant deposits available</span></span>
+      <span class="num">$1,486.20</span>
+    </section>
+
+    <section data-od-id="watchlist" data-od-label="Watchlist">
+      <div class="section-head">
+        <h2>Watchlist</h2>
+        <button data-od-id="cta-edit-watchlist" data-od-label="Edit watchlist" aria-label="Edit watchlist">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14.5 5.5 18.5 9.5M4.5 19.5l1-4 10-10 3 3-10 10-4 1Z" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+
+      <button class="watch-row" data-od-id="watch-vlt" data-od-label="Voltaic Motors row">
+        <span class="wr-id">
+          <p class="wr-ticker">VLTC</p>
+          <p class="wr-name">Voltaic Motors</p>
+        </span>
+        <svg class="wr-spark" width="64" height="28" viewBox="0 0 64 28" fill="none"><path class="up-line" d="M2 22 C 8 20, 12 24, 18 19 S 28 10, 34 13 S 44 18, 50 11 L 62 6" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span class="wr-chip up num">$284.16</span>
+      </button>
+
+      <button class="watch-row" data-od-id="watch-hlx" data-od-label="Helix Biolabs row">
+        <span class="wr-id">
+          <p class="wr-ticker">HLXB</p>
+          <p class="wr-name">Helix Biolabs</p>
+        </span>
+        <svg class="wr-spark" width="64" height="28" viewBox="0 0 64 28" fill="none"><path class="down-line" d="M2 8 C 10 10, 14 6, 20 12 S 30 20, 36 17 S 46 14, 52 20 L 62 23" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span class="wr-chip down num">$61.07</span>
+      </button>
+
+      <button class="watch-row" data-od-id="watch-arb" data-od-label="Arbor Grid row">
+        <span class="wr-id">
+          <p class="wr-ticker">ARBG</p>
+          <p class="wr-name">Arbor Grid Energy</p>
+        </span>
+        <svg class="wr-spark" width="64" height="28" viewBox="0 0 64 28" fill="none"><path class="up-line" d="M2 24 C 10 22, 16 16, 22 18 S 32 12, 38 14 S 48 8, 54 9 L 62 5" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span class="wr-chip up num">$112.48</span>
+      </button>
+
+      <button class="watch-row" data-od-id="watch-nmb" data-od-label="Nimbus Compute row">
+        <span class="wr-id">
+          <p class="wr-ticker">NMBS</p>
+          <p class="wr-name">Nimbus Compute</p>
+        </span>
+        <svg class="wr-spark" width="64" height="28" viewBox="0 0 64 28" fill="none"><path class="up-line" d="M2 18 C 8 20, 14 12, 20 14 S 30 18, 36 10 S 46 6, 52 8 L 62 4" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span class="wr-chip up num">$427.90</span>
+      </button>
+
+      <button class="watch-row" data-od-id="watch-fld" data-od-label="Fieldline Freight row">
+        <span class="wr-id">
+          <p class="wr-ticker">FLDF</p>
+          <p class="wr-name">Fieldline Freight</p>
+        </span>
+        <svg class="wr-spark" width="64" height="28" viewBox="0 0 64 28" fill="none"><path class="down-line" d="M2 10 C 8 8, 14 14, 20 12 S 30 16, 36 19 S 46 17, 52 21 L 62 22" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span class="wr-chip down num">$38.62</span>
+      </button>
+    </section>
+  </main>
+
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="Bottom tab bar">
+    <button class="tab active" data-od-id="tab-home" data-od-label="Investing tab" aria-label="Investing">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3.5 17.5 9 11l4 4 7.5-8.5M15 6.5h5.5V12" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="tab" data-od-id="tab-crypto" data-od-label="Crypto tab" aria-label="Crypto">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.4h-4V7.5ZM9.5 11.9h4.6a2.3 2.3 0 0 1 0 4.6H9.5v-4.6ZM11 5.8v1.7M11 16.5v1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="tab" data-od-id="tab-transfers" data-od-label="Transfers tab" aria-label="Transfers">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 4.5 3.5 8 7 11.5M3.5 8h12M17 12.5 20.5 16 17 19.5M20.5 16h-12" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="tab" data-od-id="tab-notifications" data-od-label="Alerts tab" aria-label="Alerts">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 9.5a6 6 0 0 1 12 0c0 4.2 1.6 5.8 1.6 5.8H4.4S6 13.7 6 9.5ZM10 18.8a2.1 2.1 0 0 0 4 0" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="tab" data-od-id="tab-account" data-od-label="Account tab" aria-label="Account">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20a7.5 7.5 0 0 1 14.4 0" stroke-linecap="round"/></svg>
+    </button>
+  </nav>
+</div>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "banking",
+  "name": "Ledger",
+  "category": "Banking & Finance",
+  "description": "Secure retail-banking system for accounts, payments, and money dashboards — deep secure-blue, crisp surfaces, a mint confirmation accent, mono figures, and AA+ clarity.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

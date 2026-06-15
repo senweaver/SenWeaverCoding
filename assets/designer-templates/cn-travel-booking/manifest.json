@@ -1,0 +1,7 @@
+{
+  "id": "cn-travel-booking",
+  "title": "旅行预订 · Travel Booking",
+  "category": "Mobile",
+  "tags": ["旅行", "预订", "机票", "酒店", "travel", "booking", "flight", "hotel", "mobile", "blue"],
+  "summary": "Mobile travel booking home with a segmented search card for flights, hotels and tickets, swap-route inputs, promo banner row, discounted destination cards and a bottom tab bar following the design language of mainstream Chinese online travel platforms."
+}

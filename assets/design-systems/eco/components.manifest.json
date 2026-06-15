@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "brandId": "eco",
+  "source": {
+    "tokensCss": "tokens.css"
+  },
+  "fixture": {
+    "title": "Terra — reference components",
+    "description": "Component inventory for the Terra sustainability system. Every value resolves from tokens.css: recycled-paper surfaces, a grounded forest-green accent, soft organic radii, a serif display voice, and honest impact data presentation.",
+    "styleBlockCount": 1
+  },
+  "tokens": {
+    "declared": [
+      "--accent", "--accent-active", "--accent-hover", "--accent-on",
+      "--bg", "--border", "--border-soft",
+      "--container-gutter-desktop", "--container-gutter-phone", "--container-gutter-tablet", "--container-max",
+      "--danger", "--ease-standard", "--elev-flat", "--elev-raised", "--elev-ring",
+      "--fg", "--fg-2", "--focus-ring", "--font-body", "--font-display", "--font-mono",
+      "--leading-body", "--leading-tight", "--meta", "--motion-base", "--motion-fast", "--muted",
+      "--radius-lg", "--radius-md", "--radius-pill", "--radius-sm",
+      "--section-y-desktop", "--section-y-phone", "--section-y-tablet",
+      "--space-1", "--space-12", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8",
+      "--success", "--surface", "--surface-warm",
+      "--text-2xl", "--text-3xl", "--text-4xl", "--text-base", "--text-lg", "--text-sm", "--text-xl", "--text-xs",
+      "--tracking-display", "--warn"
+    ],
+    "undeclaredReferenced": []
+  },
+  "groups": [
+    {
+      "id": "buttons",
+      "label": "Buttons and calls to action",
+      "present": true,
+      "classes": ["btn", "btn-primary", "btn-secondary"],
+      "elements": ["button"],
+      "tokenReferences": ["--accent", "--accent-on", "--accent-hover", "--border", "--focus-ring", "--radius-sm", "--space-3", "--text-base"]
+    },
+    {
+      "id": "inputs",
+      "label": "Form fields and controls",
+      "present": true,
+      "classes": ["field", "field-label", "field-help", "field-error"],
+      "elements": ["form", "input", "label", "select"],
+      "tokenReferences": ["--border", "--danger", "--fg", "--focus-ring", "--meta", "--radius-sm", "--surface"]
+    },
+    {
+      "id": "cards",
+      "label": "Cards, panels, and story tiles",
+      "present": true,
+      "classes": ["card", "story-card", "quote"],
+      "elements": ["article", "section", "blockquote"],
+      "tokenReferences": ["--border", "--elev-raised", "--radius-md", "--surface", "--surface-warm", "--space-6"]
+    },
+    {
+      "id": "stats",
+      "label": "Impact figures and stats",
+      "present": true,
+      "classes": ["stat", "stat-value", "stat-unit", "trend-up", "trend-down"],
+      "elements": ["div", "span"],
+      "tokenReferences": ["--danger", "--font-display", "--meta", "--success", "--surface-warm", "--warn"]
+    },
+    {
+      "id": "badges",
+      "label": "Certification labels and pills",
+      "present": true,
+      "classes": ["pill", "label-cert"],
+      "elements": ["span"],
+      "tokenReferences": ["--accent", "--radius-pill", "--success", "--text-xs"]
+    },
+    {
+      "id": "links",
+      "label": "Links and inline actions",
+      "present": true,
+      "classes": [],
+      "elements": ["a"],
+      "tokenReferences": ["--accent", "--accent-hover", "--focus-ring"]
+    },
+    {
+      "id": "typography",
+      "label": "Typography scale and text utilities",
+      "present": true,
+      "classes": ["eyebrow", "lede", "body-muted", "caption"],
+      "elements": ["h1", "h2", "h3", "p"],
+      "tokenReferences": ["--fg", "--font-display", "--leading-body", "--leading-tight", "--muted", "--text-2xl", "--tracking-display"]
+    },
+    {
+      "id": "layout",
+      "label": "Layout primitives",
+      "present": true,
+      "classes": ["container", "stack", "row", "split"],
+      "elements": ["main", "nav", "section"],
+      "tokenReferences": ["--container-gutter-desktop", "--container-max", "--section-y-desktop", "--space-4"]
+    }
+  ]
+}

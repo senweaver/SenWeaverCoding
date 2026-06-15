@@ -1,0 +1,423 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>燃迹 · 今日训练</title>
+<style>
+:root {
+  --od-accent: #2ad181;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #1aa864;
+  --brand-soft: rgba(42, 209, 129, 0.14);
+  --bg: #0e1013;
+  --surface: #181b20;
+  --surface-2: #1f242b;
+  --fg: #eef1f3;
+  --muted: #8b929c;
+  --faint: #4a5159;
+  --hairline: #272c33;
+  --ring-track: #262c34;
+  --bar-track: #232930;
+  --warn: #ffb340;
+  --cover-1a: #234b3a;
+  --cover-1b: #173027;
+  --cover-2a: #3a3322;
+  --cover-2b: #241f15;
+  --cover-3a: #22384b;
+  --cover-3b: #15222e;
+  --on-brand: #06130c;
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --fs-40: calc(40px * var(--od-scale));
+  --pad-page: calc(16px * var(--od-density));
+  --gap-xs: calc(6px * var(--od-density));
+  --gap-sm: calc(10px * var(--od-density));
+  --gap-md: calc(14px * var(--od-density));
+  --gap-lg: calc(20px * var(--od-density));
+  --dur-fast: calc(0.15s * var(--od-motion));
+  --radius: 12px;
+  --radius-lg: 18px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: #08090b;
+  --surface: #121519;
+  --surface-2: #181d23;
+  --hairline: #20252b;
+  --ring-track: #1f252c;
+  --bar-track: #1c2228;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+.phone {
+  max-width: 480px;
+  margin-inline: auto;
+  min-height: 100vh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding-bottom: calc(64px * var(--od-density));
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad-page) calc(4px * var(--od-density));
+  font-size: var(--fs-13);
+  font-weight: 600;
+  font-family: var(--font-num);
+}
+.sb-icons { display: flex; align-items: center; gap: 5px; }
+.greet {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-xs) var(--pad-page) var(--gap-sm);
+}
+.greet h1 { margin: 0; font-size: calc(21px * var(--od-scale)); font-weight: 700; }
+.greet p { margin: 2px 0 0; font-size: var(--fs-12); color: var(--muted); }
+.greet .bell {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--surface);
+  display: grid;
+  place-items: center;
+  color: var(--fg);
+}
+.hero-card {
+  margin: 0 var(--pad-page);
+  background: linear-gradient(150deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  padding: var(--gap-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--gap-lg);
+}
+.hero-card .nums { flex: 1; }
+.hero-card .label { font-size: var(--fs-12); color: var(--muted); }
+.hero-card .steps {
+  font-family: var(--font-num);
+  font-size: var(--fs-40);
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--brand);
+  letter-spacing: -0.02em;
+}
+.hero-card .steps small { font-size: var(--fs-13); color: var(--muted); font-weight: 400; margin-left: 4px; }
+.substats { display: flex; gap: var(--gap-lg); margin-top: var(--gap-sm); }
+.substats .s { line-height: 1.3; }
+.substats .v { font-family: var(--font-num); font-size: var(--fs-15); font-weight: 600; }
+.substats .k { font-size: var(--fs-11); color: var(--muted); }
+.ring-wrap { position: relative; width: 116px; height: 116px; }
+.ring-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.ring-wrap .pct {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  font-family: var(--font-num);
+  font-size: var(--fs-17);
+  font-weight: 700;
+}
+.ring-wrap .pct small { display: block; font-size: var(--fs-11); color: var(--muted); font-weight: 400; }
+.panel {
+  margin: var(--gap-md) var(--pad-page) 0;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  padding: var(--gap-md) var(--gap-lg);
+}
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--gap-sm);
+}
+.panel-head h2 { margin: 0; font-size: var(--fs-15); font-weight: 700; }
+.panel-head span { font-size: var(--fs-12); color: var(--muted); }
+.chart {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  height: calc(96px * var(--od-density));
+  gap: var(--gap-xs);
+}
+.chart .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+.chart .bar {
+  width: 60%;
+  max-width: 22px;
+  border-radius: 6px 6px 3px 3px;
+  background: var(--bar-track);
+  transition: background var(--dur-fast) ease;
+}
+.chart .col.hot .bar { background: var(--brand); box-shadow: 0 0 14px var(--brand-soft); }
+.chart .d { font-size: var(--fs-11); color: var(--muted); }
+.chart .col.hot .d { color: var(--brand); font-weight: 600; }
+.streak { display: flex; align-items: center; justify-content: space-between; }
+.streak .day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-11);
+  color: var(--muted);
+}
+.streak .mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1.5px solid var(--hairline);
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+}
+.streak .day.done .mark {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.streak .day.today .mark {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+.streak .day.today { color: var(--brand); font-weight: 600; }
+.courses { padding: 0 var(--pad-page); margin-top: var(--gap-md); }
+.courses-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--gap-sm);
+}
+.courses-head h2 { margin: 0; font-size: var(--fs-15); font-weight: 700; }
+.courses-head a { font-size: var(--fs-12); color: var(--muted); text-decoration: none; }
+.course {
+  display: flex;
+  gap: var(--gap-md);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: var(--gap-sm);
+  margin-bottom: var(--gap-sm);
+  transition: transform var(--dur-fast) ease;
+}
+.course:active { transform: scale(0.98); }
+.course .cover {
+  width: 96px;
+  aspect-ratio: 4 / 3;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--brand);
+}
+.course.c1 .cover { background: linear-gradient(135deg, var(--cover-1a), var(--cover-1b)); }
+.course.c2 .cover { background: linear-gradient(135deg, var(--cover-2a), var(--cover-2b)); }
+.course.c3 .cover { background: linear-gradient(135deg, var(--cover-3a), var(--cover-3b)); }
+.course .body { flex: 1; min-width: 0; }
+.course h3 { margin: 2px 0 3px; font-size: var(--fs-14); font-weight: 600; }
+.course .desc { font-size: var(--fs-12); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.course .tags { display: flex; gap: var(--gap-xs); margin-top: var(--gap-xs); }
+.course .tag {
+  font-size: var(--fs-11);
+  color: var(--muted);
+  background: var(--surface-2);
+  border-radius: 5px;
+  padding: 2px 8px;
+}
+.course .tag.hard { color: var(--warn); }
+.course .tag.lvl { color: var(--brand); }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 1px solid var(--hairline);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: calc(6px * var(--od-density)) 0 calc(10px * var(--od-density));
+}
+.tabbar .item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-11);
+  color: var(--muted);
+  transition: color var(--dur-fast) ease;
+}
+.tabbar .item.active { color: var(--brand); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="手机外框">
+  <header data-od-id="app-header" data-od-label="顶部区域">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>06:58</span>
+      <span class="sb-icons">
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+        <svg width="14" height="11" viewBox="0 0 14 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 4.5a7 7 0 0 1 10 0M4.3 6.8a3.8 3.8 0 0 1 5.4 0" stroke-linecap="round"/><circle cx="7" cy="9.2" r="0.8" fill="currentColor" stroke="none"/></svg>
+        <svg width="20" height="11" viewBox="0 0 20 11" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1.5" width="14" height="8" rx="2.2"/><path d="M17.5 4.2v2.6" stroke-linecap="round"/><rect x="2.6" y="3.1" width="11" height="4.8" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="greet">
+      <div>
+        <h1>早上好，阿哲</h1>
+        <p>晨跑黄金时段，比 82% 的伙伴起得早</p>
+      </div>
+      <button class="bell" data-od-id="notice-entry" data-od-label="通知入口">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 9.5a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5h-15S6 13.5 6 9.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.2 18.5a2 2 0 0 0 3.6 0" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </header>
+  <main>
+    <section class="hero-card" data-od-id="hero-stats" data-od-label="今日数据卡">
+      <div class="nums">
+        <span class="label">今日步数</span>
+        <div class="steps">8,642<small>步</small></div>
+        <div class="substats">
+          <div class="s" data-od-id="stat-calorie" data-od-label="卡路里统计">
+            <div class="v">326 千卡</div>
+            <div class="k">消耗</div>
+          </div>
+          <div class="s" data-od-id="stat-duration" data-od-label="时长统计">
+            <div class="v">52 分钟</div>
+            <div class="k">活动时长</div>
+          </div>
+        </div>
+      </div>
+      <div class="ring-wrap" data-od-id="progress-ring" data-od-label="目标完成环">
+        <svg viewBox="0 0 120 120" fill="none">
+          <circle cx="60" cy="60" r="52" stroke="var(--ring-track)" stroke-width="10"/>
+          <circle cx="60" cy="60" r="52" stroke="var(--brand)" stroke-width="10" stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="91.5"/>
+        </svg>
+        <span class="pct">72%<small>目标 12000 步</small></span>
+      </div>
+    </section>
+    <section class="panel" data-od-id="weekly-chart" data-od-label="本周运动图表">
+      <div class="panel-head">
+        <h2>本周运动量</h2>
+        <span>累计 4 小时 36 分</span>
+      </div>
+      <div class="chart">
+        <div class="col"><span class="bar" style="height: 42%"></span><span class="d">一</span></div>
+        <div class="col"><span class="bar" style="height: 66%"></span><span class="d">二</span></div>
+        <div class="col"><span class="bar" style="height: 30%"></span><span class="d">三</span></div>
+        <div class="col"><span class="bar" style="height: 78%"></span><span class="d">四</span></div>
+        <div class="col"><span class="bar" style="height: 54%"></span><span class="d">五</span></div>
+        <div class="col hot"><span class="bar" style="height: 92%"></span><span class="d">六</span></div>
+        <div class="col"><span class="bar" style="height: 18%"></span><span class="d">日</span></div>
+      </div>
+    </section>
+    <section class="panel" data-od-id="streak-row" data-od-label="打卡连续记录">
+      <div class="panel-head">
+        <h2>连续打卡 12 天</h2>
+        <span>再坚持 2 天解锁徽章</span>
+      </div>
+      <div class="streak">
+        <div class="day done"><span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5.5 12.5 4 4 9-9.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>周一</div>
+        <div class="day done"><span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5.5 12.5 4 4 9-9.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>周二</div>
+        <div class="day done"><span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5.5 12.5 4 4 9-9.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>周三</div>
+        <div class="day done"><span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5.5 12.5 4 4 9-9.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>周四</div>
+        <div class="day done"><span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5.5 12.5 4 4 9-9.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>周五</div>
+        <div class="day today"><span class="mark"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5.5v13M5.5 12h13" stroke-linecap="round"/></svg></span>今天</div>
+        <div class="day"><span class="mark"></span>周日</div>
+      </div>
+    </section>
+    <section class="courses" data-od-id="course-list" data-od-label="推荐课程区">
+      <div class="courses-head">
+        <h2>为你推荐</h2>
+        <a href="#" data-od-id="course-more" data-od-label="全部课程入口">全部课程</a>
+      </div>
+      <article class="course c1" data-od-id="course-card-1" data-od-label="课程-晨间唤醒拉伸">
+        <span class="cover">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="5.5" r="2.2"/><path d="M12 8v5M12 13l-3.5 6M12 13l3.5 6M7 10.5 12 9l5 1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <div class="body">
+          <h3>晨间唤醒拉伸</h3>
+          <div class="desc">全身激活 · 适合空腹完成</div>
+          <div class="tags">
+            <span class="tag lvl">零基础</span>
+            <span class="tag">12 分钟</span>
+            <span class="tag">26.8万人练过</span>
+          </div>
+        </div>
+      </article>
+      <article class="course c2" data-od-id="course-card-2" data-od-label="课程-核心燃脂循环">
+        <span class="cover">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3c1 3-1.5 4.5-1.5 7a3.5 3.5 0 0 0 7 .3C19.5 13 21 14.8 21 17a8 8 0 0 1-16 0c0-3 1.8-4.6 3-7 .8-1.6 1-3.4 4-7z" stroke-linejoin="round"/></svg>
+        </span>
+        <div class="body">
+          <h3>核心燃脂循环 K3</h3>
+          <div class="desc">高强度间歇 · 注意补水</div>
+          <div class="tags">
+            <span class="tag hard">进阶</span>
+            <span class="tag">25 分钟</span>
+            <span class="tag">9.4万人练过</span>
+          </div>
+        </div>
+      </article>
+      <article class="course c3" data-od-id="course-card-3" data-od-label="课程-睡前放松冥想">
+        <span class="cover">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M19 13.5A7.5 7.5 0 1 1 10.5 5 6 6 0 0 0 19 13.5z" stroke-linejoin="round"/></svg>
+        </span>
+        <div class="body">
+          <h3>睡前放松冥想</h3>
+          <div class="desc">呼吸引导 · 改善睡眠质量</div>
+          <div class="tags">
+            <span class="tag lvl">零基础</span>
+            <span class="tag">10 分钟</span>
+            <span class="tag">31.2万人练过</span>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <nav class="tabbar" data-od-id="bottom-tabbar" data-od-label="底部导航">
+    <button class="item active" data-od-id="tab-home" data-od-label="首页标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19z" stroke-linejoin="round"/><path d="M9.5 20v-6h5v6"/></svg>
+      首页
+    </button>
+    <button class="item" data-od-id="tab-courses" data-od-label="课程标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z" stroke-linejoin="round"/></svg>
+      课程
+    </button>
+    <button class="item" data-od-id="tab-data" data-od-label="数据标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 19.5v-7M12 19.5v-13M19 19.5v-4" stroke-linecap="round"/></svg>
+      数据
+    </button>
+    <button class="item" data-od-id="tab-mine" data-od-label="我的标签">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8.5" r="3.5"/><path d="M4.5 19.5c1.2-3.4 4-5 7.5-5s6.3 1.6 7.5 5" stroke-linecap="round"/></svg>
+      我的
+    </button>
+  </nav>
+</div>
+</body>
+</html>

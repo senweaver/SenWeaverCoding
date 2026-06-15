@@ -1,0 +1,64 @@
+/* design-systems/recruiting/tokens.css
+ * Token contract for Talent — Modern HR & recruiting UI: light surfaces, a friendly-professional violet accent, clear candidate pipelines, and humane hierarchy.
+ * Paste the :root block verbatim into the artifact's first <style>, then
+ * resolve every value through var(--*).
+ */
+
+:root {
+  --bg: #fbfbfe;
+  --surface: #ffffff;
+  --surface-warm: #f2f1fb;
+  --fg: #1c1b2e;
+  --fg-2: #34324b;
+  --muted: #625f78;
+  --meta: #8d8aa2;
+  --border: #e4e2f1;
+  --border-soft: #efeef8;
+  --accent: #6d4aff;
+  --accent-on: #ffffff;
+  --accent-hover: #5d3def;
+  --accent-active: #4d31cf;
+  --success: #16a34a;
+  --warn: #d97706;
+  --danger: #dc2626;
+  --font-display: "Inter", -apple-system, system-ui, "Segoe UI", Arial, sans-serif;
+  --font-body: "Inter", -apple-system, system-ui, "Segoe UI", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 19px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 44px;
+  --text-4xl: 58px;
+  --leading-body: 1.55;
+  --leading-tight: 1.18;
+  --tracking-display: -0.01em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 72px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: rgba(28,27,46,.05) 0 1px 2px 0, rgba(28,27,46,.08) 0 8px 24px -6px;
+  --focus-ring: 0 0 0 3px rgba(109,74,255,.35);
+  --motion-fast: 150ms;
+  --motion-base: 230ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1240px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}

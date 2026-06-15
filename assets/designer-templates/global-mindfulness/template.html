@@ -1,0 +1,389 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stillpoint — Today</title>
+<style>
+:root {
+  --od-accent: #f2a65a;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --dusk-high: #2b3a67;
+  --dusk-mid: #5c5687;
+  --dusk-low: #a4628c;
+  --dusk-horizon: #e08e6d;
+  --bg-page: #1c2547;
+  --fg: #fbf6ef;
+  --fg-soft: #d9d3e4;
+  --fg-dim: #a79fc0;
+  --card: rgba(251, 246, 239, 0.1);
+  --card-strong: rgba(251, 246, 239, 0.16);
+  --card-line: rgba(251, 246, 239, 0.18);
+  --ring-core: rgba(251, 246, 239, 0.92);
+  --ring-mid: rgba(251, 246, 239, 0.3);
+  --ring-outer: rgba(251, 246, 239, 0.14);
+  --on-brand: #33250f;
+  --cover-dawn-a: #e9b28a;
+  --cover-dawn-b: #9d5d75;
+  --cover-night-a: #46548f;
+  --cover-night-b: #222b52;
+  --cover-rain-a: #6e87a8;
+  --cover-rain-b: #2f4258;
+  --font-display: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
+  --fs-greet: calc(26px * var(--od-scale));
+  --fs-section: calc(18px * var(--od-scale));
+  --fs-body: calc(14px * var(--od-scale));
+  --fs-meta: calc(12px * var(--od-scale));
+  --pad: calc(20px * var(--od-density));
+  --gap: calc(12px * var(--od-density));
+  --dur: calc(0.2s * var(--od-motion));
+  --breath-dur: calc(7s * var(--od-motion));
+}
+html[data-od-mode="dark"] {
+  --dusk-high: #131b38;
+  --dusk-mid: #35315a;
+  --dusk-low: #5f3a55;
+  --dusk-horizon: #8a5644;
+  --bg-page: #0e1430;
+  --card: rgba(251, 246, 239, 0.07);
+  --card-strong: rgba(251, 246, 239, 0.12);
+  --card-line: rgba(251, 246, 239, 0.13);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.phone {
+  max-width: 480px;
+  min-height: 100dvh;
+  margin-inline: auto;
+  background:
+    radial-gradient(120% 36% at 50% 64%, var(--dusk-horizon) 0%, transparent 58%),
+    linear-gradient(180deg, var(--dusk-high) 0%, var(--dusk-mid) 42%, var(--dusk-low) 72%, var(--dusk-horizon) 100%);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 0 1px var(--card-line);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(4px * var(--od-density));
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .glyphs { display: flex; gap: 5px; align-items: center; }
+.greet-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: calc(14px * var(--od-density)) var(--pad) 0;
+}
+.greet h1 {
+  font-family: var(--font-display);
+  font-size: var(--fs-greet);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.greet p { margin: 4px 0 0; color: var(--fg-soft); font-size: calc(13px * var(--od-scale)); }
+.streak-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--brand);
+}
+.content { flex: 1; overflow-y: auto; padding-bottom: calc(96px * var(--od-density)); }
+.breath {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: calc(30px * var(--od-density)) var(--pad) calc(22px * var(--od-density));
+  text-align: center;
+}
+.breath-stage { position: relative; width: 240px; height: 240px; display: grid; place-items: center; }
+.b-ring { position: absolute; border-radius: 999px; }
+.b-ring.outer {
+  inset: 0;
+  border: 1px solid var(--ring-outer);
+  animation: breathe var(--breath-dur) ease-in-out infinite;
+}
+.b-ring.mid {
+  inset: 30px;
+  border: 1.4px solid var(--ring-mid);
+  animation: breathe var(--breath-dur) ease-in-out infinite;
+  animation-delay: calc(0.35s * var(--od-motion));
+}
+.b-core {
+  width: 124px;
+  height: 124px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 38% 32%, var(--ring-core), var(--ring-mid));
+  display: grid;
+  place-items: center;
+  color: var(--dusk-high);
+  animation: breathe var(--breath-dur) ease-in-out infinite;
+  animation-delay: calc(0.7s * var(--od-motion));
+  box-shadow: 0 0 60px var(--ring-outer);
+  transition: transform var(--dur) ease;
+}
+.b-core:active { transform: scale(0.96); }
+.b-core span {
+  font-family: var(--font-display);
+  font-size: calc(15px * var(--od-scale));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.09); }
+}
+.breath-caption { margin: calc(18px * var(--od-density)) 0 0; color: var(--fg-soft); font-size: calc(13px * var(--od-scale)); }
+.breath-caption b { display: block; font-family: var(--font-display); font-weight: 500; font-size: calc(17px * var(--od-scale)); color: var(--fg); margin-bottom: 2px; }
+.mood {
+  margin: 0 var(--pad);
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: 18px;
+  padding: calc(14px * var(--od-density)) calc(16px * var(--od-density));
+}
+.mood h2 { font-size: calc(13px * var(--od-scale)); font-weight: 600; color: var(--fg-soft); margin: 0 0 calc(10px * var(--od-density)); }
+.mood-row { display: flex; justify-content: space-between; }
+.mood-face {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-dim);
+  font-size: calc(11px * var(--od-scale));
+  transition: color var(--dur) ease, transform var(--dur) ease;
+}
+.mood-face:active { transform: scale(0.88); }
+.mood-face.picked { color: var(--brand); }
+.mood-face.picked svg { background: var(--card-strong); border-radius: 999px; }
+.section-head { padding: calc(24px * var(--od-density)) var(--pad) calc(10px * var(--od-density)); display: flex; align-items: baseline; justify-content: space-between; }
+.section-head h2 {
+  font-family: var(--font-display);
+  font-size: var(--fs-section);
+  font-weight: 500;
+  margin: 0;
+}
+.section-head span { font-size: var(--fs-meta); color: var(--fg-dim); }
+.sessions { display: flex; flex-direction: column; gap: calc(10px * var(--od-density)); padding: 0 var(--pad); }
+.session {
+  display: flex;
+  align-items: center;
+  gap: calc(14px * var(--od-density));
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: 18px;
+  padding: calc(12px * var(--od-density));
+  text-align: left;
+  transition: background var(--dur) ease, transform var(--dur) ease;
+}
+.session:active { background: var(--card-strong); transform: scale(0.985); }
+.session-art {
+  width: calc(56px * var(--od-density));
+  height: calc(56px * var(--od-density));
+  border-radius: 14px;
+  flex: none;
+  position: relative;
+  overflow: hidden;
+}
+.art-dawn { background: radial-gradient(110% 75% at 30% 22%, var(--cover-dawn-a), var(--cover-dawn-b)); }
+.art-night { background: radial-gradient(110% 75% at 70% 20%, var(--cover-night-a), var(--cover-night-b)); }
+.art-rain { background: radial-gradient(110% 75% at 50% 18%, var(--cover-rain-a), var(--cover-rain-b)); }
+.art-night::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  box-shadow: -4px 3px 0 0 var(--fg);
+  opacity: 0.85;
+}
+.art-rain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(115deg, transparent 0 9px, var(--card-line) 9px 10.5px);
+}
+.session-meta { flex: 1; min-width: 0; }
+.session-kind { font-size: calc(10.5px * var(--od-scale)); letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-dim); margin: 0 0 2px; font-weight: 600; }
+.session-title { font-family: var(--font-display); font-size: calc(16px * var(--od-scale)); font-weight: 500; margin: 0 0 2px; }
+.session-by { font-size: var(--fs-meta); color: var(--fg-soft); margin: 0; }
+.dur-chip {
+  flex: none;
+  background: var(--card-strong);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: calc(11.5px * var(--od-scale));
+  font-weight: 600;
+  color: var(--fg-soft);
+  font-variant-numeric: tabular-nums;
+}
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin-inline: auto;
+  display: flex;
+  justify-content: space-around;
+  padding: calc(9px * var(--od-density)) var(--pad) calc(20px * var(--od-density));
+  background: linear-gradient(180deg, transparent, var(--bg-page) 46%);
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  font-size: calc(10px * var(--od-scale));
+  font-weight: 500;
+  transition: color var(--dur) ease, transform var(--dur) ease;
+}
+.tab:active { transform: scale(0.92); }
+.tab.active { color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="App shell">
+  <header class="statusbar" data-od-id="status-bar" data-od-label="Status bar">
+    <span>9:41</span>
+    <span class="glyphs">
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 4.2a8.5 8.5 0 0 1 12 0M3.8 6.6a5.2 5.2 0 0 1 7.4 0M6.2 8.9a1.9 1.9 0 0 1 2.6 0" stroke-linecap="round"/></svg>
+      <svg width="22" height="11" viewBox="0 0 22 11" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1" y="1.5" width="17" height="8" rx="2.4"/><rect x="2.6" y="3.1" width="11" height="4.8" rx="1.2" fill="currentColor" stroke="none"/><path d="M19.6 4v3" stroke-linecap="round"/></svg>
+    </span>
+  </header>
+
+  <section class="greet-bar" data-od-id="greeting" data-od-label="Greeting header">
+    <div class="greet">
+      <h1>Good evening, Mara</h1>
+      <p>Wind down before the day ends</p>
+    </div>
+    <span class="streak-chip">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5 6.6 6.6 0 0 1-8.5-8.5Z" stroke-linejoin="round"/></svg>
+      12 days
+    </span>
+  </section>
+
+  <main class="content" data-od-id="today-content">
+    <section class="breath" data-od-id="breathing-circle" data-od-label="Breathing exercise">
+      <div class="breath-stage">
+        <span class="b-ring outer"></span>
+        <span class="b-ring mid"></span>
+        <button class="b-core" data-od-id="cta-breathe" data-od-label="Start breathing">
+          <span>Breathe</span>
+        </button>
+      </div>
+      <p class="breath-caption"><b>Evening unwind</b>Inhale for 4, hold for 4, release for 6</p>
+    </section>
+
+    <section class="mood" data-od-id="mood-checkin" data-od-label="Mood check-in">
+      <h2>How are you arriving tonight?</h2>
+      <div class="mood-row">
+        <button class="mood-face" data-od-id="mood-heavy" data-od-label="Heavy mood">
+          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="19" cy="19" r="13"/><path d="M13.5 25.5c1.6-2 3.4-3 5.5-3s3.9 1 5.5 3M13 15.5h.01M25 15.5h.01" stroke-linecap="round" stroke-width="2"/></svg>
+          Heavy
+        </button>
+        <button class="mood-face" data-od-id="mood-tense" data-od-label="Tense mood">
+          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="19" cy="19" r="13"/><path d="M13.5 24h11M13 15.5h.01M25 15.5h.01" stroke-linecap="round" stroke-width="2"/></svg>
+          Tense
+        </button>
+        <button class="mood-face picked" data-od-id="mood-settled" data-od-label="Settled mood">
+          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="19" cy="19" r="13"/><path d="M13.5 22.5c1.6 2 3.4 3 5.5 3s3.9-1 5.5-3M13 15.5h.01M25 15.5h.01" stroke-linecap="round" stroke-width="2"/></svg>
+          Settled
+        </button>
+        <button class="mood-face" data-od-id="mood-light" data-od-label="Light mood">
+          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="19" cy="19" r="13"/><path d="M12.5 21.5c1.9 3 4 4.5 6.5 4.5s4.6-1.5 6.5-4.5M13 15.5h.01M25 15.5h.01" stroke-linecap="round" stroke-width="2"/></svg>
+          Light
+        </button>
+      </div>
+    </section>
+
+    <section data-od-id="tonight-sessions" data-od-label="Tonight's sessions">
+      <div class="section-head">
+        <h2>Picked for tonight</h2>
+        <span>See library</span>
+      </div>
+      <div class="sessions">
+        <button class="session" data-od-id="session-body-scan" data-od-label="Body scan session">
+          <span class="session-art art-dawn"></span>
+          <span class="session-meta">
+            <p class="session-kind">Meditation</p>
+            <p class="session-title">Letting the day settle</p>
+            <p class="session-by">Guided by Imani Reyes</p>
+          </span>
+          <span class="dur-chip">12 min</span>
+        </button>
+        <button class="session" data-od-id="session-sleep-story" data-od-label="Sleep story session">
+          <span class="session-art art-night"></span>
+          <span class="session-meta">
+            <p class="session-kind">Sleep story</p>
+            <p class="session-title">The lighthouse at Wrenfold</p>
+            <p class="session-by">Read by Elias Thorne</p>
+          </span>
+          <span class="dur-chip">28 min</span>
+        </button>
+        <button class="session" data-od-id="session-soundscape" data-od-label="Rain soundscape session">
+          <span class="session-art art-rain"></span>
+          <span class="session-meta">
+            <p class="session-kind">Soundscape</p>
+            <p class="session-title">Rain on a tin roof</p>
+            <p class="session-by">Loops gently until you sleep</p>
+          </span>
+          <span class="dur-chip">45 min</span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="Bottom tab bar">
+    <button class="tab active" data-od-id="tab-today" data-od-label="Today tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8" stroke-linecap="round"/></svg>
+      Today
+    </button>
+    <button class="tab" data-od-id="tab-explore" data-od-label="Explore tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="m15.5 8.5-2 5-5 2 2-5 5-2Z" stroke-linejoin="round"/></svg>
+      Explore
+    </button>
+    <button class="tab" data-od-id="tab-sleep" data-od-label="Sleep tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5 6.6 6.6 0 0 1-8.5-8.5Z" stroke-linejoin="round"/></svg>
+      Sleep
+    </button>
+    <button class="tab" data-od-id="tab-journey" data-od-label="Journey tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20a7.5 7.5 0 0 1 14.4 0" stroke-linecap="round"/></svg>
+      Journey
+    </button>
+  </nav>
+</div>
+</body>
+</html>

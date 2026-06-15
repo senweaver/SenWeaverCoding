@@ -1,0 +1,7 @@
+{
+  "id": "global-storefront-admin",
+  "title": "电商后台管理 · Storefront Admin",
+  "category": "Dashboard",
+  "tags": ["电商", "后台", "订单管理", "commerce", "admin", "orders", "storefront", "analytics", "merchant-admin"],
+  "summary": "Sage-green commerce admin: sectioned left nav with count badges, top search bar, onboarding progress card, metric cards with mini sparklines, a recent orders table with payment and fulfillment badges, and a live visitors chip."
+}

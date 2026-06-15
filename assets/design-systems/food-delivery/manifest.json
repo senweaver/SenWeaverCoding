@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "food-delivery",
+  "name": "Crave",
+  "category": "Food & Delivery",
+  "description": "Appetizing system for food delivery, restaurant, and ordering apps — warm white surfaces, a hungry tomato-red accent, rounded photo-forward cards, and fast, friendly ordering flows.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

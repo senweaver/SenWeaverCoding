@@ -1,0 +1,7 @@
+{
+  "id": "bi-ops-monitoring",
+  "title": "BI Ops Monitoring Wall",
+  "category": "Dashboard",
+  "tags": ["bi", "dashboard", "big-screen", "monitoring", "noc", "sre"],
+  "summary": "1920x1080 terminal-style NOC monitoring wall with service status matrix, latency sparklines, uptime gauges and an auto-scrolling severity-colored log feed."
+}

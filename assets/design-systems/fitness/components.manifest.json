@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "brandId": "fitness",
+  "source": {
+    "tokensCss": "tokens.css"
+  },
+  "fixture": {
+    "title": "Pulse — reference components",
+    "description": "Component inventory for the Pulse athletic system. Every value resolves from tokens.css: a charcoal stack, an electric volt accent with dark text on it, condensed display headings, mono live metrics, and goal-ring progress.",
+    "styleBlockCount": 1
+  },
+  "tokens": {
+    "declared": [
+      "--accent", "--accent-active", "--accent-hover", "--accent-on",
+      "--bg", "--border", "--border-soft",
+      "--container-gutter-desktop", "--container-gutter-phone", "--container-gutter-tablet", "--container-max",
+      "--danger", "--ease-standard", "--elev-flat", "--elev-raised", "--elev-ring",
+      "--fg", "--fg-2", "--focus-ring", "--font-body", "--font-display", "--font-mono",
+      "--leading-body", "--leading-tight", "--meta", "--motion-base", "--motion-fast", "--muted",
+      "--radius-lg", "--radius-md", "--radius-pill", "--radius-sm",
+      "--section-y-desktop", "--section-y-phone", "--section-y-tablet",
+      "--space-1", "--space-12", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8",
+      "--success", "--surface", "--surface-warm",
+      "--text-2xl", "--text-3xl", "--text-4xl", "--text-base", "--text-lg", "--text-sm", "--text-xl", "--text-xs",
+      "--tracking-display", "--warn"
+    ],
+    "undeclaredReferenced": []
+  },
+  "groups": [
+    {
+      "id": "buttons",
+      "label": "Buttons and calls to action",
+      "present": true,
+      "classes": ["btn", "btn-primary", "btn-ghost"],
+      "elements": ["button"],
+      "tokenReferences": ["--accent", "--accent-on", "--accent-hover", "--border", "--focus-ring", "--radius-sm", "--surface", "--text-base"]
+    },
+    {
+      "id": "inputs",
+      "label": "Form fields and controls",
+      "present": true,
+      "classes": ["field", "field-label", "field-error"],
+      "elements": ["form", "input", "label", "select"],
+      "tokenReferences": ["--border", "--danger", "--fg", "--focus-ring", "--radius-sm", "--surface-warm"]
+    },
+    {
+      "id": "metrics",
+      "label": "Metric tiles and goal rings",
+      "present": true,
+      "classes": ["metric", "metric-value", "metric-unit", "goal-ring", "ring-fill"],
+      "elements": ["div", "span"],
+      "tokenReferences": ["--accent", "--border", "--font-mono", "--meta", "--surface-warm"]
+    },
+    {
+      "id": "cards",
+      "label": "Workout cards",
+      "present": true,
+      "classes": ["card", "workout-card"],
+      "elements": ["article", "section"],
+      "tokenReferences": ["--border", "--elev-raised", "--font-display", "--radius-md", "--surface", "--space-6"]
+    },
+    {
+      "id": "badges",
+      "label": "PR, streak, and status pills",
+      "present": true,
+      "classes": ["pill", "pill-pr", "pill-zone", "pill-missed"],
+      "elements": ["span"],
+      "tokenReferences": ["--accent", "--danger", "--radius-pill", "--success", "--text-xs", "--warn"]
+    },
+    {
+      "id": "links",
+      "label": "Links and inline actions",
+      "present": true,
+      "classes": [],
+      "elements": ["a"],
+      "tokenReferences": ["--accent", "--accent-hover", "--focus-ring"]
+    },
+    {
+      "id": "typography",
+      "label": "Typography scale and text utilities",
+      "present": true,
+      "classes": ["eyebrow", "stat-label", "big-number", "caption"],
+      "elements": ["h1", "h2", "h3", "p"],
+      "tokenReferences": ["--fg", "--font-display", "--font-mono", "--leading-tight", "--tracking-display", "--text-3xl"]
+    },
+    {
+      "id": "layout",
+      "label": "Layout primitives",
+      "present": true,
+      "classes": ["container", "grid", "row", "stack"],
+      "elements": ["main", "nav", "section"],
+      "tokenReferences": ["--container-gutter-desktop", "--container-max", "--section-y-desktop", "--space-4"]
+    }
+  ]
+}

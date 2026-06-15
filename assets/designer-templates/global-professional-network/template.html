@@ -1,0 +1,378 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Careerline — Feed</title>
+<style>
+:root {
+  --od-accent: #0a66c2;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: color-mix(in srgb, var(--brand) 10%, transparent);
+  --brand-deep: color-mix(in srgb, var(--brand) 82%, var(--fg));
+  --bg: #f4f2ee;
+  --surface: #ffffff;
+  --fg: #191919;
+  --muted: #666666;
+  --faint: #8c8c8c;
+  --border: #e0dfdc;
+  --hover: #f3f3f1;
+  --banner-1: #1f4e6b;
+  --banner-2: #5a8aa8;
+  --av-ring: #ffffff;
+  --like-fg: var(--brand);
+  --celebrate: #44712e;
+  --doc-bg: #f8f9fa;
+  --kbd-bg: #f1f1ef;
+  --kbd-border: #d8d8d5;
+  --focus-ring: color-mix(in srgb, var(--brand) 45%, transparent);
+  --shadow-card: 0 0 0 1px var(--border);
+  --av-a: #7a5c3e;
+  --av-b: #3e6b5c;
+  --av-c: #6b3e5a;
+  --av-d: #44506b;
+  --dk-bg: #14171a;
+  --dk-surface: #1d2226;
+  --dk-fg: #e9e5df;
+  --dk-muted: #b0b0ae;
+  --dk-faint: #84847f;
+  --dk-border: #383d42;
+  --dk-hover: #24292e;
+  --dk-doc-bg: #22272b;
+  --dk-kbd-bg: #24292e;
+  --dk-kbd-border: #3c4248;
+  --fs-base: calc(14px * var(--od-scale));
+  --fs-name: calc(15px * var(--od-scale));
+  --fs-sm: calc(13px * var(--od-scale));
+  --fs-xs: calc(12px * var(--od-scale));
+  --fs-h: calc(17px * var(--od-scale));
+  --pad-1: calc(4px * var(--od-density));
+  --pad-2: calc(8px * var(--od-density));
+  --pad-3: calc(12px * var(--od-density));
+  --pad-4: calc(16px * var(--od-density));
+  --pad-5: calc(20px * var(--od-density));
+  --t-fast: calc(0.12s * var(--od-motion));
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: var(--dk-bg);
+  --surface: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --hover: var(--dk-hover);
+  --doc-bg: var(--dk-doc-bg);
+  --kbd-bg: var(--dk-kbd-bg);
+  --kbd-border: var(--dk-kbd-border);
+  --av-ring: var(--dk-surface);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-ui); font-size: var(--fs-base); color: var(--fg); background: var(--bg); -webkit-font-smoothing: antialiased; }
+button { font: inherit; cursor: pointer; background: none; border: 0; color: inherit; padding: 0; }
+button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 6px; }
+a { color: inherit; text-decoration: none; }
+svg { display: block; }
+.icon { width: calc(18px * var(--od-scale)); height: calc(18px * var(--od-scale)); stroke: currentColor; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.icon-sm { width: calc(14px * var(--od-scale)); height: calc(14px * var(--od-scale)); }
+.app { display: grid; grid-template-rows: auto 1fr; height: 100vh; overflow: hidden; }
+.topbar { display: flex; align-items: center; gap: var(--pad-3); background: var(--surface); border-bottom: 1px solid var(--border); padding: var(--pad-1) var(--pad-5); }
+.logo { width: 34px; height: 34px; border-radius: 6px; background: var(--brand); color: var(--surface); display: grid; place-items: center; font-weight: 800; font-size: calc(18px * var(--od-scale)); }
+.tsearch { display: flex; align-items: center; gap: var(--pad-2); background: var(--bg); border-radius: 6px; padding: var(--pad-2) var(--pad-3); color: var(--faint); width: min(280px, 30vw); }
+.tsearch input { border: 0; outline: none; background: transparent; font: inherit; color: var(--fg); width: 100%; }
+.tnav { margin-left: auto; display: flex; }
+.tnav button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: calc(76px * var(--od-density));
+  padding: var(--pad-2) 0 var(--pad-1);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  transition: color var(--t-fast) ease;
+}
+.tnav button:hover { color: var(--fg); }
+.tnav button.active { color: var(--fg); border-bottom-color: var(--fg); }
+.shell { overflow-y: auto; }
+.cols {
+  display: grid;
+  grid-template-columns: 225px minmax(0, 555px) 300px;
+  gap: var(--pad-5);
+  max-width: 1128px;
+  margin: 0 auto;
+  padding: var(--pad-5) var(--pad-4);
+  align-items: start;
+}
+.card { background: var(--surface); border-radius: 10px; box-shadow: var(--shadow-card); overflow: hidden; }
+.profile-banner { height: 56px; background: linear-gradient(110deg, var(--banner-1), var(--banner-2)); }
+.profile-body { padding: 0 var(--pad-3) var(--pad-4); text-align: center; }
+.profile-av {
+  width: 68px; height: 68px;
+  border-radius: 50%;
+  background: var(--av-a);
+  color: var(--surface);
+  display: grid; place-items: center;
+  font-weight: 700;
+  font-size: calc(22px * var(--od-scale));
+  border: 3px solid var(--av-ring);
+  margin: -34px auto var(--pad-2);
+}
+.profile-body h2 { margin: 0; font-size: var(--fs-h); }
+.profile-body h2 a:hover { text-decoration: underline; }
+.profile-body .headline { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--pad-1); line-height: 1.4; }
+.profile-stats { border-top: 1px solid var(--border); margin-top: var(--pad-3); padding-top: var(--pad-2); text-align: left; }
+.pstat { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--muted); padding: var(--pad-1) var(--pad-1); border-radius: 4px; font-weight: 600; }
+.pstat:hover { background: var(--hover); }
+.pstat b { color: var(--brand); }
+.side-link { display: flex; align-items: center; gap: var(--pad-2); padding: var(--pad-3); font-size: var(--fs-xs); font-weight: 600; border-top: 1px solid var(--border); width: 100%; text-align: left; transition: background var(--t-fast) ease; }
+.side-link:hover { background: var(--hover); }
+.composer { padding: var(--pad-3); }
+.composer-row { display: flex; gap: var(--pad-2); align-items: center; }
+.av { border-radius: 50%; color: var(--surface); display: grid; place-items: center; font-weight: 700; flex: none; }
+.av-48 { width: 48px; height: 48px; font-size: var(--fs-name); }
+.av-40 { width: 40px; height: 40px; font-size: var(--fs-sm); }
+.start-post {
+  flex: 1;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: var(--pad-3) var(--pad-4);
+  color: var(--muted);
+  font-weight: 600;
+  transition: background var(--t-fast) ease;
+}
+.start-post:hover { background: var(--hover); }
+.composer-actions { display: flex; justify-content: space-between; margin-top: var(--pad-2); }
+.composer-actions button { display: flex; align-items: center; gap: var(--pad-2); color: var(--muted); font-weight: 600; font-size: var(--fs-sm); padding: var(--pad-2) var(--pad-3); border-radius: 6px; transition: background var(--t-fast) ease; }
+.composer-actions button:hover { background: var(--hover); }
+.composer-actions .c-media { color: var(--brand); }
+.composer-actions .c-event { color: var(--celebrate); }
+.post { margin-top: var(--pad-2); }
+.post-head { display: flex; gap: var(--pad-2); padding: var(--pad-3) var(--pad-3) 0; }
+.post-who { min-width: 0; }
+.post-who .name { font-size: var(--fs-name); font-weight: 600; }
+.post-who .name a:hover { color: var(--brand); text-decoration: underline; }
+.post-who .sub { color: var(--muted); font-size: var(--fs-xs); line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.post-head .follow { margin-left: auto; color: var(--brand); font-weight: 600; font-size: var(--fs-sm); padding: var(--pad-1) var(--pad-2); border-radius: 6px; align-self: flex-start; }
+.post-head .follow:hover { background: var(--brand-soft); }
+.post-text { padding: var(--pad-2) var(--pad-3); margin: 0; line-height: 1.5; }
+.post-text a { color: var(--brand); font-weight: 600; }
+.post-text a:hover { text-decoration: underline; }
+.doc-preview { margin: 0 var(--pad-3); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color var(--t-fast) ease; display: block; }
+.doc-preview:hover { border-color: var(--faint); }
+.doc-hero { height: 150px; background: linear-gradient(120deg, var(--banner-1), var(--banner-2)); display: grid; place-items: center; color: var(--surface); }
+.doc-hero svg { width: 40px; height: 40px; opacity: 0.7; }
+.doc-meta { padding: var(--pad-2) var(--pad-3); background: var(--doc-bg); }
+.doc-meta .t { font-weight: 600; font-size: var(--fs-sm); }
+.doc-meta .s { color: var(--muted); font-size: var(--fs-xs); margin-top: 2px; }
+.social-proof { display: flex; align-items: center; gap: var(--pad-2); padding: var(--pad-2) var(--pad-3); color: var(--muted); font-size: var(--fs-xs); border-bottom: 1px solid var(--border); margin: var(--pad-1) var(--pad-3) 0; padding-left: 0; padding-right: 0; }
+.proof-icons { display: flex; }
+.proof-icons span { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; margin-left: -4px; border: 1px solid var(--surface); }
+.proof-icons span:first-child { margin-left: 0; }
+.proof-icons .p-like { background: var(--brand); color: var(--surface); }
+.proof-icons .p-cel { background: var(--celebrate); color: var(--surface); }
+.proof-icons svg { width: 9px; height: 9px; stroke-width: 2.2; }
+.social-proof .comments { margin-left: auto; }
+.social-proof .comments:hover, .social-proof .who:hover { color: var(--brand); text-decoration: underline; }
+.post-actions { display: flex; padding: var(--pad-1) var(--pad-2) var(--pad-2); }
+.post-actions button { flex: 1; display: flex; align-items: center; justify-content: center; gap: var(--pad-2); color: var(--muted); font-weight: 600; font-size: var(--fs-sm); padding: var(--pad-3) 0; border-radius: 6px; transition: background var(--t-fast) ease, color var(--t-fast) ease; }
+.post-actions button:hover { background: var(--hover); color: var(--fg); }
+.rail-card h3 { margin: 0; padding: var(--pad-3) var(--pad-3) var(--pad-2); font-size: var(--fs-name); font-weight: 600; }
+.suggest { display: flex; gap: var(--pad-2); padding: var(--pad-2) var(--pad-3); }
+.suggest .who { min-width: 0; }
+.suggest .who .n { font-weight: 600; font-size: var(--fs-sm); }
+.suggest .who .n:hover { text-decoration: underline; }
+.suggest .who .h { color: var(--muted); font-size: var(--fs-xs); line-height: 1.35; }
+.follow-btn {
+  margin-top: var(--pad-1);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--muted);
+  border-radius: 999px;
+  padding: 3px var(--pad-3);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  transition: border-color var(--t-fast) ease, color var(--t-fast) ease, box-shadow var(--t-fast) ease;
+}
+.follow-btn:hover { border-color: var(--fg); color: var(--fg); box-shadow: inset 0 0 0 1px var(--muted); }
+.news li { list-style: none; padding: var(--pad-1) var(--pad-3); cursor: pointer; border-radius: 4px; }
+.news li:hover { background: var(--hover); }
+.news { margin: 0 0 var(--pad-2); padding: 0; }
+.news .nt { font-weight: 600; font-size: var(--fs-sm); }
+.news .ns { color: var(--faint); font-size: var(--fs-xs); }
+kbd { font-family: var(--font-mono); font-size: var(--fs-xs); background: var(--kbd-bg); border: 1px solid var(--kbd-border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--muted); }
+@media (max-width: 1000px) { .cols { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="app" data-od-id="app-frame" data-od-label="App frame">
+  <header class="topbar" data-od-id="top-bar" data-od-label="Top navigation">
+    <span class="logo">C</span>
+    <div class="tsearch" data-od-id="top-search" data-od-label="Search field">
+      <svg class="icon icon-sm" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.5 13.5L17 17"/></svg>
+      <input type="text" placeholder="Search" aria-label="Search" />
+      <kbd>/</kbd>
+    </div>
+    <nav class="tnav" data-od-id="top-nav-items" data-od-label="Navigation items">
+      <button class="active" aria-current="page"><svg class="icon" viewBox="0 0 20 20"><path d="M4 16V8.5L10 4l6 4.5V16h-4v-4.5H8V16z"/></svg>Home</button>
+      <button><svg class="icon" viewBox="0 0 20 20"><circle cx="8" cy="7.5" r="2.6"/><path d="M3.5 16a4.5 4.5 0 019 0M13.5 9.5h4M15.5 7.5v4"/></svg>Network</button>
+      <button><svg class="icon" viewBox="0 0 20 20"><rect x="3.5" y="6.5" width="13" height="9" rx="2"/><path d="M7.5 6.5V5a2 2 0 012-2h1a2 2 0 012 2v1.5"/></svg>Jobs</button>
+      <button><svg class="icon" viewBox="0 0 20 20"><path d="M3.5 5.5a2 2 0 012-2h9a2 2 0 012 2v6a2 2 0 01-2 2H9l-3.5 3v-3h-1a2 2 0 01-2-2z"/></svg>Messaging</button>
+      <button><svg class="icon" viewBox="0 0 20 20"><path d="M10 4.5a3.4 3.4 0 013.4 3.4c0 3.2 1.4 4.3 2.1 4.9H4.5c.7-.6 2.1-1.7 2.1-4.9A3.4 3.4 0 0110 4.5zM8.5 15.5a1.6 1.6 0 003 0"/></svg>Alerts</button>
+    </nav>
+  </header>
+  <div class="shell">
+    <div class="cols">
+      <aside data-od-id="left-rail" data-od-label="Profile rail">
+        <section class="card" data-od-id="profile-card" data-od-label="Profile card">
+          <div class="profile-banner"></div>
+          <div class="profile-body">
+            <span class="profile-av">DM</span>
+            <h2><a href="#">Dana Mireles</a></h2>
+            <p class="headline">Staff data engineer · Building streaming pipelines for renewable-grid telemetry</p>
+            <div class="profile-stats">
+              <a class="pstat" href="#"><span>Profile viewers</span><b>312</b></a>
+              <a class="pstat" href="#"><span>Post impressions</span><b>4,087</b></a>
+            </div>
+          </div>
+          <button class="side-link">
+            <svg class="icon icon-sm" viewBox="0 0 20 20"><rect x="3.5" y="3.5" width="13" height="13" rx="2"/><path d="M7 8h6M7 12h4"/></svg>
+            Saved items
+          </button>
+        </section>
+        <section class="card" style="margin-top: var(--pad-2);" data-od-id="groups-card" data-od-label="Groups card">
+          <button class="side-link" style="border-top: 0;">Groups</button>
+          <button class="side-link">Events</button>
+          <button class="side-link">Newsletters</button>
+        </section>
+      </aside>
+      <main data-od-id="feed-column" data-od-label="Feed column">
+        <section class="card composer" data-od-id="post-composer" data-od-label="Post composer">
+          <div class="composer-row">
+            <span class="av av-48" style="background: var(--av-a);">DM</span>
+            <button class="start-post">Start a post</button>
+          </div>
+          <div class="composer-actions">
+            <button class="c-media"><svg class="icon" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="11" rx="2"/><circle cx="7.5" cy="8.5" r="1.3"/><path d="M3.5 13.5l4-3.5 3 2.5 2.5-2 3.5 3"/></svg>Media</button>
+            <button class="c-event"><svg class="icon" viewBox="0 0 20 20"><rect x="3.5" y="4.5" width="13" height="12" rx="2"/><path d="M3.5 8.5h13M7 3v3M13 3v3"/></svg>Event</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M5 4h10v12.5l-2.5-1.5-2.5 1.5-2.5-1.5L5 16.5z"/><path d="M8 8h4M8 11h4"/></svg>Write article</button>
+          </div>
+        </section>
+        <article class="card post" data-od-id="post-priya" data-od-label="Feed post">
+          <div class="post-head">
+            <span class="av av-48" style="background: var(--av-b);">RO</span>
+            <div class="post-who">
+              <div class="name"><a href="#">Rashida Okafor</a></div>
+              <div class="sub">Engineering manager, data platform · Meridian Grid Systems</div>
+              <div class="sub">2d · Edited</div>
+            </div>
+            <button class="follow">+ Follow</button>
+          </div>
+          <p class="post-text">We just finished migrating 14 batch jobs to an incremental model, and the biggest win was not speed — it was trust. When backfills stopped rewriting three days of history, the analytics team finally stopped keeping shadow spreadsheets. Wrote up the decision log, including the two approaches we rejected. <a href="#">#dataengineering</a> <a href="#">#analytics</a></p>
+          <a class="doc-preview" href="#" data-od-id="article-preview" data-od-label="Article preview">
+            <div class="doc-hero">
+              <svg class="icon" viewBox="0 0 20 20"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3M8 10h4M8 13h4"/></svg>
+            </div>
+            <div class="doc-meta">
+              <div class="t">Incremental models in production: our decision log</div>
+              <div class="s">meridian-engineering.example · 8 min read</div>
+            </div>
+          </a>
+          <div style="padding: 0 var(--pad-3);">
+            <div class="social-proof">
+              <span class="proof-icons">
+                <span class="p-like"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor"><path d="M6 9v7H3.5V9zM6 9l3-5.5c1.2 0 2 .9 2 2L10.5 9h4.6c1 0 1.7.9 1.5 1.9l-1 4.6c-.2.9-1 1.5-1.9 1.5H6"/></svg></span>
+                <span class="p-cel"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor"><path d="M10 3.5l1.8 3.8 4.2.6-3 3 .7 4.1-3.7-2-3.7 2 .7-4.1-3-3 4.2-.6z"/></svg></span>
+              </span>
+              <a class="who" href="#">Tom Eaves and 482 others</a>
+              <a class="comments" href="#">67 comments · 24 reposts</a>
+            </div>
+          </div>
+          <div class="post-actions" data-od-id="post-action-bar" data-od-label="Post action bar">
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M6 9v7H3.5V9zM6 9l3-5.5c1.2 0 2 .9 2 2L10.5 9h4.6c1 0 1.7.9 1.5 1.9l-1 4.6c-.2.9-1 1.5-1.9 1.5H6"/></svg>Like</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M3.5 5.5a2 2 0 012-2h9a2 2 0 012 2v6a2 2 0 01-2 2H9l-3.5 3v-3h-1a2 2 0 01-2-2z"/></svg>Comment</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M13 4l3.5 3.5L13 11M16.5 7.5h-9a4 4 0 00-4 4V13"/></svg>Repost</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M3 10l14-6-4 14-3-5.5z"/><path d="M10 12.5L17 4"/></svg>Send</button>
+          </div>
+        </article>
+        <article class="card post" data-od-id="post-mateus" data-od-label="Feed post">
+          <div class="post-head">
+            <span class="av av-48" style="background: var(--av-c);">MF</span>
+            <div class="post-who">
+              <div class="name"><a href="#">Mateus Fonseca</a></div>
+              <div class="sub">Head of talent · Bellhaven Robotics</div>
+              <div class="sub">5h</div>
+            </div>
+            <button class="follow">+ Follow</button>
+          </div>
+          <p class="post-text">We are opening three roles on the perception team in Porto: two senior C++ engineers and one applied researcher in sensor fusion. The team ships to a real factory floor every six weeks, so you see your work running on hardware within a quarter. Referrals warmly welcome — happy to share the full briefs with anyone curious.</p>
+          <div style="padding: 0 var(--pad-3);">
+            <div class="social-proof">
+              <span class="proof-icons">
+                <span class="p-like"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor"><path d="M6 9v7H3.5V9zM6 9l3-5.5c1.2 0 2 .9 2 2L10.5 9h4.6c1 0 1.7.9 1.5 1.9l-1 4.6c-.2.9-1 1.5-1.9 1.5H6"/></svg></span>
+              </span>
+              <a class="who" href="#">128 reactions</a>
+              <a class="comments" href="#">19 comments</a>
+            </div>
+          </div>
+          <div class="post-actions">
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M6 9v7H3.5V9zM6 9l3-5.5c1.2 0 2 .9 2 2L10.5 9h4.6c1 0 1.7.9 1.5 1.9l-1 4.6c-.2.9-1 1.5-1.9 1.5H6"/></svg>Like</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M3.5 5.5a2 2 0 012-2h9a2 2 0 012 2v6a2 2 0 01-2 2H9l-3.5 3v-3h-1a2 2 0 01-2-2z"/></svg>Comment</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M13 4l3.5 3.5L13 11M16.5 7.5h-9a4 4 0 00-4 4V13"/></svg>Repost</button>
+            <button><svg class="icon" viewBox="0 0 20 20"><path d="M3 10l14-6-4 14-3-5.5z"/><path d="M10 12.5L17 4"/></svg>Send</button>
+          </div>
+        </article>
+      </main>
+      <aside data-od-id="right-rail" data-od-label="Right rail">
+        <section class="card rail-card" data-od-id="suggestions-card" data-od-label="Suggestions card">
+          <h3>Add to your feed</h3>
+          <div class="suggest">
+            <span class="av av-40" style="background: var(--av-d);">HV</span>
+            <div class="who">
+              <a class="n" href="#">Helena Vask</a>
+              <div class="h">Writes about pricing strategy for developer tools</div>
+              <button class="follow-btn"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>Follow</button>
+            </div>
+          </div>
+          <div class="suggest">
+            <span class="av av-40" style="background: var(--av-b);">GL</span>
+            <div class="who">
+              <a class="n" href="#">Grid &amp; Ledger Weekly</a>
+              <div class="h">Newsletter on energy markets and infrastructure software</div>
+              <button class="follow-btn"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>Follow</button>
+            </div>
+          </div>
+          <div class="suggest" style="padding-bottom: var(--pad-3);">
+            <span class="av av-40" style="background: var(--av-c);">AP</span>
+            <div class="who">
+              <a class="n" href="#">Anneke Prins</a>
+              <div class="h">CTO at Fjordlight · Posts on engineering leadership</div>
+              <button class="follow-btn"><svg class="icon icon-sm" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>Follow</button>
+            </div>
+          </div>
+        </section>
+        <section class="card rail-card" style="margin-top: var(--pad-2);" data-od-id="news-card" data-od-label="News card">
+          <h3>Industry briefing</h3>
+          <ul class="news">
+            <li><div class="nt">Battery storage hiring doubles year over year</div><div class="ns">1d · 4,310 readers</div></li>
+            <li><div class="nt">Remote pay bands converge across EU hubs</div><div class="ns">2d · 2,876 readers</div></li>
+            <li><div class="nt">Open-source maintainers push for paid review time</div><div class="ns">3d · 1,945 readers</div></li>
+            <li><div class="nt">Port automation projects clear regulatory hurdle</div><div class="ns">3d · 1,402 readers</div></li>
+          </ul>
+        </section>
+      </aside>
+    </div>
+  </div>
+</div>
+</body>
+</html>

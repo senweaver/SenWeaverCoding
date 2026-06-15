@@ -1,0 +1,414 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>燃拍 · 沉浸短视频</title>
+<style>
+:root {
+  --od-accent: #fe2c55;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-soft: rgba(254, 44, 85, 0.16);
+  --page-bg: #000000;
+  --surface: #121212;
+  --surface-2: #1e1e1e;
+  --fg: #ffffff;
+  --fg-dim: rgba(255, 255, 255, 0.74);
+  --fg-faint: rgba(255, 255, 255, 0.46);
+  --line: rgba(255, 255, 255, 0.12);
+  --video-a: #16242c;
+  --video-b: #2c4438;
+  --video-c: #0c1418;
+  --live-tag: #fe2c55;
+  --music-chip: rgba(255, 255, 255, 0.1);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --fs-10: calc(10px * var(--od-scale));
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --sp-1: calc(4px * var(--od-density));
+  --sp-2: calc(8px * var(--od-density));
+  --sp-3: calc(12px * var(--od-density));
+  --sp-4: calc(16px * var(--od-density));
+  --sp-5: calc(20px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+  --marquee-dur: calc(7s * var(--od-motion));
+  --dk-page-bg: #000000;
+  --dk-surface: #0a0a0a;
+  --dk-surface-2: #161616;
+  --dk-video-a: #101a20;
+  --dk-video-b: #20322a;
+  --dk-video-c: #06090b;
+}
+html[data-od-mode="dark"] {
+  --page-bg: var(--dk-page-bg);
+  --surface: var(--dk-surface);
+  --surface-2: var(--dk-surface-2);
+  --video-a: var(--dk-video-a);
+  --video-b: var(--dk-video-b);
+  --video-c: var(--dk-video-c);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; padding: 0; color: inherit; }
+.phone {
+  max-width: 480px;
+  height: 100vh;
+  min-height: 640px;
+  margin: 0 auto;
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+.statusbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(8px * var(--od-density)) var(--sp-4) calc(4px * var(--od-density));
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--fg);
+}
+.statusbar .sb-icons { display: flex; align-items: center; gap: 5px; }
+.statusbar svg { width: 15px; height: 12px; }
+.video-stage {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 80% at 70% 18%, var(--video-b) 0%, transparent 55%),
+    linear-gradient(168deg, var(--video-a) 0%, var(--video-c) 78%);
+}
+.video-stage::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 38%;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.78), transparent);
+}
+.top-tabs {
+  position: absolute;
+  top: calc(34px * var(--od-density));
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-5);
+  padding: var(--sp-2) var(--sp-4);
+}
+.top-tabs .side {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg);
+  opacity: 0.92;
+}
+.top-tabs .side svg { width: 22px; height: 22px; }
+.top-tabs .side:active { opacity: 0.6; }
+.side-live { left: var(--sp-4); }
+.side-search { right: var(--sp-4); }
+.feed-tab {
+  font-size: var(--fs-16);
+  color: var(--fg-faint);
+  font-weight: 500;
+  position: relative;
+  padding-bottom: 7px;
+  transition: color var(--dur) ease;
+}
+.feed-tab.active { color: var(--fg); font-weight: 700; }
+.feed-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 24px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--fg);
+}
+.feed-tab:active { color: var(--fg-dim); }
+.action-rail {
+  position: absolute;
+  right: var(--sp-3);
+  bottom: calc(118px * var(--od-density));
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(18px * var(--od-density));
+}
+.rail-avatar {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-1);
+}
+.rail-avatar .face {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1.5px solid var(--fg);
+  background: linear-gradient(140deg, var(--video-b), var(--brand));
+  display: grid;
+  place-items: center;
+  font-size: var(--fs-14);
+  font-weight: 700;
+}
+.rail-avatar .follow {
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  transform: translateX(-50%);
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--fg);
+  display: grid;
+  place-items: center;
+  transition: transform var(--dur) ease;
+}
+.rail-avatar .follow svg { width: 11px; height: 11px; }
+.rail-avatar .follow:active { transform: translateX(-50%) scale(0.85); }
+.rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: var(--fg);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  transition: transform var(--dur) ease;
+}
+.rail-item svg { width: 32px; height: 32px; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5)); }
+.rail-item:active { transform: scale(0.88); }
+.rail-item.liked { color: var(--brand); }
+.rail-item.liked span { color: var(--fg); }
+.rail-disc {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--surface-2) 28%, var(--page-bg) 30%, var(--page-bg) 62%, var(--surface-2) 64%);
+  border: 6px solid var(--surface);
+  animation: spin calc(6s * var(--od-motion)) linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.caption-zone {
+  position: absolute;
+  left: var(--sp-4);
+  right: calc(76px * var(--od-density));
+  bottom: calc(72px * var(--od-density));
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.author-line {
+  font-size: var(--fs-16);
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.caption-text {
+  margin: 0;
+  font-size: var(--fs-14);
+  color: var(--fg-dim);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.caption-text b { color: var(--fg); font-weight: 600; }
+.music-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--music-chip);
+  border-radius: 999px;
+  padding: calc(5px * var(--od-density)) var(--sp-3) calc(5px * var(--od-density)) var(--sp-2);
+  width: fit-content;
+  max-width: 100%;
+  font-size: var(--fs-12);
+}
+.music-line svg { width: 14px; height: 14px; flex: none; }
+.music-track {
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 170px;
+  mask-image: linear-gradient(to right, transparent, var(--fg) 8%, var(--fg) 92%, transparent);
+}
+.music-track span {
+  display: inline-block;
+  padding-right: 36px;
+  animation: marquee var(--marquee-dur) linear infinite;
+}
+@keyframes marquee { to { transform: translateX(-50%); } }
+.tabbar {
+  position: relative;
+  z-index: 6;
+  margin-top: auto;
+  background: var(--page-bg);
+  border-top: 0.5px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: center;
+  padding: calc(8px * var(--od-density)) 0 calc(16px * var(--od-density));
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-11);
+  color: var(--fg-faint);
+  font-weight: 500;
+  transition: color var(--dur) ease;
+}
+.tab svg { width: 22px; height: 22px; }
+.tab.active { color: var(--fg); font-weight: 700; }
+.tab:active { opacity: 0.6; }
+.tab-plus {
+  justify-self: center;
+  width: 44px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--fg);
+  color: var(--page-bg);
+  display: grid;
+  place-items: center;
+  position: relative;
+  transition: transform var(--dur) ease;
+}
+.tab-plus::before,
+.tab-plus::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  border-radius: 9px;
+  z-index: -1;
+}
+.tab-plus::before { left: -5px; background: var(--brand); }
+.tab-plus::after { right: -5px; background: var(--video-b); }
+.tab-plus svg { width: 20px; height: 20px; }
+.tab-plus:active { transform: scale(0.92); }
+.live-pill {
+  position: absolute;
+  top: calc(78px * var(--od-density));
+  left: var(--sp-4);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 0.5px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: var(--fs-11);
+  color: var(--fg-dim);
+}
+.live-pill i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--live-tag);
+  animation: pulse calc(1.4s * var(--od-motion)) ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: 0.35; } }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-frame" data-od-label="手机外框">
+  <section class="video-stage" data-od-id="video-stage" data-od-label="视频画面"></section>
+  <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+    <span>21:36</span>
+    <span class="sb-icons">
+      <svg viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 9.5v1M6 7v3.5M10 4.5v6M14 2v8.5"/></svg>
+      <svg viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5a8.5 8.5 0 0 1 12 0M4.4 7.4a5 5 0 0 1 7.2 0M7 9.8l1 1 1-1"/></svg>
+      <svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="2" width="15" height="8" rx="2.5"/><path d="M18 5v2" stroke-linecap="round"/><rect x="3" y="4" width="7" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+    </span>
+  </div>
+  <nav class="top-tabs" data-od-id="top-tabs" data-od-label="顶部频道切换">
+    <button class="side side-live" data-od-id="live-entry" data-od-label="直播入口">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="M16 10.5l5-3v9l-5-3"/></svg>
+    </button>
+    <button class="feed-tab" data-od-id="tab-follow" data-od-label="关注频道">关注</button>
+    <button class="feed-tab active" data-od-id="tab-foryou" data-od-label="推荐频道">推荐</button>
+    <button class="side side-search" data-od-id="search-entry" data-od-label="搜索入口">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+    </button>
+  </nav>
+  <section class="live-pill" data-od-id="poi-pill" data-od-label="同城热点"><i></i>同城 · 滨江夜跑大会直播中</section>
+  <section class="action-rail" data-od-id="action-rail" data-od-label="右侧互动栏">
+    <div class="rail-avatar" data-od-id="author-avatar" data-od-label="作者头像">
+      <span class="face">岚</span>
+      <button class="follow" data-od-id="follow-button" data-od-label="关注按钮">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+    <button class="rail-item liked" data-od-id="like-action" data-od-label="点赞">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg>
+      <span>12.8w</span>
+    </button>
+    <button class="rail-item" data-od-id="comment-action" data-od-label="评论">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1L3.5 20.5l1-4.4A8.5 8.5 0 1 1 21 12z"/></svg>
+      <span>3402</span>
+    </button>
+    <button class="rail-item" data-od-id="favorite-action" data-od-label="收藏">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+      <span>9560</span>
+    </button>
+    <button class="rail-item" data-od-id="share-action" data-od-label="分享">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 5.5L20.5 12 13 18.5v-4C7.5 14.5 4.5 16.5 3 20c0-7 3.5-10.5 10-11v-3.5z"/></svg>
+      <span>2.1w</span>
+    </button>
+    <div class="rail-disc" data-od-id="music-disc" data-od-label="音乐唱片"></div>
+  </section>
+  <section class="caption-zone" data-od-id="caption-zone" data-od-label="作者与文案">
+    <div class="author-line">@山野食帐</div>
+    <p class="caption-text">深秋第一锅栗子炖鸡，柴火灶慢煨四十分钟，出锅前撒一把青蒜末 <b>#山居日常 #秋日食谱</b></p>
+    <div class="music-line" data-od-id="music-marquee" data-od-label="背景音乐跑马灯">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18.5V6l11-2v12.5"/><circle cx="6.5" cy="18.5" r="2.5"/><circle cx="17.5" cy="16.5" r="2.5"/></svg>
+      <span class="music-track"><span>灶台与晚风 · 原声制作人阿筠 — 灶台与晚风 · 原声制作人阿筠 — </span></span>
+    </div>
+  </section>
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="底部标签栏">
+    <button class="tab active" data-od-id="tab-home" data-od-label="首页标签">首页</button>
+    <button class="tab" data-od-id="tab-friends" data-od-label="朋友标签">朋友</button>
+    <button class="tab-plus" data-od-id="tab-create" data-od-label="拍摄发布按钮">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="tab" data-od-id="tab-inbox" data-od-label="消息标签">消息</button>
+    <button class="tab" data-od-id="tab-profile" data-od-label="我标签">我</button>
+  </nav>
+</div>
+</body>
+</html>

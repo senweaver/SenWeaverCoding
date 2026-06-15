@@ -1,0 +1,105 @@
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/government/tokens.css
+ *
+ * Token contract for Civic — an accessibility-first system for public
+ * services: government portals, benefit applications, tax forms, and civic
+ * information. Civic prioritizes clarity and access over brand expression.
+ * Near-black ink on white, a single functional blue for links and actions,
+ * a high-visibility yellow focus highlight, and almost no rounding. It must
+ * work for every citizen, on every device, at every ability level.
+ *
+ * Paste the :root block verbatim into the artifact's first <style>.
+ * ─────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── Surface ──────────────────────────────────────────────────── */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-warm: #f3f2f1;
+
+  /* ─── Foreground ramp ──────────────────────────────────────────── */
+  --fg: #0b0c0c;
+  --fg-2: #2b2b2b;
+  --muted: #505a5f;
+  --meta: #6f777b;
+
+  /* ─── Border ───────────────────────────────────────────────────── */
+  --border: #b1b4b6;
+  --border-soft: #d8dad9;
+
+  /* ─── Accent — functional blue (links + primary) ───────────────── */
+  --accent: #1d70b8;
+  --accent-on: #ffffff;
+  --accent-hover: #155799;
+  --accent-active: #0c4a82;
+
+  /* ─── Semantic ─────────────────────────────────────────────────── */
+  --success: #00703c;
+  --warn: #f47738;
+  --danger: #d4351c;
+
+  /* ─── Typography — fonts ───────────────────────────────────────── */
+  --font-display:
+    "GDS Transport", "Inter", -apple-system, system-ui, Arial,
+    "Helvetica Neue", sans-serif;
+  --font-body:
+    "GDS Transport", "Inter", -apple-system, system-ui, Arial,
+    "Helvetica Neue", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ─── Typography — type scale (px) ─────────────────────────────── */
+  --text-xs: 14px;
+  --text-sm: 16px;
+  --text-base: 19px;
+  --text-lg: 24px;
+  --text-xl: 27px;
+  --text-2xl: 36px;
+  --text-3xl: 48px;
+  --text-4xl: 64px;
+
+  /* ─── Typography — leading & tracking ──────────────────────────── */
+  --leading-body: 1.47;
+  --leading-tight: 1.09;
+  --tracking-display: 0;
+
+  /* ─── Spacing — base scale (5px-rooted gov grid) ───────────────── */
+  --space-1: 5px;
+  --space-2: 10px;
+  --space-3: 15px;
+  --space-4: 20px;
+  --space-5: 25px;
+  --space-6: 30px;
+  --space-8: 40px;
+  --space-12: 60px;
+
+  /* ─── Section rhythm ───────────────────────────────────────────── */
+  --section-y-desktop: 60px;
+  --section-y-tablet: 40px;
+  --section-y-phone: 30px;
+
+  /* ─── Radius — minimal, functional ─────────────────────────────── */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 4px;
+  --radius-pill: 9999px;
+
+  /* ─── Elevation — flat; structure comes from borders ───────────── */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: rgba(11, 12, 12, 0.12) 0 2px 6px 0;
+
+  /* ─── Focus ring — high-visibility yellow + black underline ────── */
+  --focus-ring: 0 -2px #ffdd00, 0 4px var(--fg);
+
+  /* ─── Motion — minimal ─────────────────────────────────────────── */
+  --motion-fast: 0ms;
+  --motion-base: 120ms;
+  --ease-standard: linear;
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --container-max: 960px;
+  --container-gutter-desktop: 30px;
+  --container-gutter-tablet: 20px;
+  --container-gutter-phone: 15px;
+}

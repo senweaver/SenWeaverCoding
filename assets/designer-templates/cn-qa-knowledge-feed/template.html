@@ -1,0 +1,525 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>知澜 · 有问题，就有回答</title>
+<style>
+:root {
+  --od-accent: #0a6cff;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #0556d4;
+  --brand-soft: #e8f1ff;
+  --bg: #f6f6f6;
+  --surface: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #8590a6;
+  --faint: #b9c2d3;
+  --border: #ebebeb;
+  --rank-1: #ff4d2e;
+  --rank-2: #ff7a26;
+  --rank-3: #ffb000;
+  --verify: #0aa674;
+  --cta-a: #d9e9ff;
+  --cta-b: #f0f7ff;
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-18: calc(18px * var(--od-scale));
+  --fs-20: calc(20px * var(--od-scale));
+  --pad-card: calc(20px * var(--od-density));
+  --gap-xs: calc(6px * var(--od-density));
+  --gap-sm: calc(10px * var(--od-density));
+  --gap-md: calc(16px * var(--od-density));
+  --gap-lg: calc(24px * var(--od-density));
+  --dur-fast: calc(0.15s * var(--od-motion));
+  --radius: 4px;
+  --radius-lg: 8px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-title: Georgia, "Songti SC", "SimSun", "PingFang SC", serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg: #121417;
+  --surface: #1c1f24;
+  --fg: #e4e6e9;
+  --muted: #80889a;
+  --faint: #4d5566;
+  --border: #2b2f36;
+  --brand-soft: #16273f;
+  --cta-a: #1a2c47;
+  --cta-b: #161e2c;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-14);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+.topnav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(18, 18, 18, 0.05);
+}
+.topnav-inner {
+  max-width: 1200px;
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-lg);
+  padding: calc(10px * var(--od-density)) var(--gap-md);
+}
+.logo {
+  font-size: calc(26px * var(--od-scale));
+  font-weight: 800;
+  color: var(--brand);
+  letter-spacing: -0.02em;
+  font-family: var(--font-title);
+}
+.topnav nav { display: flex; gap: var(--gap-lg); }
+.topnav nav a {
+  font-size: var(--fs-15);
+  color: var(--muted);
+  transition: color var(--dur-fast) ease;
+}
+.topnav nav a:hover { color: var(--fg); }
+.topnav nav a.active { color: var(--fg); font-weight: 600; }
+.searchbox {
+  flex: 1;
+  max-width: 420px;
+  display: flex;
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  transition: border-color var(--dur-fast) ease;
+}
+.searchbox:focus-within { border-color: var(--brand); background: var(--surface); }
+.searchbox input {
+  flex: 1;
+  border: 0;
+  background: none;
+  padding: calc(8px * var(--od-density)) calc(16px * var(--od-density));
+  font: inherit;
+  font-size: var(--fs-14);
+  color: var(--fg);
+  outline: none;
+}
+.searchbox input::placeholder { color: var(--faint); }
+.searchbox .go {
+  padding: 0 calc(14px * var(--od-density));
+  color: var(--muted);
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+}
+.ask-btn {
+  background: var(--brand);
+  color: var(--surface);
+  font-size: var(--fs-14);
+  font-weight: 500;
+  padding: calc(7px * var(--od-density)) calc(18px * var(--od-density));
+  border-radius: 999px;
+  transition: background var(--dur-fast) ease;
+}
+.ask-btn:hover { background: var(--brand-deep); }
+.me {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--cta-a), var(--brand));
+  border: 1px solid var(--border);
+}
+.page {
+  max-width: 1200px;
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--gap-md);
+  padding: var(--gap-md);
+  align-items: start;
+}
+@media (max-width: 960px) { .page { grid-template-columns: 1fr; } }
+.feed { display: flex; flex-direction: column; gap: var(--gap-sm); }
+.acard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--pad-card);
+}
+.acard .q-title {
+  margin: 0 0 var(--gap-sm);
+  font-family: var(--font-title);
+  font-size: var(--fs-18);
+  font-weight: 700;
+  line-height: 1.45;
+}
+.acard .q-title a:hover { color: var(--brand); }
+.author {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  margin-bottom: var(--gap-sm);
+}
+.author .avatar { width: 36px; height: 36px; border-radius: var(--radius); }
+.acard:nth-child(1) .author .avatar { background: linear-gradient(135deg, var(--rank-3), var(--rank-2)); }
+.acard:nth-child(2) .author .avatar { background: linear-gradient(135deg, var(--cta-a), var(--brand)); }
+.acard:nth-child(3) .author .avatar { background: linear-gradient(135deg, var(--verify), var(--cta-a)); }
+.author .who { line-height: 1.35; }
+.author .name { font-size: var(--fs-14); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.badge-verify {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--fs-12);
+  color: var(--verify);
+  font-weight: 500;
+}
+.author .bio { font-size: var(--fs-13); color: var(--muted); }
+.excerpt {
+  margin: 0;
+  font-size: var(--fs-15);
+  color: var(--fg);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: var(--gap-xs);
+  font-size: var(--fs-14);
+  color: var(--brand);
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  margin-top: var(--gap-md);
+}
+.vote {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: var(--fs-14);
+  font-weight: 600;
+  padding: calc(6px * var(--od-density)) calc(14px * var(--od-density));
+  border-radius: var(--radius);
+  transition: background var(--dur-fast) ease;
+}
+.vote:hover { background: var(--cta-a); }
+.vote.down { padding-inline: calc(10px * var(--od-density)); }
+.act {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-14);
+  color: var(--muted);
+  transition: color var(--dur-fast) ease;
+}
+.act:hover { color: var(--fg); }
+.sidebar { display: flex; flex-direction: column; gap: var(--gap-md); }
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--gap-md) var(--pad-card);
+}
+.panel h2 {
+  margin: 0 0 var(--gap-sm);
+  font-size: var(--fs-15);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.panel h2 svg { color: var(--rank-1); }
+.hot-list { list-style: none; margin: 0; padding: 0; }
+.hot-list li {
+  display: flex;
+  gap: var(--gap-sm);
+  padding: calc(9px * var(--od-density)) 0;
+  border-bottom: 1px solid var(--border);
+  align-items: baseline;
+}
+.hot-list li:last-child { border-bottom: 0; }
+.hot-list .rank {
+  font-family: var(--font-num);
+  font-size: var(--fs-15);
+  font-weight: 700;
+  color: var(--faint);
+  min-width: 18px;
+}
+.hot-list li:nth-child(1) .rank { color: var(--rank-1); }
+.hot-list li:nth-child(2) .rank { color: var(--rank-2); }
+.hot-list li:nth-child(3) .rank { color: var(--rank-3); }
+.hot-list .h-title {
+  flex: 1;
+  font-size: var(--fs-14);
+  line-height: 1.45;
+}
+.hot-list .h-title:hover { color: var(--brand); }
+.hot-list .heat {
+  font-size: var(--fs-12);
+  color: var(--muted);
+  font-family: var(--font-num);
+  white-space: nowrap;
+}
+.cta-card {
+  background: linear-gradient(135deg, var(--cta-a), var(--cta-b));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--pad-card);
+}
+.cta-card h3 { margin: 0 0 4px; font-size: var(--fs-15); font-weight: 700; }
+.cta-card p { margin: 0 0 var(--gap-sm); font-size: var(--fs-13); color: var(--muted); }
+.cta-card .go-create {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--brand);
+  color: var(--surface);
+  font-size: var(--fs-13);
+  font-weight: 500;
+  padding: calc(7px * var(--od-density)) calc(16px * var(--od-density));
+  border-radius: 999px;
+  transition: background var(--dur-fast) ease;
+}
+.cta-card .go-create:hover { background: var(--brand-deep); }
+.foot {
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: var(--gap-md);
+  font-size: var(--fs-12);
+  color: var(--faint);
+  display: flex;
+  gap: var(--gap-md);
+}
+</style>
+</head>
+<body>
+<header class="topnav" data-od-id="top-nav" data-od-label="顶部导航">
+  <div class="topnav-inner">
+    <span class="logo">知澜</span>
+    <nav data-od-id="nav-links" data-od-label="主导航链接">
+      <a href="#" class="active">首页</a>
+      <a href="#">发现</a>
+      <a href="#">等你来答</a>
+      <a href="#">盐选专栏</a>
+    </nav>
+    <div class="searchbox" data-od-id="search-box" data-od-label="搜索框">
+      <input type="text" placeholder="新一线城市的通勤幸福感排名" />
+      <span class="go">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14" stroke-linecap="round"/></svg>
+      </span>
+    </div>
+    <button class="ask-btn" data-od-id="ask-cta" data-od-label="提问按钮">提问</button>
+    <span class="me" data-od-id="user-avatar" data-od-label="用户头像"></span>
+  </div>
+</header>
+<div class="page">
+  <main class="feed" data-od-id="answer-feed" data-od-label="回答信息流">
+    <section class="acard" data-od-id="answer-card-1" data-od-label="回答卡片-长跑入门">
+      <h2 class="q-title"><a href="#">成年人零基础开始练长跑，最容易被忽视的准备是什么？</a></h2>
+      <div class="author">
+        <span class="avatar"></span>
+        <div class="who">
+          <div class="name">
+            林晚舟
+            <span class="badge-verify">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z" stroke-linejoin="round"/><path d="m8.5 12 2.4 2.4 4.6-4.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              运动康复师 认证
+            </span>
+          </div>
+          <div class="bio">十年田径队随队康复经验</div>
+        </div>
+      </div>
+      <p class="excerpt">绝大多数人把注意力放在跑鞋和配速上，但前六周真正决定你能否坚持下去的，是足踝和髋部的基础力量。我带过的学员里，因为膝盖不适而放弃的，九成在开始前连单腿站立三十秒都不稳。建议先用两周时间……</p>
+      <a class="fold" href="#" data-od-id="read-more-1" data-od-label="阅读全文-1">
+        阅读全文
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m7 10 5 5 5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <div class="actions" data-od-id="answer-actions-1" data-od-label="操作行-1">
+        <button class="vote">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 14.5 12 7l7 7.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          赞同 2.4 万
+        </button>
+        <button class="vote down">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 9.5 7 7.5 7-7.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9l-4 3.5v-3.5h-.5A2.5 2.5 0 0 1 2 14.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          1865 条评论
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h12v17l-6-4-6 4z" stroke-linejoin="round"/></svg>
+          收藏
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="12" r="2.4"/><circle cx="17" cy="6" r="2.4"/><circle cx="17" cy="18" r="2.4"/><path d="m8.2 10.9 6.6-3.8M8.2 13.1l6.6 3.8"/></svg>
+          分享
+        </button>
+      </div>
+    </section>
+    <section class="acard" data-od-id="answer-card-2" data-od-label="回答卡片-旧城改造">
+      <h2 class="q-title"><a href="#">为什么很多老城区改造后反而失去了烟火气？</a></h2>
+      <div class="author">
+        <span class="avatar"></span>
+        <div class="who">
+          <div class="name">
+            陈砚青
+            <span class="badge-verify">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z" stroke-linejoin="round"/><path d="m8.5 12 2.4 2.4 4.6-4.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              城市规划话题 优秀答主
+            </span>
+          </div>
+          <div class="bio">参与过三个历史街区更新项目</div>
+        </div>
+      </div>
+      <p class="excerpt">问题往往不在"改"，而在"齐"。统一的招牌、统一的立面、统一的业态准入，把原本由几十年自发生长出来的差异一次性抹平了。烟火气的本质是低租金容纳的多样性：修鞋摊、旧书店、深夜面馆，它们对租金极其敏感……</p>
+      <a class="fold" href="#" data-od-id="read-more-2" data-od-label="阅读全文-2">
+        阅读全文
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m7 10 5 5 5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <div class="actions" data-od-id="answer-actions-2" data-od-label="操作行-2">
+        <button class="vote">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 14.5 12 7l7 7.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          赞同 1.8 万
+        </button>
+        <button class="vote down">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 9.5 7 7.5 7-7.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9l-4 3.5v-3.5h-.5A2.5 2.5 0 0 1 2 14.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          942 条评论
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h12v17l-6-4-6 4z" stroke-linejoin="round"/></svg>
+          收藏
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="12" r="2.4"/><circle cx="17" cy="6" r="2.4"/><circle cx="17" cy="18" r="2.4"/><path d="m8.2 10.9 6.6-3.8M8.2 13.1l6.6 3.8"/></svg>
+          分享
+        </button>
+      </div>
+    </section>
+    <section class="acard" data-od-id="answer-card-3" data-od-label="回答卡片-家庭存档">
+      <h2 class="q-title"><a href="#">家里几十年的老照片和录像带，怎样数字化保存最稳妥？</a></h2>
+      <div class="author">
+        <span class="avatar"></span>
+        <div class="who">
+          <div class="name">
+            白杨工作室
+            <span class="badge-verify">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z" stroke-linejoin="round"/><path d="m8.5 12 2.4 2.4 4.6-4.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              影像修复机构 认证
+            </span>
+          </div>
+          <div class="bio">已修复家庭影像素材 12000+ 小时</div>
+        </div>
+      </div>
+      <p class="excerpt">先说结论：照片优先平板扫描而不是翻拍，录像带要赶在磁粉脱落前转录，这件事每拖一年风险都在累积。家用方案里，600dpi 扫描对 5 寸照片已经足够，关键是扫描后立刻做三份冷备：本地硬盘、异地亲属……</p>
+      <a class="fold" href="#" data-od-id="read-more-3" data-od-label="阅读全文-3">
+        阅读全文
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m7 10 5 5 5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <div class="actions" data-od-id="answer-actions-3" data-od-label="操作行-3">
+        <button class="vote">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 14.5 12 7l7 7.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          赞同 9637
+        </button>
+        <button class="vote down">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 9.5 7 7.5 7-7.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9l-4 3.5v-3.5h-.5A2.5 2.5 0 0 1 2 14.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          318 条评论
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h12v17l-6-4-6 4z" stroke-linejoin="round"/></svg>
+          收藏
+        </button>
+        <button class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="12" r="2.4"/><circle cx="17" cy="6" r="2.4"/><circle cx="17" cy="18" r="2.4"/><path d="m8.2 10.9 6.6-3.8M8.2 13.1l6.6 3.8"/></svg>
+          分享
+        </button>
+      </div>
+    </section>
+  </main>
+  <aside class="sidebar">
+    <section class="panel" data-od-id="hot-ranking" data-od-label="热榜面板">
+      <h2>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3c1 3-1.5 4.5-1.5 7a3.5 3.5 0 0 0 7 .3C19.5 13 21 14.8 21 17a8 8 0 0 1-16 0c0-3 1.8-4.6 3-7 .8-1.6 1-3.4 4-7z" stroke-linejoin="round"/></svg>
+        全站热榜
+      </h2>
+      <ol class="hot-list">
+        <li data-od-id="hot-item-1" data-od-label="热榜第1条">
+          <span class="rank">1</span>
+          <a class="h-title" href="#">多地试点四天半工作制，哪些行业最先受益？</a>
+          <span class="heat">1842 万热度</span>
+        </li>
+        <li data-od-id="hot-item-2" data-od-label="热榜第2条">
+          <span class="rank">2</span>
+          <a class="h-title" href="#">国产大飞机完成首条跨洋航线试飞意味着什么？</a>
+          <span class="heat">1367 万热度</span>
+        </li>
+        <li data-od-id="hot-item-3" data-od-label="热榜第3条">
+          <span class="rank">3</span>
+          <a class="h-title" href="#">年轻人开始流行"周末县城游"，体验如何？</a>
+          <span class="heat">986 万热度</span>
+        </li>
+        <li data-od-id="hot-item-4" data-od-label="热榜第4条">
+          <span class="rank">4</span>
+          <a class="h-title" href="#">如何看待高校逐步取消大学英语四六级与学位挂钩？</a>
+          <span class="heat">751 万热度</span>
+        </li>
+        <li data-od-id="hot-item-5" data-od-label="热榜第5条">
+          <span class="rank">5</span>
+          <a class="h-title" href="#">家用机器人价格跌破五千元，现在入手值不值？</a>
+          <span class="heat">623 万热度</span>
+        </li>
+        <li data-od-id="hot-item-6" data-od-label="热榜第6条">
+          <span class="rank">6</span>
+          <a class="h-title" href="#">考研报名人数连续两年下降，背后原因是什么？</a>
+          <span class="heat">488 万热度</span>
+        </li>
+      </ol>
+    </section>
+    <section class="cta-card" data-od-id="creator-cta" data-od-label="创作者招募卡">
+      <h3>开通创作者中心</h3>
+      <p>沉淀你的专业见解，回答被推荐后可获得流量加成与盐粒奖励。</p>
+      <button class="go-create" data-od-id="creator-cta-button" data-od-label="去创作按钮">
+        去创作
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </section>
+  </aside>
+</div>
+<footer class="foot" data-od-id="page-footer" data-od-label="页脚">
+  <span>知澜 © 2026</span>
+  <span>社区规范</span>
+  <span>侵权举报</span>
+  <span>联系我们</span>
+</footer>
+</body>
+</html>

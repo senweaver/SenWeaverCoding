@@ -1,0 +1,7 @@
+{
+  "id": "bi-fintech-trading",
+  "title": "BI Fintech Trading Screen",
+  "category": "Dashboard",
+  "tags": ["bi", "dashboard", "big-screen", "fintech", "trading", "markets"],
+  "summary": "1920x1080 markets terminal big screen with index ticker strip, candlestick hero chart, movers rank table, sector heat tiles and dense tabular numbers."
+}

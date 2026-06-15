@@ -1,0 +1,7 @@
+{
+  "id": "mobile-app",
+  "title": "Mobile App Prototype",
+  "category": "Mobile",
+  "tags": ["mobile", "app", "prototype", "ios"],
+  "summary": "Mobile app prototype with status bar, screens, and bottom navigation."
+}

@@ -1,0 +1,7 @@
+{
+  "id": "cn-microblog-feed",
+  "title": "热搜信息流 · Microblog Feed",
+  "category": "Mobile",
+  "tags": ["微博客", "热搜", "信息流", "社交", "microblog", "trending", "feed", "social", "mobile", "orange"],
+  "summary": "Mobile microblog timeline with a hot-search ranking card, rich feed posts featuring image grids and inset repost quotes, and a repost-comment-like action row following the design language of mainstream Chinese microblogging apps."
+}

@@ -1,0 +1,7 @@
+{
+  "id": "cn-messaging-app",
+  "title": "即时通讯会话 · Messaging App",
+  "category": "Mobile",
+  "tags": ["即时通讯", "聊天", "会话列表", "气泡", "messaging", "chat", "im", "bubbles", "mobile"],
+  "summary": "Calm neutral messaging screen stacking a pinned conversation list with unread badges above a chat detail strip of green-tinted outgoing and white incoming bubbles, voice message bar and icon input row in the lineage of mainstream Chinese IM apps."
+}

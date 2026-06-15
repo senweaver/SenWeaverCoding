@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>[REPLACE] AI 数据洞察</title>
+<style>
+:root {
+  --od-accent: #444CE7;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --bg: #fafbfc;
+  --surface: #ffffff;
+  --fg: #262626;
+  --muted: #65676c;
+  --hairline: #d9d9d9;
+  --soft: #f0f1f5;
+  --up: #389e6d;
+  --down: #d4380d;
+  --series-1: #444CE7;
+  --series-2: #E31B54;
+  --series-3: #EBC405;
+  --series-4: #0086C9;
+  --font-body: Inter, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: calc(13px * var(--od-scale));
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: calc(24px * var(--od-density)) calc(20px * var(--od-density)) calc(48px * var(--od-density));
+  display: flex;
+  flex-direction: column;
+  gap: calc(20px * var(--od-density));
+}
+.page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.page-head h1 { font-size: 18px; font-weight: 700; }
+.page-head .meta { font-size: 12px; color: var(--muted); }
+.card {
+  background: var(--surface);
+  border-radius: 4px;
+  box-shadow: rgba(45, 62, 80, 0.12) 0 1px 5px;
+  min-width: 0;
+}
+.answer-card { padding: calc(20px * var(--od-density)) calc(24px * var(--od-density)); }
+.answer-card .question {
+  font-size: 15px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.answer-card .question::before {
+  content: 'AI';
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: var(--od-accent);
+  border-radius: 4px;
+  padding: 3px 7px;
+}
+.answer-card .summary {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--fg);
+}
+.answer-card .summary b { font-weight: 700; }
+.answer-card .summary .hi { color: var(--od-accent); font-weight: 700; }
+.preview { margin-top: 16px; border: 1px solid var(--soft); border-radius: 4px; overflow: hidden; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--soft);
+  text-align: right;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 8px 12px;
+}
+thead th:first-child, tbody td:first-child { text-align: left; }
+tbody td {
+  text-align: right;
+  padding: 10px 12px;
+  border-top: 1px solid var(--soft);
+  line-height: 24px;
+}
+.preview-caption {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-top: 1px solid var(--soft);
+  display: flex;
+  justify-content: space-between;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 10px; }
+.chips .chips-label { font-size: 12px; color: var(--muted); align-self: center; }
+.chip {
+  border: 1px solid color-mix(in srgb, var(--od-accent) 35%, transparent);
+  color: var(--od-accent);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover { background: color-mix(in srgb, var(--od-accent) 8%, var(--surface)); }
+.section-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.pinned {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: calc(8px * var(--od-density));
+}
+.pin-card { grid-column: span 3; padding: 16px 16px 12px; display: flex; flex-direction: column; }
+.pin-card.wide { grid-column: span 6; }
+.pin-card:hover { outline: 1px solid var(--od-accent); }
+.pin-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.pin-title { font-size: 14px; font-weight: 700; }
+.pin-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.pin-card svg { width: 100%; height: auto; display: block; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.legend .item { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); background: var(--soft); border-radius: 999px; padding: 2px 10px; }
+.legend .swatch { width: 8px; height: 8px; border-radius: 50%; }
+.tip {
+  position: absolute;
+  background: #262626;
+  color: #fff;
+  border: 1px solid #434343;
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 6px 10px;
+  pointer-events: none;
+}
+.tip .k { color: #bfbfbf; margin-right: 8px; }
+.chart-wrap { position: relative; }
+@media (max-width: 900px) {
+  .pin-card { grid-column: span 6; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .card { animation: rise calc(0.3s * var(--od-motion)) ease both; }
+  .card:nth-child(3) { animation-delay: calc(0.06s * var(--od-motion)); }
+  .card:nth-child(4) { animation-delay: calc(0.12s * var(--od-motion)); }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+}
+</style>
+</head>
+<body>
+<div class="page" data-od-id="page" data-od-label="洞察页">
+  <header class="page-head" data-od-id="page-head" data-od-label="页头">
+    <h1>[REPLACE] 经营数据洞察</h1>
+    <span class="meta">数据截至 2026-06-12 09:41 · 数据源 data.json</span>
+  </header>
+
+  <section class="card answer-card" data-od-id="answer-card" data-od-label="AI 答案卡">
+    <div class="question">[REPLACE] 最近一个季度哪个产品线的收入增长最快？</div>
+    <p class="summary">
+      最近一个季度增长最快的产品线是 <span class="hi">[REPLACE] 协作套件</span>：收入达到
+      <b class="num">¥4.28M</b>，环比增长 <b class="num">+23.6%</b>，显著高于整体增速
+      <b class="num">+9.4%</b>。增长主要来自企业版席位扩容（贡献约 <b class="num">68%</b>
+      的增量）；数据分析线保持平稳（<b class="num">+6.1%</b>），而传统授权线收入下滑
+      <b class="num">-3.8%</b>，建议关注其续约率变化。
+    </p>
+    <div class="preview" data-od-id="answer-preview" data-od-label="数据预览">
+      <table>
+        <thead>
+          <tr><th>产品线</th><th>本季收入</th><th>上季收入</th><th>环比</th><th>增量贡献</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>[REPLACE] 协作套件</td><td class="num">¥4,280,000</td><td class="num">¥3,462,000</td><td class="num" style="color: var(--up);">+23.6%</td><td class="num">68%</td></tr>
+          <tr><td>[REPLACE] 数据分析</td><td class="num">¥2,914,000</td><td class="num">¥2,746,000</td><td class="num" style="color: var(--up);">+6.1%</td><td class="num">14%</td></tr>
+          <tr><td>[REPLACE] 自动化平台</td><td class="num">¥1,866,000</td><td class="num">¥1,702,000</td><td class="num" style="color: var(--up);">+9.6%</td><td class="num">13%</td></tr>
+          <tr><td>[REPLACE] 传统授权</td><td class="num">¥1,204,000</td><td class="num">¥1,252,000</td><td class="num" style="color: var(--down);">-3.8%</td><td class="num">—</td></tr>
+        </tbody>
+      </table>
+      <div class="preview-caption"><span>展示前 4 行（共 9 个产品线）</span><span>查询耗时 412ms</span></div>
+    </div>
+  </section>
+
+  <section class="chips" data-od-id="recommended" data-od-label="推荐问题">
+    <span class="chips-label">继续追问：</span>
+    <button class="chip" type="button">[REPLACE] 协作套件的增长来自哪些行业客户？</button>
+    <button class="chip" type="button">[REPLACE] 传统授权线的续约率走势如何？</button>
+    <button class="chip" type="button">[REPLACE] 对比各产品线的获客成本</button>
+  </section>
+
+  <h2 class="section-title" data-od-id="pinned-title">已固定的图表</h2>
+  <section class="pinned" data-od-id="pinned-grid" data-od-label="固定图表网格">
+    <article class="card pin-card wide" data-od-id="pin-revenue-trend" data-od-label="收入走势">
+      <div class="pin-head">
+        <span class="pin-title">各产品线收入走势</span>
+        <span class="pin-meta">最近刷新 5 分钟前</span>
+      </div>
+      <div class="chart-wrap">
+        <svg viewBox="0 0 1020 260" preserveAspectRatio="xMidYMid meet" role="img" aria-label="各产品线收入走势折线图">
+          <g stroke="var(--soft)" stroke-width="1">
+            <line x1="56" y1="30" x2="1000" y2="30"/>
+            <line x1="56" y1="90" x2="1000" y2="90"/>
+            <line x1="56" y1="150" x2="1000" y2="150"/>
+            <line x1="56" y1="210" x2="1000" y2="210"/>
+          </g>
+          <g fill="var(--muted)" font-size="11">
+            <text x="50" y="34" text-anchor="end">5M</text>
+            <text x="50" y="94" text-anchor="end">3M</text>
+            <text x="50" y="154" text-anchor="end">1M</text>
+            <text x="56" y="234">1月</text>
+            <text x="370" y="234">3月</text>
+            <text x="684" y="234">5月</text>
+            <text x="976" y="234">6月</text>
+          </g>
+          <path d="M56 168 L213 158 L370 144 L527 122 L684 96 L841 72 L1000 48" fill="none" stroke="var(--series-1)" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M56 150 L213 148 L370 142 L527 138 L684 132 L841 126 L1000 120" fill="none" stroke="var(--series-4)" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M56 176 L213 172 L370 170 L527 164 L684 160 L841 154 L1000 148" fill="none" stroke="var(--series-3)" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M56 182 L213 184 L370 186 L527 188 L684 192 L841 194 L1000 198" fill="none" stroke="var(--series-2)" stroke-width="2" stroke-dasharray="5 4"/>
+          <circle cx="684" cy="96" r="4" fill="#fff" stroke="var(--series-1)" stroke-width="2.5"/>
+        </svg>
+        <div class="tip" style="left: 62%; top: 14%;"><span class="k">协作套件</span><span class="num">¥3.46M</span></div>
+      </div>
+      <div class="legend">
+        <span class="item"><span class="swatch" style="background: var(--series-1);"></span>协作套件</span>
+        <span class="item"><span class="swatch" style="background: var(--series-4);"></span>数据分析</span>
+        <span class="item"><span class="swatch" style="background: var(--series-3);"></span>自动化平台</span>
+        <span class="item"><span class="swatch" style="background: var(--series-2);"></span>传统授权</span>
+      </div>
+    </article>
+
+    <article class="card pin-card" data-od-id="pin-grouped-bar" data-od-label="季度对比">
+      <div class="pin-head">
+        <span class="pin-title">季度收入对比</span>
+        <span class="pin-meta">刷新 12 分钟前</span>
+      </div>
+      <svg viewBox="0 0 480 240" preserveAspectRatio="xMidYMid meet" role="img" aria-label="季度收入分组柱状图">
+        <g stroke="var(--soft)" stroke-width="1">
+          <line x1="40" y1="30" x2="464" y2="30"/>
+          <line x1="40" y1="90" x2="464" y2="90"/>
+          <line x1="40" y1="150" x2="464" y2="150"/>
+          <line x1="40" y1="200" x2="464" y2="200"/>
+        </g>
+        <g fill="var(--muted)" font-size="11">
+          <text x="34" y="34" text-anchor="end">5M</text>
+          <text x="34" y="154" text-anchor="end">1M</text>
+          <text x="84" y="222" text-anchor="middle">协作</text>
+          <text x="196" y="222" text-anchor="middle">分析</text>
+          <text x="308" y="222" text-anchor="middle">自动化</text>
+          <text x="420" y="222" text-anchor="middle">授权</text>
+        </g>
+        <g>
+          <rect x="60" y="106" width="22" height="94" rx="3" fill="var(--series-1)" opacity="0.45"/>
+          <rect x="86" y="78" width="22" height="122" rx="3" fill="var(--series-1)"/>
+          <rect x="172" y="124" width="22" height="76" rx="3" fill="var(--series-4)" opacity="0.45"/>
+          <rect x="198" y="118" width="22" height="82" rx="3" fill="var(--series-4)"/>
+          <rect x="284" y="152" width="22" height="48" rx="3" fill="var(--series-3)" opacity="0.45"/>
+          <rect x="310" y="146" width="22" height="54" rx="3" fill="var(--series-3)"/>
+          <rect x="396" y="164" width="22" height="36" rx="3" fill="var(--series-2)" opacity="0.45"/>
+          <rect x="422" y="168" width="22" height="32" rx="3" fill="var(--series-2)"/>
+        </g>
+      </svg>
+      <div class="legend">
+        <span class="item"><span class="swatch" style="background: var(--series-1); opacity: 0.45;"></span>上季</span>
+        <span class="item"><span class="swatch" style="background: var(--series-1);"></span>本季</span>
+      </div>
+    </article>
+
+    <article class="card pin-card" data-od-id="pin-share" data-od-label="收入占比">
+      <div class="pin-head">
+        <span class="pin-title">本季收入构成</span>
+        <span class="pin-meta">刷新 12 分钟前</span>
+      </div>
+      <svg viewBox="0 0 480 240" preserveAspectRatio="xMidYMid meet" role="img" aria-label="本季收入构成环形图">
+        <g transform="translate(150,120)">
+          <circle r="68" fill="none" stroke="var(--soft)" stroke-width="26"/>
+          <circle r="68" fill="none" stroke="var(--series-1)" stroke-dasharray="178 427" stroke-width="26" transform="rotate(-90)"/>
+          <circle r="68" fill="none" stroke="var(--series-4)" stroke-dasharray="120 427" stroke-dashoffset="-178" stroke-width="26" transform="rotate(-90)"/>
+          <circle r="68" fill="none" stroke="var(--series-3)" stroke-dasharray="77 427" stroke-dashoffset="-298" stroke-width="26" transform="rotate(-90)"/>
+          <circle r="68" fill="none" stroke="var(--series-2)" stroke-dasharray="52 427" stroke-dashoffset="-375" stroke-width="26" transform="rotate(-90)"/>
+          <text y="-2" text-anchor="middle" font-size="22" font-weight="700" fill="var(--fg)" class="num">¥10.3M</text>
+          <text y="18" text-anchor="middle" font-size="11" fill="var(--muted)">本季总收入</text>
+        </g>
+        <g font-size="12" fill="var(--fg)">
+          <circle cx="312" cy="62" r="5" fill="var(--series-1)"/><text x="326" y="66">协作套件 41.7%</text>
+          <circle cx="312" cy="100" r="5" fill="var(--series-4)"/><text x="326" y="104">数据分析 28.3%</text>
+          <circle cx="312" cy="138" r="5" fill="var(--series-3)"/><text x="326" y="142">自动化 18.2%</text>
+          <circle cx="312" cy="176" r="5" fill="var(--series-2)"/><text x="326" y="180">授权 11.8%</text>
+        </g>
+      </svg>
+    </article>
+  </section>
+</div>
+
+<script>
+(function () {
+  var chips = document.querySelectorAll('.chip');
+  for (var i = 0; i < chips.length; i++) {
+    chips[i].addEventListener('click', function () {
+      this.style.opacity = '0.6';
+    });
+  }
+})();
+</script>
+</body>
+</html>

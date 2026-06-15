@@ -1,0 +1,422 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hearthaway — Stays</title>
+<style>
+:root {
+  --od-accent: #ff5a5f;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --bg-page: #efece8;
+  --bg-app: #ffffff;
+  --fg: #222222;
+  --fg-muted: #717171;
+  --hairline: #ebebeb;
+  --chip-active: #222222;
+  --on-dark: #ffffff;
+  --star: #222222;
+  --shadow-search: 0 3px 12px rgba(34, 34, 34, 0.12);
+  --shadow-card: 0 1px 4px rgba(34, 34, 34, 0.08);
+  --photo-1a: #cfe0d8;
+  --photo-1b: #7da08c;
+  --photo-1c: #3f5c4d;
+  --photo-2a: #f0ddc8;
+  --photo-2b: #cf9a62;
+  --photo-2c: #7a5230;
+  --photo-3a: #d4e2ec;
+  --photo-3b: #88a8bd;
+  --photo-3c: #45617a;
+  --fs-search: calc(14px * var(--od-scale));
+  --fs-title: calc(15px * var(--od-scale));
+  --fs-body: calc(14px * var(--od-scale));
+  --fs-meta: calc(13px * var(--od-scale));
+  --fs-chip: calc(11px * var(--od-scale));
+  --pad: calc(20px * var(--od-density));
+  --gap: calc(12px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+}
+html[data-od-mode="dark"] {
+  --bg-page: #0d0d0d;
+  --bg-app: #161616;
+  --fg: #f1f1f1;
+  --fg-muted: #9c9c9c;
+  --hairline: #2b2b2b;
+  --chip-active: #f1f1f1;
+  --on-dark: #161616;
+  --star: #f1f1f1;
+  --shadow-search: 0 3px 12px rgba(0, 0, 0, 0.55);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.phone {
+  max-width: 480px;
+  min-height: 100dvh;
+  margin-inline: auto;
+  background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: 0 0 0 1px var(--hairline), 0 24px 60px rgba(34, 34, 34, 0.1);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(4px * var(--od-density));
+  font-size: calc(12px * var(--od-scale));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .glyphs { display: flex; gap: 5px; align-items: center; }
+.search-wrap { padding: calc(8px * var(--od-density)) var(--pad) calc(4px * var(--od-density)); }
+.search-pill {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: calc(11px * var(--od-density)) calc(16px * var(--od-density));
+  border-radius: 999px;
+  background: var(--bg-app);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-search);
+  text-align: left;
+  transition: transform var(--dur) ease;
+}
+.search-pill:active { transform: scale(0.98); }
+.search-pill .q { flex: 1; }
+.search-pill .q b { display: block; font-size: var(--fs-search); font-weight: 600; }
+.search-pill .q span { font-size: calc(12px * var(--od-scale)); color: var(--fg-muted); }
+.search-filter {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.cats {
+  display: flex;
+  gap: calc(26px * var(--od-density));
+  padding: calc(14px * var(--od-density)) var(--pad) 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--hairline);
+}
+.cats::-webkit-scrollbar { display: none; }
+.cat {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: calc(10px * var(--od-density));
+  color: var(--fg-muted);
+  font-size: var(--fs-chip);
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+  transition: color var(--dur) ease;
+}
+.cat.active { color: var(--fg); border-bottom-color: var(--fg); }
+.cat:active { color: var(--fg); }
+.feed { flex: 1; overflow-y: auto; padding: calc(18px * var(--od-density)) var(--pad) calc(150px * var(--od-density)); display: flex; flex-direction: column; gap: calc(28px * var(--od-density)); }
+.listing { text-align: left; }
+.listing-media {
+  aspect-ratio: 20 / 19;
+  border-radius: 14px;
+  position: relative;
+  overflow: hidden;
+  margin-bottom: calc(10px * var(--od-density));
+  box-shadow: var(--shadow-card);
+}
+.lm-1 {
+  background:
+    radial-gradient(110% 60% at 70% 0%, var(--photo-1a) 0%, transparent 60%),
+    linear-gradient(165deg, var(--photo-1a) 0%, var(--photo-1b) 55%, var(--photo-1c) 100%);
+}
+.lm-1::after {
+  content: "";
+  position: absolute;
+  inset: 58% 12% 14%;
+  background: linear-gradient(180deg, var(--bg-app), var(--photo-1a));
+  border-radius: 8px 8px 2px 2px;
+  box-shadow: -28px 16px 0 -6px var(--photo-1c);
+  opacity: 0.92;
+}
+.lm-2 {
+  background:
+    radial-gradient(100% 55% at 30% 0%, var(--photo-2a) 0%, transparent 62%),
+    linear-gradient(150deg, var(--photo-2a) 0%, var(--photo-2b) 58%, var(--photo-2c) 100%);
+}
+.lm-2::after {
+  content: "";
+  position: absolute;
+  left: 16%;
+  right: 16%;
+  bottom: 0;
+  height: 34%;
+  background: linear-gradient(180deg, var(--photo-2c), transparent);
+  clip-path: polygon(0 100%, 18% 22%, 38% 70%, 58% 8%, 80% 58%, 100% 30%, 100% 100%);
+  opacity: 0.55;
+}
+.lm-3 {
+  background:
+    radial-gradient(120% 58% at 50% 0%, var(--photo-3a) 0%, transparent 64%),
+    linear-gradient(172deg, var(--photo-3a) 0%, var(--photo-3b) 52%, var(--photo-3c) 100%);
+}
+.lm-3::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 30%;
+  background: repeating-linear-gradient(90deg, var(--photo-3c) 0 3px, transparent 3px 26px), linear-gradient(180deg, transparent, var(--photo-3c));
+  opacity: 0.45;
+}
+.fav {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  color: var(--on-dark);
+  transition: transform var(--dur) ease;
+}
+.fav:active { transform: scale(0.8); }
+.fav.saved { color: var(--brand); }
+.fav svg { filter: drop-shadow(0 1px 2px rgba(34, 34, 34, 0.4)); }
+.badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: var(--bg-app);
+  color: var(--fg);
+  font-size: calc(12px * var(--od-scale));
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 999px;
+  box-shadow: var(--shadow-card);
+}
+.media-dots {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 5px;
+}
+.media-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--on-dark);
+  opacity: 0.55;
+}
+.media-dots i.on { opacity: 1; }
+.listing-row { display: flex; justify-content: space-between; gap: var(--gap); }
+.listing-title { font-size: var(--fs-title); font-weight: 600; margin: 0; }
+.rating { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-meta); color: var(--star); flex: none; }
+.listing-sub { color: var(--fg-muted); font-size: var(--fs-meta); margin: 2px 0 0; }
+.listing-price { margin: 6px 0 0; font-size: var(--fs-title); }
+.listing-price b { font-weight: 600; }
+.listing-price span { font-weight: 400; }
+.map-pill {
+  position: fixed;
+  bottom: calc(92px * var(--od-density));
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--chip-active);
+  color: var(--on-dark);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(11px * var(--od-density)) calc(18px * var(--od-density));
+  border-radius: 999px;
+  font-size: calc(13px * var(--od-scale));
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(34, 34, 34, 0.3);
+  transition: transform var(--dur) ease;
+  z-index: 2;
+}
+.map-pill:active { transform: translateX(-50%) scale(0.95); }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin-inline: auto;
+  background: var(--bg-app);
+  border-top: 1px solid var(--hairline);
+  display: flex;
+  justify-content: space-around;
+  padding: calc(8px * var(--od-density)) var(--pad) calc(20px * var(--od-density));
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-muted);
+  font-size: calc(10px * var(--od-scale));
+  font-weight: 500;
+  transition: color var(--dur) ease, transform var(--dur) ease;
+}
+.tab:active { transform: scale(0.92); }
+.tab.active { color: var(--brand); }
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="App shell">
+  <header class="statusbar" data-od-id="status-bar" data-od-label="Status bar">
+    <span>9:41</span>
+    <span class="glyphs">
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 4.2a8.5 8.5 0 0 1 12 0M3.8 6.6a5.2 5.2 0 0 1 7.4 0M6.2 8.9a1.9 1.9 0 0 1 2.6 0" stroke-linecap="round"/></svg>
+      <svg width="22" height="11" viewBox="0 0 22 11" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1" y="1.5" width="17" height="8" rx="2.4"/><rect x="2.6" y="3.1" width="11" height="4.8" rx="1.2" fill="currentColor" stroke="none"/><path d="M19.6 4v3" stroke-linecap="round"/></svg>
+    </span>
+  </header>
+
+  <section class="search-wrap" data-od-id="search-area" data-od-label="Search bar">
+    <button class="search-pill" data-od-id="cta-search" data-od-label="Open search">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20.5 20.5-4.9-4.9" stroke-linecap="round"/></svg>
+      <span class="q"><b>Where to?</b><span>Anywhere · Any week · Add guests</span></span>
+      <span class="search-filter">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 17h16" stroke-linecap="round"/><circle cx="9" cy="7" r="2.4" fill="var(--bg-app)"/><circle cx="15" cy="17" r="2.4" fill="var(--bg-app)"/></svg>
+      </span>
+    </button>
+  </section>
+
+  <section class="cats" data-od-id="category-chips" data-od-label="Category chips">
+    <button class="cat active" data-od-id="cat-cabins" data-od-label="Cabins category">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3.5 11 8.5-7 8.5 7M6 9.4V20h12V9.4M9.8 20v-5.4h4.4V20" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Cabins
+    </button>
+    <button class="cat" data-od-id="cat-beach" data-od-label="Beachfront category">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 19.5c2.2-1.4 4.3-1.4 6.5 0 2.2-1.4 4.3-1.4 6.5 0 1.7-1.1 3.3-1.4 5-.7M12.5 15.5 9 6.8a5.6 5.6 0 0 1 7.3 3l-3.8 1.5M12.2 11l3.3 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Beachfront
+    </button>
+    <button class="cat" data-od-id="cat-views" data-od-label="Amazing views category">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3 18 5.5-9 4 6.4L15.8 12 21 18H3Z" stroke-linejoin="round"/><circle cx="17" cy="6.5" r="2"/></svg>
+      Views
+    </button>
+    <button class="cat" data-od-id="cat-tiny" data-od-label="Tiny homes category">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.5 12.5 12 7l6.5 5.5M7.5 11v8h9v-8M10.6 19v-4h2.8v4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Tiny homes
+    </button>
+    <button class="cat" data-od-id="cat-lake" data-od-label="Lakefront category">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 17.5c2.2-1.3 4.3-1.3 6.5 0 2.2-1.3 4.3-1.3 6.5 0 1.7-1 3.3-1.3 5-.6M12 13.5V4.5M8.5 8l3.5-3.5L15.5 8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Lakefront
+    </button>
+    <button class="cat" data-od-id="cat-farms" data-od-label="Farm stays category">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19.5V9.8L9.5 6l5.5 3.8v9.7M4 13h11M9.5 19.5V16M20 19.5v-6.3l-2.6-1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Farms
+    </button>
+  </section>
+
+  <main class="feed" data-od-id="listings-feed">
+    <section class="listing" data-od-id="listing-pinecrest" data-od-label="Pinecrest cabin listing">
+      <div class="listing-media lm-1">
+        <span class="badge">Guest favorite</span>
+        <button class="fav" data-od-id="fav-pinecrest" data-od-label="Save listing" aria-label="Save">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="rgba(34,34,34,0.45)" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10Z" stroke-linejoin="round"/></svg>
+        </button>
+        <span class="media-dots"><i class="on"></i><i></i><i></i><i></i><i></i></span>
+      </div>
+      <div class="listing-row">
+        <h3 class="listing-title">Pinecrest A-frame, Mendon Ridge</h3>
+        <span class="rating">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="m12 2 3 6.4 7 .9-5.1 4.8 1.3 6.9L12 17.7 5.8 21l1.3-6.9L2 9.3l7-.9L12 2Z"/></svg>
+          4.96
+        </span>
+      </div>
+      <p class="listing-sub">Forest cabin · 70 km away</p>
+      <p class="listing-sub">Mar 3 – 8</p>
+      <p class="listing-price"><b>$184</b> <span>night</span></p>
+    </section>
+
+    <section class="listing" data-od-id="listing-saltdune" data-od-label="Salt Dune cottage listing">
+      <div class="listing-media lm-2">
+        <button class="fav saved" data-od-id="fav-saltdune" data-od-label="Saved listing" aria-label="Remove from saved">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10Z" stroke-linejoin="round"/></svg>
+        </button>
+        <span class="media-dots"><i></i><i class="on"></i><i></i><i></i><i></i></span>
+      </div>
+      <div class="listing-row">
+        <h3 class="listing-title">Salt Dune cottage, Carraway Bay</h3>
+        <span class="rating">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="m12 2 3 6.4 7 .9-5.1 4.8 1.3 6.9L12 17.7 5.8 21l1.3-6.9L2 9.3l7-.9L12 2Z"/></svg>
+          4.88
+        </span>
+      </div>
+      <p class="listing-sub">Beachfront · 142 km away</p>
+      <p class="listing-sub">Apr 12 – 17</p>
+      <p class="listing-price"><b>$236</b> <span>night</span></p>
+    </section>
+
+    <section class="listing" data-od-id="listing-fjordlight" data-od-label="Fjordlight loft listing">
+      <div class="listing-media lm-3">
+        <button class="fav" data-od-id="fav-fjordlight" data-od-label="Save listing" aria-label="Save">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="rgba(34,34,34,0.45)" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10Z" stroke-linejoin="round"/></svg>
+        </button>
+        <span class="media-dots"><i class="on"></i><i></i><i></i></span>
+      </div>
+      <div class="listing-row">
+        <h3 class="listing-title">Fjordlight loft, Skellan Harbour</h3>
+        <span class="rating">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="m12 2 3 6.4 7 .9-5.1 4.8 1.3 6.9L12 17.7 5.8 21l1.3-6.9L2 9.3l7-.9L12 2Z"/></svg>
+          4.92
+        </span>
+      </div>
+      <p class="listing-sub">Amazing views · 318 km away</p>
+      <p class="listing-sub">May 2 – 7</p>
+      <p class="listing-price"><b>$312</b> <span>night</span></p>
+    </section>
+  </main>
+
+  <button class="map-pill" data-od-id="cta-map" data-od-label="Open map view">
+    Map
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m9 4.5-5 2v13l5-2 6 2 5-2v-13l-5 2-6-2ZM9 4.5v13M15 6.5v13" stroke-linejoin="round"/></svg>
+  </button>
+
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="Bottom tab bar">
+    <button class="tab active" data-od-id="tab-explore" data-od-label="Explore tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20.5 20.5-4.9-4.9" stroke-linecap="round"/></svg>
+      Explore
+    </button>
+    <button class="tab" data-od-id="tab-wishlists" data-od-label="Wishlists tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10Z" stroke-linejoin="round"/></svg>
+      Wishlists
+    </button>
+    <button class="tab" data-od-id="tab-trips" data-od-label="Trips tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="m15.5 8.5-2 5-5 2 2-5 5-2Z" stroke-linejoin="round"/></svg>
+      Trips
+    </button>
+    <button class="tab" data-od-id="tab-inbox" data-od-label="Inbox tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 11.6a8.4 8.4 0 0 1-12.3 7.4L3 20.5l1.5-5.4A8.4 8.4 0 1 1 21 11.6Z" stroke-linejoin="round"/></svg>
+      Inbox
+    </button>
+    <button class="tab" data-od-id="tab-profile" data-od-label="Profile tab">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20a7.5 7.5 0 0 1 14.4 0" stroke-linecap="round"/></svg>
+      Profile
+    </button>
+  </nav>
+</div>
+</body>
+</html>

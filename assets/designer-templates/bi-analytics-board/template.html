@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>[REPLACE] 产品分析看板</title>
+<style>
+:root {
+  --od-accent: #2893B3;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --fg: #1c2433;
+  --muted: #6b7588;
+  --border: #e1e4ea;
+  --grid-line: #eef1f5;
+  --up: #5ac189;
+  --up-bg: #e8f7f0;
+  --down: #e04355;
+  --down-bg: #fceef0;
+  --font-body: Inter, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: calc(13px * var(--od-scale));
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: calc(12px * var(--od-density)) calc(20px * var(--od-density));
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--surface);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--od-accent); color: var(--od-accent); }
+.chip.accent { border-color: var(--od-accent); color: var(--od-accent); background: color-mix(in srgb, var(--od-accent) 8%, var(--surface)); }
+.topbar .spacer { flex: 1; }
+.refresh-meta { font-size: 12px; color: var(--muted); }
+.btn-refresh {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--od-accent);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-refresh:hover { border-color: var(--od-accent); }
+.shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: calc(100vh - 53px);
+}
+.rail {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: calc(16px * var(--od-density));
+  display: flex;
+  flex-direction: column;
+  gap: calc(18px * var(--od-density));
+}
+.rail .search {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+}
+.rail .group .group-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.rail label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+.rail label .count { margin-left: auto; font-size: 11px; color: var(--muted); }
+.rail input[type="checkbox"] { accent-color: var(--od-accent); }
+.rail .range-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.rail .footer {
+  margin-top: auto;
+  display: flex;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.btn-primary {
+  flex: 1;
+  background: var(--od-accent);
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 0;
+  cursor: pointer;
+}
+.btn-ghost {
+  flex: 1;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 0;
+  cursor: pointer;
+}
+.board {
+  padding: calc(16px * var(--od-density)) calc(20px * var(--od-density));
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: calc(16px * var(--od-density));
+  align-content: start;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  padding: calc(14px * var(--od-density)) calc(16px * var(--od-density));
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.card .card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.card .card-title {
+  font-size: 13px;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card .card-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.kpi { grid-column: span 3; }
+.kpi .label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.kpi .value-row { display: flex; align-items: center; gap: 10px; margin: 8px 0 4px; }
+.kpi .value { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+.kpi .value .unit { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.pill.up { color: var(--up); background: var(--up-bg); }
+.pill.down { color: var(--down); background: var(--down-bg); }
+.kpi .spark { margin-top: 6px; }
+.kpi .spark svg { width: 100%; height: 44px; display: block; }
+.span-8 { grid-column: span 8; }
+.span-6 { grid-column: span 6; }
+.span-4 { grid-column: span 4; }
+.span-12 { grid-column: span 12; }
+.chart-body { flex: 1; min-height: 0; }
+.chart-body svg { width: 100%; height: auto; display: block; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; }
+.legend .item { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+.ranking { display: flex; flex-direction: column; gap: 10px; }
+.rank-row { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 10px; font-size: 12px; }
+.rank-row .name { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-row .track { height: 10px; background: var(--grid-line); border-radius: 4px; overflow: hidden; }
+.rank-row .fill { height: 100%; background: var(--od-accent); border-radius: 4px; }
+.rank-row .val { text-align: right; color: var(--fg); }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+thead th:first-child, tbody td:first-child { text-align: left; }
+tbody td {
+  text-align: right;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--grid-line);
+}
+tbody tr:hover { background: color-mix(in srgb, var(--od-accent) 4%, var(--surface)); }
+caption {
+  caption-side: bottom;
+  text-align: left;
+  font-size: 11px;
+  color: var(--muted);
+  padding-top: 8px;
+}
+@media (max-width: 1100px) {
+  .shell { grid-template-columns: 1fr; }
+  .rail { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--border); }
+  .kpi { grid-column: span 6; }
+  .span-8, .span-6, .span-4 { grid-column: span 12; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .card { transition: box-shadow calc(0.18s * var(--od-motion)) ease; }
+  .card:hover { box-shadow: 0 3px 10px rgba(28, 36, 51, 0.08); }
+}
+</style>
+</head>
+<body>
+<header class="topbar" data-od-id="topbar" data-od-label="顶栏">
+  <h1>[REPLACE] 产品分析看板</h1>
+  <span class="chip accent" data-od-id="date-range" data-od-label="时间范围">近 30 天 ▾</span>
+  <span class="chip">对比上一周期</span>
+  <span class="spacer"></span>
+  <span class="refresh-meta">最近刷新 09:41</span>
+  <button class="btn-refresh" id="refresh-btn" type="button">刷新</button>
+</header>
+
+<div class="shell">
+  <aside class="rail" data-od-id="filter-rail" data-od-label="筛选栏">
+    <input class="search" type="search" placeholder="搜索指标 / 维度…" />
+    <div class="group" data-od-id="filter-channel">
+      <div class="group-title">渠道</div>
+      <label><input type="checkbox" checked /> 自然流量 <span class="count num">42,180</span></label>
+      <label><input type="checkbox" checked /> 付费投放 <span class="count num">28,964</span></label>
+      <label><input type="checkbox" /> 社交分享 <span class="count num">11,532</span></label>
+      <label><input type="checkbox" /> 邮件召回 <span class="count num">6,204</span></label>
+    </div>
+    <div class="group" data-od-id="filter-platform">
+      <div class="group-title">平台</div>
+      <label><input type="checkbox" checked /> Web <span class="count num">51,477</span></label>
+      <label><input type="checkbox" checked /> iOS <span class="count num">23,861</span></label>
+      <label><input type="checkbox" checked /> Android <span class="count num">13,542</span></label>
+    </div>
+    <div class="group" data-od-id="filter-period">
+      <div class="group-title">时间粒度</div>
+      <div class="range-row">
+        <span class="chip">日</span>
+        <span class="chip accent">周</span>
+        <span class="chip">月</span>
+      </div>
+    </div>
+    <div class="footer">
+      <button class="btn-ghost" type="button">清除</button>
+      <button class="btn-primary" type="button">应用筛选</button>
+    </div>
+  </aside>
+
+  <main class="board" data-od-id="board" data-od-label="看板主体">
+    <section class="card kpi" data-od-id="kpi-active-users" data-od-label="活跃用户">
+      <div class="label">周活跃用户</div>
+      <div class="value-row">
+        <span class="value num">88,880</span>
+        <span class="pill up">▲ +12.4%</span>
+      </div>
+      <div class="spark">
+        <svg viewBox="0 0 260 44" preserveAspectRatio="none" role="img" aria-label="周活跃用户趋势">
+          <defs>
+            <linearGradient id="sp1" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--od-accent)" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="var(--od-accent)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M0 34 L26 31 L52 33 L78 27 L104 24 L130 26 L156 18 L182 20 L208 13 L234 11 L260 8 L260 44 L0 44 Z" fill="url(#sp1)"/>
+          <path d="M0 34 L26 31 L52 33 L78 27 L104 24 L130 26 L156 18 L182 20 L208 13 L234 11 L260 8" fill="none" stroke="var(--od-accent)" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </section>
+    <section class="card kpi" data-od-id="kpi-conversion" data-od-label="转化率">
+      <div class="label">注册转化率</div>
+      <div class="value-row">
+        <span class="value num">4.62<span class="unit">%</span></span>
+        <span class="pill up">▲ +0.38pt</span>
+      </div>
+      <div class="spark">
+        <svg viewBox="0 0 260 44" preserveAspectRatio="none" role="img" aria-label="转化率趋势">
+          <defs>
+            <linearGradient id="sp1b" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--od-accent)" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="var(--od-accent)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M0 30 L26 32 L52 28 L78 30 L104 25 L130 27 L156 22 L182 24 L208 18 L234 16 L260 14 L260 44 L0 44 Z" fill="url(#sp1b)"/>
+          <path d="M0 30 L26 32 L52 28 L78 30 L104 25 L130 27 L156 22 L182 24 L208 18 L234 16 L260 14" fill="none" stroke="var(--od-accent)" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </section>
+    <section class="card kpi" data-od-id="kpi-revenue" data-od-label="收入">
+      <div class="label">周收入</div>
+      <div class="value-row">
+        <span class="value num">¥1.28M</span>
+        <span class="pill up">▲ +8.9%</span>
+      </div>
+      <div class="spark">
+        <svg viewBox="0 0 260 44" preserveAspectRatio="none" role="img" aria-label="收入趋势">
+          <defs>
+            <linearGradient id="sp1c" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--od-accent)" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="var(--od-accent)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M0 36 L26 33 L52 34 L78 29 L104 31 L130 24 L156 26 L182 19 L208 21 L234 14 L260 10 L260 44 L0 44 Z" fill="url(#sp1c)"/>
+          <path d="M0 36 L26 33 L52 34 L78 29 L104 31 L130 24 L156 26 L182 19 L208 21 L234 14 L260 10" fill="none" stroke="var(--od-accent)" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </section>
+    <section class="card kpi" data-od-id="kpi-churn" data-od-label="流失率">
+      <div class="label">周流失率</div>
+      <div class="value-row">
+        <span class="value num">1.84<span class="unit">%</span></span>
+        <span class="pill down">▼ +0.21pt</span>
+      </div>
+      <div class="spark">
+        <svg viewBox="0 0 260 44" preserveAspectRatio="none" role="img" aria-label="流失率趋势">
+          <defs>
+            <linearGradient id="sp2" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--down)" stop-opacity="0.22"/>
+              <stop offset="100%" stop-color="var(--down)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M0 28 L26 30 L52 26 L78 27 L104 24 L130 25 L156 21 L182 23 L208 19 L234 17 L260 15 L260 44 L0 44 Z" fill="url(#sp2)"/>
+          <path d="M0 28 L26 30 L52 26 L78 27 L104 24 L130 25 L156 21 L182 23 L208 19 L234 17 L260 15" fill="none" stroke="var(--down)" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </section>
+
+    <section class="card span-8" data-od-id="trend-chart" data-od-label="核心趋势">
+      <div class="card-head">
+        <span class="card-title">活跃用户走势（按周）</span>
+        <span class="card-meta num">12 周 · 周粒度</span>
+      </div>
+      <div class="chart-body">
+        <svg viewBox="0 0 760 280" preserveAspectRatio="xMidYMid meet" role="img" aria-label="活跃用户周走势面积图">
+          <g stroke="var(--grid-line)" stroke-width="1">
+            <line x1="48" y1="40" x2="740" y2="40"/>
+            <line x1="48" y1="100" x2="740" y2="100"/>
+            <line x1="48" y1="160" x2="740" y2="160"/>
+            <line x1="48" y1="220" x2="740" y2="220"/>
+          </g>
+          <g fill="var(--muted)" font-size="11" font-family="inherit">
+            <text x="42" y="44" text-anchor="end">90k</text>
+            <text x="42" y="104" text-anchor="end">60k</text>
+            <text x="42" y="164" text-anchor="end">30k</text>
+            <text x="42" y="224" text-anchor="end">0</text>
+            <text x="48" y="248">W1</text>
+            <text x="216" y="248">W4</text>
+            <text x="390" y="248">W7</text>
+            <text x="564" y="248">W10</text>
+            <text x="716" y="248">W12</text>
+          </g>
+          <defs>
+            <linearGradient id="trend-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--od-accent)" stop-opacity="0.2"/>
+              <stop offset="100%" stop-color="var(--od-accent)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M48 168 L106 160 L164 164 L222 148 L280 140 L338 146 L396 120 L454 126 L512 102 L570 96 L628 84 L686 74 L740 66 L740 220 L48 220 Z" fill="url(#trend-fill)"/>
+          <path d="M48 168 L106 160 L164 164 L222 148 L280 140 L338 146 L396 120 L454 126 L512 102 L570 96 L628 84 L686 74 L740 66" fill="none" stroke="var(--od-accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+          <circle cx="628" cy="84" r="4" fill="var(--surface)" stroke="var(--od-accent)" stroke-width="2.5"/>
+          <text x="628" y="68" text-anchor="middle" fill="var(--fg)" font-size="12" font-weight="600">84,120</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span class="item"><span class="swatch" style="background: var(--od-accent);"></span>周活跃用户</span>
+      </div>
+    </section>
+
+    <section class="card span-4" data-od-id="share-chart" data-od-label="渠道占比">
+      <div class="card-head">
+        <span class="card-title">渠道贡献占比</span>
+        <span class="card-meta">本周期</span>
+      </div>
+      <div class="chart-body">
+        <svg viewBox="0 0 300 220" preserveAspectRatio="xMidYMid meet" role="img" aria-label="渠道占比环形图">
+          <g transform="translate(108,110)">
+            <circle r="62" fill="none" stroke="var(--grid-line)" stroke-width="24"/>
+            <circle r="62" fill="none" stroke="#2893B3" stroke-width="24" stroke-dasharray="183 390" transform="rotate(-90)"/>
+            <circle r="62" fill="none" stroke="#5ac189" stroke-width="24" stroke-dasharray="101 390" stroke-dashoffset="-183" transform="rotate(-90)"/>
+            <circle r="62" fill="none" stroke="#fcc700" stroke-width="24" stroke-dasharray="62 390" stroke-dashoffset="-284" transform="rotate(-90)"/>
+            <circle r="62" fill="none" stroke="#a868b7" stroke-width="24" stroke-dasharray="44 390" stroke-dashoffset="-346" transform="rotate(-90)"/>
+            <text y="-2" text-anchor="middle" font-size="20" font-weight="700" fill="var(--fg)" class="num">88.9k</text>
+            <text y="16" text-anchor="middle" font-size="11" fill="var(--muted)">总访问</text>
+          </g>
+          <g font-size="11" fill="var(--fg)">
+            <rect x="206" y="48" width="10" height="10" rx="2" fill="#2893B3"/><text x="222" y="57">自然 47%</text>
+            <rect x="206" y="78" width="10" height="10" rx="2" fill="#5ac189"/><text x="222" y="87">付费 26%</text>
+            <rect x="206" y="108" width="10" height="10" rx="2" fill="#fcc700"/><text x="222" y="117">社交 16%</text>
+            <rect x="206" y="138" width="10" height="10" rx="2" fill="#a868b7"/><text x="222" y="147">其他 11%</text>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <section class="card span-4" data-od-id="ranking" data-od-label="页面排行">
+      <div class="card-head">
+        <span class="card-title">落地页 Top 6</span>
+        <span class="card-meta">按访问量 · 共 38 页</span>
+      </div>
+      <div class="ranking">
+        <div class="rank-row"><span class="name">[REPLACE] /pricing</span><span class="track"><span class="fill" style="width: 92%;"></span></span><span class="val num">18,204</span></div>
+        <div class="rank-row"><span class="name">[REPLACE] /features</span><span class="track"><span class="fill" style="width: 76%;"></span></span><span class="val num">15,031</span></div>
+        <div class="rank-row"><span class="name">[REPLACE] /blog/launch</span><span class="track"><span class="fill" style="width: 58%;"></span></span><span class="val num">11,488</span></div>
+        <div class="rank-row"><span class="name">[REPLACE] /docs/start</span><span class="track"><span class="fill" style="width: 44%;"></span></span><span class="val num">8,716</span></div>
+        <div class="rank-row"><span class="name">[REPLACE] /templates</span><span class="track"><span class="fill" style="width: 35%;"></span></span><span class="val num">6,930</span></div>
+        <div class="rank-row"><span class="name">其他（32 页）</span><span class="track"><span class="fill" style="width: 28%; opacity: 0.45;"></span></span><span class="val num">5,542</span></div>
+      </div>
+    </section>
+
+    <section class="card span-8" data-od-id="detail-table" data-od-label="明细表">
+      <div class="card-head">
+        <span class="card-title">分渠道明细</span>
+        <span class="card-meta">最近刷新 09:41</span>
+      </div>
+      <div class="chart-body" style="overflow: auto; max-height: 260px;">
+        <table>
+          <caption>展示前 6 行，共 24 行</caption>
+          <thead>
+            <tr><th>渠道</th><th>访问</th><th>注册</th><th>转化率</th><th>收入</th><th>环比</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>自然流量</td><td class="num">42,180</td><td class="num">2,236</td><td class="num">5.30%</td><td class="num">¥512,400</td><td class="num" style="color: var(--up);">+14.2%</td></tr>
+            <tr><td>付费投放</td><td class="num">28,964</td><td class="num">1,304</td><td class="num">4.50%</td><td class="num">¥418,200</td><td class="num" style="color: var(--up);">+6.8%</td></tr>
+            <tr><td>社交分享</td><td class="num">11,532</td><td class="num">426</td><td class="num">3.69%</td><td class="num">¥186,500</td><td class="num" style="color: var(--down);">-2.1%</td></tr>
+            <tr><td>邮件召回</td><td class="num">6,204</td><td class="num">311</td><td class="num">5.01%</td><td class="num">¥98,300</td><td class="num" style="color: var(--up);">+9.4%</td></tr>
+            <tr><td>合作引荐</td><td class="num">3,418</td><td class="num">122</td><td class="num">3.57%</td><td class="num">¥41,800</td><td class="num" style="color: var(--up);">+1.6%</td></tr>
+            <tr><td>线下活动</td><td class="num">1,205</td><td class="num">58</td><td class="num">4.81%</td><td class="num">¥22,900</td><td class="num" style="color: var(--down);">-4.7%</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+  document.getElementById('refresh-btn').addEventListener('click', function () {
+    fetch('data.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function () { window.location.reload(); })
+      .catch(function () { window.location.reload(); });
+  });
+})();
+</script>
+</body>
+</html>

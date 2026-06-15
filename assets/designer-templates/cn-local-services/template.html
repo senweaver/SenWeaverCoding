@@ -1,0 +1,561 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>邻味到家 · 首页</title>
+<style>
+:root {
+  --od-accent: #ffc300;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #e6a800;
+  --brand-soft: #fff7df;
+  --on-brand: #221a00;
+  --page-bg: #f4f4f5;
+  --surface: #ffffff;
+  --fg: #232326;
+  --muted: #85858c;
+  --faint: #b5b5bb;
+  --border: #ededef;
+  --price: #ff4d2a;
+  --price-soft: #fff0ec;
+  --star: #ff9a14;
+  --tag-fg: #e0532e;
+  --tag-bg: #fff1ea;
+  --tag-line: #ffc9b3;
+  --deal-a1: #fbe6cf;
+  --deal-a2: #d68a3f;
+  --deal-b1: #dcecd9;
+  --deal-b2: #5f9456;
+  --deal-c1: #f6dede;
+  --deal-c2: #c25b5b;
+  --shop-a1: #efe3d2;
+  --shop-a2: #a8845c;
+  --shop-b1: #dde8ec;
+  --shop-b2: #5f8799;
+  --shop-c1: #e7e0ef;
+  --shop-c2: #82689a;
+  --countdown-bg: #2b2b30;
+  --countdown-fg: #ffffff;
+  --shadow: 0 2px 10px rgba(35, 35, 38, 0.05);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --fs-10: calc(10px * var(--od-scale));
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --fs-18: calc(18px * var(--od-scale));
+  --sp-1: calc(4px * var(--od-density));
+  --sp-2: calc(8px * var(--od-density));
+  --sp-3: calc(12px * var(--od-density));
+  --sp-4: calc(16px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+  --radius: 10px;
+  --radius-lg: 14px;
+  --dk-page-bg: #121214;
+  --dk-surface: #1d1d20;
+  --dk-fg: #ebebee;
+  --dk-muted: #9b9ba2;
+  --dk-faint: #68686e;
+  --dk-border: #2b2b2f;
+  --dk-brand-soft: #33290e;
+  --dk-price-soft: #381d15;
+  --dk-tag-bg: #381f14;
+  --dk-tag-line: #5e3622;
+  --dk-deal-a1: #45331d;
+  --dk-deal-b1: #25341f;
+  --dk-deal-c1: #3d2424;
+  --dk-shop-a1: #3a3126;
+  --dk-shop-b1: #25323a;
+  --dk-shop-c1: #322b3a;
+  --dk-countdown-bg: #3a3a40;
+}
+html[data-od-mode="dark"] {
+  --page-bg: var(--dk-page-bg);
+  --surface: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --brand-soft: var(--dk-brand-soft);
+  --price-soft: var(--dk-price-soft);
+  --tag-bg: var(--dk-tag-bg);
+  --tag-line: var(--dk-tag-line);
+  --deal-a1: var(--dk-deal-a1);
+  --deal-b1: var(--dk-deal-b1);
+  --deal-c1: var(--dk-deal-c1);
+  --shop-a1: var(--dk-shop-a1);
+  --shop-b1: var(--dk-shop-b1);
+  --shop-c1: var(--dk-shop-c1);
+  --countdown-bg: var(--dk-countdown-bg);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; padding: 0; color: inherit; }
+.phone {
+  max-width: 480px;
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+}
+.app-head {
+  background: var(--brand);
+  color: var(--on-brand);
+  padding-bottom: var(--sp-3);
+}
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(8px * var(--od-density)) var(--sp-4) calc(4px * var(--od-density));
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.statusbar .sb-icons { display: flex; align-items: center; gap: 5px; }
+.statusbar svg { width: 15px; height: 12px; }
+.loc-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4) 0;
+  font-size: var(--fs-15);
+  font-weight: 700;
+}
+.loc-row svg { width: 16px; height: 16px; }
+.loc-row .caret { opacity: 0.65; }
+.loc-row .scan { margin-left: auto; transition: opacity var(--dur) ease; }
+.loc-row .scan:active { opacity: 0.6; }
+.loc-row .scan svg { width: 21px; height: 21px; }
+.search-row { padding: var(--sp-2) var(--sp-3) 0; }
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: calc(8px * var(--od-density)) var(--sp-2) calc(8px * var(--od-density)) var(--sp-3);
+  color: var(--faint);
+  font-size: var(--fs-13);
+}
+.search-box svg { width: 17px; height: 17px; flex: none; color: var(--muted); }
+.search-box .kw { flex: 1; text-align: left; color: var(--muted); }
+.search-box .go {
+  background: var(--countdown-bg);
+  color: var(--countdown-fg);
+  border-radius: 999px;
+  padding: 4px 13px;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  transition: transform var(--dur) ease;
+}
+.search-box .go:active { transform: scale(0.94); }
+.cat-grid {
+  background: var(--surface);
+  margin: var(--sp-3) var(--sp-3) 0;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  row-gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+}
+.cat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(6px * var(--od-density));
+  font-size: var(--fs-11);
+  color: var(--fg);
+  padding: var(--sp-1) 0;
+  transition: opacity var(--dur) ease;
+}
+.cat:active { opacity: 0.6; }
+.cat-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: var(--brand-soft);
+  color: var(--brand-deep);
+  display: grid;
+  place-items: center;
+}
+.cat-icon svg { width: 20px; height: 20px; }
+.deal-block {
+  background: var(--surface);
+  margin: var(--sp-3) var(--sp-3) 0;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--sp-3);
+}
+.deal-head { display: flex; align-items: center; gap: var(--sp-2); }
+.deal-head h2 { margin: 0; font-size: var(--fs-16); font-weight: 800; }
+.countdown { display: flex; align-items: center; gap: 3px; font-size: var(--fs-11); }
+.countdown i {
+  font-style: normal;
+  background: var(--countdown-bg);
+  color: var(--countdown-fg);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.deal-head .all { margin-left: auto; font-size: var(--fs-12); color: var(--faint); }
+.deal-rail {
+  display: flex;
+  gap: var(--sp-2);
+  overflow-x: auto;
+  margin-top: var(--sp-3);
+  scrollbar-width: none;
+}
+.deal-rail::-webkit-scrollbar { display: none; }
+.deal-card {
+  flex: none;
+  width: 108px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--page-bg);
+  transition: transform var(--dur) ease;
+}
+.deal-card:active { transform: scale(0.96); }
+.deal-cover {
+  height: 76px;
+  display: grid;
+  place-items: center;
+  color: var(--surface);
+  font-size: var(--fs-13);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.dc-a { background: linear-gradient(140deg, var(--deal-a1), var(--deal-a2)); }
+.dc-b { background: linear-gradient(140deg, var(--deal-b1), var(--deal-b2)); }
+.dc-c { background: linear-gradient(140deg, var(--deal-c1), var(--deal-c2)); }
+.deal-body { padding: var(--sp-1) var(--sp-2) var(--sp-2); }
+.deal-name {
+  margin: 0;
+  font-size: var(--fs-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deal-price { margin-top: 2px; display: flex; align-items: baseline; gap: 4px; }
+.deal-price b { color: var(--price); font-size: var(--fs-16); font-weight: 800; font-variant-numeric: tabular-nums; }
+.deal-price b small { font-size: var(--fs-10); margin-right: 1px; }
+.deal-price s { color: var(--faint); font-size: var(--fs-10); }
+.shop-section { padding: var(--sp-3) var(--sp-3) calc(76px * var(--od-density)); }
+.shop-section h2 { margin: 0 var(--sp-1) var(--sp-2); font-size: var(--fs-17); font-weight: 800; }
+.shop-card {
+  display: flex;
+  gap: var(--sp-3);
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  transition: transform var(--dur) ease;
+}
+.shop-card:active { transform: scale(0.99); }
+.shop-cover {
+  width: 82px;
+  height: 82px;
+  flex: none;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  color: var(--surface);
+  font-size: var(--fs-14);
+  font-weight: 700;
+}
+.sc-a { background: linear-gradient(140deg, var(--shop-a1), var(--shop-a2)); }
+.sc-b { background: linear-gradient(140deg, var(--shop-b1), var(--shop-b2)); }
+.sc-c { background: linear-gradient(140deg, var(--shop-c1), var(--shop-c2)); }
+.shop-main { flex: 1; min-width: 0; }
+.shop-name {
+  margin: 0;
+  font-size: var(--fs-15);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shop-stats {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: 4px;
+  font-size: var(--fs-12);
+  color: var(--muted);
+}
+.stars { display: flex; gap: 1px; color: var(--star); }
+.stars svg { width: 12px; height: 12px; }
+.stars + b { color: var(--star); font-weight: 700; }
+.shop-stats .dist { margin-left: auto; color: var(--faint); }
+.shop-tags { display: flex; gap: 5px; margin-top: calc(6px * var(--od-density)); flex-wrap: wrap; }
+.stag {
+  font-size: var(--fs-10);
+  color: var(--tag-fg);
+  background: var(--tag-bg);
+  border: 0.5px solid var(--tag-line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.shop-delivery {
+  margin-top: calc(6px * var(--od-density));
+  font-size: var(--fs-11);
+  color: var(--faint);
+  display: flex;
+  gap: var(--sp-2);
+}
+.shop-delivery b { color: var(--muted); font-weight: 500; }
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-top: 0.5px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding: calc(6px * var(--od-density)) 0 calc(14px * var(--od-density));
+  z-index: 10;
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-10);
+  color: var(--muted);
+  transition: color var(--dur) ease;
+}
+.tab svg { width: 23px; height: 23px; }
+.tab.active { color: var(--brand-deep); font-weight: 700; }
+.tab:active { opacity: 0.6; }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-frame" data-od-label="手机外框">
+  <header class="app-head" data-od-id="app-head" data-od-label="顶部定位搜索区">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>11:36</span>
+      <span class="sb-icons">
+        <svg viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 9.5v1M6 7v3.5M10 4.5v6M14 2v8.5"/></svg>
+        <svg viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5a8.5 8.5 0 0 1 12 0M4.4 7.4a5 5 0 0 1 7.2 0M7 9.8l1 1 1-1"/></svg>
+        <svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="2" width="15" height="8" rx="2.5"/><path d="M18 5v2" stroke-linecap="round"/><rect x="3" y="4" width="9" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="loc-row" data-od-id="location-row" data-od-label="定位行">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.5-5.6-6.5-10.5a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21z"/><circle cx="12" cy="10.5" r="2.3"/></svg>
+      杨树湾路 16 号院
+      <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg>
+      <button class="scan" data-od-id="scan-entry" data-od-label="扫码入口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M3 12h18"/></svg>
+      </button>
+    </div>
+    <div class="search-row" data-od-id="search-row" data-od-label="搜索栏">
+      <div class="search-box" data-od-id="search-box" data-od-label="搜索框">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        <button class="kw" data-od-id="search-keyword" data-od-label="搜索热词">老坛酸菜鱼 人均 40 起</button>
+        <button class="go" data-od-id="search-cta" data-od-label="搜索按钮">搜索</button>
+      </div>
+    </div>
+  </header>
+  <main data-od-id="home-main" data-od-label="首页主体">
+    <section class="cat-grid" data-od-id="category-grid" data-od-label="服务分类宫格">
+      <button class="cat" data-od-id="cat-food" data-od-label="美食外卖">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h16l-1.5 7h-13L4 13z"/><path d="M7 13a5 5 0 0 1 10 0M12 8V6"/></svg></span>
+        美食外卖
+      </button>
+      <button class="cat" data-od-id="cat-grocery" data-od-label="买菜">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h14l-1.2 11H6.2L5 9z"/><path d="M8.5 9V7a3.5 3.5 0 0 1 7 0v2"/></svg></span>
+        买菜到家
+      </button>
+      <button class="cat" data-od-id="cat-hotel" data-od-label="酒店民宿">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20V6.5L12 3l9 3.5V20M3 20h18M9 20v-4h6v4M9 9h.01M15 9h.01M9 12.5h.01M15 12.5h.01"/></svg></span>
+        酒店民宿
+      </button>
+      <button class="cat" data-od-id="cat-movie" data-od-label="电影演出">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M3.5 9.5h17M8 5v4.5M16 5v4.5"/></svg></span>
+        电影演出
+      </button>
+      <button class="cat" data-od-id="cat-massage" data-od-label="休闲按摩">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c2 3 6 4.5 6 9a6 6 0 0 1-12 0c0-4.5 4-6 6-9z"/></svg></span>
+        休闲按摩
+      </button>
+      <button class="cat" data-od-id="cat-haircut" data-od-label="丽人美发">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><path d="M9.2 8.6L20 19M9.2 15.4L20 5"/></svg></span>
+        丽人美发
+      </button>
+      <button class="cat" data-od-id="cat-ktv" data-od-label="K歌">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3"/></svg></span>
+        K 歌
+      </button>
+      <button class="cat" data-od-id="cat-petcare" data-od-label="宠物">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="8" r="1.8"/><circle cx="12" cy="5.8" r="1.8"/><circle cx="17" cy="8" r="1.8"/><path d="M12 11c3 0 5.5 2.2 5.5 5 0 2-1.5 3.5-3.3 3.5-1 0-1.6-.5-2.2-.5s-1.2.5-2.2.5c-1.8 0-3.3-1.5-3.3-3.5 0-2.8 2.5-5 5.5-5z"/></svg></span>
+        宠物服务
+      </button>
+      <button class="cat" data-od-id="cat-repair" data-od-label="家政维修">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6.5a4 4 0 0 0-5.2 5.2L4 17v3h3l5.3-5.3a4 4 0 0 0 5.2-5.2l-2.7 2.7-2.3-2.3 2.7-2.7z"/></svg></span>
+        家政维修
+      </button>
+      <button class="cat" data-od-id="cat-all" data-od-label="全部分类">
+        <span class="cat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6"/></svg></span>
+        全部
+      </button>
+    </section>
+    <section class="deal-block" data-od-id="flash-deals" data-od-label="限时秒杀区">
+      <div class="deal-head">
+        <h2>限时秒杀</h2>
+        <span class="countdown" data-od-id="deal-countdown" data-od-label="秒杀倒计时">距结束 <i>01</i>:<i>42</i>:<i>09</i></span>
+        <span class="all">更多优惠</span>
+      </div>
+      <div class="deal-rail" data-od-id="deal-rail" data-od-label="秒杀卡片行">
+        <article class="deal-card" data-od-id="deal-bbq" data-od-label="烤肉套餐">
+          <div class="deal-cover dc-a">双人烤肉</div>
+          <div class="deal-body">
+            <h3 class="deal-name">炭知味·双人烤肉套餐</h3>
+            <div class="deal-price"><b><small>¥</small>99</b><s>¥168</s></div>
+          </div>
+        </article>
+        <article class="deal-card" data-od-id="deal-tea" data-od-label="奶茶券">
+          <div class="deal-cover dc-b">奶茶通兑</div>
+          <div class="deal-body">
+            <h3 class="deal-name">山茶半盏·任意大杯通兑</h3>
+            <div class="deal-price"><b><small>¥</small>9.9</b><s>¥18</s></div>
+          </div>
+        </article>
+        <article class="deal-card" data-od-id="deal-hotpot" data-od-label="火锅券">
+          <div class="deal-cover dc-c">火锅代金</div>
+          <div class="deal-body">
+            <h3 class="deal-name">沸腾里·100 元代金券</h3>
+            <div class="deal-price"><b><small>¥</small>79</b><s>¥100</s></div>
+          </div>
+        </article>
+        <article class="deal-card" data-od-id="deal-spa" data-od-label="足疗券">
+          <div class="deal-cover dc-a">足疗放松</div>
+          <div class="deal-body">
+            <h3 class="deal-name">松快客·60 分钟足疗</h3>
+            <div class="deal-price"><b><small>¥</small>68</b><s>¥128</s></div>
+          </div>
+        </article>
+      </div>
+    </section>
+    <section class="shop-section" data-od-id="merchant-list" data-od-label="附近商家列表">
+      <h2>附近优选</h2>
+      <article class="shop-card" data-od-id="shop-noodle" data-od-label="面馆商家卡">
+        <div class="shop-cover sc-a">湖光面馆</div>
+        <div class="shop-main">
+          <h3 class="shop-name">湖光手擀面 · 杨树湾店</h3>
+          <div class="shop-stats">
+            <span class="stars">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9"/></svg>
+            </span>
+            <b>4.8</b>
+            <span>月售 2300+</span>
+            <span class="dist">1.2km</span>
+          </div>
+          <div class="shop-tags">
+            <span class="stag">满 30 减 8</span>
+            <span class="stag">满 50 减 15</span>
+            <span class="stag">下单返 3 元券</span>
+          </div>
+          <div class="shop-delivery"><b>约 28 分钟</b><span>配送费 ¥2.5</span><span>起送 ¥20</span></div>
+        </div>
+      </article>
+      <article class="shop-card" data-od-id="shop-salad" data-od-label="轻食商家卡">
+        <div class="shop-cover sc-b">绿盒轻食</div>
+        <div class="shop-main">
+          <h3 class="shop-name">绿盒轻食实验室（滨河中心店）</h3>
+          <div class="shop-stats">
+            <span class="stars">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9"/></svg>
+            </span>
+            <b>4.6</b>
+            <span>月售 980+</span>
+            <span class="dist">800m</span>
+          </div>
+          <div class="shop-tags">
+            <span class="stag">满 25 减 6</span>
+            <span class="stag">新客立减 10</span>
+          </div>
+          <div class="shop-delivery"><b>约 22 分钟</b><span>免配送费</span><span>起送 ¥15</span></div>
+        </div>
+      </article>
+      <article class="shop-card" data-od-id="shop-dessert" data-od-label="甜品商家卡">
+        <div class="shop-cover sc-c">糖霜事务</div>
+        <div class="shop-main">
+          <h3 class="shop-name">糖霜事务所 · 手作甜品</h3>
+          <div class="shop-stats">
+            <span class="stars">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></svg>
+            </span>
+            <b>4.9</b>
+            <span>月售 1500+</span>
+            <span class="dist">2.4km</span>
+          </div>
+          <div class="shop-tags">
+            <span class="stag">满 40 减 10</span>
+            <span class="stag">收藏店铺领 5 元券</span>
+          </div>
+          <div class="shop-delivery"><b>约 35 分钟</b><span>配送费 ¥4</span><span>起送 ¥30</span></div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="底部标签栏">
+    <button class="tab active" data-od-id="tab-home" data-od-label="首页标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5"/></svg>
+      首页
+    </button>
+    <button class="tab" data-od-id="tab-nearby" data-od-label="附近标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M15.5 8.5l-2 5-5 2 2-5 5-2z"/></svg>
+      附近
+    </button>
+    <button class="tab" data-od-id="tab-video" data-od-label="视频标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="M16 10.5l5-3v9l-5-3"/></svg>
+      视频
+    </button>
+    <button class="tab" data-od-id="tab-order" data-od-label="订单标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3.5" width="14" height="17" rx="2.5"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>
+      订单
+    </button>
+    <button class="tab" data-od-id="tab-me" data-od-label="我的标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="4"/><path d="M4.5 20c1.5-3.5 4.2-5 7.5-5s6 1.5 7.5 5"/></svg>
+      我的
+    </button>
+  </nav>
+</div>
+</body>
+</html>

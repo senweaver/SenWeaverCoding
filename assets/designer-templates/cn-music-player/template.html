@@ -1,0 +1,405 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>声潮 · 正在播放</title>
+<style>
+:root {
+  --od-accent: #e2453a;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #b8332b;
+  --brand-soft: rgba(226, 69, 58, 0.16);
+  --bg-page: #0c0a0b;
+  --bg-a: #2a1416;
+  --bg-b: #160d0f;
+  --bg-c: #0b0809;
+  --surface: rgba(255, 255, 255, 0.06);
+  --surface-strong: rgba(255, 255, 255, 0.1);
+  --fg: #f3eeee;
+  --muted: rgba(243, 238, 238, 0.55);
+  --faint: rgba(243, 238, 238, 0.28);
+  --hairline: rgba(255, 255, 255, 0.12);
+  --vinyl-edge: #1a1718;
+  --vinyl-groove-a: #211d1e;
+  --vinyl-groove-b: #171314;
+  --album-a: #e9b8a4;
+  --album-b: #9e4a52;
+  --album-c: #3c2030;
+  --arm-metal: #c9c2c4;
+  --on-brand: #ffffff;
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-16: calc(16px * var(--od-scale));
+  --fs-18: calc(18px * var(--od-scale));
+  --pad-page: calc(20px * var(--od-density));
+  --gap-xs: calc(6px * var(--od-density));
+  --gap-sm: calc(10px * var(--od-density));
+  --gap-md: calc(16px * var(--od-density));
+  --gap-lg: calc(24px * var(--od-density));
+  --dur-fast: calc(0.18s * var(--od-motion));
+  --dur-spin: calc(22s * var(--od-motion));
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html[data-od-mode="dark"] {
+  --bg-page: #060505;
+  --bg-a: #1f0e10;
+  --bg-b: #100a0b;
+  --bg-c: #070506;
+  --surface: rgba(255, 255, 255, 0.05);
+  --hairline: rgba(255, 255, 255, 0.09);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+.phone {
+  max-width: 480px;
+  margin-inline: auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(120% 70% at 50% 0%, var(--bg-a), var(--bg-b) 55%, var(--bg-c));
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.55);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(8px * var(--od-density)) var(--pad-page) calc(4px * var(--od-density));
+  font-size: var(--fs-13);
+  font-weight: 600;
+  font-family: var(--font-num);
+}
+.sb-icons { display: flex; align-items: center; gap: 5px; }
+.navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-xs) var(--pad-page);
+}
+.navbar .song { text-align: center; min-width: 0; }
+.navbar .song h1 {
+  margin: 0;
+  font-size: var(--fs-16);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.navbar .song p { margin: 1px 0 0; font-size: var(--fs-12); color: var(--muted); }
+.navbar .icon-btn {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  color: var(--fg);
+  border-radius: 50%;
+  transition: background var(--dur-fast) ease;
+}
+.navbar .icon-btn:active { background: var(--surface-strong); }
+.stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: calc(34px * var(--od-density)) 0 calc(10px * var(--od-density));
+}
+.disc-wrap { position: relative; width: 270px; height: 270px; }
+.disc {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, transparent 0 33%, var(--vinyl-groove-a) 33% 34%, transparent 34% 100%),
+    repeating-radial-gradient(circle at 50% 50%, var(--vinyl-groove-a) 0 3px, var(--vinyl-groove-b) 3px 6px);
+  border: 8px solid var(--vinyl-edge);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6), inset 0 0 30px rgba(0, 0, 0, 0.7);
+  display: grid;
+  place-items: center;
+  animation: spin var(--dur-spin) linear infinite;
+}
+.disc .album {
+  width: 46%;
+  height: 46%;
+  border-radius: 50%;
+  background: conic-gradient(from 210deg, var(--album-a), var(--album-b) 45%, var(--album-c) 75%, var(--album-a));
+  border: 4px solid var(--vinyl-edge);
+  display: grid;
+  place-items: center;
+}
+.disc .hole {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg-c);
+  border: 2px solid var(--hairline);
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .disc { animation: none; } }
+.tonearm {
+  position: absolute;
+  top: calc(-26px * var(--od-density));
+  left: 50%;
+  width: 110px;
+  height: 130px;
+  transform-origin: 14px 14px;
+  transform: rotate(24deg);
+  z-index: 2;
+}
+.tonearm .pivot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--arm-metal);
+  border: 4px solid var(--vinyl-edge);
+}
+.tonearm .rod {
+  position: absolute;
+  top: 22px;
+  left: 12px;
+  width: 4px;
+  height: 86px;
+  border-radius: 2px;
+  background: linear-gradient(to bottom, var(--arm-metal), var(--faint));
+  transform: rotate(-14deg);
+  transform-origin: top center;
+}
+.tonearm .head {
+  position: absolute;
+  top: 102px;
+  left: 26px;
+  width: 14px;
+  height: 22px;
+  border-radius: 4px;
+  background: var(--arm-metal);
+  transform: rotate(-14deg);
+}
+.lyrics {
+  text-align: center;
+  padding: var(--gap-md) var(--pad-page);
+  display: flex;
+  flex-direction: column;
+  gap: calc(8px * var(--od-density));
+}
+.lyrics p {
+  margin: 0;
+  font-size: var(--fs-13);
+  color: var(--faint);
+  transition: color var(--dur-fast) ease;
+}
+.lyrics p.near { color: var(--muted); }
+.lyrics p.now {
+  color: var(--fg);
+  font-size: var(--fs-16);
+  font-weight: 600;
+}
+.lyrics p.now::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--brand);
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.progress { padding: var(--gap-sm) var(--pad-page) 0; }
+.progress .bar {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-strong);
+}
+.progress .played {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  border-radius: 999px;
+  background: var(--brand);
+}
+.progress .knob {
+  position: absolute;
+  top: 50%;
+  left: 38%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--fg);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.progress .times {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--gap-xs);
+  font-size: var(--fs-11);
+  font-family: var(--font-num);
+  color: var(--muted);
+}
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-md) calc(30px * var(--od-density)) var(--gap-lg);
+}
+.controls .ctl {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  color: var(--fg);
+  border-radius: 50%;
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+.controls .ctl:active { background: var(--surface-strong); transform: scale(0.92); }
+.controls .ctl.liked { color: var(--brand); }
+.controls .play {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--on-brand);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 10px 26px var(--brand-soft);
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+.controls .play:active { background: var(--brand-deep); transform: scale(0.94); }
+.comment-strip {
+  margin: 0 var(--pad-page) calc(26px * var(--od-density));
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: calc(8px * var(--od-density)) calc(14px * var(--od-density));
+}
+.comment-strip .stack { display: flex; }
+.comment-strip .stack i {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-b);
+}
+.comment-strip .stack i + i { margin-left: -8px; }
+.comment-strip .stack i:nth-child(1) { background: linear-gradient(135deg, var(--album-a), var(--album-b)); }
+.comment-strip .stack i:nth-child(2) { background: linear-gradient(135deg, var(--album-b), var(--album-c)); }
+.comment-strip .stack i:nth-child(3) { background: linear-gradient(135deg, var(--album-a), var(--album-c)); }
+.comment-strip .text {
+  flex: 1;
+  font-size: var(--fs-12);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.comment-strip .count {
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-shell" data-od-label="手机外框">
+  <header data-od-id="player-header" data-od-label="播放页顶栏">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>23:18</span>
+      <span class="sb-icons">
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 9.5v-2M5 9.5v-4M8.5 9.5v-6M12 9.5v-8" stroke-linecap="round"/></svg>
+        <svg width="14" height="11" viewBox="0 0 14 11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 4.5a7 7 0 0 1 10 0M4.3 6.8a3.8 3.8 0 0 1 5.4 0" stroke-linecap="round"/><circle cx="7" cy="9.2" r="0.8" fill="currentColor" stroke="none"/></svg>
+        <svg width="20" height="11" viewBox="0 0 20 11" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1.5" width="14" height="8" rx="2.2"/><path d="M17.5 4.2v2.6" stroke-linecap="round"/><rect x="2.6" y="3.1" width="6" height="4.8" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="navbar">
+      <button class="icon-btn" data-od-id="back-button" data-od-label="返回按钮">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14.5 5.5 8 12l6.5 6.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="song" data-od-id="song-title" data-od-label="歌曲信息">
+        <h1>夜航西风</h1>
+        <p>晚枫乐队 · 专辑《城市候鸟》</p>
+      </div>
+      <button class="icon-btn" data-od-id="share-button" data-od-label="分享按钮">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="12" r="2.6"/><circle cx="17" cy="6" r="2.6"/><circle cx="17" cy="18" r="2.6"/><path d="m8.4 10.8 6.2-3.6M8.4 13.2l6.2 3.6"/></svg>
+      </button>
+    </div>
+  </header>
+  <main>
+    <section class="stage" data-od-id="vinyl-stage" data-od-label="黑胶舞台">
+      <div class="disc-wrap">
+        <div class="tonearm" data-od-id="tonearm" data-od-label="唱臂">
+          <span class="pivot"></span>
+          <span class="rod"></span>
+          <span class="head"></span>
+        </div>
+        <div class="disc" data-od-id="vinyl-disc" data-od-label="旋转唱片">
+          <div class="album"><span class="hole"></span></div>
+        </div>
+      </div>
+    </section>
+    <section class="lyrics" data-od-id="lyric-panel" data-od-label="歌词面板">
+      <p>巷口的灯还亮着一半</p>
+      <p class="near">行李箱滚轮碾过站台</p>
+      <p class="now">夜航的风替我把告别说完</p>
+      <p class="near">云层下面是谁的窗台</p>
+      <p>候鸟也会想念出发的海岸</p>
+      <p>明天的城市请你慢一点</p>
+    </section>
+    <section class="progress" data-od-id="progress-section" data-od-label="进度条">
+      <div class="bar">
+        <span class="played"></span>
+        <span class="knob"></span>
+      </div>
+      <div class="times"><span>01:42</span><span>04:27</span></div>
+    </section>
+    <section class="controls" data-od-id="transport-controls" data-od-label="播放控制区">
+      <button class="ctl liked" data-od-id="like-button" data-od-label="喜欢按钮">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20.5S4 15.2 4 9.8C4 6.9 6.2 5 8.6 5c1.5 0 2.7.7 3.4 1.9C12.7 5.7 13.9 5 15.4 5 17.8 5 20 6.9 20 9.8c0 5.4-8 10.7-8 10.7z" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="ctl" data-od-id="prev-button" data-od-label="上一首">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17.5 5.5v13L9 12z" stroke-linejoin="round"/><path d="M6.5 5.5v13" stroke-linecap="round"/></svg>
+      </button>
+      <button class="play" data-od-id="play-button" data-od-label="播放按钮">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8.5 5v14M15.5 5v14" stroke-linecap="round"/></svg>
+      </button>
+      <button class="ctl" data-od-id="next-button" data-od-label="下一首">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6.5 5.5v13L15 12z" stroke-linejoin="round"/><path d="M17.5 5.5v13" stroke-linecap="round"/></svg>
+      </button>
+      <button class="ctl" data-od-id="queue-button" data-od-label="播放列表">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 12h10M4 17h10" stroke-linecap="round"/><path d="M19 12v6.2" stroke-linecap="round"/><circle cx="17" cy="18.2" r="2"/></svg>
+      </button>
+    </section>
+    <section class="comment-strip" data-od-id="comment-teaser" data-od-label="评论入口条">
+      <span class="stack"><i></i><i></i><i></i></span>
+      <span class="text">这首歌陪我跑完了今晚最后三公里</span>
+      <span class="count">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9l-4 3.5v-3.5h-.5A2.5 2.5 0 0 1 2 14.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        评论 999+
+      </span>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "logistics",
+  "name": "Freight",
+  "category": "Logistics & Delivery",
+  "description": "Industrial system for logistics, fleet, and delivery tracking — crisp slate surfaces, a high-visibility safety-orange accent, mono tracking codes, and dense operational hierarchy.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "od-design-system-project/v1",
+  "id": "kids",
+  "name": "Sprout",
+  "category": "Kids & Family",
+  "description": "Playful, safe system for children and family products — bright friendly palette, big rounded shapes, large touch targets, and joyful but legible hierarchy.",
+  "source": {
+    "type": "bundled",
+    "origin": "SenWeaverCoding curated bundled fixture"
+  },
+  "files": {
+    "design": "DESIGN.md",
+    "tokens": "tokens.css"
+  },
+  "componentsManifest": "components.manifest.json",
+  "importMode": "normalized"
+}

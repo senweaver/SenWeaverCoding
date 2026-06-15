@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "brandId": "insurance",
+  "source": {
+    "componentsHtml": "components.html",
+    "tokensCss": "tokens.css"
+  },
+  "fixture": {
+    "title": "Assured — reference components",
+    "description": "Reference fixture for design-systems/insurance: Reassuring insurance & risk UI: stable navy, a calm trust-teal accent, clear coverage cards, and confident jargon-free hierarchy.",
+    "styleBlockCount": 1
+  },
+  "groups": [
+    {
+      "id": "buttons",
+      "label": "Buttons and calls to action",
+      "present": true,
+      "classes": [
+        "btn",
+        "btn-primary",
+        "btn-secondary"
+      ],
+      "tokenReferences": [
+        "--accent",
+        "--accent-on",
+        "--accent-hover",
+        "--border",
+        "--fg",
+        "--radius-md",
+        "--focus-ring",
+        "--motion-fast"
+      ]
+    },
+    {
+      "id": "inputs",
+      "label": "Form fields and controls",
+      "present": true,
+      "classes": [
+        "field"
+      ],
+      "tokenReferences": [
+        "--surface",
+        "--border",
+        "--fg",
+        "--muted",
+        "--radius-sm",
+        "--focus-ring"
+      ]
+    },
+    {
+      "id": "cards",
+      "label": "Cards and panels",
+      "present": true,
+      "classes": [
+        "panel",
+        "tile"
+      ],
+      "tokenReferences": [
+        "--surface",
+        "--border",
+        "--radius-lg",
+        "--elev-raised"
+      ]
+    },
+    {
+      "id": "badges",
+      "label": "Badges, chips, and status labels",
+      "present": true,
+      "classes": [
+        "status"
+      ],
+      "tokenReferences": [
+        "--accent",
+        "--success",
+        "--warn",
+        "--danger",
+        "--radius-pill"
+      ]
+    },
+    {
+      "id": "typography",
+      "label": "Typography scale and text utilities",
+      "present": true,
+      "classes": [
+        "eyebrow",
+        "lead"
+      ],
+      "tokenReferences": [
+        "--fg",
+        "--fg-2",
+        "--muted",
+        "--text-4xl",
+        "--text-xl",
+        "--tracking-display"
+      ]
+    },
+    {
+      "id": "layout",
+      "label": "Layout primitives",
+      "present": true,
+      "classes": [
+        "container"
+      ],
+      "tokenReferences": [
+        "--container-max",
+        "--container-gutter-desktop",
+        "--section-y-desktop"
+      ]
+    }
+  ]
+}

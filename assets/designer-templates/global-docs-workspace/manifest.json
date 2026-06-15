@@ -1,0 +1,7 @@
+{
+  "id": "global-docs-workspace",
+  "title": "块式文档工作区 · Block Docs Workspace",
+  "category": "Web App",
+  "tags": ["文档", "知识库", "笔记", "docs", "notes", "wiki", "blocks", "editor", "block-editor"],
+  "summary": "Ultra-minimal block-based document workspace: light gray page-tree sidebar with toggles, a large page title, paragraph, heading, to-do, callout and table blocks, hover block handles and a slash-command hint."
+}

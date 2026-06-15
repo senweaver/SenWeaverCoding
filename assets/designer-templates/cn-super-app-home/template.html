@@ -1,0 +1,506 @@
+<!-- SenWeaverCoding built-in template -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>青禾钱包 · 超级应用首页</title>
+<style>
+:root {
+  --od-accent: #1677ff;
+  --od-scale: 1;
+  --od-density: 1;
+  --od-motion: 1;
+  --brand: var(--od-accent);
+  --brand-deep: #0e5fd8;
+  --brand-soft: #e8f1ff;
+  --brand-tint: #f0f6ff;
+  --page-bg: #eef1f6;
+  --surface: #ffffff;
+  --fg: #1c1f26;
+  --muted: #7b8290;
+  --faint: #aab0bc;
+  --border: #eceef2;
+  --up: #00b578;
+  --warn: #ff8f1f;
+  --warn-soft: #fff3e5;
+  --hot: #fa5151;
+  --hot-soft: #ffefee;
+  --teal: #04b8b8;
+  --teal-soft: #e3f8f8;
+  --gold: #c9881a;
+  --gold-soft: #fdf3e0;
+  --green-soft: #e4f8f0;
+  --on-brand: #ffffff;
+  --shadow: 0 4px 16px rgba(28, 31, 38, 0.06);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --fs-10: calc(10px * var(--od-scale));
+  --fs-11: calc(11px * var(--od-scale));
+  --fs-12: calc(12px * var(--od-scale));
+  --fs-13: calc(13px * var(--od-scale));
+  --fs-14: calc(14px * var(--od-scale));
+  --fs-15: calc(15px * var(--od-scale));
+  --fs-17: calc(17px * var(--od-scale));
+  --fs-20: calc(20px * var(--od-scale));
+  --fs-28: calc(28px * var(--od-scale));
+  --sp-1: calc(4px * var(--od-density));
+  --sp-2: calc(8px * var(--od-density));
+  --sp-3: calc(12px * var(--od-density));
+  --sp-4: calc(16px * var(--od-density));
+  --sp-5: calc(20px * var(--od-density));
+  --sp-6: calc(24px * var(--od-density));
+  --dur: calc(0.16s * var(--od-motion));
+  --radius: 12px;
+  --radius-lg: 16px;
+  --dk-page-bg: #0d0f14;
+  --dk-surface: #181b22;
+  --dk-fg: #e8eaf0;
+  --dk-muted: #9aa1ad;
+  --dk-faint: #6a7180;
+  --dk-border: #262a33;
+  --dk-brand-soft: #14233c;
+  --dk-brand-tint: #131c2c;
+  --dk-warn-soft: #2e2113;
+  --dk-hot-soft: #2e1717;
+  --dk-teal-soft: #102b2b;
+  --dk-gold-soft: #2c2312;
+  --dk-green-soft: #112b21;
+}
+html[data-od-mode="dark"] {
+  --page-bg: var(--dk-page-bg);
+  --surface: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --muted: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --brand-soft: var(--dk-brand-soft);
+  --brand-tint: var(--dk-brand-tint);
+  --warn-soft: var(--dk-warn-soft);
+  --hot-soft: var(--dk-hot-soft);
+  --teal-soft: var(--dk-teal-soft);
+  --gold-soft: var(--dk-gold-soft);
+  --green-soft: var(--dk-green-soft);
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+svg { display: block; }
+button { font: inherit; cursor: pointer; border: 0; background: none; padding: 0; color: inherit; }
+.phone {
+  max-width: 480px;
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+.app-top {
+  background: linear-gradient(176deg, var(--brand) 0%, var(--brand-deep) 88%);
+  color: var(--on-brand);
+  padding-bottom: calc(var(--sp-6) + 34px);
+}
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(8px * var(--od-density)) var(--sp-4) calc(4px * var(--od-density));
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.statusbar .sb-icons { display: flex; align-items: center; gap: 5px; }
+.statusbar svg { width: 15px; height: 12px; }
+.searchbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+}
+.search-field {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: calc(7px * var(--od-density)) var(--sp-3);
+  font-size: var(--fs-13);
+  color: rgba(255, 255, 255, 0.86);
+  transition: background var(--dur) ease;
+}
+.search-field:active { background: rgba(255, 255, 255, 0.28); }
+.search-field svg { width: 16px; height: 16px; opacity: 0.9; }
+.scan-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-10);
+  color: var(--on-brand);
+}
+.scan-btn svg { width: 22px; height: 22px; }
+.scan-btn:active { opacity: 0.7; }
+.quick-actions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+.qa-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-12);
+  color: var(--on-brand);
+  padding: var(--sp-2) 0;
+  border-radius: var(--radius);
+  transition: background var(--dur) ease;
+}
+.qa-item:active { background: rgba(255, 255, 255, 0.14); }
+.qa-item svg { width: 26px; height: 26px; }
+.sheet {
+  flex: 1;
+  margin-top: -28px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--sp-4) var(--sp-3) calc(76px * var(--od-density));
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.asset-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--sp-4) var(--sp-4) var(--sp-3);
+}
+.asset-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--muted);
+  font-size: var(--fs-13);
+}
+.asset-head .more { display: flex; align-items: center; gap: 2px; color: var(--faint); font-size: var(--fs-12); }
+.asset-head svg { width: 14px; height: 14px; }
+.asset-value {
+  font-size: var(--fs-28);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+  margin-top: var(--sp-1);
+}
+.asset-value small { font-size: var(--fs-15); font-weight: 600; margin-right: 2px; }
+.asset-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.asset-yield { font-size: var(--fs-12); color: var(--muted); }
+.asset-yield b { color: var(--up); font-weight: 600; font-variant-numeric: tabular-nums; }
+.asset-cta {
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  padding: calc(6px * var(--od-density)) var(--sp-3);
+  border-radius: 999px;
+  transition: transform var(--dur) ease, opacity var(--dur) ease;
+}
+.asset-cta:active { transform: scale(0.96); opacity: 0.85; }
+.service-grid {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: var(--sp-3) 0;
+}
+.svc {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(6px * var(--od-density));
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-12);
+  color: var(--fg);
+  border-radius: var(--radius);
+  transition: background var(--dur) ease;
+}
+.svc:active { background: var(--brand-tint); }
+.svc-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+}
+.svc-icon svg { width: 22px; height: 22px; }
+.tint-blue { background: var(--brand-soft); color: var(--brand); }
+.tint-orange { background: var(--warn-soft); color: var(--warn); }
+.tint-red { background: var(--hot-soft); color: var(--hot); }
+.tint-teal { background: var(--teal-soft); color: var(--teal); }
+.tint-gold { background: var(--gold-soft); color: var(--gold); }
+.tint-green { background: var(--green-soft); color: var(--up); }
+.promo {
+  border-radius: var(--radius-lg);
+  background: linear-gradient(112deg, var(--brand-deep), var(--brand) 62%, var(--teal));
+  color: var(--on-brand);
+  padding: var(--sp-4);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: var(--shadow);
+  transition: transform var(--dur) ease;
+}
+.promo:active { transform: scale(0.99); }
+.promo h3 { margin: 0; font-size: var(--fs-15); font-weight: 700; }
+.promo p { margin: 4px 0 0; font-size: var(--fs-12); opacity: 0.82; }
+.promo-pill {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  padding: calc(6px * var(--od-density)) var(--sp-3);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.feed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-1) var(--sp-1) 0;
+}
+.feed-head h2 { margin: 0; font-size: var(--fs-17); font-weight: 700; }
+.feed-head span { font-size: var(--fs-12); color: var(--faint); }
+.feed-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--sp-3);
+  display: flex;
+  gap: var(--sp-3);
+  transition: transform var(--dur) ease;
+}
+.feed-card:active { transform: scale(0.99); }
+.feed-thumb {
+  width: 84px;
+  height: 84px;
+  flex: none;
+  border-radius: var(--radius);
+}
+.thumb-a { background: linear-gradient(135deg, var(--teal-soft), var(--teal)); }
+.thumb-b { background: linear-gradient(135deg, var(--gold-soft), var(--warn)); }
+.thumb-c { background: linear-gradient(135deg, var(--green-soft), var(--up)); }
+.feed-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.feed-body h3 {
+  margin: 0;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.feed-body p { margin: 4px 0 0; font-size: var(--fs-12); color: var(--muted); }
+.feed-meta {
+  margin-top: auto;
+  display: flex;
+  gap: var(--sp-2);
+  font-size: var(--fs-11);
+  color: var(--faint);
+}
+.feed-tag {
+  background: var(--brand-tint);
+  color: var(--brand);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-weight: 500;
+}
+.tabbar {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding: calc(6px * var(--od-density)) 0 calc(14px * var(--od-density));
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-10);
+  color: var(--faint);
+  transition: color var(--dur) ease;
+}
+.tab svg { width: 23px; height: 23px; }
+.tab.active { color: var(--brand); font-weight: 600; }
+.tab:active { opacity: 0.7; }
+</style>
+</head>
+<body>
+<div class="phone" data-od-id="phone-frame" data-od-label="手机外框">
+  <header class="app-top" data-od-id="app-top" data-od-label="顶部品牌区">
+    <div class="statusbar" data-od-id="status-bar" data-od-label="状态栏">
+      <span>9:41</span>
+      <span class="sb-icons">
+        <svg viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 9.5v1M6 7v3.5M10 4.5v6M14 2v8.5"/></svg>
+        <svg viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5a8.5 8.5 0 0 1 12 0M4.4 7.4a5 5 0 0 1 7.2 0M7 9.8l1 1 1-1"/></svg>
+        <svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="2" width="15" height="8" rx="2.5"/><path d="M18 5v2" stroke-linecap="round"/><rect x="3" y="4" width="9" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+    <div class="searchbar" data-od-id="search-bar" data-od-label="搜索与扫码">
+      <button class="search-field" data-od-id="search-field" data-od-label="搜索框">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        水电燃气缴费
+      </button>
+      <button class="scan-btn" data-od-id="scan-entry" data-od-label="扫一扫入口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M3 12h18"/></svg>
+        扫一扫
+      </button>
+    </div>
+    <nav class="quick-actions" data-od-id="quick-actions" data-od-label="高频四宫格">
+      <button class="qa-item" data-od-id="qa-pay" data-od-label="付钱">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 8h3v3H8zM13 8h3M13 11h3M8 14h8M8 17h5"/></svg>
+        付钱
+      </button>
+      <button class="qa-item" data-od-id="qa-collect" data-od-label="收钱">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 10.5L12 14l3.5-3.5M12 14V7"/></svg>
+        收钱
+      </button>
+      <button class="qa-item" data-od-id="qa-travel" data-od-label="出行">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3.5" width="14" height="15" rx="3"/><path d="M5 13h14M9 21l1-2.5M15 21l-1-2.5"/><circle cx="8.7" cy="15.8" r="0.4"/><circle cx="15.3" cy="15.8" r="0.4"/></svg>
+        出行
+      </button>
+      <button class="qa-item" data-od-id="qa-card" data-od-label="卡包">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="6" width="17" height="12.5" rx="2.5"/><path d="M3.5 10h17M7 15h4"/></svg>
+        卡包
+      </button>
+    </nav>
+  </header>
+  <main class="sheet" data-od-id="content-sheet" data-od-label="内容面板">
+    <section class="asset-card" data-od-id="asset-card" data-od-label="资产卡片">
+      <div class="asset-head">
+        <span>总资产（元）</span>
+        <span class="more">隐藏金额
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.6"/></svg>
+        </span>
+      </div>
+      <div class="asset-value"><small>¥</small>86,420.57</div>
+      <div class="asset-row">
+        <span class="asset-yield">禾盈宝 昨日收益 <b>+3.86</b> · 七日年化 2.18%</span>
+        <button class="asset-cta" data-od-id="asset-transfer-cta" data-od-label="转入按钮">转入</button>
+      </div>
+    </section>
+    <section class="service-grid" data-od-id="service-grid" data-od-label="服务宫格">
+      <button class="svc" data-od-id="svc-recharge" data-od-label="充值中心">
+        <span class="svc-icon tint-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M10.5 17.5h3"/></svg></span>
+        充值中心
+      </button>
+      <button class="svc" data-od-id="svc-utility" data-od-label="生活缴费">
+        <span class="svc-icon tint-orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2.5L5 13.5h5l-1 8 8-11h-5l1-8z"/></svg></span>
+        生活缴费
+      </button>
+      <button class="svc" data-od-id="svc-credit" data-od-label="信用分">
+        <span class="svc-icon tint-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 3v5.5c0 4.6-3.1 8-7.5 9.5-4.4-1.5-7.5-4.9-7.5-9.5V6L12 3z"/><path d="M8.8 12l2.2 2.2 4.2-4.4"/></svg></span>
+        禾信分
+      </button>
+      <button class="svc" data-od-id="svc-invest" data-od-label="理财">
+        <span class="svc-icon tint-red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19h16M5 15.5l4-4.5 3.5 3 5.5-7"/><path d="M14.5 7H18v3.5"/></svg></span>
+        理财
+      </button>
+      <button class="svc" data-od-id="svc-insure" data-od-label="保险">
+        <span class="svc-icon tint-gold"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a8 8 0 0 1 16 0H4z"/><path d="M12 3v2M12 11v6.5A2.5 2.5 0 0 1 9.5 22"/></svg></span>
+        保险
+      </button>
+      <button class="svc" data-od-id="svc-charity" data-od-label="公益">
+        <span class="svc-icon tint-green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.9c0 5.4-7.5 10-7.5 10z"/></svg></span>
+        禾苗公益
+      </button>
+      <button class="svc" data-od-id="svc-city" data-od-label="城市服务">
+        <span class="svc-icon tint-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21h16M6 21V8l6-4.5L18 8v13M10 21v-5h4v5M10 11h.01M14 11h.01"/></svg></span>
+        城市服务
+      </button>
+      <button class="svc" data-od-id="svc-more" data-od-label="更多服务">
+        <span class="svc-icon tint-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6"/></svg></span>
+        全部
+      </button>
+    </section>
+    <section class="promo" data-od-id="promo-banner" data-od-label="活动横幅">
+      <div>
+        <h3>新客理财体验金 8,888 元</h3>
+        <p>开通禾盈宝即领，收益当日可见</p>
+      </div>
+      <span class="promo-pill" data-od-id="promo-cta" data-od-label="领取按钮">立即领取</span>
+    </section>
+    <section data-od-id="lifestyle-feed" data-od-label="生活推荐流">
+      <div class="feed-head">
+        <h2>为你推荐</h2>
+        <span>换一批</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-3);">
+        <article class="feed-card" data-od-id="feed-card-commute" data-od-label="通勤卡片">
+          <div class="feed-thumb thumb-a"></div>
+          <div class="feed-body">
+            <h3>地铁公交联乘月卡上新，通勤每月最高省 46 元</h3>
+            <p>绑定乘车码自动抵扣</p>
+            <div class="feed-meta"><span class="feed-tag">出行优惠</span><span>12.6万人已开通</span></div>
+          </div>
+        </article>
+        <article class="feed-card" data-od-id="feed-card-utility" data-od-label="缴费卡片">
+          <div class="feed-thumb thumb-b"></div>
+          <div class="feed-body">
+            <h3>本月电费账单已出：上月用电 286 度，环比下降 8%</h3>
+            <p>开启自动代扣不再逾期</p>
+            <div class="feed-meta"><span class="feed-tag">账单提醒</span><span>2 小时前</span></div>
+          </div>
+        </article>
+        <article class="feed-card" data-od-id="feed-card-health" data-od-label="健康卡片">
+          <div class="feed-thumb thumb-c"></div>
+          <div class="feed-body">
+            <h3>步数挑战：本周累计 42,180 步，可兑换 3 张咖啡券</h3>
+            <p>邀请好友组队额外加 500 步</p>
+            <div class="feed-meta"><span class="feed-tag">健康任务</span><span>进行中</span></div>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+  <nav class="tabbar" data-od-id="tab-bar" data-od-label="底部标签栏">
+    <button class="tab active" data-od-id="tab-home" data-od-label="首页标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5"/></svg>
+      首页
+    </button>
+    <button class="tab" data-od-id="tab-wealth" data-od-label="理财标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 9l3.5 4 3.5-4M12 13v4M9.5 14.5h5"/></svg>
+      理财
+    </button>
+    <button class="tab" data-od-id="tab-life" data-od-label="生活标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 13c1 2 2.5 3 4 3s3-1 4-3"/></svg>
+      生活
+    </button>
+    <button class="tab" data-od-id="tab-message" data-od-label="消息标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1L3.5 20.5l1-4.4A8.5 8.5 0 1 1 21 12z"/></svg>
+      消息
+    </button>
+    <button class="tab" data-od-id="tab-me" data-od-label="我的标签">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="4"/><path d="M4.5 20c1.5-3.5 4.2-5 7.5-5s6 1.5 7.5 5"/></svg>
+      我的
+    </button>
+  </nav>
+</div>
+</body>
+</html>
