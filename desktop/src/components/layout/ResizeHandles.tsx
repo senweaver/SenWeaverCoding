@@ -14,65 +14,65 @@ type Direction =
   | 'SouthEast'
   | 'SouthWest'
 
-const GUTTER_PX = 18
+const RESIZE_EDGE_PX = 8
 
 const HANDLE_STYLES: Record<Direction, React.CSSProperties> = {
 
   North: {
     top: 0,
-    left: GUTTER_PX,
-    right: GUTTER_PX,
-    height: GUTTER_PX,
+    left: RESIZE_EDGE_PX,
+    right: RESIZE_EDGE_PX,
+    height: RESIZE_EDGE_PX,
     cursor: 'ns-resize',
   },
   South: {
     bottom: 0,
-    left: GUTTER_PX,
-    right: GUTTER_PX,
-    height: GUTTER_PX,
+    left: RESIZE_EDGE_PX,
+    right: RESIZE_EDGE_PX,
+    height: RESIZE_EDGE_PX,
     cursor: 'ns-resize',
   },
   West: {
-    top: GUTTER_PX,
-    bottom: GUTTER_PX,
+    top: RESIZE_EDGE_PX,
+    bottom: RESIZE_EDGE_PX,
     left: 0,
-    width: GUTTER_PX,
+    width: RESIZE_EDGE_PX,
     cursor: 'ew-resize',
   },
   East: {
-    top: GUTTER_PX,
-    bottom: GUTTER_PX,
+    top: RESIZE_EDGE_PX,
+    bottom: RESIZE_EDGE_PX,
     right: 0,
-    width: GUTTER_PX,
+    width: RESIZE_EDGE_PX,
     cursor: 'ew-resize',
   },
 
   NorthWest: {
     top: 0,
     left: 0,
-    width: GUTTER_PX,
-    height: GUTTER_PX,
+    width: RESIZE_EDGE_PX,
+    height: RESIZE_EDGE_PX,
     cursor: 'nwse-resize',
   },
   NorthEast: {
     top: 0,
     right: 0,
-    width: GUTTER_PX,
-    height: GUTTER_PX,
+    width: RESIZE_EDGE_PX,
+    height: RESIZE_EDGE_PX,
     cursor: 'nesw-resize',
   },
   SouthWest: {
     bottom: 0,
     left: 0,
-    width: GUTTER_PX,
-    height: GUTTER_PX,
+    width: RESIZE_EDGE_PX,
+    height: RESIZE_EDGE_PX,
     cursor: 'nesw-resize',
   },
   SouthEast: {
     bottom: 0,
     right: 0,
-    width: GUTTER_PX,
-    height: GUTTER_PX,
+    width: RESIZE_EDGE_PX,
+    height: RESIZE_EDGE_PX,
     cursor: 'nwse-resize',
   },
 }

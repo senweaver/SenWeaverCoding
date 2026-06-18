@@ -249,13 +249,15 @@ fn smart_truncate(text: &str, max_chars: usize, tee_path: Option<&PathBuf>) -> S
     }
 
     let head_ratio = 0.7;
-    let head_len = (max_chars as f64 * head_ratio) as usize;
+    let head_len =
+        crate::util::floor_char_boundary(text, (max_chars as f64 * head_ratio) as usize);
     let tail_len = max_chars.saturating_sub(head_len).saturating_sub(200);
 
     let head_end = text[..head_len].rfind('\n').unwrap_or(head_len);
 
     let tail_start = if tail_len > 0 {
-        let start_search = text.len().saturating_sub(tail_len);
+        let start_search =
+            crate::util::floor_char_boundary(text, text.len().saturating_sub(tail_len));
         text[start_search..]
             .find('\n')
             .map(|p| start_search + p + 1)

@@ -9,6 +9,8 @@ import { useTranslation } from '../../i18n'
 import { Modal } from '../shared/Modal'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
+import { revealInExplorer } from '../../lib/revealInExplorer'
+import { useUIStore } from '../../stores/uiStore'
 import {
   extractMermaidBlocks,
   renderCuratorDiagrams,
@@ -28,23 +30,6 @@ function cleanWinPath(path: string): string {
 
 const docxDiagramsProcessed = new Set<string>()
 
-async function openLocalPath(path: string): Promise<void> {
-  const target = cleanWinPath(path)
-  if (!target) return
-  if (!isTauriRuntime()) {
-    window.open(target, '_blank')
-    return
-  }
-  try {
-    const mod = (await import(/* @vite-ignore */ '@tauri-apps/plugin-shell')) as {
-      open: (target: string) => Promise<void>
-    }
-    await mod.open(target)
-  } catch (err) {
-    console.warn('[CuratorCard] open docx failed', err)
-  }
-}
-
 type Props = {
   messageId: string
   slug: string
@@ -55,7 +40,8 @@ type Props = {
   title: string
   body: string
   sessionId?: string | null
-  status?: 'writing' | 'completed'
+  status?: 'writing' | 'completed' | 'failed'
+  error?: string
 }
 
 export function CuratorCard({
@@ -69,12 +55,14 @@ export function CuratorCard({
   body,
   sessionId,
   status = 'completed',
+  error,
 }: Props) {
   const t = useTranslation()
   const [viewOpen, setViewOpen] = useState(false)
   const [pathCopied, setPathCopied] = useState(false)
   const requestModeSwitch = useChatStore((s) => s.requestCuratorModeSwitch)
   const resumeCuratorExecution = useChatStore((s) => s.resumeCuratorExecution)
+  const continueCuratorWriting = useChatStore((s) => s.continueCuratorWriting)
 
   const curatorInputs = useChatStore(
     useShallow((s) => {
@@ -94,13 +82,22 @@ export function CuratorCard({
     )
   }, [sessionId, curatorInputs.messages, curatorInputs.chatState, messageId])
 
-  const isWriting = status === 'writing'
+  const sessionIsLive = (curatorInputs.chatState ?? 'idle') !== 'idle'
+  const interruptedWhileWriting = status === 'writing' && !sessionIsLive
+  const isWriting = status === 'writing' && sessionIsLive
+  const isFailed = status === 'failed' || interruptedWhileWriting
+  const resolvedError =
+    error ||
+    (interruptedWhileWriting
+      ? t('curator.interrupted') ||
+        'The turn ended before the document was finalized. Click "Continue writing".'
+      : undefined)
   const isExecuting = execState === 'executing'
   const isPendingSwitch = execState === 'pending_switch'
   const isIncomplete = execState === 'incomplete_run'
   const isBuilt = execState === 'completed_run'
   const buildDisabled =
-    !sessionId || isWriting || isExecuting || isBuilt || isPendingSwitch || isIncomplete
+    !sessionId || isWriting || isFailed || isExecuting || isBuilt || isPendingSwitch || isIncomplete
 
   function handleBuild() {
     if (buildDisabled) return
@@ -114,6 +111,27 @@ export function CuratorCard({
   function handleResume() {
     if (!sessionId) return
     resumeCuratorExecution(sessionId, implBlueprintPath || finalMdPath)
+  }
+
+  function handleContinueWriting() {
+    if (!sessionId) return
+    continueCuratorWriting(sessionId)
+  }
+
+  async function handleRevealDocx() {
+    const target = docxDisplay
+    if (!target) return
+    try {
+      await revealInExplorer(target)
+    } catch (err) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('files.preview.revealFailed', {
+          message: err instanceof Error ? err.message : String(err),
+        }),
+        duration: 5000,
+      })
+    }
   }
 
   async function handleCopyPath() {
@@ -204,6 +222,12 @@ export function CuratorCard({
               {t('curator.statusWriting') || 'Writing…'}
             </span>
           )}
+          {isFailed && (
+            <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-[var(--color-error)]">
+              <span className="material-symbols-outlined text-[12px]">error</span>
+              {t('curator.statusFailed') || 'Not finalized'}
+            </span>
+          )}
         </div>
         <div className="px-3 py-3">
           <div className="text-sm font-semibold text-[var(--color-text-primary)] truncate" title={title}>
@@ -226,13 +250,25 @@ export function CuratorCard({
               </div>
             )}
           </div>
+          {isFailed && (
+            <div className="mt-2 rounded-md border border-[var(--color-error)]/40 bg-[var(--color-error)]/10 px-2 py-1.5">
+              <div className="text-[11px] font-medium text-[var(--color-error)]">
+                {t('curator.failedHint') || 'The deliverable was not finalized. Tell the assistant to continue or fix the issue below.'}
+              </div>
+              {resolvedError && (
+                <div className="mt-1 max-h-[120px] overflow-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-[var(--color-text-secondary)]">
+                  {resolvedError}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center justify-end gap-1.5 px-3 py-2 border-t border-[var(--color-outline-variant)]/30 bg-[var(--color-surface-container-low)]">
           <button
             onClick={() => setViewOpen(true)}
             className="text-[11px] px-2 py-1 rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
           >
-            {t('plan.viewPlan')}
+            {t('curator.viewDocument')}
           </button>
           <button
             onClick={handleCopyPath}
@@ -242,7 +278,7 @@ export function CuratorCard({
           </button>
           {docxDisplay && (
             <button
-              onClick={() => void openLocalPath(docxDisplay)}
+              onClick={() => void handleRevealDocx()}
               disabled={diagramState === 'rendering'}
               title={diagramState === 'rendering' ? t('curator.renderingDiagrams') || docxDisplay : docxDisplay}
               className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md text-[var(--color-curator-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
@@ -250,9 +286,9 @@ export function CuratorCard({
               <span
                 className={`material-symbols-outlined text-[14px]${diagramState === 'rendering' ? ' animate-spin' : ''}`}
               >
-                {diagramState === 'rendering' ? 'progress_activity' : 'description'}
+                {diagramState === 'rendering' ? 'progress_activity' : 'folder_open'}
               </span>
-              {t('curator.openDocx')}
+              {t('curator.revealDocx')}
             </button>
           )}
           {isIncomplete ? (
@@ -284,6 +320,15 @@ export function CuratorCard({
               </span>
               {t('plan.completed') || 'Completed'}
             </span>
+          ) : isFailed ? (
+            <button
+              onClick={handleContinueWriting}
+              disabled={!sessionId || sessionIsLive}
+              className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="material-symbols-outlined text-[14px]">edit_note</span>
+              {t('curator.continueWriting') || 'Continue writing'}
+            </button>
           ) : (
             <button
               onClick={handleBuild}

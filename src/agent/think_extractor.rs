@@ -52,6 +52,7 @@ impl ThinkTagSplitter {
             }
 
             let tag_suffix = &buf[cursor..];
+            let suffix_bytes = tag_suffix.as_bytes();
             let tags: &[&str] = if self.inside {
                 CLOSING_TAGS
             } else {
@@ -60,10 +61,11 @@ impl ThinkTagSplitter {
 
             let mut matched_len: Option<usize> = None;
             for tag in tags {
-                if tag_suffix.len() >= tag.len()
-                    && tag_suffix[..tag.len()].eq_ignore_ascii_case(tag)
+                let tag_bytes = tag.as_bytes();
+                if suffix_bytes.len() >= tag_bytes.len()
+                    && suffix_bytes[..tag_bytes.len()].eq_ignore_ascii_case(tag_bytes)
                 {
-                    matched_len = Some(tag.len());
+                    matched_len = Some(tag_bytes.len());
                     break;
                 }
             }
@@ -76,8 +78,9 @@ impl ThinkTagSplitter {
 
             let mut could_extend = false;
             for tag in tags {
-                if tag.len() > tag_suffix.len()
-                    && tag[..tag_suffix.len()].eq_ignore_ascii_case(tag_suffix)
+                let tag_bytes = tag.as_bytes();
+                if tag_bytes.len() > suffix_bytes.len()
+                    && tag_bytes[..suffix_bytes.len()].eq_ignore_ascii_case(suffix_bytes)
                 {
                     could_extend = true;
                     break;

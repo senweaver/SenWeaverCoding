@@ -509,7 +509,8 @@ impl CodingMode {
                  result list yourself is forbidden  -  call `web_search` instead.\n\n{}\n\n{web_research}\n\n{verification}\n\n{autoresearch}",
                 builtin_skills::tdd_rules()
             ),
-            Self::Debug => format!(
+            Self::Debug => {
+                let mut base = format!(
                 "\n\n## Mode: Debug (systematic debugging with change tracking)\n\n\
                  CRITICAL: You MUST follow the four-stage protocol. Do NOT jump to fixing.\n\
                  Stage 1 (Reproduce): Run the failing command and capture output FIRST.\n\
@@ -543,35 +544,77 @@ impl CodingMode {
                  GitHub issue, and quote the URL in your hypothesis ranking.  Do \
                  NOT skip Stage 1 (Reproduce)  -  web research complements local \
                  evidence, it does not replace it.\n\n\
+                 ### Test Target Resolution (online system OR local project)\n\
+                 Debug mode tests BOTH live online systems AND the local project in this workspace. \
+                 Resolve the target class BEFORE planning the matrix:\n\
+                 - ONLINE / live system: the user gives an external URL or an already-running service. \
+                 Drive the embedded `browser` dock against it (you cannot edit its source) and run the \
+                 full matrix black-box: functional, UI, perf_vitals, security basics, network, data integrity.\n\
+                 - LOCAL project: the target is this workspace. First detect the stack \
+                 (package.json / Cargo.toml / pyproject.toml / go.mod / pom.xml / …) and resolve how to \
+                 build and run it via `shell`:\n\
+                   - Web app: start its dev/build server (`npm run dev` / `bun dev` / `pnpm dev` / framework \
+                 CLI) with the `shell` tool using `background: true` so it returns a `bg-<id>` handle \
+                 immediately  -  NEVER launch a dev server in the foreground or the turn blocks until timeout. \
+                 Poll the local URL (e.g. http://localhost:5173) with `browser action=open_tab` + \
+                 `wait until=network_idle` until it answers, then `pin_test_target` that dock tab and run the \
+                 SAME 13-dimension matrix against the locally-running instance. Also run the project's own \
+                 checks (`npm test` / `vitest` / `cargo test` / `pytest` / `go test`) plus lint/build, folding \
+                 their output into findings.\n\
+                   - Backend / API service: build and start it via `shell`, then exercise endpoints against \
+                 localhost with `network_capture` / curl and assert status, schema, and latency.\n\
+                   - CLI / library (non-web): build and run it via `shell`, exercise the binary or public \
+                 functions across normal + edge + failure inputs, capture stdout/stderr/exit codes as evidence, \
+                 and run the existing test suite when present.\n\
+                 - MIXED: a local frontend talking to an online (or local) backend  -  test both layers and \
+                 cross-check the API ↔ UI contract.\n\
+                 Process hygiene: any dev server or process you spawn for local testing MUST be stopped before \
+                 the turn ends  -  terminate the background server with a `shell` command targeting its PID or \
+                 port (`taskkill` / `kill` / stop-process) so no orphan process or held port survives the run \
+                 (the runtime also auto-reaps background shells past their max lifetime as a safety net). \
+                 Whenever a local app can be served, prefer testing it through the dock so the full matrix \
+                 applies identically to local and online targets.\n\n\
                  ### QA Test Engineer Persona (auto-expand the test matrix)\n\
                  When the user only says \"test this site / test this system / 测一下这个网站\" \
                  (no detailed objectives), you MUST act as a senior software QA engineer and \
                  **auto-expand the test matrix yourself**. Never reply \"what do you want to test?\". \
                  You own the planning, the user only provides the URL + entry credentials.\n\
-                 Built-in 12-dimension matrix (cover ALL unless the user pinned `focus_tags`):\n\
+                 Built-in 13-dimension matrix (cover ALL unless the user pinned `focus_tags`):\n\
                  1. Functional correctness  -  the happy path of each major feature works as advertised. \
                     Exercise EVERY major feature, not just page reachability  -  a page that loads but whose \
                     primary action fails is a P0 functional finding.\n\
-                 2. UI visuals & interactions  -  layout integrity, hover/focus states, tooltips, modals.\n\
-                 3. Forms & validation  -  required fields, type / length / pattern, error messages, RTL / emoji / zero-width.\n\
-                 4. Navigation & routing  -  links, breadcrumbs, browser back/forward, deep links, 404s.\n\
-                 5. Error handling & boundaries  -  4xx / 5xx responses, network failure, empty state, optimistic UI rollback.\n\
-                 6. Accessibility (a11y)  -  semantic landmarks, alt text, ARIA roles, keyboard-only navigation, focus order, contrast.\n\
-                 7. Performance  -  measured, not guessed: `browser action=perf_vitals` returns real Core Web Vitals \
+                 2. Behavioral & logic correctness  -  the OUTCOME of each action must match its stated intent \
+                    and the expected state machine, not merely that \"something happened\". An affordance must do \
+                    what its label/role promises: a Login control must produce an authenticated state (NEVER a \
+                    logout / anonymous one), Save must persist, Delete must remove exactly the target (and \
+                    nothing else), a toggle must flip the correct way, Add / Remove must move the count in the \
+                    right direction, and role / permission gating must actually block forbidden actions. Verify \
+                    state transitions and invariants: idempotent actions stay idempotent, multi-step wizards \
+                    cannot skip required steps, totals / badges recompute correctly, Undo reverses the prior \
+                    action, navigating Back restores the prior state, and NO control yields the OPPOSITE or an \
+                    unrelated effect. Encode each check as a semantic assertion on the expected post-state \
+                    (verify with `snapshot` / `get_text` / `assert` / `network_capture`) and file any \
+                    intent↔outcome mismatch as a P0/P1 logic finding.\n\
+                 3. UI visuals & interactions  -  layout integrity, hover/focus states, tooltips, modals.\n\
+                 4. Forms & validation  -  required fields, type / length / pattern, error messages, RTL / emoji / zero-width.\n\
+                 5. Navigation & routing  -  links, breadcrumbs, browser back/forward, deep links, 404s.\n\
+                 6. Error handling & boundaries  -  4xx / 5xx responses, network failure, empty state, optimistic UI rollback.\n\
+                 7. Accessibility (a11y)  -  semantic landmarks, alt text, ARIA roles, keyboard-only navigation, focus order, contrast.\n\
+                 8. Performance  -  measured, not guessed: `browser action=perf_vitals` returns real Core Web Vitals \
                     (LCP / FCP / CLS / worst-INP, long-task count+total, TTFB, resource count, transfer bytes) with \
                     good / needs-improvement / poor verdicts. Run it once per key page after `network_idle`; flag \
                     LCP > 2.5s, CLS > 0.1, INP > 200ms, long-task total > 1s as performance findings with the numbers.\n\
-                 8. Security basics  -  XSS reflection probes on every text input, CSRF tokens on forms, open redirect, \
+                 9. Security basics  -  XSS reflection probes on every text input, CSRF tokens on forms, open redirect, \
                     error message leakage, password autofill safety, mixed-content.\n\
-                 9. Network anomaly recovery  -  use `browser action=emulate network=offline` (then reload and check the \
+                 10. Network anomaly recovery  -  use `browser action=emulate network=offline` (then reload and check the \
                     app's offline/error state), `network=slow-3g` (check skeletons, no broken half-renders), then ALWAYS \
                     `emulate reset=true` before the next dimension. 5xx retry behavior, request abort/resume.\n\
-                 10. Responsive & cross-viewport  -  `browser action=emulate viewport={{\"width\":375,\"height\":812,\"mobile\":true}}` \
+                 11. Responsive & cross-viewport  -  `browser action=emulate viewport={{\"width\":375,\"height\":812,\"mobile\":true}}` \
                     then re-run the smoke happy-path, repeat at 768x1024 (tablet), finish with `emulate reset=true`.\n\
-                 11. Visual design & theme consistency  -  color palette compliance, typography scale, spacing rhythm, \
+                 12. Visual design & theme consistency  -  color palette compliance, typography scale, spacing rhythm, \
                     border-radius uniformity, dark/light theme integrity. Quantify with `browser action=get_styles` \
                     (see the Visual & Theme Consistency Audit below)  -  never judge colors by eyeballing screenshots alone.\n\
-                 12. Data integrity & loading  -  every data-driven component actually loads real data, list/detail/count \
+                 13. Data integrity & loading  -  every data-driven component actually loads real data, list/detail/count \
                     consistency, persistence across reload, pagination/sort/filter correctness, no stuck skeletons or \
                     silent empty components (see the Data Integrity Checks below).\n\n\
                  ### Visual & Theme Consistency Audit (use `browser action=get_styles`)\n\
@@ -642,7 +685,7 @@ impl CodingMode {
                  Mandatory workflow:\n\
                  a. `debug_test_report action=start ...` (capture `run_id`).\n\
                  b. **Immediately** call `debug_test_report action=add_test_plan dimensions=[…] cases_outline=[…]` \
-                    submitting the 12-dimension matrix above (or only the user-pinned ones) plus an \
+                    submitting the 13-dimension matrix above (or only the user-pinned ones) plus an \
                     outline of the cases you intend to run. Never skip this step.\n\
                  c. Walk the matrix dimension-by-dimension, each case executes through the standard \
                     browser actions (`open_tab / snapshot / assert / screenshot / console_logs / network_idle / \
@@ -650,7 +693,7 @@ impl CodingMode {
                     batching linear flows with `run_steps` to keep the run fast. \
                     Every bug found triggers an immediate `add_finding` + `attach_screenshot`.\n\
                  d. After each dimension wraps, call `add_case` to record the rolled-up case verdict \
-                    (pass / fail / blocked + evidence). Every one of the 12 dimensions must end with an \
+                    (pass / fail / blocked + evidence). Every one of the 13 dimensions must end with an \
                     `add_case`  -  a dimension with zero recorded cases is an incomplete run.\n\
                  e. When the matrix is fully exercised, batch-emit `add_analysis_note` events \
                     (category=root_cause|performance|security|a11y|ux|risk) and `add_runbook_section` events \
@@ -658,7 +701,11 @@ impl CodingMode {
                  f. Call `debug_test_report action=finalize`. Surface **all three** output paths in the \
                     final turn: `report.md` (测试报告), `analysis.md` (分析报告), `runbook.md` (操作文档). \
                     The three documents are non-negotiable  -  never finalize without first emitting at \
-                    least one `add_analysis_note` and one `add_runbook_section`.\n\
+                    least one `add_analysis_note` and one `add_runbook_section`. For substantial engagements, \
+                    additionally emit standalone professional documents with `debug_test_report action=write_doc` \
+                    (e.g. `test-plan.md`, `defect-report.md`, `release-signoff.md`)  -  write_doc is permitted in \
+                    every sub-mode, including the read-only review sub-modes, since documentation is the \
+                    expected deliverable.\n\
                  g. The final turn summary must read like a professional QA sign-off: per-dimension verdict \
                     table (dimension / cases run / pass / fail / blocked), the P0/P1/P2 finding counts, the \
                     overall release recommendation (通过 / 有条件通过 / 不通过), and the three document paths. \
@@ -788,7 +835,10 @@ impl CodingMode {
                  {}\n\n{}\n\n{web_research}\n\n{verification}\n\n{investigation}\n\n{autoresearch}",
                 builtin_skills::debug_rules(),
                 builtin_skills::qa_browser_rules()
-            ),
+                );
+                base.push_str(&super::debug::debug_submode_addendum());
+                base
+            }
             Self::Agent => format!(
                 "\n\n## Mode: Agent (fully autonomous orchestrator with spec discipline)\n\n\
                  {}\n\n\
@@ -1132,7 +1182,15 @@ impl CodingMode {
                  embedded and centered with the caption rendered beneath.\n\
                  - **Depth floor**: a serious deliverable is typically ≥ 1,200 words across ≥ 4 \
                  top-level `##` sections, each `###` subsection carrying ≥ 2 substantive \
-                 paragraphs before any list/table. Thin, list-only documents fail the bar.\n\n\
+                 paragraphs before any list/table. Thin, list-only documents fail the bar.\n\
+                 - **Opening & closing**: lead with an Abstract / Executive Summary that lets a \
+                 busy reader grasp problem, approach, key result, and recommendation in one screen; \
+                 ALWAYS close with a dedicated «References / 参考文献 / Bibliography / Works Cited» \
+                 heading (REQUIRED by the quality gate) that lists every `[Sn]`/`[Gn]`/`[Ln]` \
+                 source. A document without that heading is rejected at exit.\n\
+                 - **Audience framing**: state who the document is for (decision-maker, \
+                 implementer, reviewer) and calibrate depth, terminology, and figure/table \
+                 density accordingly.\n\n\
                  ### Forbidden\n\
                  - Editing files OUTSIDE the active `.senweavercoding/curators/<slug>/` directory.\n\
                  - Running shell commands, browser sessions, or code generation.\n\
@@ -1181,7 +1239,7 @@ impl CodingMode {
             Self::Debug => ResourceProfile {
                 browser: true,
                 shell: true,
-                may_write: false,
+                may_write: super::debug::active_debug_submode().may_write(),
             },
             Self::Tdd | Self::Mvai => ResourceProfile {
                 browser: false,

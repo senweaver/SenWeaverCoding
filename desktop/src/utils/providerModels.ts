@@ -30,11 +30,16 @@ export function aggregateProviderModels(
       if (!modelId || seen.has(modelId)) continue
       seen.add(modelId)
       const preset = presetMap?.get(provider.presetId)
+      const presetName = preset && preset.id !== 'custom' ? preset.name : undefined
+      const dedupedPresetName =
+        presetName && presetName.trim().toLowerCase() === provider.name.trim().toLowerCase()
+          ? undefined
+          : presetName
       out.push({
         modelId,
         providerId: provider.id,
         providerName: provider.name,
-        presetName: preset && preset.id !== 'custom' ? preset.name : undefined,
+        presetName: dedupedPresetName,
         isPrimary: modelId === primaryModelId,
         enabled: isProviderModelEnabled(provider, modelId),
       })

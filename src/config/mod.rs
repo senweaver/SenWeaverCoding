@@ -54,7 +54,7 @@ pub use schema::{
     LinkedInImageConfig, LocalWhisperConfig, MatrixConfig, McpConfig, McpServerConfig,
     McpTransport, MediaPipelineConfig, MemoryConfig, MemoryPolicyConfig, Microsoft365Config,
     ModelProviderConfig, ModelRouteConfig, MultimodalConfig, NextcloudTalkConfig,
-    DEFAULT_MODEL_TYPE, MODEL_TYPES, is_known_model_type, sanitize_model_types,
+    DEFAULT_MODEL_TYPE, MODEL_TYPES, classify_model_type, is_known_model_type, sanitize_model_types,
     NodesConfig,
     NotionConfig, ObservabilityConfig, OpenAiSttConfig, OpenAiTtsConfig, OpenCodeCliConfig,
     OpenVpnTunnelConfig, OtpConfig, OtpMethod, PacingConfig, PeripheralBoardConfig,

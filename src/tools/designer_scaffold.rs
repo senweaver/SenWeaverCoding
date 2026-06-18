@@ -140,7 +140,7 @@ impl Tool for DesignerScaffoldTool {
                 let mut body = content.to_string();
                 let truncated = body.len() > MAX_OUTPUT;
                 if truncated {
-                    body.truncate(MAX_OUTPUT);
+                    crate::util::truncate_string_bytes(&mut body, MAX_OUTPUT);
                 }
                 let suffix = if truncated { "\n\n[truncated]" } else { "" };
                 Ok(ToolResult {

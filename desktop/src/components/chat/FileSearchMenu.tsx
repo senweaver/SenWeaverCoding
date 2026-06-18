@@ -21,7 +21,7 @@ export type FileSearchMenuHandle = {
 type Props = {
   cwd: string
   filter?: string
-  onSelect: (path: string, relativePath: string) => void
+  onSelect: (path: string, relativePath: string, isDir: boolean) => void
 }
 
 export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, filter = '', onSelect }, ref) => {
@@ -117,8 +117,9 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault()
-      if (entries[selectedIndex]) {
-        onSelect(entries[selectedIndex]!.path, entries[selectedIndex]!.name)
+      const entry = entries[selectedIndex]
+      if (entry) {
+        onSelect(entry.path, entry.name, entry.isDirectory)
       }
       return
     }
@@ -160,6 +161,19 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
         {loading && (
           <span className="material-symbols-outlined text-[12px] text-[var(--color-text-tertiary)] animate-spin ml-1">progress_activity</span>
         )}
+        {currentPath !== cwd && currentPath.startsWith(cwd) && (
+          <button
+            type="button"
+            onClick={() =>
+              onSelect(currentPath, currentPath.split('/').pop() || currentPath, true)
+            }
+            className="ml-auto flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface)] hover:text-[var(--color-text-primary)]"
+            title={t('fileSearch.attachFolder')}
+          >
+            <span className="material-symbols-outlined text-[12px]">add</span>
+            {t('fileSearch.attachFolder')}
+          </button>
+        )}
       </div>
 
       {}
@@ -178,20 +192,35 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
           <>
             {}
             {dirs.map((entry, i) => (
-              <button
+              <div
                 key={entry.path}
                 data-index={i}
-                onClick={() => {
-                  void loadDir(entry.path, filter)
-                }}
                 onMouseEnter={() => setSelectedIndex(i)}
-                className={`w-full flex items-center gap-3 px-3 py-2 text-left transition-colors ${
+                className={`group flex w-full items-center gap-3 px-3 py-2 transition-colors ${
                   selectedIndex === i ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
                 }`}
               >
-                <span className="material-symbols-outlined text-[16px] text-[var(--color-brand)]">folder</span>
-                <span className="text-sm text-[var(--color-text-primary)] truncate">{entry.name}</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void loadDir(entry.path, filter)
+                  }}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  title={t('fileSearch.navigate')}
+                >
+                  <span className="material-symbols-outlined text-[16px] text-[var(--color-brand)]">folder</span>
+                  <span className="text-sm text-[var(--color-text-primary)] truncate">{entry.name}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSelect(entry.path, entry.name, true)}
+                  className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface)] hover:text-[var(--color-text-primary)]"
+                  title={t('fileSearch.attach')}
+                >
+                  <span className="material-symbols-outlined text-[12px]">add</span>
+                  {t('fileSearch.attach')}
+                </button>
+              </div>
             ))}
 
             {}
@@ -201,7 +230,7 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
                 <button
                   key={entry.path}
                   data-index={idx}
-                  onClick={() => onSelect(entry.path, entry.name)}
+                  onClick={() => onSelect(entry.path, entry.name, false)}
                   onMouseEnter={() => setSelectedIndex(idx)}
                   className={`w-full flex items-center gap-3 px-3 py-2 text-left transition-colors ${
                     selectedIndex === idx ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'

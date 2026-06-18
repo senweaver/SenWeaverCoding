@@ -16,6 +16,8 @@ pub mod desktop_bridge;
 pub mod desktop_routes;
 pub mod evolution_routes;
 pub mod git_routes;
+#[cfg(feature = "lan-comms")]
+pub mod lan_routes;
 pub mod mcp_live;
 pub mod python_env_routes;
 pub mod workspace_files;
@@ -639,6 +641,21 @@ async fn run_gateway_inner(
         svc.auto_dream
             .bind_persistence(svc_data_dir.join("auto_dream.json"))
             .await;
+    }
+    #[cfg(feature = "lan-comms")]
+    {
+        let lan_enabled = std::fs::read_to_string(svc_data_dir.join("desktop_user.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("lanDiscoveryEnabled").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false);
+        if lan_enabled {
+            if let Some(lan) = crate::services::try_get_services().and_then(|svc| svc.lan.clone()) {
+                if let Err(err) = lan.start().await {
+                    tracing::warn!(error = %err, "failed to auto-start LAN discovery");
+                }
+            }
+        }
     }
     if with_scheduler {
         crate::runtime::task_manager::spawn_supervised_restartable(
@@ -1497,6 +1514,107 @@ async fn run_gateway_inner(
         .route("/api/config", put(api::handle_api_config_put))
         .layer(RequestBodyLimitLayer::new(1_048_576));
 
+    #[cfg(feature = "lan-comms")]
+    let lan_router: Router<AppState> = Router::new()
+        .route("/api/lan/identity", get(lan_routes::handle_lan_identity_get))
+        .route("/api/lan/profile", put(lan_routes::handle_lan_profile_put))
+        .route("/api/lan/discovery", post(lan_routes::handle_lan_discovery_post))
+        .route("/api/lan/peers", get(lan_routes::handle_lan_peers_get))
+        .route(
+            "/api/lan/messages",
+            get(lan_routes::handle_lan_messages_get).post(lan_routes::handle_lan_messages_post),
+        )
+        .route("/api/lan/messages/read", post(lan_routes::handle_lan_read_post))
+        .route(
+            "/api/lan/conversations",
+            get(lan_routes::handle_lan_conversations_get),
+        )
+        .route("/api/lan/files", post(lan_routes::handle_lan_files_post))
+        .route("/api/lan/files/raw", get(lan_routes::handle_lan_file_raw_get))
+        .route("/api/lan/files/save", post(lan_routes::handle_lan_files_save_post))
+        .route("/api/lan/transfers", get(lan_routes::handle_lan_transfers_get))
+        .route(
+            "/api/lan/groups",
+            get(lan_routes::handle_lan_groups_get).post(lan_routes::handle_lan_groups_post),
+        )
+        .route(
+            "/api/lan/groups/snapshot",
+            get(lan_routes::handle_lan_group_snapshot_get),
+        )
+        .route(
+            "/api/lan/groups/messages",
+            get(lan_routes::handle_lan_group_messages_get)
+                .post(lan_routes::handle_lan_group_messages_post),
+        )
+        .route(
+            "/api/lan/groups/messages/read",
+            post(lan_routes::handle_lan_group_read_post),
+        )
+        .route("/api/lan/groups/meta", post(lan_routes::handle_lan_group_meta_post))
+        .route(
+            "/api/lan/groups/invite",
+            post(lan_routes::handle_lan_group_invite_post),
+        )
+        .route(
+            "/api/lan/groups/members/role",
+            post(lan_routes::handle_lan_group_role_post),
+        )
+        .route(
+            "/api/lan/groups/members/remove",
+            post(lan_routes::handle_lan_group_member_remove_post),
+        )
+        .route("/api/lan/groups/leave", post(lan_routes::handle_lan_group_leave_post))
+        .route(
+            "/api/lan/groups/phases",
+            post(lan_routes::handle_lan_group_phase_post),
+        )
+        .route(
+            "/api/lan/groups/phases/remove",
+            post(lan_routes::handle_lan_group_phase_remove_post),
+        )
+        .route(
+            "/api/lan/groups/documents",
+            post(lan_routes::handle_lan_group_document_post),
+        )
+        .route(
+            "/api/lan/groups/documents/raw",
+            get(lan_routes::handle_lan_group_document_raw_get),
+        )
+        .route(
+            "/api/lan/groups/documents/download",
+            post(lan_routes::handle_lan_group_document_download_post),
+        )
+        .route(
+            "/api/lan/groups/documents/save",
+            post(lan_routes::handle_lan_group_document_save_post),
+        )
+        .route(
+            "/api/lan/groups/documents/remove",
+            post(lan_routes::handle_lan_group_document_remove_post),
+        )
+        .route("/api/lan/groups/tasks", post(lan_routes::handle_lan_group_task_post))
+        .route(
+            "/api/lan/groups/tasks/remove",
+            post(lan_routes::handle_lan_group_task_remove_post),
+        )
+        .route(
+            "/api/lan/shares",
+            get(lan_routes::handle_lan_shares_get).post(lan_routes::handle_lan_shares_post),
+        )
+        .route(
+            "/api/lan/shares/remove",
+            post(lan_routes::handle_lan_shares_remove_post),
+        )
+        .route(
+            "/api/lan/shares/peers",
+            get(lan_routes::handle_lan_share_peers_get),
+        )
+        .route(
+            "/api/lan/shares/download",
+            post(lan_routes::handle_lan_share_download_post),
+        )
+        .route("/ws/lan", get(lan_routes::handle_ws_lan));
+
     let workspace_files_writes_router = Router::new()
         .route(
             "/api/workspace/file",
@@ -1719,6 +1837,10 @@ async fn run_gateway_inner(
         .route(
             "/api/providers/test",
             post(desktop_routes::handle_providers_test_config),
+        )
+        .route(
+            "/api/providers/discover-models",
+            post(desktop_routes::handle_providers_discover_models),
         )
         .route(
             "/api/providers/{id}",
@@ -2095,6 +2217,14 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_designer_submodes),
         )
         .route(
+            "/api/debug/submodes",
+            get(desktop_routes::handle_debug_submodes),
+        )
+        .route(
+            "/api/sessions/{id}/debug-report",
+            get(desktop_routes::handle_session_debug_report),
+        )
+        .route(
             "/api/designer/design-systems",
             get(desktop_routes::handle_designer_design_systems),
         )
@@ -2264,7 +2394,15 @@ async fn run_gateway_inner(
         .route("/ws/nodes", get(nodes::handle_ws_nodes))
 
         .merge(config_put_router)
-        .merge(workspace_files_writes_router)
+        .merge(workspace_files_writes_router);
+
+    #[cfg(feature = "lan-comms")]
+    let inner = inner.merge(lan_router);
+
+    #[cfg(feature = "lan-comms")]
+    let lan_media_state = state.clone();
+
+    let inner = inner
         .with_state(state)
 
         .merge(crate::workers::router::router())
@@ -2276,6 +2414,24 @@ async fn run_gateway_inner(
             Duration::from_secs(gateway_request_timeout_secs()),
         ))
         .layer(desktop_cors_layer());
+
+    #[cfg(feature = "lan-comms")]
+    let inner = {
+        let lan_media_router: Router = Router::new()
+            .route("/api/lan/files/image", post(lan_routes::handle_lan_image_post))
+            .route(
+                "/api/lan/groups/documents/image",
+                post(lan_routes::handle_lan_group_image_post),
+            )
+            .with_state(lan_media_state)
+            .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                Duration::from_secs(gateway_request_timeout_secs()),
+            ))
+            .layer(desktop_cors_layer());
+        inner.merge(lan_media_router)
+    };
 
     let app = if let Some(prefix) = path_prefix {
         let redirect_target = prefix.to_string();

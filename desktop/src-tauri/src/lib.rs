@@ -226,6 +226,8 @@ fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
     };
 
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: i32 = 2;
 
     if hwnd.is_null() {
         return;
@@ -243,12 +245,19 @@ fn reapply_chrome_styles(hwnd: windows_sys::Win32::Foundation::HWND) {
     }
 
     let value: u32 = DWMWA_COLOR_NONE;
+    let corner_pref: i32 = DWMWCP_ROUND;
     unsafe {
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,
             (&value as *const u32).cast(),
             std::mem::size_of::<u32>() as u32,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&corner_pref as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
         );
         SetWindowPos(
             hwnd,
@@ -270,7 +279,7 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
     use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, InvalidateRect, MonitorFromWindow, RedrawWindow, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST, RDW_FRAME, RDW_INVALIDATE,
+        MONITOR_DEFAULTTONEAREST, RDW_FRAME,
     };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -281,11 +290,13 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
         WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_DWMNCRENDERINGCHANGED, WM_GETMINMAXINFO,
         WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_SETFOCUS, WM_SETTINGCHANGE,
         WM_SHOWWINDOW, WM_THEMECHANGED, WM_WINDOWPOSCHANGED, MINMAXINFO, NCCALCSIZE_PARAMS,
-        WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+        WINDOWPOS, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
         WS_THICKFRAME,
     };
 
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: i32 = 2;
     const SUBCLASS_ID: usize = 0x53_45_4E_57;
     const WM_NCUAHDRAWCAPTION: u32 = 0x00AE;
     const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
@@ -402,14 +413,19 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
 
             WM_WINDOWPOSCHANGED => {
                 let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                let flags = {
+                    let wp = lparam as *const WINDOWPOS;
+                    if wp.is_null() {
+                        0
+                    } else {
+                        unsafe { (*wp).flags }
+                    }
+                };
+                let size_changed = (flags & SWP_NOSIZE) == 0;
                 unsafe {
-                    InvalidateRect(hwnd, ptr::null(), 0);
-                    RedrawWindow(
-                        hwnd,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        RDW_FRAME | RDW_INVALIDATE,
-                    );
+                    if size_changed {
+                        RedrawWindow(hwnd, ptr::null(), ptr::null_mut(), RDW_FRAME);
+                    }
                 }
                 r
             }
@@ -463,6 +479,23 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
             "[sen-desktop] DwmSetWindowAttribute(BORDER_COLOR) returned 0x{:08X} \
              (expected on pre-Win11-22H2 systems; subclass fallback covers it)",
             border_hr as u32
+        );
+    }
+
+    let corner_pref: i32 = DWMWCP_ROUND;
+    let corner_hr = unsafe {
+        DwmSetWindowAttribute(
+            raw,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&corner_pref as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if corner_hr < 0 {
+        tracing::debug!(
+            "[sen-desktop] DwmSetWindowAttribute(WINDOW_CORNER_PREFERENCE) returned 0x{:08X} \
+             (expected on pre-Win11 systems; square corners used as fallback)",
+            corner_hr as u32
         );
     }
 
@@ -734,15 +767,26 @@ async fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+static FRONTEND_READY_SIGNALED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct MainWindowHandle(tauri::WebviewWindow);
+
 #[tauri::command]
-fn signal_frontend_ready(handle: AppHandle) -> Result<(), String> {
-    if let Some(main) = handle.get_webview_window("main") {
-        show_main_window_now(&main);
-    }
+fn signal_frontend_ready(
+    main: State<'_, MainWindowHandle>,
+    handle: AppHandle,
+) -> Result<(), String> {
+    FRONTEND_READY_SIGNALED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let win = handle
+        .get_webview_window("main")
+        .or_else(|| handle.webview_windows().into_values().next())
+        .unwrap_or_else(|| main.0.clone());
+    show_main_window_now(&win);
     Ok(())
 }
 
-const MAIN_WINDOW_SHOW_FALLBACK_MS: u64 = 1_500;
+const FRONTEND_READY_TIMEOUT_MS: u64 = 60_000;
 
 fn show_main_window_now(window: &tauri::WebviewWindow) {
     static SHOWN: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
@@ -776,14 +820,81 @@ fn show_main_window_now(window: &tauri::WebviewWindow) {
     }
 }
 
-fn schedule_main_window_show_fallback(window: tauri::WebviewWindow) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(MAIN_WINDOW_SHOW_FALLBACK_MS)).await;
-        let win_for_closure = window.clone();
-        let _ = window.run_on_main_thread(move || {
-            show_main_window_now(&win_for_closure);
-        });
+fn schedule_frontend_ready_watchdog(window: tauri::WebviewWindow) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(FRONTEND_READY_TIMEOUT_MS));
+        if FRONTEND_READY_SIGNALED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let win = window.clone();
+        if let Err(err) = window.run_on_main_thread(move || {
+            // The window may have been revealed through any path (including the
+            // frontend's direct show() fallback) without the explicit signal.
+            // If it is already visible the app started fine; never show the
+            // failure screen in that case.
+            if win.is_visible().unwrap_or(false) {
+                return;
+            }
+            tracing::error!(
+                "[sen-desktop] frontend did not signal ready within {}s and window is not visible; showing boot-failure screen",
+                FRONTEND_READY_TIMEOUT_MS / 1_000
+            );
+            show_frontend_failure(&win);
+        }) {
+            tracing::error!("[sen-desktop] watchdog: run_on_main_thread failed: {err}");
+        }
     });
+}
+
+fn show_frontend_failure(window: &tauri::WebviewWindow) {
+    let secs = FRONTEND_READY_TIMEOUT_MS / 1_000;
+    if let Err(err) = window.eval(&frontend_failure_script(secs)) {
+        tracing::warn!("[sen-desktop] failed to inject boot-failure screen: {err}");
+    }
+    show_main_window_now(window);
+}
+
+fn frontend_failure_script(secs: u64) -> String {
+    let default_reason = format!(
+        "前端在 {secs} 秒内未发出就绪信号，可能是脚本未能加载或初始化时卡死。\\nThe frontend did not become ready within {secs}s; the script may have failed to load or hung during initialization."
+    );
+    format!(
+        r#"(function(){{
+  try {{
+    var root = document.getElementById('root');
+    if (!root) return;
+    if (root.dataset && root.dataset.bootErrorPainted === '1') return;
+    var reason = '';
+    try {{ reason = (window.__SEN_BOOT_ERROR__ || '').toString(); }} catch (e) {{ reason = ''; }}
+    if (!reason) reason = "{default_reason}";
+    root.innerHTML = '';
+    root.dataset.bootErrorPainted = '1';
+    var dark = false;
+    try {{ dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }} catch (e) {{}}
+    var fg = dark ? '#ececec' : '#1a1a1a';
+    var sub = dark ? '#aaaaaa' : '#444444';
+    var bg = dark ? '#0E0E0E' : '#FCFCFC';
+    var pre_bg = dark ? '#1a1a1a' : '#f4f4f4';
+    var pre_bd = dark ? '#333333' : '#dddddd';
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;color:'+fg+';background:'+bg+';';
+    var title = document.createElement('div');
+    title.textContent = 'React 应用启动失败 / Frontend failed to start';
+    title.style.cssText = 'font-size:15px;font-weight:600;';
+    var body = document.createElement('pre');
+    body.textContent = reason;
+    body.style.cssText = 'font-size:11px;max-height:300px;max-width:820px;width:100%;overflow:auto;background:'+pre_bg+';border:1px solid '+pre_bd+';border-radius:6px;padding:12px;white-space:pre-wrap;word-break:break-all;color:'+sub+';';
+    var btn = document.createElement('button');
+    btn.textContent = '重新加载 / Reload';
+    btn.style.cssText = 'padding:6px 14px;font-size:13px;border:1px solid #888;border-radius:6px;background:transparent;color:'+fg+';cursor:pointer;';
+    btn.onclick = function() {{ window.location.reload(); }};
+    wrap.appendChild(title);
+    wrap.appendChild(body);
+    wrap.appendChild(btn);
+    root.appendChild(wrap);
+  }} catch (e) {{}}
+}})();"#
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -1025,7 +1136,8 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 disable_window_focus_border(&main);
 
-                schedule_main_window_show_fallback(main.clone());
+                app.manage(MainWindowHandle(main.clone()));
+                schedule_frontend_ready_watchdog(main.clone());
             }
 
             browser_dock::install_into(app.handle());

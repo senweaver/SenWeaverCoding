@@ -8,22 +8,12 @@
 
       html, body, #root { height: 100%; margin: 0; background: transparent; }
 
-      .__boot_backdrop {
-        position: fixed;
-        inset: 0;
-        backdrop-filter: blur(28px) saturate(1.4);
-        -webkit-backdrop-filter: blur(28px) saturate(1.4);
-        z-index: 0;
-      }
       .__boot_frame {
         position: fixed;
-        inset: 18px;
-        border-radius: 8px;
+        inset: 0;
+        border-radius: 0;
         background: #FCFCFC;
-        box-shadow:
-          0 1px 3px rgba(0, 0, 0, 0.12),
-          0 4px 12px rgba(0, 0, 0, 0.10),
-          0 6px 12px rgba(0, 0, 0, 0.06);
+        box-shadow: none;
         z-index: 1;
       }
       @media (prefers-color-scheme: dark) {
@@ -33,7 +23,6 @@
   </head>
   <body>
     <div id="root">
-      <div class="__boot_backdrop"></div>
       <div class="__boot_frame"></div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

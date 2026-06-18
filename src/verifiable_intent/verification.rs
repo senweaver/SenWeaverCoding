@@ -177,7 +177,7 @@ fn check_single_constraint(
 
             ConstraintCheckResult::ok(&format!(
                 "payment.reference({})",
-                &conditional_transaction_id[..8.min(conditional_transaction_id.len())]
+                crate::util::truncate_str_bytes(conditional_transaction_id, 8)
             ))
         }
         Constraint::PaymentRecurrence { .. } | Constraint::AgentRecurrence { .. } => {

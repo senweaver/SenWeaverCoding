@@ -28,10 +28,15 @@ import { AttachmentGallery } from './AttachmentGallery'
 import { ProjectContextChip } from '../shared/ProjectContextChip'
 import { DirectoryPicker } from '../shared/DirectoryPicker'
 import { DesignerInlineControls } from '../designer/DesignerInlineControls'
+import { DebugInlineControls } from '../debug/DebugInlineControls'
 import { useDesignerStore } from '../../stores/designerStore'
+import { useDebugStore } from '../../stores/debugStore'
 import { useDesignerCanvasStore, unitDisplayName } from '../../stores/designerCanvasStore'
 import { DESIGN_UNIT_DND_MIME } from '../designer/DesignArtifactFrame'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
+import { RichComposer, type RichComposerHandle } from './RichComposer'
+import { isSessionRef, makeCredToken, parseRefSegments, sessionIdFromRef, toRelativeRefPath } from './composerRefs'
+import { useFileDragStore } from '../../stores/fileDragStore'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { PrivacyBanner } from './PrivacyBanner'
 import { ReviewCard } from './ReviewCard'
@@ -61,6 +66,7 @@ type Attachment = {
   data?: string
 }
 
+
 type ChatInputProps = {
   variant?: 'default' | 'hero'
 }
@@ -81,14 +87,17 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
   const [atFilter, setAtFilter] = useState('')
   const [atCursorPos, setAtCursorPos] = useState(-1)
+  const [atStartPos, setAtStartPos] = useState(-1)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const composingRef = useRef(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const composerRef = useRef<RichComposerHandle>(null)
+  const caretRef = useRef(0)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const composerRootRef = useRef<HTMLDivElement>(null)
+  const composerCardRef = useRef<HTMLDivElement>(null)
   const sendMessage = useChatStore((s) => s.sendMessage)
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -189,6 +198,8 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   }, [providers, designerMediaType])
 
   const isMemberSession = !!memberInfo
+  const fileDragActive = useFileDragStore((s) => s.payload != null)
+  const fileDragOverComposer = useFileDragStore((s) => s.activeZoneId === 'chat-composer')
   const isActive = chatState !== 'idle'
   const hasModel = useMemo(() => {
     if (isMemberSession) return true
@@ -235,7 +246,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           ? { id: detail.element, label: detail.elementLabel ?? detail.element }
           : null,
       )
-      requestAnimationFrame(() => textareaRef.current?.focus())
+      requestAnimationFrame(() => composerRef.current?.focus())
     }
     window.addEventListener('designer:composer-ref', handler)
     return () => window.removeEventListener('designer:composer-ref', handler)
@@ -408,22 +419,9 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   }, [activeTabId, protoFigmaDraft, t])
 
   const insertCredentialPlaceholder = useCallback((name: string) => {
-    const placeholder = `\${cred.${name}}`
-    const ta = textareaRef.current
-    if (!ta) {
-      setInput((prev) => `${prev}${placeholder}`)
-      return
-    }
-    const start = ta.selectionStart ?? input.length
-    const end = ta.selectionEnd ?? input.length
-    const next = `${input.slice(0, start)}${placeholder}${input.slice(end)}`
-    setInput(next)
-    requestAnimationFrame(() => {
-      const pos = start + placeholder.length
-      ta.focus()
-      ta.setSelectionRange(pos, pos)
-    })
-  }, [input])
+    composerRef.current?.insertText(`${makeCredToken(name)} `)
+    composerRef.current?.focus()
+  }, [])
   useEffect(() => {
     return () => {
       if (stopCooldownTimerRef.current) {
@@ -477,7 +475,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   }, [isHeroComposer, isWorkspaceMissing, resolvedWorkDir])
 
   useEffect(() => {
-    textareaRef.current?.focus()
+    composerRef.current?.focus()
   }, [isActive])
 
   const prevDraftSessionRef = useRef<string | null>(null)
@@ -505,6 +503,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       const draft = useChatStore.getState().sessions[next]?.composerDraft
       if (draft) {
         setInput(draft.text ?? '')
+        composerRef.current?.setValue(draft.text ?? '')
         setAttachments(
           (draft.attachments ?? [])
             .filter((a) => a.type === 'image' || a.data)
@@ -520,11 +519,13 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
         setSlashMenuOpen(!!draft.slashMenuOpen)
       } else {
         setInput('')
+        composerRef.current?.clear()
         setAttachments([])
         setSlashMenuOpen(false)
       }
     } else {
       setInput('')
+      composerRef.current?.clear()
       setAttachments([])
       setSlashMenuOpen(false)
     }
@@ -533,6 +534,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     setSlashFilter('')
     setAtFilter('')
     setAtCursorPos(-1)
+    setAtStartPos(-1)
     setSlashSelectedIndex(0)
     prevDraftSessionRef.current = next
   }, [activeTabId, setComposerDraft])
@@ -555,6 +557,34 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   }, [])
 
   useEffect(() => {
+    if (isMemberSession || isWorkspaceMissing) return
+    const store = useFileDragStore.getState()
+    store.registerZone({
+      id: 'chat-composer',
+      getRect: () => composerCardRef.current?.getBoundingClientRect() ?? null,
+      onDrop: (payload) => {
+        const relPath = (payload.relPath ?? '').trim()
+        if (!relPath) return
+        if (isSessionRef(relPath)) {
+          const droppedId = sessionIdFromRef(relPath)
+          if (droppedId === activeTabId) return
+          const current = composerRef.current?.getValue() ?? ''
+          const alreadyReferenced = parseRefSegments(current).some(
+            (seg) =>
+              seg.type === 'ref' &&
+              isSessionRef(seg.relPath) &&
+              sessionIdFromRef(seg.relPath) === droppedId,
+          )
+          if (alreadyReferenced) return
+        }
+        const name = (payload.name ?? '').trim() || relPath.split('/').pop() || relPath
+        composerRef.current?.insertRefAtLastCaret(name, relPath)
+      },
+    })
+    return () => store.unregisterZone('chat-composer')
+  }, [isMemberSession, isWorkspaceMissing, activeTabId])
+
+  useEffect(() => {
     if (!composerPrefill) return
 
     setInput(composerPrefill.text)
@@ -575,12 +605,11 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     setSlashFilter('')
     setAtFilter('')
     setAtCursorPos(-1)
+    setAtStartPos(-1)
+    composerRef.current?.setValue(composerPrefill.text)
 
     requestAnimationFrame(() => {
-      const el = textareaRef.current
-      el?.focus()
-      const cursor = composerPrefill.text.length
-      el?.setSelectionRange(cursor, cursor)
+      composerRef.current?.focus()
     })
   }, [composerPrefill])
 
@@ -603,21 +632,16 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     setFileSearchOpen(false)
   }, [isMemberSession, activeTabId])
 
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
-  }, [input])
 
   useEffect(() => {
     if (!slashMenuOpen) return
     const handleClick = (event: MouseEvent) => {
+      const target = event.target as Node
+      const composerEl = document.querySelector('[data-role="chat-composer"]')
       if (
         slashMenuRef.current &&
-        !slashMenuRef.current.contains(event.target as Node) &&
-        textareaRef.current &&
-        !textareaRef.current.contains(event.target as Node)
+        !slashMenuRef.current.contains(target) &&
+        !(composerEl && composerEl.contains(target))
       ) {
         setSlashMenuOpen(false)
       }
@@ -629,11 +653,12 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   useEffect(() => {
     if (!localSlashPanel) return
     const handleClick = (event: MouseEvent) => {
+      const target = event.target as Node
+      const composerEl = document.querySelector('[data-role="chat-composer"]')
       if (
         slashMenuRef.current &&
-        !slashMenuRef.current.contains(event.target as Node) &&
-        textareaRef.current &&
-        !textareaRef.current.contains(event.target as Node)
+        !slashMenuRef.current.contains(target) &&
+        !(composerEl && composerEl.contains(target))
       ) {
         setLocalSlashPanel(null)
       }
@@ -645,12 +670,13 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   useEffect(() => {
     if (!fileSearchOpen) return
     const handleClick = (event: MouseEvent) => {
+      const target = event.target as Node
       const menu = document.getElementById('file-search-menu')
+      const composerEl = document.querySelector('[data-role="chat-composer"]')
       if (
         menu &&
-        !menu.contains(event.target as Node) &&
-        textareaRef.current &&
-        !textareaRef.current.contains(event.target as Node)
+        !menu.contains(target) &&
+        !(composerEl && composerEl.contains(target))
       ) {
         setFileSearchOpen(false)
       }
@@ -705,6 +731,9 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     for (let i = textBeforeCursor.length - 1; i >= 0; i--) {
       const ch = textBeforeCursor[i]!
       if (ch === '@') {
+        if (textBeforeCursor[i + 1] === '[') {
+          break
+        }
         if (i === 0 || /\s/.test(textBeforeCursor[i - 1]!)) {
           pos = i
           break
@@ -720,39 +749,36 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       setFileSearchOpen(false)
       setAtFilter('')
       setAtCursorPos(-1)
+      setAtStartPos(-1)
       return
     }
 
     const filter = textBeforeCursor.slice(pos + 1)
     setAtFilter(filter)
     setAtCursorPos(cursorPos)
+    setAtStartPos(pos)
     setSlashMenuOpen(false)
     setFileSearchOpen(true)
   }, [])
 
-  const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = event.target.value
-    if (isMemberSession) {
+  const handleComposerChange = useCallback(
+    (value: string, caret: number) => {
+      caretRef.current = caret
       setInput(value)
-      return
-    }
-    const cursorPos = event.target.selectionStart ?? value.length
-    setInput(value)
-    detectSlashTrigger(value, cursorPos)
-    detectAtTrigger(value, cursorPos)
-  }
+      if (isMemberSession) return
+      detectSlashTrigger(value, caret)
+      detectAtTrigger(value, caret)
+    },
+    [isMemberSession, detectSlashTrigger, detectAtTrigger],
+  )
 
   const selectSlashCommand = useCallback((command: string) => {
-    const el = textareaRef.current
-    if (!el) return
-    const cursorPos = el.selectionStart ?? input.length
-    const replacement = replaceSlashToken(input, cursorPos, command)
-    setInput(replacement.value)
+    const value = composerRef.current?.getValue() ?? input
+    const cursorPos = composerRef.current?.getCaret() ?? caretRef.current
+    const replacement = replaceSlashToken(value, cursorPos, command)
+    composerRef.current?.setValue(replacement.value, replacement.cursorPos)
+    composerRef.current?.focus()
     setSlashMenuOpen(false)
-    requestAnimationFrame(() => {
-      el.focus()
-      el.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
-    })
   }, [input])
 
   const handleSubmit = () => {
@@ -761,7 +787,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       window.dispatchEvent(new CustomEvent('plan:question:submit'))
       return
     }
-    const text = input.trim()
+    const text = (composerRef.current?.getValue() ?? input).trim()
     if ((!text && (!attachments.length || isMemberSession)) || isWorkspaceMissing) return
 
     if (codingMode === 'designer' && !isMemberSession && activeTabId) {
@@ -805,6 +831,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           refElementLabel: designRefElement?.label,
         }
         setInput('')
+        composerRef.current?.clear()
         setAttachments([])
         setDesignRef(null)
         setDesignRefElement(null)
@@ -821,6 +848,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     if (slashUiAction?.type === 'panel') {
       setLocalSlashPanel(slashUiAction.command as LocalSlashCommandName)
       setInput('')
+      composerRef.current?.clear()
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       return
@@ -829,9 +857,19 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     if (slashUiAction?.type === 'settings') {
       useUIStore.getState().openSettingsOverlay(slashUiAction.tab)
       setInput('')
+      composerRef.current?.clear()
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       return
+    }
+
+    if (isDebugMode && !isMemberSession && activeTabId) {
+      const dbg = useDebugStore.getState()
+      const sub = dbg.sessions[activeTabId]?.selectedSubmodeId
+      if (sub) {
+        const submodeParams = dbg.sessions[activeTabId]?.paramsBySubmode[sub] ?? {}
+        useChatStore.getState().setSessionDebugSubmode(activeTabId, sub, submodeParams)
+      }
     }
 
     const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
@@ -843,6 +881,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
 
     const targetTabId = activeTabId!
     setInput('')
+    composerRef.current?.clear()
     setAttachments([])
     setSlashMenuOpen(false)
     setFileSearchOpen(false)
@@ -912,43 +951,53 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       handleSubmit()
+      return
+    }
+
+    if (event.key === 'Enter' && event.shiftKey) {
+      event.preventDefault()
+      composerRef.current?.insertText('\n')
     }
   }
 
   const handlePaste = (event: React.ClipboardEvent) => {
-    if (isMemberSession) return
     const items = event.clipboardData?.items
-    if (!items) return
 
     let hasImage = false
-    for (let i = 0; i < items.length; i += 1) {
-      const item = items[i]
-      if (!item || !item.type.startsWith('image/')) continue
+    if (!isMemberSession && items) {
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i]
+        if (!item || !item.type.startsWith('image/')) continue
 
-      hasImage = true
-      event.preventDefault()
-      const file = item.getAsFile()
-      if (!file) continue
+        hasImage = true
+        event.preventDefault()
+        const file = item.getAsFile()
+        if (!file) continue
 
-      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      const reader = new FileReader()
-      reader.onload = () => {
-        setAttachments((prev) => [
-          ...prev,
-          {
-            id,
-            name: `pasted-image-${Date.now()}.png`,
-            type: 'image',
-            mimeType: file.type || 'image/png',
-            previewUrl: reader.result as string,
-            data: reader.result as string,
-          },
-        ])
+        const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const reader = new FileReader()
+        reader.onload = () => {
+          setAttachments((prev) => [
+            ...prev,
+            {
+              id,
+              name: `pasted-image-${Date.now()}.png`,
+              type: 'image',
+              mimeType: file.type || 'image/png',
+              previewUrl: reader.result as string,
+              data: reader.result as string,
+            },
+          ])
+        }
+        reader.readAsDataURL(file)
       }
-      reader.readAsDataURL(file)
     }
 
-    if (!hasImage) return
+    if (hasImage) return
+
+    const text = event.clipboardData?.getData('text/plain') ?? ''
+    event.preventDefault()
+    if (text) composerRef.current?.insertText(text)
   }
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1075,30 +1124,41 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
         {!isMemberSession && <ReviewCard />}
         {!isMemberSession && <WorkspaceQueuePanel sessionId={activeTabId} />}
         <div
+          ref={composerCardRef}
           className={isHeroComposer
             ? 'glass-panel relative flex min-h-[100px] flex-col gap-1.5 rounded-xl px-3 py-2.5 transition-colors'
-            : 'glass-panel relative min-h-[100px] rounded-xl px-3 py-2.5 transition-colors'}
+            : 'glass-panel relative min-h-[64px] rounded-xl px-3 py-2.5 transition-colors'}
           onDragOver={(event) => event.preventDefault()}
           onDrop={handleDrop}
         >
+          {!isMemberSession && fileDragActive && (
+            <div
+              className={`pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-xl border-2 border-dashed transition-colors ${
+                fileDragOverComposer
+                  ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10'
+                  : 'border-[var(--color-accent)]/40 bg-[var(--color-accent)]/[0.04]'
+              }`}
+            >
+              <span className="rounded-md bg-[var(--color-surface-container-high)] px-2.5 py-1 text-[12px] font-medium text-[var(--color-text-primary)] shadow-sm">
+                {t('composer.dropToReference')}
+              </span>
+            </div>
+          )}
           {!isMemberSession && fileSearchOpen && (
             <FileSearchMenu
               ref={fileSearchRef}
               cwd={resolvedWorkDir || ''}
               filter={atFilter}
-              onSelect={(_path, name) => {
-                if (atCursorPos >= 0) {
-
-                  const newValue = `${input.slice(0, atCursorPos)}${name}${input.slice(atCursorPos)}`
-                  const newCursorPos = atCursorPos + name.length
-                  setInput(newValue)
+              onSelect={(path, name, _isDir) => {
+                const start = atStartPos >= 0 ? atStartPos : atCursorPos
+                const end = atCursorPos >= 0 ? atCursorPos : start
+                if (start >= 0) {
+                  const relPath = toRelativeRefPath(path, resolvedWorkDir || '', name)
+                  composerRef.current?.insertRef(start, end, name, relPath)
                   setFileSearchOpen(false)
                   setAtFilter('')
                   setAtCursorPos(-1)
-                  void textareaRef.current?.focus()
-                  requestAnimationFrame(() => {
-                    textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
-                  })
+                  setAtStartPos(-1)
                 }
               }}
             />
@@ -1516,8 +1576,8 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                   type="button"
                   title={s.description}
                   onClick={() => {
-                    setInput(s.text)
-                    textareaRef.current?.focus()
+                    composerRef.current?.setValue(s.text)
+                    composerRef.current?.focus()
                   }}
                   className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 py-1 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-text-primary)]"
                 >
@@ -1529,36 +1589,36 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           {isHeroComposer ? (
 
             <div className="flex flex-1 items-start gap-3">
-              <textarea
-                ref={textareaRef}
-                data-role="chat-composer"
-                value={input}
-                onChange={handleInputChange}
+              <RichComposer
+                ref={composerRef}
+                dataRole="chat-composer"
+                ariaLabel={composerPlaceholder}
+                placeholder={composerPlaceholder}
+                initialValue={input}
+                disabled={isWorkspaceMissing}
+                onChange={handleComposerChange}
                 onKeyDown={handleKeyDown}
                 onCompositionStart={() => { composingRef.current = true }}
                 onCompositionEnd={() => { composingRef.current = false }}
                 onPaste={handlePaste}
-                placeholder={composerPlaceholder}
-                disabled={isWorkspaceMissing}
-                rows={1}
-                className="min-h-[54px] w-full flex-1 resize-none border-none bg-transparent py-1 text-[12px] leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
+                className="min-h-[84px] max-h-[220px] w-full flex-1 overflow-y-auto py-1 text-[12px] leading-relaxed text-[var(--color-text-primary)]"
               />
             </div>
           ) : (
 
-            <textarea
-              ref={textareaRef}
-              data-role="chat-composer"
-              value={input}
-              onChange={handleInputChange}
+            <RichComposer
+              ref={composerRef}
+              dataRole="chat-composer"
+              ariaLabel={composerPlaceholder}
+              placeholder={composerPlaceholder}
+              initialValue={input}
+              disabled={isWorkspaceMissing}
+              onChange={handleComposerChange}
               onKeyDown={handleKeyDown}
               onCompositionStart={() => { composingRef.current = true }}
               onCompositionEnd={() => { composingRef.current = false }}
               onPaste={handlePaste}
-              placeholder={composerPlaceholder}
-              disabled={isWorkspaceMissing}
-              rows={1}
-              className={`w-full min-h-[80px] resize-none bg-transparent py-1 ${codingMode === 'designer' ? 'pb-1' : 'pb-9'} text-[12px] leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50`}
+              className={`w-full max-h-[220px] overflow-y-auto py-1 ${codingMode === 'designer' ? 'min-h-[44px] pb-1' : 'min-h-[48px]'} text-[12px] leading-relaxed text-[var(--color-text-primary)]`}
             />
           )}
 
@@ -1567,7 +1627,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             ? 'flex items-start justify-between gap-2'
             : codingMode === 'designer'
               ? 'flex items-start justify-between gap-2 px-3 pb-2 pt-1'
-              : 'absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2'}>
+              : 'flex items-center justify-between gap-2 pt-1.5'}>
             {}
             <div
               className={`flex min-w-0 flex-1 gap-1.5 ${
@@ -1598,6 +1658,9 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                   </div>
                   {codingMode === 'designer' && activeTabId && (
                     <DesignerInlineControls sessionId={activeTabId} />
+                  )}
+                  {isDebugMode && !isMemberSession && activeTabId && (
+                    <DebugInlineControls sessionId={activeTabId} />
                   )}
                 </>
               )}

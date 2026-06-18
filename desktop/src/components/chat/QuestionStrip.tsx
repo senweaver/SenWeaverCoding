@@ -150,20 +150,26 @@ export function QuestionStrip() {
       : {}
 
   function readDetailsFromComposer(): string {
-    const ta = document.querySelector<HTMLTextAreaElement>('textarea[data-role="chat-composer"]')
-    return ta?.value?.trim() ?? ''
+    const el = document.querySelector<HTMLElement>('[data-role="chat-composer"]')
+    if (!el) return ''
+    if (el instanceof HTMLTextAreaElement) return el.value.trim()
+    return (el.textContent ?? '').trim()
   }
 
   function clearComposer() {
-    const ta = document.querySelector<HTMLTextAreaElement>('textarea[data-role="chat-composer"]')
-    if (ta) {
+    const el = document.querySelector<HTMLElement>('[data-role="chat-composer"]')
+    if (!el) return
+    if (el instanceof HTMLTextAreaElement) {
       const setter = Object.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(ta),
+        Object.getPrototypeOf(el),
         'value',
       )?.set
-      setter?.call(ta, '')
-      ta.dispatchEvent(new Event('input', { bubbles: true }))
+      setter?.call(el, '')
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      return
     }
+    el.textContent = ''
+    el.dispatchEvent(new Event('input', { bubbles: true }))
   }
 
   function toggleOption(question: Question, optId: string) {

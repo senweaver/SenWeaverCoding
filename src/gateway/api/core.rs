@@ -1815,6 +1815,90 @@ fn gateway_desktop_message_content(msg_ty: &'static str, raw: &str) -> serde_jso
     }
 }
 
+const MAX_ATTACHMENT_INLINE_BYTES: u64 = 20 * 1024 * 1024;
+
+fn attachment_file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn image_mime_from_path(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "image/png"
+    }
+}
+
+fn read_image_as_data_url(path: &str) -> Option<String> {
+    use base64::Engine;
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_ATTACHMENT_INLINE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let mime = image_mime_from_path(path);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+fn parse_persisted_attachments(content: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("[IMAGE:") {
+            let Some(path) = rest.strip_suffix(']') else {
+                continue;
+            };
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            let mut attachment = serde_json::json!({
+                "type": "image",
+                "name": attachment_file_name(path),
+                "path": path,
+            });
+            if let Some(data_url) = read_image_as_data_url(path) {
+                if let Some(obj) = attachment.as_object_mut() {
+                    obj.insert(
+                        "mimeType".to_string(),
+                        serde_json::Value::String(image_mime_from_path(path).to_string()),
+                    );
+                    obj.insert("data".to_string(), serde_json::Value::String(data_url));
+                }
+            }
+            out.push(attachment);
+        } else if let Some(rest) = trimmed.strip_prefix("[Attached file:") {
+            let Some(path) = rest.strip_suffix(']') else {
+                continue;
+            };
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "type": "file",
+                "name": attachment_file_name(path),
+                "path": path,
+            }));
+        }
+    }
+    out
+}
+
 fn message_entry(
     session_id: &str,
     index: usize,
@@ -1830,6 +1914,17 @@ fn message_entry(
         "content": content,
         "timestamp": fallback_ts,
     });
+    if ty == "user" {
+        let attachments = parse_persisted_attachments(&msg.content);
+        if !attachments.is_empty() {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "attachments".to_string(),
+                    serde_json::Value::Array(attachments),
+                );
+            }
+        }
+    }
     if let Some(design_ref) = msg
         .metadata
         .get("design_ref")

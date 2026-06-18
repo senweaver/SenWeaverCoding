@@ -37,5 +37,8 @@ export type UserSettings = {
   effort?: EffortLevel
   permissionMode?: PermissionMode
   theme?: ThemeMode
+  lanNickname?: string
+  lanEmail?: string | null
+  lanDiscoveryEnabled?: boolean
   [key: string]: unknown
 }

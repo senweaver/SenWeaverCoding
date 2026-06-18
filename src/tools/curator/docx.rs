@@ -93,6 +93,8 @@ pub fn render_docx_with_diagrams(
     let mut skip_first_h1 = typo.include_cover_page;
     let mut blank_run_after_code = false;
     let mut mermaid_idx = 0usize;
+    let figure_word = figure_caption_word(template);
+    let mut figure_no = 0usize;
     let total_mermaid_blocks = blocks
         .iter()
         .filter(|block| {
@@ -170,6 +172,22 @@ pub fn render_docx_with_diagrams(
                         &typo,
                     ) {
                         doc = doc.add_paragraph(para);
+                        figure_no += 1;
+                        doc = doc.add_paragraph(
+                            Paragraph::new().align(AlignmentType::Center).add_run(
+                                Run::new()
+                                    .add_text(format!("{figure_word} {figure_no}"))
+                                    .italic()
+                                    .size(typo.body_size_hp - 2)
+                                    .color("666666")
+                                    .fonts(
+                                        RunFonts::new()
+                                            .ascii(typo.body_font_ascii)
+                                            .hi_ansi(typo.body_font_ascii)
+                                            .east_asia(typo.body_font_east),
+                                    ),
+                            ),
+                        );
                         doc = doc.add_paragraph(
                             Paragraph::new()
                                 .line_spacing(LineSpacing::new().before(40).after(40)),
@@ -188,25 +206,27 @@ pub fn render_docx_with_diagrams(
                 let base = output_path.parent();
                 if let Some(para) = embed_image_paragraph(alt, path, base, &typo) {
                     doc = doc.add_paragraph(para);
-                    if !alt.trim().is_empty() {
-                        doc = doc.add_paragraph(
-                            Paragraph::new()
-                                .align(AlignmentType::Center)
-                                .add_run(
-                                    Run::new()
-                                        .add_text(alt.clone())
-                                        .italic()
-                                        .size(typo.body_size_hp - 2)
-                                        .color("666666")
-                                        .fonts(
-                                            RunFonts::new()
-                                                .ascii(typo.body_font_ascii)
-                                                .hi_ansi(typo.body_font_ascii)
-                                                .east_asia(typo.body_font_east),
-                                        ),
+                    figure_no += 1;
+                    let caption = if alt.trim().is_empty() {
+                        format!("{figure_word} {figure_no}")
+                    } else {
+                        format!("{figure_word} {figure_no}: {}", alt.trim())
+                    };
+                    doc = doc.add_paragraph(
+                        Paragraph::new().align(AlignmentType::Center).add_run(
+                            Run::new()
+                                .add_text(caption)
+                                .italic()
+                                .size(typo.body_size_hp - 2)
+                                .color("666666")
+                                .fonts(
+                                    RunFonts::new()
+                                        .ascii(typo.body_font_ascii)
+                                        .hi_ansi(typo.body_font_ascii)
+                                        .east_asia(typo.body_font_east),
                                 ),
-                        );
-                    }
+                        ),
+                    );
                 } else {
                     doc = doc.add_paragraph(emit_inline_runs(
                         &format!("![{alt}]({path})"),
@@ -337,6 +357,17 @@ const INCH: i32 = 1440;
 const BULLET_NUM_ID: usize = 10;
 #[cfg(feature = "tool-curator")]
 const ORDERED_NUM_ID: usize = 11;
+
+#[cfg(feature = "tool-curator")]
+fn figure_caption_word(template: CuratorTemplateKind) -> &'static str {
+    match template {
+        CuratorTemplateKind::PaperGb7714
+        | CuratorTemplateKind::SolutionFunctional
+        | CuratorTemplateKind::SolutionGb8567_2006
+        | CuratorTemplateKind::SolutionGb8567_1988 => "图",
+        _ => "Figure",
+    }
+}
 
 #[cfg(feature = "tool-curator")]
 fn typography_for(template: CuratorTemplateKind) -> Typography {

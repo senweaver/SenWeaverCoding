@@ -285,10 +285,51 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
         break
       }
     }
-    if (activePlanIdx >= 0 && activePlanIdx < items.length - 1) {
-      const planItem = items[activePlanIdx]!
-      items.splice(activePlanIdx, 1)
-      items.push(planItem)
+    if (activePlanIdx >= 0) {
+      const activeItem = items[activePlanIdx]!
+      const activeMsg = activeItem.kind === 'message' ? activeItem.message : null
+      const isCurator = activeMsg !== null && activeMsg.type === 'curator_card'
+      const keepInPlace =
+        activeMsg !== null &&
+        activeMsg.type === 'curator_card' &&
+        activeMsg.status === 'writing'
+      if (!keepInPlace) {
+        let nextUserIdx = items.length
+        for (let i = activePlanIdx + 1; i < items.length; i++) {
+          const it = items[i]!
+          if (it.kind === 'message' && it.message.type === 'user_text') {
+            nextUserIdx = i
+            break
+          }
+        }
+        let anchor: RenderItem | null =
+          nextUserIdx < items.length ? items[nextUserIdx]! : null
+        if (isCurator) {
+          let turnStart = 0
+          for (let i = activePlanIdx - 1; i >= 0; i--) {
+            const it = items[i]!
+            if (it.kind === 'message' && it.message.type === 'user_text') {
+              turnStart = i + 1
+              break
+            }
+          }
+          let tailAssistantIdx = -1
+          for (let i = turnStart; i < nextUserIdx; i++) {
+            if (i === activePlanIdx) continue
+            const it = items[i]!
+            if (it.kind === 'message' && it.message.type === 'assistant_text') {
+              tailAssistantIdx = i
+            }
+          }
+          if (tailAssistantIdx >= 0) anchor = items[tailAssistantIdx]!
+        }
+        const anchorIdx = anchor ? items.indexOf(anchor) : items.length
+        if (activePlanIdx !== anchorIdx - 1) {
+          items.splice(activePlanIdx, 1)
+          const insertAt = anchor ? items.indexOf(anchor) : items.length
+          items.splice(insertAt, 0, activeItem)
+        }
+      }
     }
   }
 
@@ -445,6 +486,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const atTopRef = useRef(false)
   const lastScrollTopRef = useRef(0)
   const programmaticScrollRef = useRef(false)
+  const scrollRafRef = useRef<number | null>(null)
   const prevFirstKeyRef = useRef<string | null>(null)
   const prevListLenRef = useRef(0)
   const t = useTranslation()
@@ -481,22 +523,18 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const [firstItemIndex, setFirstItemIndex] = useState(FIRST_ITEM_INDEX_BASE)
 
   const scrollFollowToBottom = useCallback(() => {
-    const el = scrollerElRef.current
-    if (!el) return
-    programmaticScrollRef.current = true
-    const pin = () => {
+    if (!scrollerElRef.current) return
+    if (scrollRafRef.current != null) return
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
       const node = scrollerElRef.current
       if (!node) return
+      programmaticScrollRef.current = true
       const target = node.scrollHeight - node.clientHeight
       if (target - node.scrollTop > 2) {
         node.scrollTop = target
       }
-    }
-    pin()
-    requestAnimationFrame(() => {
-      pin()
       requestAnimationFrame(() => {
-        pin()
         programmaticScrollRef.current = false
       })
     })
@@ -554,7 +592,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     if (!followRef.current) return
     if (typeof document !== 'undefined' && document.hidden) return
     scrollFollowToBottom()
-  }, [streamingText, chatState, messages, scrollFollowToBottom])
+  }, [streamingText, chatState, scrollFollowToBottom])
 
   const handleLiveThinkingGrow = useCallback(() => {
     if (!followRef.current) return
@@ -1728,6 +1766,7 @@ export const MessageBlock = memo(function MessageBlock({
           title={message.title}
           body={message.body}
           status={message.status}
+          error={message.error}
           sessionId={sessionId}
         />
       )

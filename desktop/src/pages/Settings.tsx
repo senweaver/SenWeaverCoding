@@ -22,6 +22,7 @@ import type {
   ApiFormat,
   CustomHttpHeader,
   ModelPricingEntry,
+  DiscoveredModel,
 } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import type { CodingModeId } from '../types/codingMode'
@@ -37,8 +38,10 @@ import {
 } from '../utils/modelTypes'
 import { GlobalModelsPanel } from './GlobalModelsPanel'
 import { ProviderModelsPanel } from './ProviderModelsPanel'
+import { ModelDiscoveryPanel } from '../components/settings/ModelDiscoveryPanel'
 import { usePluginStore } from '../stores/pluginStore'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
+import { useLanStore } from '../stores/lanStore'
 
 const AdapterSettings = lazy(() =>
   import('./AdapterSettings').then((m) => ({ default: m.AdapterSettings })),
@@ -829,6 +832,28 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setNewModelDraft('')
   }
 
+  const applyDiscoveredModels = (discovered: DiscoveredModel[]) => {
+    const existingIds = new Set(modelRows.map((row) => row.value.trim()).filter(Boolean))
+    const newOnes = discovered.filter((model) => {
+      const id = model.id.trim()
+      return id.length > 0 && !existingIds.has(id)
+    })
+    if (newOnes.length === 0) return
+    setModelRows((prev) => [
+      ...prev,
+      ...newOnes.map((model) => ({ id: createModelRowId(), value: model.id.trim() })),
+    ])
+    setModelTypes((prev) => {
+      const next = { ...prev }
+      for (const model of newOnes) {
+        const id = model.id.trim()
+        const sanitized = sanitizeModelTypes(model.types)
+        if (sanitized.length > 0) next[id] = sanitized
+      }
+      return next
+    })
+  }
+
   const removeModel = (rowId: string) => {
     setModelRows((prev) => {
       const removed = prev.find((row) => row.id === rowId)
@@ -1320,6 +1345,15 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                 </div>
               )
             })}
+            <ModelDiscoveryPanel
+              baseUrl={baseUrl}
+              apiFormat={apiFormat}
+              apiKey={apiKey}
+              presetId={selectedPreset.id}
+              providerId={provider?.id}
+              existingModelIds={trimmedModels}
+              onApply={applyDiscoveredModels}
+            />
             <div className="flex items-center gap-2 mt-1">
               <input
                 value={newModelDraft}
@@ -2032,8 +2066,145 @@ function GeneralSettings() {
         </button>
       </div>
 
+      <LanUserGroupSection />
+
       <SettingsSyncSection />
 
+    </div>
+  )
+}
+
+function LanUserGroupSection() {
+  const t = useTranslation()
+  const identity = useLanStore((s) => s.identity)
+  const init = useLanStore((s) => s.init)
+  const updateProfile = useLanStore((s) => s.updateProfile)
+  const setDiscovery = useLanStore((s) => s.setDiscovery)
+  const [nickname, setNickname] = useState('')
+  const [email, setEmail] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void init()
+  }, [init])
+
+  useEffect(() => {
+    if (identity) {
+      setNickname(identity.nickname ?? '')
+      setEmail(identity.email ?? '')
+    }
+  }, [identity?.nickname, identity?.email])
+
+  const running = identity?.running ?? false
+  const dirty =
+    !!identity &&
+    (nickname.trim() !== (identity.nickname ?? '') ||
+      email.trim() !== (identity.email ?? ''))
+
+  async function save() {
+    setSaving(true)
+    try {
+      await updateProfile({
+        nickname: nickname.trim() || undefined,
+        email: email.trim() ? email.trim() : null,
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function toggleDiscovery() {
+    setBusy(true)
+    try {
+      await setDiscovery(!running)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6">
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
+        {t('settings.userGroup.title')}
+      </h2>
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
+        {t('settings.userGroup.description')}
+      </p>
+
+      <div className="space-y-3">
+        <div>
+          <label className="text-xs font-medium text-[var(--color-text-secondary)] mb-1 block">
+            {t('settings.userGroup.nickname')}
+          </label>
+          <Input value={nickname} onChange={(e) => setNickname(e.target.value)} />
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-[var(--color-text-secondary)] mb-1 block">
+            {t('settings.userGroup.email')}
+          </label>
+          <Input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="name@example.com"
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <Button onClick={() => void save()} disabled={!dirty || saving}>
+            {saving ? t('common.saving') : t('common.save')}
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-lg border border-[var(--color-border)] px-3 py-2">
+            <div className="text-xs text-[var(--color-text-tertiary)]">
+              {t('settings.userGroup.userId')}
+            </div>
+            <div className="text-xs font-mono text-[var(--color-text-primary)] mt-0.5 break-all">
+              {identity?.userId ?? '—'}
+            </div>
+          </div>
+          <div className="rounded-lg border border-[var(--color-border)] px-3 py-2">
+            <div className="text-xs text-[var(--color-text-tertiary)]">
+              {t('settings.userGroup.localIp')}
+            </div>
+            <div className="text-xs font-mono text-[var(--color-text-primary)] mt-0.5 break-all">
+              {identity?.localIp ?? '—'}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-medium text-[var(--color-text-primary)]">
+              {t('settings.userGroup.discoveryToggle')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+              {running
+                ? t('settings.userGroup.discoveryEnabledHint')
+                : t('settings.userGroup.discoveryDisabledHint')}
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={running}
+            disabled={busy}
+            onClick={() => void toggleDiscovery()}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+              running ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                running ? 'translate-x-5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

@@ -2891,21 +2891,40 @@ pub(crate) async fn run_unified_loop_impl(
 
         let image_marker_count = multimodal::count_image_markers(history);
 
-        let vision_provider_box: Option<Box<dyn Provider>> = if image_marker_count > 0
-            && !provider.supports_vision()
-        {
+        let needs_image_degrade = image_marker_count > 0 && {
+            let effective_supports_vision = crate::services::try_get_services()
+                .and_then(|svc| svc.config().model_vision_capability(provider_name, model))
+                .unwrap_or_else(|| provider.supports_vision());
+            !effective_supports_vision
+        };
+
+        let vision_provider_box: Option<Box<dyn Provider>> = if needs_image_degrade {
             let configured_vp = multimodal_config.vision_provider.clone();
+            let vision_fallback_model = multimodal_config
+                .vision_model
+                .as_deref()
+                .unwrap_or(model)
+                .to_string();
             let usable_vp: Option<Box<dyn Provider>> = match configured_vp {
                 Some(ref vp) => match providers::create_provider_async(vp.clone(), None).await {
-                    Ok(instance) if instance.supports_vision() => Some(instance),
-                    Ok(_) => {
-                        tracing::warn!(
-                            target: "agent.loop.vision",
-                            turn_id = %turn_id,
-                            vision_provider = %vp,
-                            "configured vision_provider does not support vision input; degrading images to text instead of failing the turn"
-                        );
-                        None
+                    Ok(instance) => {
+                        let fallback_supports_vision = crate::services::try_get_services()
+                            .and_then(|svc| {
+                                svc.config()
+                                    .model_vision_capability(vp, &vision_fallback_model)
+                            })
+                            .unwrap_or_else(|| instance.supports_vision());
+                        if fallback_supports_vision {
+                            Some(instance)
+                        } else {
+                            tracing::warn!(
+                                target: "agent.loop.vision",
+                                turn_id = %turn_id,
+                                vision_provider = %vp,
+                                "configured vision_provider does not support vision input; degrading images to text instead of failing the turn"
+                            );
+                            None
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(

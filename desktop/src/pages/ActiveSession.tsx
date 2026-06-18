@@ -13,6 +13,7 @@ import { useTranslation } from '../i18n'
 import { MessageList } from '../components/chat/MessageList'
 import { SectionErrorBoundary } from '../components/layout/SectionErrorBoundary'
 import { ChatInput } from '../components/chat/ChatInput'
+import { DebugResultCard } from '../components/debug/DebugResultCard'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { QuestionStrip } from '../components/chat/QuestionStrip'
@@ -285,6 +286,12 @@ export function ActiveSession() {
       {!isMemberSession && activeTabId && (
         <SectionErrorBoundary label="ResourceWaitBanner" resetKeys={[activeTabId]}>
           <ResourceWaitBanner sessionId={activeTabId} />
+        </SectionErrorBoundary>
+      )}
+
+      {!isMemberSession && activeTabId && (
+        <SectionErrorBoundary label="DebugResultCard" resetKeys={[activeTabId]}>
+          <DebugResultCard sessionId={activeTabId} />
         </SectionErrorBoundary>
       )}
 

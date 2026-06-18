@@ -136,6 +136,7 @@ impl ProxyConfigTool {
             "all_proxy": proxy.all_proxy,
             "no_proxy": proxy.normalized_no_proxy(),
             "services": proxy.normalized_services(),
+            "system_detect": proxy.system_detect,
         })
     }
 
@@ -239,6 +240,12 @@ impl ProxyConfigTool {
 
         if let Some(services_raw) = args.get("services") {
             proxy.services = Self::parse_string_list(services_raw, "services")?;
+        }
+
+        if let Some(system_detect) = args.get("system_detect") {
+            proxy.system_detect = system_detect
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("'system_detect' must be a boolean"))?;
         }
 
         if args.get("enabled").is_none() && touched_proxy_url {
@@ -411,6 +418,10 @@ impl Tool for ProxyConfigTool {
                         {"type": "string"},
                         {"type": "array", "items": {"type": "string"}}
                     ]
+                },
+                "system_detect": {
+                    "type": "boolean",
+                    "description": "Auto-detect and follow the OS system proxy when no explicit proxy URL is configured (default true)"
                 },
                 "clear_env": {
                     "type": "boolean",

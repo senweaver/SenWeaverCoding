@@ -275,7 +275,10 @@ export function TitleBar() {
   }
 
   return (
-    <div className="flex h-[var(--titlebar-height)] w-full shrink-0 select-none border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+    <div
+      data-app-titlebar
+      className="flex h-[var(--titlebar-height)] w-full shrink-0 select-none border-b border-[var(--color-border)] bg-[var(--color-surface)]"
+    >
       {showMacTrafficLights ? (
         <MacTrafficLightsStrip t={t} />
       ) : (

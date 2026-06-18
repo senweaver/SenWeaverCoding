@@ -20,6 +20,14 @@ import { Spinner } from '../shared/Spinner'
 import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
 import { AgentMonitorPanel } from './AgentMonitorPanel'
 import { searchApi } from '../../api/search'
+import { useLanStore } from '../../stores/lanStore'
+import { useLanGroupStore } from '../../stores/lanGroupStore'
+import { useLanShareStore } from '../../stores/lanShareStore'
+import { UserPanel } from '../lan/UserPanel'
+import { GroupsPanel } from '../lanGroup/GroupsPanel'
+import { SharePanel } from '../lanShare/SharePanel'
+import { useFileDragStore } from '../../stores/fileDragStore'
+import { SESSION_REF_PREFIX } from '../chat/composerRefs'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
@@ -53,6 +61,24 @@ export function Sidebar() {
   }, [queueState])
   const selectedProjects = useSessionStore((s) => s.selectedProjects)
   const error = useSessionStore((s) => s.error)
+  const lanNickname = useLanStore((s) => s.identity?.nickname ?? s.identity?.userId ?? '')
+  const lanRunning = useLanStore((s) => s.identity?.running ?? false)
+  const lanUnread = useLanStore((s) => s.unread)
+  const lanPanelOpen = useLanStore((s) => s.panelOpen)
+  const lanInit = useLanStore((s) => s.init)
+  const toggleLanPanel = useLanStore((s) => s.togglePanel)
+  const lanGroupInit = useLanGroupStore((s) => s.init)
+  const lanGroupUnread = useLanGroupStore((s) => s.unread)
+  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
+  const toggleLanGroupPanel = useLanGroupStore((s) => s.togglePanel)
+  const lanShareInit = useLanShareStore((s) => s.init)
+  const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
+  const toggleLanSharePanel = useLanShareStore((s) => s.togglePanel)
+  useEffect(() => {
+    void lanInit()
+    void lanGroupInit()
+    void lanShareInit()
+  }, [lanInit, lanGroupInit, lanShareInit])
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
   const deleteSession = useSessionStore((s) => s.deleteSession)
   const deleteSessions = useSessionStore((s) => s.deleteSessions)
@@ -306,6 +332,53 @@ export function Sidebar() {
     startDraggingRef.current?.()
   }, [])
 
+  const sessionDragSuppressRef = useRef(false)
+
+  const handleSessionPointerDown = useCallback(
+    (event: React.PointerEvent, sessionId: string, displayTitle: string) => {
+      if (event.button !== 0) return
+      if (renamingId === sessionId) return
+      if (sessionId === activeTabId) return
+      sessionDragSuppressRef.current = false
+      const startX = event.clientX
+      const startY = event.clientY
+      const payload = {
+        relPath: `${SESSION_REF_PREFIX}${sessionId}`,
+        name: displayTitle,
+        isDir: false,
+      }
+      const store = useFileDragStore.getState()
+      let started = false
+      const onMove = (ev: PointerEvent) => {
+        if (!started) {
+          if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return
+          started = true
+          sessionDragSuppressRef.current = true
+          document.body.classList.add('sen-file-dragging')
+          store.begin(payload, ev.clientX, ev.clientY)
+        } else {
+          useFileDragStore.getState().move(ev.clientX, ev.clientY)
+        }
+      }
+      const cleanup = (commit: boolean) => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onCancel)
+        document.body.classList.remove('sen-file-dragging')
+        if (started) {
+          if (commit) useFileDragStore.getState().finish()
+          else useFileDragStore.getState().cancel()
+        }
+      }
+      const onUp = () => cleanup(true)
+      const onCancel = () => cleanup(false)
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onCancel)
+    },
+    [renamingId, activeTabId],
+  )
+
   const renderSessionRow = (session: SessionListItem) => {
     const displayTitle = resolveSessionTitle(session.title, t('sidebar.untitled'))
     const isRunning = runningSessions.has(session.id)
@@ -331,9 +404,14 @@ export function Sidebar() {
           <>
             <button
               onClick={() => {
+                if (sessionDragSuppressRef.current) {
+                  sessionDragSuppressRef.current = false
+                  return
+                }
                 useTabStore.getState().openTab(session.id, displayTitle)
                 focusSession(session.id)
               }}
+              onPointerDown={(e) => handleSessionPointerDown(e, session.id, displayTitle)}
               onContextMenu={(e) => handleContextMenu(e, session.id)}
               title={displayTitle}
               className={`
@@ -416,12 +494,51 @@ export function Sidebar() {
       data-state={sidebarOpen ? 'open' : 'closed'}
       aria-label="Sidebar"
     >
-      <div className="flex justify-end px-3 pb-2 pt-3">
+      <div className="flex items-center justify-end gap-1 px-3 pb-2 pt-3">
+        <button
+          type="button"
+          data-lan-group-toggle
+          onClick={() => toggleLanGroupPanel()}
+          title={t('lanGroup.title')}
+          aria-label={t('lanGroup.title')}
+          aria-pressed={lanGroupPanelOpen}
+          className={
+            `relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+              lanGroupPanelOpen
+                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
+                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+            }`
+          }
+        >
+          <span className="material-symbols-outlined text-[16px]">groups</span>
+          {lanGroupUnread > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[9px] font-semibold text-white">
+              {lanGroupUnread > 99 ? '99+' : lanGroupUnread}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          data-lan-share-toggle
+          onClick={() => toggleLanSharePanel()}
+          title={t('lanShare.title')}
+          aria-label={t('lanShare.title')}
+          aria-pressed={lanSharePanelOpen}
+          className={
+            `relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+              lanSharePanelOpen
+                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
+                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+            }`
+          }
+        >
+          <span className="material-symbols-outlined text-[16px]">share</span>
+        </button>
         <a
           href="https://github.com/senweaver/SenWeaverCoding"
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center justify-center rounded-md p-1 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
           title="GitHub"
           data-tauri-drag-region
         >
@@ -610,7 +727,39 @@ export function Sidebar() {
         <div className="flex-1" aria-hidden="true" />
       )}
 
-      <div className="flex items-center justify-end gap-1 border-t border-[var(--color-border)] p-2">
+      <div className="flex min-w-0 items-center gap-1 border-t border-[var(--color-border)] p-2">
+        <button
+          type="button"
+          data-lan-panel-toggle
+          onClick={() => toggleLanPanel()}
+          title={lanNickname || t('lan.title')}
+          aria-label={lanNickname || t('lan.title')}
+          aria-pressed={lanPanelOpen}
+          className={
+            `mr-auto flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors ${
+              lanPanelOpen
+                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
+                : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+            }`
+          }
+        >
+          <span className="relative inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)] text-[10px] font-semibold text-white">
+            {(lanNickname || '?').trim().slice(0, 1).toUpperCase()}
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-[var(--color-surface)] ${
+                lanRunning ? 'bg-[var(--color-success,#16a34a)]' : 'bg-[var(--color-text-tertiary)]'
+              }`}
+            />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-left text-xs font-medium">
+            {lanNickname || t('lan.title')}
+          </span>
+          {lanUnread > 0 && (
+            <span className="ml-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[10px] font-semibold text-white">
+              {lanUnread > 99 ? '99+' : lanUnread}
+            </span>
+          )}
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -623,8 +772,8 @@ export function Sidebar() {
           aria-pressed={designerCanvasOpen}
           className={
             designerCanvasOpen
-              ? 'inline-flex items-center justify-center rounded-md p-1.5 bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] transition-colors'
-              : 'inline-flex items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+              ? 'inline-flex shrink-0 items-center justify-center rounded-md p-1.5 bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] transition-colors'
+              : 'inline-flex shrink-0 items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
           }
         >
           <span className="material-symbols-outlined text-[16px]">palette</span>
@@ -645,7 +794,7 @@ export function Sidebar() {
             }}
             title={t('sidebar.browserPanel')}
             aria-label={t('sidebar.browserPanel')}
-            className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            className="inline-flex shrink-0 items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
           >
             <span className="material-symbols-outlined text-[16px]">public</span>
           </button>
@@ -658,13 +807,17 @@ export function Sidebar() {
           aria-pressed={settingsOverlayOpen}
           className={
             settingsOverlayOpen
-              ? 'inline-flex items-center justify-center rounded-md p-1.5 bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] transition-colors'
-              : 'inline-flex items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+              ? 'inline-flex shrink-0 items-center justify-center rounded-md p-1.5 bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] transition-colors'
+              : 'inline-flex shrink-0 items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
           }
         >
           <span className="material-symbols-outlined text-[16px]">settings</span>
         </button>
       </div>
+
+      <UserPanel />
+      <GroupsPanel />
+      <SharePanel />
 
       {contextMenu && sidebarOpen && (
         <div
@@ -954,7 +1107,7 @@ function TrashIcon() {
 
 function GitHubIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
       <path
         fillRule="evenodd"
         clipRule="evenodd"

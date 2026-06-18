@@ -125,6 +125,8 @@ pub struct ServiceContainer {
     session_designer:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, DesignerSelection>>>,
 
+    session_debug: Arc<parking_lot::RwLock<std::collections::HashMap<String, DebugSelection>>>,
+
     #[cfg(feature = "tool-curator")]
     pub curator_state: crate::tools::curator::state::CuratorState,
 
@@ -167,6 +169,9 @@ pub struct ServiceContainer {
     pub remote_sessions: crate::remote::manager::RemoteSessionManager,
 
     pub tips: parking_lot::Mutex<TipManager>,
+
+    #[cfg(feature = "lan-comms")]
+    pub lan: Option<Arc<crate::lan::LanService>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -175,6 +180,12 @@ pub struct DesignerSelection {
     pub params: serde_json::Value,
     #[serde(default)]
     pub ref_artifact: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DebugSelection {
+    pub submode_id: String,
+    pub params: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -221,6 +232,15 @@ impl ServiceContainer {
             ))
         });
 
+        #[cfg(feature = "lan-comms")]
+        let lan = match crate::lan::LanService::new(&cfg.data_dir, &shared_config) {
+            Ok(svc) => Some(svc),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to initialise LAN service");
+                None
+            }
+        };
+
         Self {
             analytics: AnalyticsService::new(true),
             compact: CompactService,
@@ -257,6 +277,9 @@ impl ServiceContainer {
             session_designer: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
+            session_debug: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             #[cfg(feature = "tool-curator")]
             curator_state: crate::tools::curator::state::new_curator_state(),
             #[cfg(feature = "tool-curator")]
@@ -287,6 +310,8 @@ impl ServiceContainer {
             proxy_runtime: crate::services::proxy::runtime::ProxyRuntime::global(),
             remote_sessions: crate::remote::manager::RemoteSessionManager::new(),
             tips: parking_lot::Mutex::new(TipManager::new(2)),
+            #[cfg(feature = "lan-comms")]
+            lan,
         }
     }
 
@@ -445,6 +470,29 @@ impl ServiceContainer {
 
     pub fn clear_session_designer(&self, session_key: &str) {
         self.session_designer.write().remove(session_key);
+    }
+
+    pub fn session_debug(&self, session_key: &str) -> Option<DebugSelection> {
+        self.session_debug.read().get(session_key).cloned()
+    }
+
+    pub fn set_session_debug(
+        &self,
+        session_key: &str,
+        submode_id: String,
+        params: serde_json::Value,
+    ) {
+        self.session_debug.write().insert(
+            session_key.to_string(),
+            DebugSelection {
+                submode_id,
+                params,
+            },
+        );
+    }
+
+    pub fn clear_session_debug(&self, session_key: &str) {
+        self.session_debug.write().remove(session_key);
     }
 
     pub fn resolve_coding_mode_for(&self, session_key: Option<&str>) -> CodingMode {

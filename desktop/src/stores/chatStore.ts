@@ -24,6 +24,7 @@ import { useDesignerCanvasStore } from './designerCanvasStore'
 import { useLspStore } from './lspStore'
 import { useUIStore } from './uiStore'
 import { t } from '../i18n'
+import { isWindowBusy, onWindowIdle } from '../lib/windowBusy'
 import type { LspBroadcastEvent } from '../types/lsp'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import {
@@ -315,6 +316,11 @@ type ChatStore = {
     scope?: 'session' | 'global',
   ) => void
   resolveSessionCodingMode: (confirmed: boolean) => void
+  setSessionDebugSubmode: (
+    sessionId: string,
+    submode: string,
+    params: Record<string, unknown>,
+  ) => void
   dismissAgentTaskNotification: (sessionId: string, toolUseId: string) => void
   stopGeneration: (sessionId: string) => void
   cancelTool: (sessionId: string, toolUseId?: string) => void
@@ -360,6 +366,8 @@ type ChatStore = {
   resumePlanExecution: (sessionId: string, planPath: string) => void
 
   resumeCuratorExecution: (sessionId: string, implBlueprintPath: string) => void
+
+  continueCuratorWriting: (sessionId: string) => void
 
   resetDebugPiiStats: (sessionId: string) => void
 }
@@ -550,7 +558,9 @@ function applyUpdatePlanUpdateToCard(
 
 function findLatestCuratorCardIdx(messages: UIMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.type === 'curator_card') return i
+    const m = messages[i]!
+    if (m.type === 'curator_card') return i
+    if (m.type === 'user_text' || m.type === 'plan_question_answers') return -1
   }
   return -1
 }
@@ -816,18 +826,19 @@ function upgradeCuratorCardFromResult(
   rawContent: unknown,
   isError: boolean,
 ): Extract<UIMessage, { type: 'curator_card' }> {
-  if (isError) {
-    return { ...card, status: 'writing' }
-  }
   const text =
     typeof rawContent === 'string' ? rawContent : extractTextFromRawContent(rawContent)
+  if (isError) {
+    return { ...card, status: 'failed', error: text.trim() || undefined }
+  }
   const parsed = parseCuratorEnvelopeForCard(text)
   if (!parsed) {
-    return { ...card, status: 'completed' }
+    return { ...card, status: 'completed', error: undefined }
   }
   return {
     ...card,
     status: 'completed',
+    error: undefined,
     slug: parsed.slug || card.slug,
     template: parsed.template || card.template,
     finalMdPath: parsed.finalMdPath || card.finalMdPath,
@@ -838,11 +849,30 @@ function upgradeCuratorCardFromResult(
   }
 }
 
+function resolveDanglingCuratorCards(messages: UIMessage[]): UIMessage[] {
+  let changed = false
+  const next = messages.map((m) => {
+    if (m.type === 'curator_card' && m.status === 'writing') {
+      changed = true
+      return {
+        ...m,
+        status: 'failed' as const,
+        error:
+          m.error ||
+          (t('curator.interrupted') ||
+            'The turn ended before the document was finalized. Ask the assistant to continue.'),
+      }
+    }
+    return m
+  })
+  return changed ? next : messages
+}
+
 function findReplaceableCuratorCardIdx(messages: UIMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!
     if (m.type === 'curator_card') {
-      if (m.status === 'writing') return i
+      if (m.status === 'writing' || m.status === 'failed') return i
       return -1
     }
     if (
@@ -1283,6 +1313,24 @@ const lastStreamActivityAtBySession = new Map<string, number>()
 const FLUSH_HIGH_WATER_CHARS = 96
 const FLUSH_HIGH_WATER_MS = 80
 
+const deferredDeltaFlush = new Map<string, () => void>()
+const deferredThinkingFlush = new Map<string, () => void>()
+let busyIdleUnsub: (() => void) | null = null
+
+function ensureBusyIdleFlush(): void {
+  if (busyIdleUnsub) return
+  busyIdleUnsub = onWindowIdle(() => {
+    busyIdleUnsub?.()
+    busyIdleUnsub = null
+    const deltaFlushes = Array.from(deferredDeltaFlush.values())
+    deferredDeltaFlush.clear()
+    for (const fn of deltaFlushes) fn()
+    const thinkingFlushes = Array.from(deferredThinkingFlush.values())
+    deferredThinkingFlush.clear()
+    for (const fn of thinkingFlushes) fn()
+  })
+}
+
 const runtimeSyncFailureToastSessions = new Set<string>()
 const runtimeSyncRetrySessions = new Set<string>()
 
@@ -1711,6 +1759,22 @@ function stripAttachmentMarkersForDisplay(content: string): string {
   })
   const result = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
   return result.length > 0 ? result : content
+}
+
+function mapPersistedAttachments(entry: MessageEntry): UIAttachment[] | undefined {
+  if (!Array.isArray(entry.attachments) || entry.attachments.length === 0) return undefined
+  const mapped: UIAttachment[] = []
+  for (const att of entry.attachments) {
+    if (!att) continue
+    const type = att.type === 'image' ? 'image' : 'file'
+    mapped.push({
+      type,
+      name: att.name || att.path || type,
+      data: att.data,
+      mimeType: att.mimeType,
+    })
+  }
+  return mapped.length > 0 ? mapped : undefined
 }
 
 function extractDisplayBriefFromTaskEnvelope(content: string): string | null {
@@ -2454,7 +2518,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           pendingPermission: null,
           chatState: allowed ? 'tool_executing' : 'idle',
-          messages,
+          messages: allowed ? messages : resolveDanglingCuratorCards(messages),
         })),
       }
     })
@@ -2490,6 +2554,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       scope: pending.scope,
       confirmed: true,
     })
+  },
+
+  setSessionDebugSubmode: (sessionId, submode, params) => {
+    if (!get().sessions[sessionId]) return
+    wsManager.send(sessionId, { type: 'set_debug_submode', submode, params })
   },
 
   dismissAgentTaskNotification: (sessionId, toolUseId) => {
@@ -2605,9 +2674,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (session.elapsedTimer) clearInterval(session.elapsedTimer)
       const sealedMessages = sealThinkingForSession(sessionId, session)
       const partialText = session.streamingText
-      const committedMessages = partialText.trim()
-        ? appendAssistantTextMessage(sealedMessages, partialText, Date.now())
-        : sealedMessages
+      const committedMessages = resolveDanglingCuratorCards(
+        partialText.trim()
+          ? appendAssistantTextMessage(sealedMessages, partialText, Date.now())
+          : sealedMessages,
+      )
       return {
         sessions: {
           ...s.sessions,
@@ -2656,8 +2727,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (m && m.id) knownIds.add(m.id)
         }
         const liveOnly = liveMessages.filter((m) => !knownIds.has(m.id))
-        const merged: UIMessage[] =
+        const mergedRaw: UIMessage[] =
           liveOnly.length === 0 ? taggedMessages : [...taggedMessages, ...liveOnly]
+        const sessionIsLive =
+          session.chatState === 'streaming' ||
+          session.chatState === 'thinking' ||
+          session.chatState === 'permission_pending'
+        const merged = sessionIsLive ? mergedRaw : resolveDanglingCuratorCards(mergedRaw)
         return {
           sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
             messages: merged,
@@ -2727,11 +2803,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   (m) => m.type === 'permission_request' && !knownIds.has(m.id),
                 )
               : []
+            const rebuiltMessages =
+              livePermissionMessages.length > 0
+                ? [...taggedMessages, ...livePermissionMessages]
+                : taggedMessages
             return {
-              messages:
-                livePermissionMessages.length > 0
-                  ? [...taggedMessages, ...livePermissionMessages]
-                  : taggedMessages,
+              messages: keepPermission
+                ? rebuiltMessages
+                : resolveDanglingCuratorCards(rebuiltMessages),
               agentTaskNotifications: {
                 ...s.agentTaskNotifications,
                 ...restoredNotifications,
@@ -3118,6 +3197,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
   },
 
+  continueCuratorWriting: (sessionId) => {
+    if (!sessionId) return
+    const display = t('curator.continueWritingPrompt') || 'Continue writing the document'
+    const instruction =
+      'Continue the interrupted Curator document. Reuse the existing research in `sources.md` and ' +
+      '`research_notes.md` plus the current `draft.md`. Finish the full polished document in one pass ' +
+      'and end this turn by calling `exit_curator_mode` with complete `final_content` and ' +
+      '`impl_blueprint` arguments. Do not re-run research that is already sufficient.'
+    get().sendMessage(sessionId, instruction, undefined, { displayContent: display })
+  },
+
   undoAllPendingEdits: async (sessionId) => {
     const sess = get().sessions[sessionId]
     if (!sess) return
@@ -3237,6 +3327,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             clearInterval(session.elapsedTimer)
             update(() => ({ elapsedTimer: null }))
           }
+          update((s) =>
+            s.pendingPermission
+              ? {}
+              : { messages: resolveDanglingCuratorCards(s.messages) },
+          )
           syncTasksAfterTurnEnd(sessionId, turnWasStopped)
           revealDesignCanvasIfPending(sessionId)
         }
@@ -3305,6 +3400,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
           const flushDelta = () => {
             flushTimerBySession.delete(sessionId)
+            if (isWindowBusy()) {
+              deferredDeltaFlush.set(sessionId, flushDelta)
+              ensureBusyIdleFlush()
+              return
+            }
             const text = pendingDeltaBySession.get(sessionId) ?? ''
             pendingDeltaBySession.delete(sessionId)
             pendingDeltaFirstAt.delete(sessionId)
@@ -3362,6 +3462,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
           const flushThinking = () => {
             thinkingFlushTimerBySession.delete(sessionId)
+            if (isWindowBusy()) {
+              deferredThinkingFlush.set(sessionId, flushThinking)
+              ensureBusyIdleFlush()
+              return
+            }
             const buffered = pendingThinkingBySession.get(sessionId) ?? ''
             pendingThinkingBySession.delete(sessionId)
             pendingThinkingFirstAt.delete(sessionId)
@@ -3893,6 +3998,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           tokenUsage: msg.usage,
           cumulativeTokens: (s.cumulativeTokens ?? 0) + Math.max(0, turnDelta),
           chatState: s.pendingPermission ? s.chatState : 'idle',
+          messages: s.pendingPermission ? s.messages : resolveDanglingCuratorCards(s.messages),
           activeThinkingId: null,
           elapsedTimer: null,
           pendingResourceWaits: [],
@@ -4045,6 +4151,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               timestamp: Date.now(),
             }]
           }
+          newMessages = resolveDanglingCuratorCards(newMessages)
           return {
             messages: newMessages,
             chatState: 'idle',
@@ -4199,9 +4306,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (stuckSession?.elapsedTimer) clearInterval(stuckSession.elapsedTimer)
           update((s) => {
             const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
-            const baseMessages = merged.trim()
-              ? appendAssistantTextMessage(sealThinkingForSession(sessionId, s), merged, Date.now())
-              : sealThinkingForSession(sessionId, s)
+            const baseMessages = resolveDanglingCuratorCards(
+              merged.trim()
+                ? appendAssistantTextMessage(sealThinkingForSession(sessionId, s), merged, Date.now())
+                : sealThinkingForSession(sessionId, s),
+            )
             return {
               connectionState: 'disconnected',
               messages: baseMessages,
@@ -4886,11 +4995,13 @@ export function mapHistoryMessagesToUiMessages(
         continue
       }
       const legacyBrief = extractDisplayBriefFromTaskEnvelope(msg.content)
+      const persistedAttachments = mapPersistedAttachments(msg)
       uiMessages.push({
         id: msg.id || nextId(),
         type: 'user_text',
         content: legacyBrief ?? stripAttachmentMarkersForDisplay(msg.content),
         timestamp,
+        ...(persistedAttachments ? { attachments: persistedAttachments } : {}),
         ...(msg.designRef ? { designRef: msg.designRef } : {}),
         ...(msg.designRefName ? { designRefName: msg.designRefName } : {}),
         ...(msg.designRefElement ? { designRefElement: msg.designRefElement } : {}),

@@ -5,6 +5,7 @@
 import { useTranslation } from '../../i18n'
 import type { UIAttachment } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
+import { hasRefTokens, parseRefSegments, refIconName, refKind } from './composerRefs'
 
 type Props = {
   content: string
@@ -26,6 +27,49 @@ type Props = {
   designRefName?: string
   designRefElement?: string
   designRefElementLabel?: string
+}
+
+function renderMessageContent(content: string) {
+  if (!hasRefTokens(content)) return content
+  return parseRefSegments(content).map((segment, index) => {
+    if (segment.type === 'text') {
+      return <span key={index}>{segment.text}</span>
+    }
+    if (segment.type === 'cred') {
+      return (
+        <span
+          key={index}
+          data-ref-kind="cred"
+          className="mx-0.5 inline-flex select-none items-center gap-1 rounded-md bg-[var(--color-ref-chip-cred-bg)] px-1.5 align-middle text-[var(--color-text-secondary)]"
+          title={segment.name}
+        >
+          <span className="material-symbols-outlined text-[13px] leading-none">key</span>
+          <span className="text-[12px] font-medium text-[var(--color-text-primary)]">
+            {segment.name}
+          </span>
+        </span>
+      )
+    }
+    const bgClass =
+      refKind(segment.relPath) === 'session'
+        ? 'bg-[var(--color-ref-chip-session-bg)]'
+        : 'bg-[var(--color-surface-container-high)]'
+    return (
+      <span
+        key={index}
+        data-ref-kind={refKind(segment.relPath)}
+        className={`mx-0.5 inline-flex select-none items-center gap-1 rounded-md ${bgClass} px-1.5 align-middle text-[var(--color-text-secondary)]`}
+        title={segment.relPath}
+      >
+        <span className="material-symbols-outlined text-[13px] leading-none">
+          {refIconName(segment.relPath)}
+        </span>
+        <span className="text-[12px] font-medium text-[var(--color-text-primary)]">
+          {segment.name || segment.relPath}
+        </span>
+      </span>
+    )
+  })
 }
 
 function designRefIcon(path: string): string {
@@ -110,14 +154,14 @@ export function UserMessage({
                 className="inline-block max-w-full bg-[var(--color-surface-user-msg)] px-4 py-3 pr-9 text-left text-sm leading-relaxed text-[var(--color-text-primary)] whitespace-pre-wrap break-words transition-shadow hover:ring-1 hover:ring-[var(--color-brand)]/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
                 style={{ borderRadius: '18px 4px 18px 18px' }}
               >
-                {content}
+                {renderMessageContent(content)}
               </button>
             ) : (
               <div
                 className="inline-block max-w-full bg-[var(--color-surface-user-msg)] px-4 py-3 pr-9 text-sm leading-relaxed text-[var(--color-text-primary)] whitespace-pre-wrap break-words"
                 style={{ borderRadius: '18px 4px 18px 18px' }}
               >
-                {content}
+                {renderMessageContent(content)}
               </div>
             )}
 

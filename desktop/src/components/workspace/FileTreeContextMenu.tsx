@@ -5,6 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import type { FileTreeNode } from '../../types/workspaceFile'
+import type { LanPeer } from '../../types/lan'
 
 export type ContextMenuTarget =
   | { kind: 'root' }
@@ -32,6 +33,11 @@ type Props = {
   onCutEntry: (node: FileTreeNode) => void
   onPasteInto: (targetDir: string) => void
   canPaste: boolean
+  lanEnabled: boolean
+  lanPeers: LanPeer[]
+  onSendToPeer: (node: FileTreeNode, peerId: string) => void
+  onUploadToGroup: (node: FileTreeNode) => void
+  onShareToLan: (node: FileTreeNode) => void
 }
 
 export function FileTreeContextMenu({
@@ -56,6 +62,11 @@ export function FileTreeContextMenu({
   onCutEntry,
   onPasteInto,
   canPaste,
+  lanEnabled,
+  lanPeers,
+  onSendToPeer,
+  onUploadToGroup,
+  onShareToLan,
 }: Props) {
   const t = useTranslation()
   const ref = useRef<HTMLDivElement | null>(null)
@@ -232,6 +243,32 @@ export function FileTreeContextMenu({
             />
           )}
           <Separator />
+          <LanSendMenuItem
+            label={t('files.tree.sendToLan')}
+            emptyLabel={lanEnabled ? t('files.tree.lanNoPeers') : t('files.tree.lanDiscoveryOff')}
+            peers={lanEnabled ? lanPeers.filter((p) => p.online) : []}
+            onSelectPeer={(peerId) => {
+              onSendToPeer(node, peerId)
+              onClose()
+            }}
+          />
+          <MenuItem
+            label={t('files.tree.uploadToGroup')}
+            icon="groups"
+            onClick={() => {
+              onUploadToGroup(node)
+              onClose()
+            }}
+          />
+          <MenuItem
+            label={t('files.tree.shareToLan')}
+            icon="share"
+            onClick={() => {
+              onShareToLan(node)
+              onClose()
+            }}
+          />
+          <Separator />
         </>
       )}
       <MenuItem
@@ -271,6 +308,87 @@ function MenuItem({
       <span className="material-symbols-outlined text-[14px]">{icon}</span>
       <span className="flex-1">{label}</span>
     </button>
+  )
+}
+
+function LanSendMenuItem({
+  label,
+  emptyLabel,
+  peers,
+  onSelectPeer,
+}: {
+  label: string
+  emptyLabel: string
+  peers: LanPeer[]
+  onSelectPeer: (peerId: string) => void
+}) {
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  const [open, setOpen] = useState(false)
+  const [placeRight, setPlaceRight] = useState(true)
+  const [top, setTop] = useState(true)
+
+  const openSub = () => {
+    const el = rowRef.current
+    if (el) {
+      const rect = el.getBoundingClientRect()
+      const subWidth = 220
+      const subHeightEstimate = Math.min(320, 36 + peers.length * 30)
+      setPlaceRight(rect.right + subWidth + 8 <= window.innerWidth)
+      setTop(rect.top + subHeightEstimate <= window.innerHeight)
+    }
+    setOpen(true)
+  }
+
+  return (
+    <div
+      ref={rowRef}
+      className="relative"
+      onMouseEnter={openSub}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        role="menuitem"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+      >
+        <span className="material-symbols-outlined text-[14px]">send</span>
+        <span className="flex-1">{label}</span>
+        <span className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]">
+          chevron_right
+        </span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          style={{ boxShadow: 'var(--shadow-dropdown)' }}
+          className={`absolute z-[60] max-h-[320px] min-w-[200px] overflow-y-auto rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] py-1 ${
+            placeRight ? 'left-full ml-0.5' : 'right-full mr-0.5'
+          } ${top ? 'top-0' : 'bottom-0'}`}
+        >
+          {peers.length === 0 ? (
+            <div className="px-3 py-1.5 text-[var(--color-text-tertiary)]">{emptyLabel}</div>
+          ) : (
+            peers.map((peer) => (
+              <button
+                key={peer.userId}
+                type="button"
+                role="menuitem"
+                onClick={() => onSelectPeer(peer.userId)}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--color-success,#22c55e)]" />
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate">{peer.nickname || peer.userId}</span>
+                  <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
+                    {peer.ip}
+                  </span>
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 

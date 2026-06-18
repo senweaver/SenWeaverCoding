@@ -176,7 +176,8 @@ fn get_value(cfg: &crate::config::Config, key: &str) -> String {
             .as_ref()
             .map(|k| {
                 if k.len() > 8 {
-                    format!("{}...{}", &k[..4], &k[k.len() - 4..])
+                    use crate::util::SafeStrSlice;
+                    format!("{}...{}", k.byte_prefix(4), k.byte_suffix(4))
                 } else {
                     "[set]".to_string()
                 }

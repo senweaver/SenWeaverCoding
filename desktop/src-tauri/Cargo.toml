@@ -22,6 +22,7 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
     "lsp-push-diagnostics",
     "observability-prometheus",
     "rag-pdf",
+    "office-docs",
     "tool-cron",
     "tool-sop",
     "tool-team",
@@ -40,6 +41,7 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
     "code-intel",
     "channels-lite",
     "whatsapp-web",
+    "lan-comms",
 ] }
 
 tauri = { version = "2.11", features = ["unstable", "image-png"] }

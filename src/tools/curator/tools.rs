@@ -13,6 +13,7 @@ use crate::tools::traits::{Tool, ToolResult};
 use crate::tools::web::fetch::WebFetchTool;
 use crate::tools::web::search::tool::WebSearchTool;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use parking_lot::RwLock;
 use regex::Regex;
 use serde_json::json;
@@ -462,7 +463,7 @@ impl Tool for CuratorDeepCollectTool {
                     "type": "integer",
                     "minimum": 400,
                     "maximum": 12000,
-                    "description": "How much body text to keep per page in research_notes.md (default 2500)."
+                    "description": "How much body text to keep per page in research_notes.md (default 3500)."
                 },
                 "tags": { "type": "array", "items": { "type": "string" } }
             },
@@ -502,7 +503,7 @@ impl Tool for CuratorDeepCollectTool {
             .get("snippet_chars")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
-            .unwrap_or(2500)
+            .unwrap_or(3500)
             .clamp(400, 12000);
         let tags = collect_str_array(args.get("tags"));
 
@@ -597,54 +598,133 @@ impl Tool for CuratorDeepCollectTool {
         }
         total_appended += session_header.len();
 
-        for (idx, hit) in selected.iter().enumerate() {
+        let tool_timeout_secs = crate::services::try_get_services()
+            .and_then(|svc| svc.config().pacing.tool_timeout_secs)
+            .filter(|s| *s > 0)
+            .unwrap_or(600);
+        let fetch_budget = std::time::Duration::from_secs(
+            tool_timeout_secs
+                .saturating_mul(3)
+                .saturating_div(4)
+                .clamp(60, 480),
+        );
+        let deadline = tokio::time::Instant::now() + fetch_budget;
+        const PER_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+        const FETCH_CONCURRENCY: usize = 3;
+
+        enum FetchOutcome {
+            Body(String),
+            Failed(String),
+            Skipped,
+        }
+
+        let fetch_inputs: Vec<(usize, String, String)> = selected
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                let label = if hit.engine.is_empty() {
+                    "search".to_string()
+                } else {
+                    hit.engine.clone()
+                };
+                (idx, hit.url.clone(), label)
+            })
+            .collect();
+        let web_fetch = self.web_fetch.clone();
+        let mut fetched: Vec<(usize, FetchOutcome)> = futures_util::stream::iter(
+            fetch_inputs.into_iter().map(|(idx, url, label)| {
+                let web_fetch = web_fetch.clone();
+                let position = idx + 1;
+                async move {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        tracing::warn!(
+                            target: "tools.curator_deep_collect",
+                            position,
+                            url = %url,
+                            "skipping fetch: deep-collect time budget exhausted"
+                        );
+                        return (idx, FetchOutcome::Skipped);
+                    }
+                    tracing::info!(
+                        target: "tools.curator_deep_collect",
+                        position,
+                        engine = %label,
+                        url = %url,
+                        "fetching"
+                    );
+                    let remaining = deadline.saturating_duration_since(now);
+                    let this_timeout = PER_FETCH_TIMEOUT.min(remaining);
+                    let fetch_args = json!({ "url": url });
+                    let exec = crate::agent::loop_::execute_tool_panic_safe(
+                        web_fetch.as_ref(),
+                        "web_fetch",
+                        fetch_args,
+                    );
+                    let outcome = match tokio::time::timeout(this_timeout, exec).await {
+                        Ok(Ok(r)) => {
+                            if r.success {
+                                let body = r.output.trim().to_string();
+                                if body.is_empty() {
+                                    FetchOutcome::Failed("empty body".to_string())
+                                } else {
+                                    FetchOutcome::Body(body)
+                                }
+                            } else {
+                                FetchOutcome::Failed(
+                                    r.error.unwrap_or_else(|| "unknown error".to_string()),
+                                )
+                            }
+                        }
+                        Ok(Err(e)) => FetchOutcome::Failed(format!("web_fetch threw: {e}")),
+                        Err(_) => {
+                            tracing::warn!(
+                                target: "tools.curator_deep_collect",
+                                position,
+                                url = %url,
+                                timeout_secs = this_timeout.as_secs(),
+                                "fetch exceeded per-source timeout; moving on"
+                            );
+                            FetchOutcome::Failed(format!(
+                                "fetch timed out after {}s",
+                                this_timeout.as_secs()
+                            ))
+                        }
+                    };
+                    (idx, outcome)
+                }
+            }),
+        )
+        .buffer_unordered(FETCH_CONCURRENCY)
+        .collect()
+        .await;
+        fetched.sort_by_key(|(idx, _)| *idx);
+
+        let mut skipped = 0usize;
+        for (idx, outcome) in fetched {
+            let hit = &selected[idx];
             let position = idx + 1;
             let label = if hit.engine.is_empty() { "search" } else { hit.engine.as_str() };
-            tracing::info!(
-                target: "tools.curator_deep_collect",
-                position,
-                engine = %label,
-                url = %hit.url,
-                "fetching"
-            );
-            let fetch_args = json!({ "url": hit.url });
-            let fetch_result = match crate::agent::loop_::execute_tool_panic_safe(
-                self.web_fetch.as_ref(),
-                "web_fetch",
-                fetch_args,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("web_fetch threw: {e}")),
-                },
+
+            let body = match outcome {
+                FetchOutcome::Body(b) => b,
+                FetchOutcome::Skipped => {
+                    skipped += 1;
+                    summary_lines.push(format!(
+                        "  {position}. ⏭ [{label}] {}  -  skipped (time budget reached)",
+                        hit.title
+                    ));
+                    continue;
+                }
+                FetchOutcome::Failed(reason) => {
+                    failures.push(format!("{} ({}): {reason}", hit.title, hit.url));
+                    summary_lines.push(format!(
+                        "  {position}. ✗ [{label}] {}  -  fetch failed: {reason}",
+                        hit.title
+                    ));
+                    continue;
+                }
             };
-
-            if !fetch_result.success {
-                let reason = fetch_result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "unknown error".to_string());
-                failures.push(format!("{} ({}): {reason}", hit.title, hit.url));
-                summary_lines.push(format!(
-                    "  {position}. ✗ [{label}] {}  -  fetch failed: {reason}",
-                    hit.title
-                ));
-                continue;
-            }
-
-            let body = fetch_result.output.trim();
-            if body.is_empty() {
-                failures.push(format!("{} ({}): empty body", hit.title, hit.url));
-                summary_lines.push(format!(
-                    "  {position}. ✗ [{label}] {}  -  empty body",
-                    hit.title
-                ));
-                continue;
-            }
 
             let persist = {
                 let root_dir = active.root_dir.clone();
@@ -760,6 +840,11 @@ impl Tool for CuratorDeepCollectTool {
             selected.len(),
             total_appended
         );
+        if skipped > 0 {
+            output.push_str(&format!(
+                "Note: {skipped} source(s) skipped to stay within the deep-collect time budget; re-run curator_deep_collect (or web_fetch) for the remaining URLs if needed.\n"
+            ));
+        }
         if !summary_lines.is_empty() {
             output.push_str("Sources:\n");
             output.push_str(&summary_lines.join("\n"));
@@ -1019,7 +1104,7 @@ impl Tool for ExitCuratorModeTool {
             "properties": {
                 "final_content": {
                     "type": "string",
-                    "description": "Polished Markdown body that will be persisted as final.md AND rendered into final.docx with the active template's typography. Must satisfy the curator quality gate (≥1500 chars, ≥3 `##` sections)."
+                    "description": "Polished Markdown body that will be persisted as final.md AND rendered into final.docx with the active template's typography. Must satisfy the curator quality gate (≥2400 chars, ≥4 top-level `## ` sections, and a citations/References section that maps to the `[Sn]/[Gn]/[Ln]` entries in sources.md)."
                 },
                 "impl_blueprint": {
                     "type": "string",
@@ -1191,20 +1276,11 @@ impl Tool for ExitCuratorModeTool {
             };
 
         if !docx_ready && !allow_docx_skip {
-            let detail = docx_error
-                .unwrap_or_else(|| "unknown DOCX render failure".to_string());
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "exit_curator_mode REJECTED  -  final.docx generation failed and is REQUIRED before the Curator card can be shown.\n\
-                     Detail: {detail}\n\n\
-                     Concrete next steps:\n\
-                     1) Inspect `final_content` for malformed Markdown that the docx renderer cannot represent (deeply nested code fences, unterminated tables, raw HTML, NUL bytes).\n\
-                     2) Simplify the section that crashed the renderer (try moving figures/long URLs/exotic Unicode out of headings).\n\
-                     3) Call exit_curator_mode again with the corrected `final_content`. DOCX is part of the deliverable contract  -  do NOT bypass it. Only pass `allow_docx_skip=true` if the user explicitly accepted a Markdown-only deliverable."
-                )),
-            });
+            tracing::warn!(
+                target: "agent.curator_mode",
+                detail = docx_error.as_deref().unwrap_or("unknown DOCX render failure"),
+                "exit_curator_mode: DOCX export failed; finalizing the Markdown deliverable in degraded mode so the documents still complete instead of trapping the turn in an unwinnable retry loop"
+            );
         }
 
         crate::agent::file_edit_emitter::emit_file_edit(
@@ -1253,15 +1329,25 @@ impl Tool for ExitCuratorModeTool {
 
         let docx_line = if let Some(ref p) = final_docx_path_opt {
             format!("\nfinal.docx: `{}`", display_path(p))
+        } else if allow_docx_skip {
+            "\nfinal.docx: (skipped by request  -  Markdown-only deliverable)".to_string()
         } else {
-            "\nfinal.docx: (skipped by allow_docx_skip  -  degraded deliverable)".to_string()
+            format!(
+                "\nfinal.docx: (DOCX export unavailable  -  renderer error: {}; final.md and impl_blueprint.md were saved successfully)",
+                docx_error.as_deref().unwrap_or("unknown render error")
+            )
         };
         let summary_line = summary
             .as_ref()
             .map(|s| format!("\n\nExecutive summary: {s}"))
             .unwrap_or_default();
+        let lead_line = if final_docx_path_opt.is_some() {
+            "Exited Curator mode. All deliverables generated and verified."
+        } else {
+            "Exited Curator mode. Markdown deliverables generated and verified; the DOCX export was skipped (see note below) but the documents are complete."
+        };
         let header = format!(
-            "Exited Curator mode. All deliverables generated and verified.\n\
+            "{lead_line}\n\
              final.md: `{}`\n\
              impl_blueprint.md: `{}`{docx_line}\n\
              Slug: `{}`  |  Template: `{}`{summary_line}\n\n\
@@ -1285,15 +1371,6 @@ impl Tool for ExitCuratorModeTool {
                 .map(|p| format!("docx_path: {}\n", display_path(p)))
                 .unwrap_or_default()
         );
-        let envelope = if crate::token_saver::is_enabled() {
-            crate::token_saver::compact_tool_output(
-                "curator_assemble",
-                &envelope,
-                &crate::token_saver::global(),
-            )
-        } else {
-            envelope
-        };
         Ok(ToolResult {
             success: true,
             output: envelope,
@@ -1822,6 +1899,22 @@ fn quality_check(final_md: &str, blueprint_md: &str) -> Result<(), String> {
         missing.push(format!(
             "final.md lacks top-level structure ({final_top_sections} `## ` sections; ≥4 required). A professional deliverable is organised into at least four top-level sections (e.g. Background / Approach / Design / Evaluation / References)."
         ));
+    }
+    let has_reference_section = final_md.lines().any(|l| {
+        let t = l.trim_start().trim_start_matches('#').trim().to_ascii_lowercase();
+        let is_heading = l.trim_start().starts_with('#');
+        is_heading
+            && (t.contains("references")
+                || t.contains("bibliography")
+                || t.contains("works cited")
+                || t.contains("参考文献")
+                || t.contains("参考资料"))
+    });
+    if !has_reference_section {
+        missing.push(
+            "final.md has no citations/References section. A professional, evidence-backed deliverable must close with a References / 参考文献 / Bibliography / Works Cited heading that lists the `[Sn]/[Gn]/[Ln]` sources gathered in sources.md."
+                .to_string(),
+        );
     }
     let blueprint_sections = blueprint_md
         .lines()

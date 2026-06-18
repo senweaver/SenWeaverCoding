@@ -95,7 +95,7 @@ pub fn render_minimal_diff(rel_path: &Path, before: &str, after: &str) -> Option
     let mut payload = header;
     payload.push_str(&body);
     if payload.len() > MAX_DIFF_PAYLOAD {
-        payload.truncate(MAX_DIFF_PAYLOAD);
+        crate::util::truncate_string_bytes(&mut payload, MAX_DIFF_PAYLOAD);
         payload.push_str("\n... (diff truncated)\n");
     }
     Some(payload)

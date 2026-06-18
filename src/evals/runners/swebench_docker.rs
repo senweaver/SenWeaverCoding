@@ -405,7 +405,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let mut out = s[..max].to_string();
+    let mut out = crate::util::truncate_str_bytes(s, max).to_string();
     out.push_str("\n...[truncated]...");
     out
 }

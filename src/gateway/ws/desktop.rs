@@ -58,7 +58,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let writer_handle = crate::runtime::spawn_supervised("ws_desktop.writer", async move {
         const COALESCE_WINDOW_MS: u64 = 24;
         const COALESCE_MAX_FRAMES: usize = 64;
+        const CONTENT_DELTA_PREFIX: &str = "{\"type\":\"content_delta\",\"text\":";
+        const THINKING_PREFIX: &str = "{\"type\":\"thinking\",\"text\":";
         let mut delta_buf = String::new();
+        let mut thinking_buf = String::new();
         loop {
             let frame = match outbound_rx.recv().await {
                 Some(f) => f,
@@ -75,31 +78,65 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 }
             }
             delta_buf.clear();
+            thinking_buf.clear();
             let mut send_failed = false;
+
+            macro_rules! flush_buf {
+                ($kind:expr, $buf:expr) => {{
+                    if !$buf.is_empty() {
+                        let coalesced = serde_json::json!({
+                            "type": $kind,
+                            "text": $buf.clone(),
+                        })
+                        .to_string();
+                        $buf.clear();
+                        if sink.send(Message::Text(coalesced.into())).await.is_err() {
+                            send_failed = true;
+                        }
+                    }
+                }};
+            }
+
             for f in frames.drain(..) {
                 match f {
                     OutboundFrame::Text(s) => {
-                        if let Some(rest) = s.strip_prefix("{\"type\":\"content_delta\",\"text\":")
+                        if let Some(rest) = s.strip_prefix(CONTENT_DELTA_PREFIX)
                             && rest.ends_with('}')
                         {
                             let body = &rest[..rest.len() - 1];
-                            if let Ok(text) = serde_json::from_str::<String>(body.trim_end_matches(','))
+                            if let Ok(text) =
+                                serde_json::from_str::<String>(body.trim_end_matches(','))
                             {
+                                flush_buf!("thinking", thinking_buf);
+                                if send_failed {
+                                    break;
+                                }
                                 delta_buf.push_str(&text);
                                 continue;
                             }
                         }
-                        if !delta_buf.is_empty() {
-                            let coalesced = serde_json::json!({
-                                "type": "content_delta",
-                                "text": delta_buf.clone(),
-                            })
-                            .to_string();
-                            delta_buf.clear();
-                            if sink.send(Message::Text(coalesced.into())).await.is_err() {
-                                send_failed = true;
-                                break;
+                        if let Some(rest) = s.strip_prefix(THINKING_PREFIX)
+                            && rest.ends_with('}')
+                        {
+                            let body = &rest[..rest.len() - 1];
+                            if let Ok(text) =
+                                serde_json::from_str::<String>(body.trim_end_matches(','))
+                            {
+                                flush_buf!("content_delta", delta_buf);
+                                if send_failed {
+                                    break;
+                                }
+                                thinking_buf.push_str(&text);
+                                continue;
                             }
+                        }
+                        flush_buf!("content_delta", delta_buf);
+                        if send_failed {
+                            break;
+                        }
+                        flush_buf!("thinking", thinking_buf);
+                        if send_failed {
+                            break;
                         }
                         if sink.send(Message::Text(s.into())).await.is_err() {
                             send_failed = true;
@@ -107,6 +144,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         }
                     }
                     OutboundFrame::Pong(p) => {
+                        flush_buf!("content_delta", delta_buf);
+                        if send_failed {
+                            break;
+                        }
+                        flush_buf!("thinking", thinking_buf);
+                        if send_failed {
+                            break;
+                        }
                         if sink.send(Message::Pong(p.into())).await.is_err() {
                             send_failed = true;
                             break;
@@ -114,16 +159,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     }
                 }
             }
-            if !delta_buf.is_empty() && !send_failed {
-                let coalesced = serde_json::json!({
-                    "type": "content_delta",
-                    "text": delta_buf.clone(),
-                })
-                .to_string();
-                delta_buf.clear();
-                if sink.send(Message::Text(coalesced.into())).await.is_err() {
-                    send_failed = true;
-                }
+            if !send_failed {
+                flush_buf!("content_delta", delta_buf);
+            }
+            if !send_failed {
+                flush_buf!("thinking", thinking_buf);
             }
             if send_failed {
                 break;
@@ -1244,7 +1284,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         .await;
                         continue;
                     }
-                    crate::tools::browser::set_prototype_ref_figma(&session_key, url);
+                    crate::tools::browser::set_prototype_ref_figma(&session_id, url);
                     let _ = send_json(
                         &outbound_tx,
                         &serde_json::json!({
@@ -1265,7 +1305,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .await;
                     continue;
                 };
-                crate::tools::browser::set_prototype_ref_tab(&session_key, tab_id as u32);
+                crate::tools::browser::set_prototype_ref_tab(&session_id, tab_id as u32);
                 let _ = send_json(
                     &outbound_tx,
                     &serde_json::json!({
@@ -1277,8 +1317,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 .await;
             }
             "debug_unbind_prototype_ref" => {
-                crate::tools::browser::clear_prototype_ref_tab(&session_key);
-                crate::tools::browser::clear_prototype_ref_figma(&session_key);
+                crate::tools::browser::clear_prototype_ref_tab(&session_id);
+                crate::tools::browser::clear_prototype_ref_figma(&session_id);
                 let _ = send_json(
                     &outbound_tx,
                     &serde_json::json!({
@@ -1770,6 +1810,39 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 )
                 .await;
             }
+            "set_debug_submode" => {
+                let submode_id = parsed
+                    .get("submode")
+                    .or_else(|| parsed.get("subMode"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto")
+                    .to_string();
+                let Some(submode) = crate::agent::debug::DebugSubMode::from_id(&submode_id) else {
+                    send_error(
+                        &outbound_tx,
+                        &format!("unknown debug submode: {submode_id}"),
+                        "UNKNOWN_DEBUG_SUBMODE",
+                    )
+                    .await;
+                    continue;
+                };
+                let params = parsed
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(svc) = crate::services::try_get_services() {
+                    svc.set_session_debug(&session_key, submode.id().to_string(), params.clone());
+                }
+                send_json(
+                    &outbound_tx,
+                    &serde_json::json!({
+                        "type": "debug_submode_set",
+                        "submode": submode.id(),
+                        "params": params,
+                    }),
+                )
+                .await;
+            }
             "start_design_generation" => {
                 let submode_id = parsed
                     .get("submode")
@@ -1967,6 +2040,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     if let Some(svc) = crate::services::try_get_services() {
         svc.clear_session_coding_mode(&session_key);
         svc.clear_session_designer(&session_key);
+        svc.clear_session_debug(&session_key);
     }
     desktop_runtime_state().clear_session_permission_mode(&session_key);
 

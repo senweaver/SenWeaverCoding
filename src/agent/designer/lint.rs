@@ -74,9 +74,10 @@ fn floor_boundary(s: &str, mut idx: usize) -> usize {
 }
 
 fn line_of(haystack: &str, byte_idx: usize) -> usize {
-    haystack[..byte_idx.min(haystack.len())]
-        .bytes()
-        .filter(|b| *b == b'\n')
+    let end = byte_idx.min(haystack.len());
+    haystack.as_bytes()[..end]
+        .iter()
+        .filter(|b| **b == b'\n')
         .count()
         + 1
 }
@@ -436,7 +437,8 @@ pub fn lint_html(content: &str) -> LintReport {
                 while k < bytes.len() && bytes[k] == b' ' {
                     k += 1;
                 }
-                let rest = &lower[k..floor_boundary(&lower, (k + 16).min(lbytes.len()))];
+                let rest_start = floor_boundary(&lower, k.min(lbytes.len()));
+                let rest = &lower[rest_start..floor_boundary(&lower, (k + 16).min(lbytes.len()))];
                 let multiplier = j < bytes.len()
                     && (bytes[j] == b'x' || content[j..].starts_with('\u{00d7}'));
                 if (multiplier && rest.starts_with("faster"))

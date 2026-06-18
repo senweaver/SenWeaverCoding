@@ -3636,7 +3636,8 @@ fn get_config_value(config: &Config, key: &str) -> Result<()> {
             if let Some(ref api_key) = config.api_key {
 
                 if api_key.len() > 8 {
-                    println!("{}...{}", &api_key[..4], &api_key[api_key.len() - 4..]);
+                    use crate::util::SafeStrSlice;
+                    println!("{}...{}", api_key.byte_prefix(4), api_key.byte_suffix(4));
                 } else {
                     println!("[API key set]");
                 }
@@ -3733,7 +3734,8 @@ fn get_config_value(config: &Config, key: &str) -> Result<()> {
                     "brave_api_key" => {
                         if let Some(ref key) = config.web_search.brave_api_key {
                             if key.len() > 8 {
-                                println!("{}...{}", &key[..4], &key[key.len() - 4..]);
+                                use crate::util::SafeStrSlice;
+                                println!("{}...{}", key.byte_prefix(4), key.byte_suffix(4));
                             } else {
                                 println!("[API key set]");
                             }

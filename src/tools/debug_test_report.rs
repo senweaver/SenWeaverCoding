@@ -112,11 +112,12 @@ pub fn record_browser_action(
     });
 }
 
+pub fn reports_root() -> PathBuf {
+    workspace_anchor().join(".senagentos").join("debug-reports")
+}
+
 fn run_dir(run_id: &str) -> PathBuf {
-    workspace_anchor()
-        .join(".senagentos")
-        .join("debug-reports")
-        .join(sanitize_segment(run_id))
+    reports_root().join(sanitize_segment(run_id))
 }
 
 fn sanitize_segment(input: &str) -> String {
@@ -333,7 +334,7 @@ impl Tool for DebugTestReportTool {
     }
 
     fn description(&self) -> &str {
-        "Structured QA debugging report tool. Use start/add_case/add_finding/attach_screenshot/attach_console_logs/add_coverage_entry/record_network_error/add_test_plan/add_analysis_note/add_runbook_section/finalize to build the three QA documents (report.md / analysis.md / runbook.md) with run.jsonl persistence in .senagentos/debug-reports/<run_id>/. add_finding accepts category=functional|ui|console|network|security|performance|access and an evidence object. add_coverage_entry tracks per-page coverage with url/depth/parent_url/http_status/console_errors/network_errors so finalize can render a coverage matrix. add_test_plan submits the QA dimensions+cases outline before execution. add_analysis_note groups findings by category (root_cause|performance|security|a11y|ux|risk). add_runbook_section adds operational steps grouped by section_kind."
+        "Structured QA debugging report tool. Use start/add_case/add_finding/attach_screenshot/attach_console_logs/add_coverage_entry/record_network_error/add_test_plan/add_analysis_note/add_runbook_section/finalize to build the three QA documents (report.md / analysis.md / runbook.md) with run.jsonl persistence in .senagentos/debug-reports/<run_id>/. add_finding accepts category=functional|logic|ui|console|network|security|performance|access and an evidence object. add_coverage_entry tracks per-page coverage with url/depth/parent_url/http_status/console_errors/network_errors so finalize can render a coverage matrix. add_test_plan submits the QA dimensions+cases outline before execution. add_analysis_note groups findings by category (root_cause|performance|security|a11y|ux|risk). add_runbook_section adds operational steps grouped by section_kind. finalize also emits report.json (machine-readable summary consumed by the Debug result card). write_doc persists an arbitrary named document (e.g. code-review.md, security-audit.md) into the run directory; it is allowed even in read-only Debug sub-modes because it writes debug documentation, not source code."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -353,9 +354,18 @@ impl Tool for DebugTestReportTool {
                         "finalize",
                         "add_test_plan",
                         "add_analysis_note",
-                        "add_runbook_section"
+                        "add_runbook_section",
+                        "write_doc"
                     ],
                     "description": "Report action to perform"
+                },
+                "doc_name": {
+                    "type": "string",
+                    "description": "File name for write_doc (e.g. code-review.md). Sanitized and confined to the run directory."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Document body for write_doc (markdown/plain text). PII is redacted before write."
                 },
                 "dimensions": {
                     "type": "array",
@@ -401,8 +411,8 @@ impl Tool for DebugTestReportTool {
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["functional", "ui", "console", "network", "security", "performance", "access"],
-                    "description": "Finding category. Use for add_finding."
+                    "enum": ["functional", "logic", "ui", "console", "network", "security", "performance", "access"],
+                    "description": "Finding category. Use for add_finding. `logic` = behavioral/logic correctness defects where an action's outcome contradicts its intent (e.g. a login control yielding a logged-out state)."
                 },
                 "evidence": {
                     "type": "object",
@@ -451,6 +461,7 @@ impl Tool for DebugTestReportTool {
             "add_analysis_note" => action_add_analysis_note(&args).await,
             "add_runbook_section" => action_add_runbook_section(&args).await,
             "finalize" => action_finalize(&args).await,
+            "write_doc" => action_write_doc(&args).await,
             other => Ok(err(format!("unknown action '{other}'"))),
         }
     }
@@ -978,6 +989,36 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
     tokio::fs::write(&runbook_path, &sanitized_runbook).await?;
     let runbook_path_str = runbook_path.to_string_lossy().to_string();
 
+    let report_rel = normalize_md_path(
+        &report_path
+            .strip_prefix(workspace_anchor())
+            .unwrap_or(&report_path)
+            .to_string_lossy(),
+    );
+    let analysis_rel = normalize_md_path(
+        &analysis_path
+            .strip_prefix(workspace_anchor())
+            .unwrap_or(&analysis_path)
+            .to_string_lossy(),
+    );
+    let runbook_rel = normalize_md_path(
+        &runbook_path
+            .strip_prefix(workspace_anchor())
+            .unwrap_or(&runbook_path)
+            .to_string_lossy(),
+    );
+    let report_summary = build_report_summary(
+        &events,
+        &run_id,
+        &report_rel,
+        &analysis_rel,
+        &runbook_rel,
+    );
+    let report_json_path = run_dir(&run_id).join("report.json");
+    if let Ok(serialized) = serde_json::to_string_pretty(&report_summary) {
+        let _ = tokio::fs::write(&report_json_path, serialized).await;
+    }
+
     let event = ReportEvent::Finalize {
         run_id: run_id.clone(),
         summary_note: summary_note.as_deref().map(redact_str),
@@ -1000,6 +1041,7 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
     Ok(ok(json!({
         "run_id": run_id,
         "report_path": report_path_str,
+        "report_json_path": report_json_path.to_string_lossy(),
         "tech_doc_path": tech_doc_path_str,
         "analysis_path": analysis_path_str,
         "runbook_path": runbook_path_str,
@@ -1031,6 +1073,172 @@ async fn action_finalize(args: &Value) -> anyhow::Result<ToolResult> {
             "total": pii_report.total(),
             "counts": serde_json::Value::Object(pii_counts),
         },
+    })))
+}
+
+fn severity_bucket(sev: &str) -> &'static str {
+    match sev.trim().to_ascii_lowercase().as_str() {
+        "critical" | "p0" => "p0",
+        "high" | "p1" => "p1",
+        "medium" | "p2" => "p2",
+        _ => "p3",
+    }
+}
+
+fn truncate_chars(input: &str, max: usize) -> String {
+    if input.chars().count() <= max {
+        return input.to_string();
+    }
+    let mut out: String = input.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+fn build_report_summary(
+    events: &[ReportEvent],
+    run_id: &str,
+    report_rel: &str,
+    analysis_rel: &str,
+    runbook_rel: &str,
+) -> Value {
+    let mut title = String::from("Debug QA Run");
+    let mut findings: Vec<Value> = Vec::new();
+    let (mut p0, mut p1, mut p2, mut p3) = (0u64, 0u64, 0u64, 0u64);
+    let mut cases: Vec<Value> = Vec::new();
+    let (mut passed, mut failed, mut blocked, mut other) = (0u64, 0u64, 0u64, 0u64);
+    let mut coverage = 0u64;
+    let mut analysis_notes = 0u64;
+
+    for ev in events {
+        match ev {
+            ReportEvent::Start { title: t, .. } => title = t.clone(),
+            ReportEvent::AddFinding {
+                finding_id,
+                severity,
+                title: f_title,
+                description,
+                category,
+                ..
+            } => {
+                let bucket = severity_bucket(severity);
+                match bucket {
+                    "p0" => p0 += 1,
+                    "p1" => p1 += 1,
+                    "p2" => p2 += 1,
+                    _ => p3 += 1,
+                }
+                findings.push(json!({
+                    "id": finding_id,
+                    "severity": severity,
+                    "bucket": bucket,
+                    "category": category.clone().unwrap_or_default(),
+                    "title": truncate_chars(f_title, 160),
+                    "description": truncate_chars(description, 280),
+                }));
+            }
+            ReportEvent::AddCase {
+                case_id,
+                title: c_title,
+                status,
+                ..
+            } => {
+                match status.trim().to_ascii_lowercase().as_str() {
+                    "passed" | "pass" => passed += 1,
+                    "failed" | "fail" => failed += 1,
+                    "blocked" => blocked += 1,
+                    _ => other += 1,
+                }
+                cases.push(json!({
+                    "id": case_id,
+                    "title": truncate_chars(c_title, 160),
+                    "status": status,
+                }));
+            }
+            ReportEvent::AddCoverageEntry { .. } => coverage += 1,
+            ReportEvent::AddAnalysisNote { .. } => analysis_notes += 1,
+            _ => {}
+        }
+    }
+
+    let session_id = crate::session::current_session_context().map(|c| c.session_id);
+
+    json!({
+        "runId": run_id,
+        "title": title,
+        "generatedAt": timestamp_now(),
+        "sessionId": session_id,
+        "submode": crate::agent::debug::active_debug_submode().id(),
+        "summary": {
+            "findings": {
+                "total": findings.len() as u64,
+                "p0": p0,
+                "p1": p1,
+                "p2": p2,
+                "p3": p3,
+            },
+            "cases": {
+                "total": cases.len() as u64,
+                "passed": passed,
+                "failed": failed,
+                "blocked": blocked,
+                "other": other,
+            },
+            "coverage": coverage,
+            "analysisNotes": analysis_notes,
+        },
+        "findings": findings,
+        "cases": cases,
+        "artifacts": {
+            "report": report_rel,
+            "analysis": analysis_rel,
+            "runbook": runbook_rel,
+        },
+    })
+}
+
+async fn action_write_doc(args: &Value) -> anyhow::Result<ToolResult> {
+    let doc_name = args
+        .get("doc_name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("document.md");
+    let content = match args.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return Ok(err("missing 'content'")),
+    };
+    let run_id = args
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(active_run_id)
+        .unwrap_or_else(|| format!("docs-{}", Utc::now().format("%Y%m%d-%H%M%S")));
+
+    let mut safe_name = sanitize_segment(doc_name);
+    if !safe_name.contains('.') {
+        safe_name.push_str(".md");
+    }
+
+    let dir = run_dir(&run_id);
+    tokio::fs::create_dir_all(&dir).await?;
+    let doc_path = dir.join(&safe_name);
+
+    let (sanitized, _) =
+        crate::services::governance::pii_sanitizer::global_sanitizer().sanitize(&content);
+    tokio::fs::write(&doc_path, &sanitized).await?;
+    let doc_path_str = doc_path.to_string_lossy().to_string();
+
+    Ok(ok(json!({
+        "run_id": run_id,
+        "doc_path": doc_path_str,
+        "relative_path": normalize_md_path(
+            &doc_path
+                .strip_prefix(workspace_anchor())
+                .unwrap_or(&doc_path)
+                .to_string_lossy(),
+        ),
     })))
 }
 

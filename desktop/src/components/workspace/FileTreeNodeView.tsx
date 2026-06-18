@@ -2,10 +2,11 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@iconify/react/dist/offline'
 import { useTranslation } from '../../i18n'
 import type { FileTreeNode } from '../../types/workspaceFile'
+import { useFileDragStore } from '../../stores/fileDragStore'
 import {
   AI_FRESH_WINDOW_MS,
   useWorkspaceFilesStore,
@@ -65,7 +66,6 @@ type Props = {
   onFocus?: (relPath: string) => void
   onContextMenu: (event: React.MouseEvent, node: FileTreeNode) => void
   onDrop: (event: React.DragEvent, target: FileTreeNode) => void
-  onDragStart: (event: React.DragEvent, node: FileTreeNode) => void
   onRenameSubmit: (value: string) => void
   onRenameCancel: () => void
   onCreateSubmit: (value: string) => void
@@ -136,7 +136,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   onFocus,
   onContextMenu,
   onDrop,
-  onDragStart,
   onRenameSubmit,
   onRenameCancel,
   onCreateSubmit,
@@ -231,7 +230,13 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     return lines.join('\n')
   }, [node.isDir, node.modifiedAt, node.relPath, sizeLabel, t])
 
+  const suppressClickRef = useRef(false)
+
   const handleClick = useCallback(() => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
     onFocus?.(node.relPath)
     if (node.isDir) {
       void toggleExpanded(node.relPath)
@@ -239,6 +244,46 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
       onSelect(node)
     }
   }, [node, onFocus, onSelect, toggleExpanded])
+
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent) => {
+      if (event.button !== 0) return
+      if ((event.target as HTMLElement).closest('[data-tree-chevron]')) return
+      suppressClickRef.current = false
+      const startX = event.clientX
+      const startY = event.clientY
+      const payload = { relPath: node.relPath, name: node.name, isDir: node.isDir }
+      const store = useFileDragStore.getState()
+      let started = false
+      const onMove = (ev: PointerEvent) => {
+        if (!started) {
+          if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return
+          started = true
+          suppressClickRef.current = true
+          document.body.classList.add('sen-file-dragging')
+          store.begin(payload, ev.clientX, ev.clientY)
+        } else {
+          useFileDragStore.getState().move(ev.clientX, ev.clientY)
+        }
+      }
+      const cleanup = (commit: boolean) => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onCancel)
+        document.body.classList.remove('sen-file-dragging')
+        if (started) {
+          if (commit) useFileDragStore.getState().finish()
+          else useFileDragStore.getState().cancel()
+        }
+      }
+      const onUp = () => cleanup(true)
+      const onCancel = () => cleanup(false)
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onCancel)
+    },
+    [node.relPath, node.name, node.isDir],
+  )
 
   const handleChevron = useCallback(
     (event: React.MouseEvent) => {
@@ -287,8 +332,9 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
         role="treeitem"
         aria-selected={isSelected}
         aria-expanded={node.isDir ? expanded : undefined}
-        draggable
-        onDragStart={(e) => onDragStart(e, node)}
+        data-tree-relpath={node.relPath}
+        data-tree-isdir={node.isDir ? '1' : '0'}
+        onPointerDown={handlePointerDown}
         onDragOver={handleDragOver}
         onDrop={(e) => onDrop(e, node)}
         onClick={handleClick}
@@ -315,6 +361,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
           ))}
         <span
           aria-hidden="true"
+          data-tree-chevron="true"
           onClick={handleChevron}
           className="material-symbols-outlined text-[14px] w-4 text-[var(--color-text-tertiary)] flex-shrink-0"
         >
@@ -432,7 +479,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
                 onFocus={onFocus}
                 onContextMenu={onContextMenu}
                 onDrop={onDrop}
-                onDragStart={onDragStart}
                 onRenameSubmit={onRenameSubmit}
                 onRenameCancel={onRenameCancel}
                 onCreateSubmit={onCreateSubmit}

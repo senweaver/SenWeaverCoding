@@ -295,7 +295,7 @@ pub use screenshot::ScreenshotTool;
 #[cfg(feature = "tool-cloud-ops")]
 pub use security_ops::SecurityOpsTool;
 pub use send_message::SendMessageTool;
-pub use sessions::{SessionsHistoryTool, SessionsListTool, SessionsSendTool};
+pub use sessions::{SessionsHistoryTool, SessionsListTool, SessionsSearchTool, SessionsSendTool};
 pub use setup_agent::SetupAgentTool;
 pub use shell::ShellTool;
 pub use skill::http::SkillHttpTool;
@@ -1248,6 +1248,10 @@ pub fn all_tools_with_runtime(
             Arc::new(session_store);
         tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
         tool_arcs.push(Arc::new(SessionsHistoryTool::new(
+            backend.clone(),
+            security.clone(),
+        )));
+        tool_arcs.push(Arc::new(SessionsSearchTool::new(
             backend.clone(),
             security.clone(),
         )));

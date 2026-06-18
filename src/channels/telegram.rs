@@ -70,7 +70,7 @@ fn split_message_for_telegram(message: &str) -> Vec<String> {
                     pos + 1
                 } else {
 
-                    search_area.rfind(' ').unwrap_or(hard_split) + 1
+                    search_area.rfind(' ').map_or(hard_split, |space| space + 1)
                 }
             } else if let Some(pos) = search_area.rfind(' ') {
                 pos + 1

@@ -28,6 +28,14 @@ export type MessageEntry = {
 
   tombstoned?: boolean
 
+  attachments?: Array<{
+    type: 'file' | 'image'
+    name?: string
+    path?: string
+    data?: string
+    mimeType?: string
+  }>
+
   designRef?: string
   designRefName?: string
   designRefElement?: string

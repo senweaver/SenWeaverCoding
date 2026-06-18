@@ -70,8 +70,6 @@ export function selectCuratorCardExecutionState(
   if (idx < 0) return 'idle'
   const card = messages[idx] as CuratorCardMsg
 
-  if (hasNewUserTurnAfter(messages, card.id)) return 'completed_run'
-
   if (card.wasExecuted && curatorTodosTerminal(card)) return 'completed_run'
 
   const switchCard = findFollowingCuratorSwitchCard(messages, idx, card)

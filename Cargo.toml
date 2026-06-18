@@ -57,7 +57,7 @@ tokio = { version = "1.50", default-features = false, features = ["rt-multi-thre
 tokio-util = { version = "0.7", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["fs", "sync"] }
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "multipart", "stream", "socks", "gzip", "brotli", "deflate", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "rustls-tls-native-roots", "blocking", "multipart", "stream", "socks", "gzip", "brotli", "deflate", "cookies"] }
 
 encoding_rs = "0.8"
 
@@ -161,6 +161,7 @@ hostname = "0.4.2"
 rustls = "0.23"
 rustls-pemfile = "2"
 rustls-pki-types = "1.14.0"
+rustls-native-certs = "0.8"
 tokio-rustls = "0.26.4"
 webpki-roots = "1.0.6"
 
@@ -184,6 +185,13 @@ ordered-float = "5.3.0"
 arc-swap = "1.9.1"
 zeroize = { version = "1.8.2", features = ["derive"] }
 serde_ignored = "0.1.14"
+
+mdns-sd = { version = "0.13", optional = true }
+mac_address = { version = "1.1", optional = true }
+local-ip-address = { version = "0.6", optional = true }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
+calamine = { version = "0.35.0", optional = true }
+quick-xml = { version = "0.40.1", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 nusb = { version = "0.2", default-features = false, optional = true }
@@ -234,6 +242,7 @@ wa-rs-tokio-transport = { version = "0.2", optional = true, default-features = f
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"], optional = true }
 windows-sys = { workspace = true }
+winreg = "0.55"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rppal = { version = "0.22", optional = true }
@@ -254,7 +263,10 @@ default = [
     "tool-search-broad",
     "tool-workspace-deep",
     "tool-curator",
+    "lan-comms",
+    "office-docs",
 ]
+lan-comms = ["dep:mdns-sd", "dep:mac_address", "dep:local-ip-address", "dep:x25519-dalek"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:syntect"]
 code-intel = [
     "dep:tree-sitter",
@@ -327,6 +339,7 @@ ci-all = [
     "sandbox-bubblewrap",
     "probe",
     "rag-pdf",
+    "office-docs",
     "skill-creation",
     "whatsapp-web",
     "plugins-wasm",
@@ -373,7 +386,8 @@ tool-image = []
 tool-search-broad = []
 tool-workspace-deep = []
 tool-curator = ["dep:docx-rs"]
-extras = ["tool-cron", "tool-sop", "tool-team", "tool-cloud-ops", "tool-reports", "tool-linkedin", "tool-pushover", "tool-search-social", "tool-productivity", "tool-utility-misc", "tool-image", "tool-search-broad", "tool-workspace-deep", "tool-curator"]
+office-docs = ["dep:calamine", "dep:quick-xml", "rag-pdf"]
+extras = ["tool-cron", "tool-sop", "tool-team", "tool-cloud-ops", "tool-reports", "tool-linkedin", "tool-pushover", "tool-search-social", "tool-productivity", "tool-utility-misc", "tool-image", "tool-search-broad", "tool-workspace-deep", "tool-curator", "office-docs"]
 
 [profile.dev]
 incremental = true

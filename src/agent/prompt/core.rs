@@ -56,6 +56,7 @@ impl SystemPromptBuilder {
                 Box::new(ExperienceRecyclingSection),
                 Box::new(ToolHonestySection),
                 Box::new(ToolsSection),
+                Box::new(ContextReferenceSection),
                 Box::new(TaskPlanningSection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
@@ -89,6 +90,7 @@ impl SystemPromptBuilder {
 pub struct IdentitySection;
 pub struct ToolHonestySection;
 pub struct ToolsSection;
+pub struct ContextReferenceSection;
 pub struct TaskPlanningSection;
 pub struct SafetySection;
 pub struct SkillsSection;
@@ -339,6 +341,112 @@ impl PromptSection for ToolsSection {
             out.push('\n');
             out.push_str(ctx.dispatcher_instructions);
         }
+        Ok(out)
+    }
+}
+
+impl PromptSection for ContextReferenceSection {
+    fn name(&self) -> &str {
+        "context_references"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let has_tool = |name: &str| {
+            ctx.tools.iter().any(|t| t.name() == name)
+                && ctx
+                    .allowed_tool_names
+                    .as_ref()
+                    .is_none_or(|allow| allow.contains(name))
+        };
+
+        if !has_tool("file_read") {
+            return Ok(String::new());
+        }
+
+        let deep = has_tool("workspace_deep_search");
+        let content = has_tool("content_search");
+        let dir = has_tool("dir_list");
+
+        let mut out = String::from(
+            "## User Context References\n\n\
+             The user may attach context references written as `@[label](path)` (the path is relative to the workspace root) to point you at a file or directory relevant to the request.\n\
+             - The referenced content is NOT inlined into the message. Treat each reference as a pointer and actively retrieve only what you actually need.\n\
+             - Never assume you already hold the file/directory contents, and never try to load an entire large file or a whole directory at once (large content gets truncated and becomes unreliable).\n",
+        );
+
+        out.push_str(
+            "- For a file reference: read it with `file_read` (use `offset`/`limit`, or `level: \"smart\"`/`\"signatures\"` for large files).",
+        );
+        if deep || content {
+            let retrieval = if deep && content {
+                "`workspace_deep_search` or `content_search`"
+            } else if deep {
+                "`workspace_deep_search`"
+            } else {
+                "`content_search`"
+            };
+            let _ = write!(
+                out,
+                " When the file is large or you only need specific parts, prefer {retrieval} to locate the relevant lines instead of reading the whole file.",
+            );
+        }
+        out.push('\n');
+
+        out.push_str(
+            "- Office documents (`.docx`, `.xlsx`, `.pptx`) and `.pdf` are readable: `file_read` extracts their text automatically (use `offset`/`limit`/`level: \"smart\"` for large ones). Content search tools cannot see inside these binary formats, so always use `file_read` for them.\n",
+        );
+
+        if dir || deep || content {
+            out.push_str("- For a directory reference: ");
+            if dir {
+                out.push_str("inspect the structure with `dir_list`, then ");
+            }
+            if deep && content {
+                out.push_str(
+                    "use `workspace_deep_search` or `content_search` scoped to that path to find the relevant content",
+                );
+            } else if deep {
+                out.push_str(
+                    "use `workspace_deep_search` scoped to that path to find the relevant content",
+                );
+            } else if content {
+                out.push_str(
+                    "use `content_search` scoped to that path to find the relevant content",
+                );
+            } else {
+                out.push_str("read only the specific files you actually need");
+            }
+            out.push_str("; do not read every file in the directory.\n");
+        }
+
+        let sessions_search = has_tool("sessions_search");
+        let sessions_history = has_tool("sessions_history");
+        if sessions_search || sessions_history {
+            out.push_str(
+                "- A reference whose path starts with `session:` (e.g. `@[Session Name](session:<id>)`) points at a past chat session, not a file. ",
+            );
+            if sessions_search && sessions_history {
+                out.push_str(
+                    "Use `sessions_search` with the `session_id` (the value after `session:`) and a keyword to locate relevant messages, then read a small contiguous window with `sessions_history` (`offset`/`limit`). ",
+                );
+            } else if sessions_search {
+                out.push_str(
+                    "Use `sessions_search` with the `session_id` (the value after `session:`) and a keyword to locate the relevant messages. ",
+                );
+            } else {
+                out.push_str(
+                    "Use `sessions_history` with the `session_id` (the value after `session:`) and a small `limit` (and `offset` when needed) to read only the relevant window. ",
+                );
+            }
+            out.push_str(
+                "Never bulk-load the entire session history.\n",
+            );
+        }
+
+        out.push_str(
+            "- Prefer targeted retrieval (DeepSearch / search) over bulk reading so large or numerous files stay within context and your understanding stays accurate.",
+        );
+
         Ok(out)
     }
 }

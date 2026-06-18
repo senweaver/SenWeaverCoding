@@ -209,6 +209,11 @@ impl OpenAiCompatibleProvider {
         self
     }
 
+    pub fn with_vision(mut self, supports_vision: bool) -> Self {
+        self.supports_vision = supports_vision;
+        self
+    }
+
     pub fn with_model_context_windows(
         mut self,
         windows: std::collections::HashMap<String, u32>,

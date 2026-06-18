@@ -12,11 +12,12 @@ import {
 } from '../../stores/workspaceQueueStore'
 import { resolveSessionTitle } from '../../utils/sessionTitle'
 import { Spinner } from '../shared/Spinner'
+import { refsToPlainText } from './composerRefs'
 
 const PREVIEW_LIMIT = 80
 
 function previewText(text: string): string {
-  const trimmed = text.replace(/\s+/g, ' ').trim()
+  const trimmed = refsToPlainText(text).replace(/\s+/g, ' ').trim()
   if (trimmed.length <= PREVIEW_LIMIT) return trimmed
   return `${trimmed.slice(0, PREVIEW_LIMIT)}\u2026`
 }

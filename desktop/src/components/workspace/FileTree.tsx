@@ -6,6 +6,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
+import { useLanStore } from '../../stores/lanStore'
+import { useLanGroupStore } from '../../stores/lanGroupStore'
+import { useLanShareStore } from '../../stores/lanShareStore'
 import {
   joinPath,
   nameOf,
@@ -21,6 +24,8 @@ import { inferLanguageFromPath, languageToMarkdownLang } from '../../lib/extLang
 import { workspaceFilesApi } from '../../api/workspaceFiles'
 import { FileTreeContextMenu, type ContextMenuTarget } from './FileTreeContextMenu'
 import { FileTreeNodeView, type FilterState } from './FileTreeNodeView'
+import { useFileDragStore } from '../../stores/fileDragStore'
+import type { FileRefDragPayload } from '../chat/composerRefs'
 import { InlineNamePrompt } from './InlineNamePrompt'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
 
@@ -63,6 +68,9 @@ export function FileTree({ workDir, onSelect }: Props) {
   const pasteInto = useWorkspaceFilesStore((s) => s.pasteInto)
   const cancelCopy = useWorkspaceFilesStore((s) => s.cancelCopy)
   const addToast = useUIStore((s) => s.addToast)
+  const lanPeers = useLanStore((s) => s.peers)
+  const lanEnabled = useLanStore((s) => s.identity?.running ?? false)
+  const lanSendFile = useLanStore((s) => s.sendFile)
 
   const collapseAll = useCallback(() => {
     const dirs = useWorkspaceFilesStore.getState().dirs
@@ -210,11 +218,6 @@ export function FileTree({ workDir, onSelect }: Props) {
     setContextMenu({ x: event.clientX, y: event.clientY, target: { kind: 'root' } })
   }, [])
 
-  const handleDragStart = useCallback((event: React.DragEvent, node: FileTreeNode) => {
-    event.dataTransfer.setData(DRAG_MIME, node.relPath)
-    event.dataTransfer.effectAllowed = 'move'
-  }, [])
-
   const handleDrop = useCallback(
     (event: React.DragEvent, targetNode: FileTreeNode | null) => {
       event.preventDefault()
@@ -260,6 +263,40 @@ export function FileTree({ workDir, onSelect }: Props) {
     },
     [addToast, renameAction, t, uploadFiles],
   )
+
+  const handleTreeMoveDrop = useCallback(
+    (payload: FileRefDragPayload, x: number, y: number) => {
+      const targetEl = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(
+        '[data-tree-relpath]',
+      ) as HTMLElement | null
+      const targetRel = targetEl?.getAttribute('data-tree-relpath') ?? ''
+      const targetIsDir = targetEl?.getAttribute('data-tree-isdir') === '1'
+      const targetParentRel = targetEl ? (targetIsDir ? targetRel : parentOf(targetRel)) : ''
+      const fromRel = payload.relPath
+      if (!fromRel || fromRel === targetParentRel) return
+      if (targetParentRel === fromRel || targetParentRel.startsWith(`${fromRel}/`)) {
+        addToast({ type: 'warning', message: t('files.dropTargetInvalid') })
+        return
+      }
+      const name = nameOf(fromRel)
+      const next = joinPath(targetParentRel, name)
+      if (next === fromRel) return
+      renameAction(fromRel, next).catch((err) => {
+        addToast({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+      })
+    },
+    [addToast, renameAction, t],
+  )
+
+  useEffect(() => {
+    const store = useFileDragStore.getState()
+    store.registerZone({
+      id: 'file-tree',
+      getRect: () => treeRef.current?.getBoundingClientRect() ?? null,
+      onDrop: handleTreeMoveDrop,
+    })
+    return () => store.unregisterZone('file-tree')
+  }, [handleTreeMoveDrop])
 
   const handleNewFile = useCallback((parent: FileTreeNode | null) => {
     setCreateTarget({ parentRelPath: parent?.relPath ?? '', kind: 'file' })
@@ -414,6 +451,45 @@ export function FileTree({ workDir, onSelect }: Props) {
           }),
         })
       }
+    },
+    [addToast, t, workDir],
+  )
+
+  const handleSendToPeer = useCallback(
+    async (node: FileTreeNode, peerId: string) => {
+      try {
+        const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+        await lanSendFile(peerId, abs)
+        addToast({
+          type: 'success',
+          message: t('files.tree.lanSendStarted', { name: node.name }),
+        })
+      } catch (err) {
+        addToast({
+          type: 'error',
+          message: t('files.tree.lanSendFailed', {
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        })
+      }
+    },
+    [addToast, lanSendFile, t, workDir],
+  )
+
+  const handleUploadToGroup = useCallback(
+    (node: FileTreeNode) => {
+      const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+      useLanGroupStore.getState().stageUpload(abs)
+    },
+    [workDir],
+  )
+
+  const handleShareToLan = useCallback(
+    (node: FileTreeNode) => {
+      const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+      void useLanShareStore.getState().addShare(abs)
+      useLanShareStore.getState().openPanel()
+      addToast({ type: 'success', message: t('lanShare.sharedToast', { name: node.name }) })
     },
     [addToast, t, workDir],
   )
@@ -861,7 +937,6 @@ export function FileTree({ workDir, onSelect }: Props) {
           onFocus={setFocusedRelPath}
           onContextMenu={handleContextMenu}
           onDrop={handleDrop}
-          onDragStart={handleDragStart}
           onRenameSubmit={handleRenameSubmit}
           onRenameCancel={() => setRenameTarget(null)}
           onCreateSubmit={handleCreateSubmit}
@@ -910,6 +985,11 @@ export function FileTree({ workDir, onSelect }: Props) {
           onCutEntry={handleCutNode}
           onPasteInto={handlePasteInto}
           canPaste={clipboard !== null}
+          lanEnabled={lanEnabled}
+          lanPeers={lanPeers}
+          onSendToPeer={handleSendToPeer}
+          onUploadToGroup={handleUploadToGroup}
+          onShareToLan={handleShareToLan}
         />
       )}
 

@@ -93,3 +93,22 @@ export type ProviderTestResult = {
 
   proxy?: ProviderTestStepResult
 }
+
+export type DiscoveredModel = {
+  id: string
+  types: string[]
+}
+
+export type DiscoverModelsInput = {
+  baseUrl: string
+  apiFormat: ApiFormat
+  apiKey?: string
+  presetId?: string
+  providerId?: string
+}
+
+export type DiscoverModelsResult = {
+  source: string
+  count: number
+  models: DiscoveredModel[]
+}

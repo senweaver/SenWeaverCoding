@@ -263,7 +263,7 @@ fn split_markdown_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
             break;
         }
 
-        let end = start + max_bytes;
+        let end = crate::util::floor_char_boundary(text, start + max_bytes);
         let search_region = &text[start..end];
         let split_at = search_region
             .rfind('\n')

@@ -25,6 +25,7 @@ import {
   type ServerStatusSnapshot,
 } from '../../lib/desktopRuntime'
 import { startAiWriteWatcher } from '../../lib/aiWriteWatcher'
+import { markWindowBusy } from '../../lib/windowBusy'
 import { startTaskbarAlertWatcher } from '../../lib/taskbarAlert'
 import { TabBar } from './TabBar'
 import { TitleBar } from './TitleBar'
@@ -40,6 +41,7 @@ import { useLspStore } from '../../stores/lspStore'
 import { useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
 import { WorkspaceFinder } from '../workspace/WorkspaceFinder'
+import { FileDragGhost } from '../workspace/FileDragGhost'
 import { useActiveTabWorkDir } from '../../lib/activeWorkDir'
 const Settings = lazy(() =>
   import('../../pages/Settings').then((m) => ({ default: m.Settings })),
@@ -236,12 +238,12 @@ export function AppShell() {
 
       }
     }
-    const raf = window.requestAnimationFrame(() => {
+    const timer = window.setTimeout(() => {
       void reveal()
-    })
+    }, 0)
     return () => {
       cancelled = true
-      window.cancelAnimationFrame(raf)
+      window.clearTimeout(timer)
     }
   }, [])
 
@@ -286,7 +288,8 @@ export function AppShell() {
 
   useEffect(() => {
     let cancelled = false
-    let unlisten: (() => void) | undefined
+    let unlistenResized: (() => void) | undefined
+    let unlistenMoved: (() => void) | undefined
     void import(/* @vite-ignore */ '@tauri-apps/api/window')
       .then(async ({ getCurrentWindow }) => {
         if (cancelled) return
@@ -300,13 +303,19 @@ export function AppShell() {
           }
         }
         await sync()
-        const fn = await win.onResized(() => {
+        const fnResized = await win.onResized(() => {
+          markWindowBusy()
           void sync()
         })
+        const fnMoved = await win.onMoved(() => {
+          markWindowBusy()
+        })
         if (cancelled) {
-          fn()
+          fnResized()
+          fnMoved()
         } else {
-          unlisten = fn
+          unlistenResized = fnResized
+          unlistenMoved = fnMoved
         }
       })
       .catch(() => {
@@ -314,7 +323,8 @@ export function AppShell() {
       })
     return () => {
       cancelled = true
-      unlisten?.()
+      unlistenResized?.()
+      unlistenMoved?.()
     }
   }, [])
 
@@ -442,12 +452,7 @@ export function AppShell() {
     return (
       <>
         <div
-          className="app-window-backdrop"
-          data-maximized={isMaximized ? 'true' : 'false'}
-        />
-        <div
           className="app-window-frame items-center justify-center text-[var(--color-text-secondary)]"
-          data-maximized={isMaximized ? 'true' : 'false'}
         >
           <div className="flex flex-col items-center gap-3 text-center px-6 max-w-[560px]">
             <div data-state={bootFailed ? 'failed' : 'starting'}>{headerText}</div>
@@ -508,12 +513,7 @@ export function AppShell() {
     <>
       <DesignerDockCoordinator />
       <div
-        className="app-window-backdrop"
-        data-maximized={isMaximized ? 'true' : 'false'}
-      />
-      <div
         className="app-window-frame outline-none ring-0"
-        data-maximized={isMaximized ? 'true' : 'false'}
       >
       <TitleBar />
       <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -568,6 +568,7 @@ export function AppShell() {
       {terminalPanelOpen && <TerminalPanel />}
       <StatusBar />
       <ToastContainer />
+      <FileDragGhost />
       <BuddyCompanion />
       <UpdateChecker />
       <CodingModeTransitionGuard />

@@ -39,6 +39,7 @@ export type ClientMessage =
       refElement?: string
       refElementLabel?: string
     }
+  | { type: 'set_debug_submode'; submode: string; params: Record<string, unknown> }
   | { type: 'debug_bind_tab'; tab_id: number }
   | { type: 'debug_unbind_tab'; tab_id: number }
   | { type: 'debug_bind_prototype_ref'; tab_id?: number; figma_url?: string }
@@ -404,7 +405,8 @@ export type UIMessage =
       docxPath?: string
       title: string
       body: string
-      status: 'writing' | 'completed'
+      status: 'writing' | 'completed' | 'failed'
+      error?: string
       sourceToolUseId?: string
 
       todos?: Array<{

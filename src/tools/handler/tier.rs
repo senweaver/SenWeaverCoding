@@ -179,6 +179,7 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("task_stop", MODERATE, "Stop a background task"),
         ("sessions_list", SAFE, "List recent sessions"),
         ("sessions_history", SAFE, "Read session history"),
+        ("sessions_search", SAFE, "Search a session's history for a keyword"),
         ("sessions_send", MODERATE, "Send a message to another session"),
         ("web_search_tool", SAFE, "Search the web with the default provider"),
         ("web_fetch", SAFE, "Fetch content from a URL"),

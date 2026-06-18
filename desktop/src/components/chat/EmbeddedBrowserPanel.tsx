@@ -26,6 +26,7 @@ import {
   listenDockEvents,
 } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
+import { isWindowBusy, onWindowIdle } from '../../lib/windowBusy'
 import { bindDebugTab, unbindDebugTab } from '../../lib/debugTabBind'
 import { useTranslation } from '../../i18n'
 import { BrowserPanelSplitter } from './BrowserPanelSplitter'
@@ -357,6 +358,7 @@ export function EmbeddedBrowserPanel() {
       if (!safe) return
       lastSafeRect = safe
       if (dragModeRef.current) return
+      if (isWindowBusy()) return
       const sig = `${Math.round(safe.x)}|${Math.round(safe.y)}|${Math.round(safe.w)}|${Math.round(safe.h)}`
       if (sig === lastRectSig) return
       lastRectSig = sig
@@ -404,6 +406,7 @@ export function EmbeddedBrowserPanel() {
     const resyncHandler = () => resync()
     document.addEventListener('browser-panel-remeasure', remeasureHandler)
     document.addEventListener('browser-panel-resync', resyncHandler)
+    const idleUnsub = onWindowIdle(() => measure())
 
     return () => {
       if (debounceTimer !== null) window.clearTimeout(debounceTimer)
@@ -411,6 +414,7 @@ export function EmbeddedBrowserPanel() {
       window.removeEventListener('resize', measure)
       document.removeEventListener('browser-panel-remeasure', remeasureHandler)
       document.removeEventListener('browser-panel-resync', resyncHandler)
+      idleUnsub()
       measureRef.current = () => {}
       void lastSafeRect
     }

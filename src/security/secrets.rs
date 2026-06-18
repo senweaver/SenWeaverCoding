@@ -24,12 +24,13 @@ pub struct SecretStore {
 impl SecretStore {
 
     pub fn mask_secret(secret: &str) -> String {
+        use crate::util::SafeStrSlice;
         let len = secret.len();
         if len <= 8 {
-            return "*".repeat(len);
+            return "*".repeat(secret.chars().count());
         }
-        let prefix = &secret[..4];
-        let suffix = &secret[len - 4..];
+        let prefix = secret.byte_prefix(4);
+        let suffix = secret.byte_suffix(4);
         format!("{prefix}...{suffix}")
     }
 

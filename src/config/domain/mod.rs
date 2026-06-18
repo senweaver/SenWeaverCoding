@@ -11,6 +11,7 @@ pub mod evolution;
 pub mod gateway_net;
 pub mod hardware;
 pub mod heartbeat;
+pub mod lan;
 pub mod memory;
 pub mod multimodal;
 pub mod observability;

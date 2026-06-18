@@ -110,6 +110,7 @@ impl ProxyRuntime {
         if let Ok(mut g) = self.config.write() {
             *g = config;
         }
+        crate::services::proxy::system::invalidate();
         self.clear_client_cache();
     }
 
@@ -122,12 +123,46 @@ impl ProxyRuntime {
         builder: reqwest::ClientBuilder,
         service_key: &str,
     ) -> reqwest::ClientBuilder {
-        self.snapshot().apply_to_reqwest_builder(builder, service_key)
+        let cfg = self.snapshot();
+        if cfg.has_explicit_proxy() {
+            return cfg.apply_to_reqwest_builder(builder, service_key);
+        }
+        if cfg.system_detect {
+            if let Some(sys) = crate::services::proxy::system::detect_cached() {
+                return apply_system_proxy_to_builder(builder, &sys, &cfg);
+            }
+        }
+        builder
+    }
+
+    fn proxy_fingerprint(&self, service_key: &str) -> String {
+        let cfg = self.snapshot();
+        if cfg.has_explicit_proxy() {
+            if cfg.should_apply_to_service(service_key) {
+                return format!(
+                    "cfg|{}|{}|{}",
+                    cfg.all_proxy.as_deref().unwrap_or("-"),
+                    cfg.http_proxy.as_deref().unwrap_or("-"),
+                    cfg.https_proxy.as_deref().unwrap_or("-"),
+                );
+            }
+            return "cfg|off".to_string();
+        }
+        if cfg.system_detect {
+            if let Some(sys) = crate::services::proxy::system::detect_cached() {
+                return format!("sys|{}", sys.signature());
+            }
+        }
+        "none".to_string()
     }
 
     pub fn build_client(&self, service_key: &str) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
-        let ck = cache_key(service_key, None, None);
+        let ck = format!(
+            "{}|{}",
+            cache_key(service_key, None, None),
+            self.proxy_fingerprint(service_key)
+        );
         if let Some(c) = self.cached_client(&ck) {
             return c;
         }
@@ -149,7 +184,11 @@ impl ProxyRuntime {
         connect_timeout_secs: u64,
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
-        let ck = cache_key(service_key, Some(timeout_secs), Some(connect_timeout_secs));
+        let ck = format!(
+            "{}|{}",
+            cache_key(service_key, Some(timeout_secs), Some(connect_timeout_secs)),
+            self.proxy_fingerprint(service_key)
+        );
         if let Some(c) = self.cached_client(&ck) {
             return c;
         }
@@ -175,8 +214,9 @@ impl ProxyRuntime {
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
         let ck = format!(
-            "{}|noredirect",
-            cache_key(service_key, Some(timeout_secs), Some(connect_timeout_secs))
+            "{}|noredirect|{}",
+            cache_key(service_key, Some(timeout_secs), Some(connect_timeout_secs)),
+            self.proxy_fingerprint(service_key)
         );
         if let Some(c) = self.cached_client(&ck) {
             return c;
@@ -384,15 +424,35 @@ impl ProxyRuntime {
             return Some(url);
         }
         let cfg = self.snapshot();
-        if !cfg.should_apply_to_service(service_key) {
+
+        let (https, http, all, bypass) = if cfg.has_explicit_proxy() {
+            if !cfg.should_apply_to_service(service_key) {
+                return None;
+            }
+            (
+                normalize_proxy_url_option(cfg.https_proxy.as_deref()),
+                normalize_proxy_url_option(cfg.http_proxy.as_deref()),
+                normalize_proxy_url_option(cfg.all_proxy.as_deref()),
+                cfg.normalized_no_proxy(),
+            )
+        } else if cfg.system_detect {
+            match crate::services::proxy::system::detect_cached() {
+                Some(sys) => {
+                    let mut bypass = cfg.normalized_no_proxy();
+                    bypass.extend(sys.bypass.iter().cloned());
+                    (sys.https, sys.http, sys.all, bypass)
+                }
+                None => return None,
+            }
+        } else {
             return None;
-        }
-        if let Ok(parsed) = reqwest::Url::parse(ws_url) {
-            if let Some(host) = parsed.host_str() {
-                let entries = cfg.normalized_no_proxy();
-                if !entries.is_empty() {
+        };
+
+        if !bypass.is_empty() {
+            if let Ok(parsed) = reqwest::Url::parse(ws_url) {
+                if let Some(host) = parsed.host_str() {
                     let hl = host.to_ascii_lowercase();
-                    if entries.iter().any(|e| {
+                    if bypass.iter().any(|e| {
                         let e = e.trim().to_ascii_lowercase();
                         e == "*"
                             || hl == e
@@ -404,13 +464,10 @@ impl ProxyRuntime {
                 }
             }
         }
+
         let is_secure = ws_url.starts_with("wss://") || ws_url.starts_with("wss:");
-        let pref = if is_secure {
-            normalize_proxy_url_option(cfg.https_proxy.as_deref())
-        } else {
-            normalize_proxy_url_option(cfg.http_proxy.as_deref())
-        };
-        pref.or_else(|| normalize_proxy_url_option(cfg.all_proxy.as_deref()))
+        let pref = if is_secure { https } else { http };
+        pref.or(all)
     }
 
     fn cached_client(&self, cache_key: &str) -> Option<reqwest::Client> {
@@ -450,6 +507,40 @@ fn cache_key(
         t,
         ct
     )
+}
+
+fn apply_system_proxy_to_builder(
+    mut builder: reqwest::ClientBuilder,
+    detected: &crate::services::proxy::system::DetectedSystemProxy,
+    cfg: &ProxyConfig,
+) -> reqwest::ClientBuilder {
+    let mut bypass = cfg.normalized_no_proxy();
+    bypass.extend(detected.bypass.iter().cloned());
+    let no_proxy = if bypass.is_empty() {
+        None
+    } else {
+        reqwest::NoProxy::from_string(&bypass.join(","))
+    };
+
+    type ProxyCtor = fn(&str) -> Result<reqwest_proxy::Proxy, reqwest::Error>;
+    let entries: [(Option<&String>, ProxyCtor); 3] = [
+        (detected.all.as_ref(), |u| reqwest_proxy::Proxy::all(u)),
+        (detected.http.as_ref(), |u| reqwest_proxy::Proxy::http(u)),
+        (detected.https.as_ref(), |u| reqwest_proxy::Proxy::https(u)),
+    ];
+    for (url_opt, make) in entries {
+        if let Some(url) = url_opt {
+            match make(url) {
+                Ok(p) => {
+                    builder = builder.proxy(p.no_proxy(no_proxy.clone()));
+                }
+                Err(e) => {
+                    tracing::warn!(proxy_url = %url, "Ignoring invalid system proxy URL: {e}");
+                }
+            }
+        }
+    }
+    builder
 }
 
 fn apply_explicit_proxy_to_builder(
@@ -558,6 +649,10 @@ async fn ws_connect_via_proxy(
     let stream: BoxedIo = if target.scheme() == "wss" {
         let mut rs = rustls::RootCertStore::empty();
         rs.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let native = rustls_native_certs::load_native_certs();
+        for cert in native.certs {
+            let _ = rs.add(cert);
+        }
         let tc = std::sync::Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(rs)

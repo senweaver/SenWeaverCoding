@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useMemo } from 'react'
+import { useRef } from 'react'
 
 type Props = {
   content: string
@@ -35,37 +35,75 @@ function applyInlineFormatting(escaped: string): string {
   return html
 }
 
-function buildStreamingHtml(content: string): string {
-  if (!content) return ''
-  const segments = content.split(/(```[\s\S]*?(?:```|$))/g)
-  const parts: string[] = []
-  for (const seg of segments) {
-    if (!seg) continue
-    if (seg.startsWith('```')) {
-      const closed = seg.endsWith('```')
-      const inner = closed ? seg.slice(3, -3) : seg.slice(3)
-      const firstNl = inner.indexOf('\n')
-      const body = firstNl >= 0 ? inner.slice(firstNl + 1) : inner
-      const lang = firstNl >= 0 ? inner.slice(0, firstNl).trim() : ''
-      const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : ''
-      parts.push(
-        `<pre class="md-stream-pre"${langAttr}><code>${escapeHtml(body)}</code></pre>`,
-      )
-    } else {
-      const escaped = escapeHtml(seg)
-      const formatted = applyInlineFormatting(escaped).replace(/\n/g, '<br />')
-      parts.push(formatted)
-    }
+function renderSegment(seg: string): string {
+  if (!seg) return ''
+  if (seg.startsWith('```')) {
+    const closed = seg.endsWith('```') && seg.length > 3
+    const inner = closed ? seg.slice(3, -3) : seg.slice(3)
+    const firstNl = inner.indexOf('\n')
+    const body = firstNl >= 0 ? inner.slice(firstNl + 1) : inner
+    const lang = firstNl >= 0 ? inner.slice(0, firstNl).trim() : ''
+    const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : ''
+    return `<pre class="md-stream-pre"${langAttr}><code>${escapeHtml(body)}</code></pre>`
   }
-  return parts.join('')
+  const escaped = escapeHtml(seg)
+  return applyInlineFormatting(escaped).replace(/\n/g, '<br />')
+}
+
+type Segment = { end: number; closed: boolean }
+
+function nextSegment(content: string, start: number): Segment | null {
+  if (start >= content.length) return null
+  if (content.startsWith('```', start)) {
+    const close = content.indexOf('```', start + 3)
+    if (close === -1) return { end: content.length, closed: false }
+    return { end: close + 3, closed: true }
+  }
+  const next = content.indexOf('```', start)
+  if (next === -1) return { end: content.length, closed: false }
+  return { end: next, closed: true }
+}
+
+type StreamCache = {
+  content: string
+  committedHtml: string
+  committedLen: number
+  html: string
+}
+
+function emptyCache(): StreamCache {
+  return { content: '', committedHtml: '', committedLen: 0, html: '' }
+}
+
+function buildIncremental(cache: StreamCache, content: string): StreamCache {
+  if (content === cache.content) return cache
+  if (!content.startsWith(cache.content)) {
+    cache = emptyCache()
+  }
+  let cursor = cache.committedLen
+  let committedHtml = cache.committedHtml
+  while (true) {
+    const seg = nextSegment(content, cursor)
+    if (!seg || !seg.closed) break
+    committedHtml += renderSegment(content.slice(cursor, seg.end))
+    cursor = seg.end
+  }
+  const pending = content.slice(cursor)
+  return {
+    content,
+    committedHtml,
+    committedLen: cursor,
+    html: committedHtml + renderSegment(pending),
+  }
 }
 
 export function StreamingMarkdownRenderer({ content, className }: Props) {
-  const html = useMemo(() => buildStreamingHtml(content), [content])
+  const cacheRef = useRef<StreamCache>(emptyCache())
+  cacheRef.current = buildIncremental(cacheRef.current, content)
   return (
     <div
       className={`streaming-markdown ${className ?? ''}`.trim()}
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: cacheRef.current.html }}
     />
   )
 }

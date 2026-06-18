@@ -6,12 +6,37 @@ import './theme/globals.css'
 import 'katex/dist/katex.min.css'
 
 let bootCompleted = false
+let revealRequested = false
+
+function revealWindowNow() {
+  if (revealRequested) return
+  revealRequested = true
+  void (async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('signal_frontend_ready')
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window')
+        const win = getCurrentWindow()
+        await win.show()
+        await win.setFocus()
+      } catch {
+      }
+    }
+  })()
+}
 
 function paintBootError(label: string, message: string, stack?: string) {
   const root = document.getElementById('root')
   if (!root) return
   if (root.dataset.bootErrorPainted === '1') return
   root.dataset.bootErrorPainted = '1'
+  try {
+    ;(window as unknown as { __SEN_BOOT_ERROR__?: string }).__SEN_BOOT_ERROR__ =
+      `${label}: ${message}${stack ? `\n${stack}` : ''}`
+  } catch {
+  }
   root.innerHTML = ''
   const wrap = document.createElement('div')
   wrap.style.cssText =
@@ -38,6 +63,7 @@ function paintBootError(label: string, message: string, stack?: string) {
   btn.onclick = () => window.location.reload()
   wrap.appendChild(btn)
   root.appendChild(wrap)
+  revealWindowNow()
 }
 
 function reportRuntimeError(label: string, message: string, stack?: string) {
@@ -116,6 +142,11 @@ async function boot() {
       ),
     )
     bootCompleted = true
+    // The window starts hidden, so requestAnimationFrame-based reveals never
+    // fire (the WebView pauses rAF while occluded). Use a timer instead: the
+    // initial React mount has already committed real content into #root by the
+    // time this runs, so revealing here shows the app, never the boot placeholder.
+    setTimeout(() => revealWindowNow(), 0)
   } catch (err) {
     paintBootError(
       'module-load',

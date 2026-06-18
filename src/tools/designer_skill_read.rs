@@ -96,7 +96,7 @@ impl Tool for DesignerSkillReadTool {
                     let mut body = content.to_string();
                     let truncated = body.len() > MAX_OUTPUT;
                     if truncated {
-                        body.truncate(MAX_OUTPUT);
+                        crate::util::truncate_string_bytes(&mut body, MAX_OUTPUT);
                     }
                     let header = format!("# skill {id}/{rel}\n\n");
                     let suffix = if truncated {

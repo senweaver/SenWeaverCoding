@@ -1525,18 +1525,23 @@ async fn probe_provider(
         _ => format!("{trimmed}/models"),
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return serde_json::json!({
-                "success": false,
-                "latencyMs": started.elapsed().as_millis() as u64,
-                "error": format!("client build failed: {e}"),
-            });
-        }
+    let client = match crate::services::try_get_services() {
+        Some(svc) => svc
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.test", 10, 10),
+        None => match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return serde_json::json!({
+                    "success": false,
+                    "latencyMs": started.elapsed().as_millis() as u64,
+                    "error": format!("client build failed: {e}"),
+                });
+            }
+        },
     };
 
     let mut req = client.get(&url);
@@ -1686,6 +1691,113 @@ pub async fn handle_providers_test_config(
         }
     }
     Json(serde_json::json!({ "result": result })).into_response()
+}
+
+pub async fn handle_providers_discover_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let base_url = body
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let api_format = body
+        .get("apiFormat")
+        .and_then(|v| v.as_str())
+        .unwrap_or("openai_chat")
+        .to_string();
+    let preset_id = body
+        .get("presetId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let provider_id = body
+        .get("providerId")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let explicit_key = body
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let api_key = match explicit_key {
+        Some(k) => Some(k),
+        None => {
+            let config = state.live_config.load_ref();
+            provider_id
+                .as_deref()
+                .and_then(|id| resolve_provider_api_key(id, &config))
+        }
+    };
+
+    let fetched: anyhow::Result<Vec<String>> = if api_format == "anthropic" {
+        crate::onboard::wizard::fetch_anthropic_models(api_key.as_deref()).await
+    } else if preset_id == "gemini" {
+        crate::onboard::wizard::fetch_gemini_models(api_key.as_deref()).await
+    } else if base_url.is_empty() {
+        Err(anyhow::anyhow!("missing baseUrl"))
+    } else {
+        let primary = format!("{base_url}/models");
+        let primary_result =
+            crate::onboard::wizard::fetch_openai_compatible_models(&primary, api_key.as_deref(), false)
+                .await;
+        match primary_result {
+            Ok(list) if !list.is_empty() => Ok(list),
+            other => {
+                if base_url.contains("/v") {
+                    other
+                } else {
+                    let fallback = format!("{base_url}/v1/models");
+                    match crate::onboard::wizard::fetch_openai_compatible_models(
+                        &fallback,
+                        api_key.as_deref(),
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(list) => Ok(list),
+                        Err(_) => other,
+                    }
+                }
+            }
+        }
+    };
+
+    match fetched {
+        Ok(ids) => {
+            let models: Vec<serde_json::Value> = ids
+                .into_iter()
+                .map(|id| {
+                    let types = crate::config::classify_model_type(&id);
+                    serde_json::json!({ "id": id, "types": types })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "source": "remote",
+                "count": models.len(),
+                "models": models,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -5065,6 +5177,65 @@ pub async fn handle_designer_submodes(
         "mediaModels": media_models,
     }))
     .into_response()
+}
+
+pub async fn handle_debug_submodes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let schemas = crate::agent::debug::params::all_submode_schemas();
+    Json(serde_json::json!({
+        "submodes": schemas.get("submodes").cloned().unwrap_or(serde_json::json!([])),
+    }))
+    .into_response()
+}
+
+pub async fn handle_session_debug_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let best = tokio::task::spawn_blocking(move || {
+        let base = crate::tools::debug_test_report::reports_root();
+        let mut best: Option<(std::time::SystemTime, serde_json::Value)> = None;
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let report_json = entry.path().join("report.json");
+                let meta = match std::fs::metadata(&report_json) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                let content = match std::fs::read_to_string(&report_json) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let value: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let matches_session =
+                    value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str());
+                if matches_session && best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                    best = Some((mtime, value));
+                }
+            }
+        }
+        best.map(|(_, value)| value)
+    })
+    .await
+    .ok()
+    .flatten();
+    match best {
+        Some(value) => Json(serde_json::json!({ "report": value })).into_response(),
+        None => Json(serde_json::json!({ "report": serde_json::Value::Null })).into_response(),
+    }
 }
 
 pub async fn handle_scheduled_tasks_list(

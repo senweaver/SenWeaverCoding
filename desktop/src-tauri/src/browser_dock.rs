@@ -5155,15 +5155,33 @@ pub fn install_into(app: &AppHandle) {
 
     if let Some(window) = app.get_window("main") {
         let app_for_resize = app.clone();
-        window.on_window_event(move |event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
-            ) {
+        let resize_scheduled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(state) = app_for_resize.try_state::<DockSharedState>() {
                     let _ = update_dock_layout(&app_for_resize, state.inner());
                 }
             }
+            tauri::WindowEvent::Resized(_) => {
+                if resize_scheduled
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let app_throttled = app_for_resize.clone();
+                    let scheduled = resize_scheduled.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                        let app_main = app_throttled.clone();
+                        let _ = app_throttled.run_on_main_thread(move || {
+                            if let Some(state) = app_main.try_state::<DockSharedState>() {
+                                let _ = update_dock_layout(&app_main, state.inner());
+                            }
+                        });
+                        scheduled.store(false, Ordering::Release);
+                    });
+                }
+            }
+            _ => {}
         });
     }
 }

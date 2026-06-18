@@ -119,6 +119,8 @@ pub mod i18n;
 pub mod identity;
 
 pub mod inline_completion;
+#[cfg(feature = "lan-comms")]
+pub mod lan;
 pub mod lsp;
 
 pub mod inline_edit;

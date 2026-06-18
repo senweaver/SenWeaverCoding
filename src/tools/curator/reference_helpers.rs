@@ -13,8 +13,8 @@ static REF_ID_BY_PREFIX_RE: LazyLock<Regex> =
 
 pub const REFS_GIT_SUBDIR: &str = "refs/git";
 
-pub const REFERENCE_HEAD_DOC_CHARS: usize = 4_000;
-pub const REFERENCE_SKELETON_HEAD_CHARS: usize = 1_400;
+pub const REFERENCE_HEAD_DOC_CHARS: usize = 6_000;
+pub const REFERENCE_SKELETON_HEAD_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct RepoMetadata {

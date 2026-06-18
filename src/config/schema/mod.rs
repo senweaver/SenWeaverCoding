@@ -92,6 +92,8 @@ pub struct ProxyConfig {
     pub scope: ProxyScope,
     #[serde(default)]
     pub services: Vec<String>,
+    #[serde(default = "default_true")]
+    pub system_detect: bool,
 }
 
 impl Default for ProxyConfig {
@@ -104,6 +106,7 @@ impl Default for ProxyConfig {
             no_proxy: Vec::new(),
             scope: ProxyScope::Internal,
             services: Vec::new(),
+            system_detect: true,
         }
     }
 }
@@ -124,6 +127,9 @@ impl ProxyConfig {
         normalize_proxy_url_option(self.http_proxy.as_deref()).is_some()
             || normalize_proxy_url_option(self.https_proxy.as_deref()).is_some()
             || normalize_proxy_url_option(self.all_proxy.as_deref()).is_some()
+    }
+    pub fn has_explicit_proxy(&self) -> bool {
+        self.enabled && self.has_any_proxy_url()
     }
     pub fn normalized_services(&self) -> Vec<String> {
         normalize_service_list(self.services.clone())
@@ -524,6 +530,9 @@ pub struct Config {
 
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+
+    #[serde(default)]
+    pub lan: LanConfig,
 
     #[serde(default)]
     pub cron: CronConfig,
@@ -1153,6 +1162,57 @@ where
     out
 }
 
+pub fn classify_model_type(model_id: &str) -> Vec<String> {
+    let id = model_id.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        return vec![DEFAULT_MODEL_TYPE.to_string()];
+    }
+
+    let has = |needle: &str| id.contains(needle);
+
+    if has("rerank") {
+        return vec!["rerank".to_string()];
+    }
+    if has("embed") || has("bge") || has("gte") || has("e5-") || has("text-embedding") {
+        return vec!["embedding".to_string()];
+    }
+    if has("whisper") || has("transcrib") || has("-stt") || has("speech-to-text") || has("asr") {
+        return vec!["speech-recognition".to_string()];
+    }
+    if has("-tts") || has("tts-") || has("text-to-speech") || has("audio-generation") {
+        return vec!["audio-generation".to_string()];
+    }
+    if has("dall-e")
+        || has("dalle")
+        || has("imagen")
+        || has("flux")
+        || has("stable-diffusion")
+        || has("stable-image")
+        || has("-sdxl")
+        || has("kontext")
+        || has("seedream")
+        || has("image-generation")
+    {
+        return vec!["image-generation".to_string()];
+    }
+    if has("video") || has("sora") || has("veo") || has("kling") || has("seedance") {
+        return vec!["video-generation".to_string()];
+    }
+
+    let mut types = vec![DEFAULT_MODEL_TYPE.to_string()];
+    if has("vision")
+        || has("-vl")
+        || has("vl-")
+        || has("-vl-")
+        || has("multimodal")
+        || has("omni")
+        || has("4o")
+    {
+        types.push("image-understanding".to_string());
+    }
+    types
+}
+
 impl ModelProviderConfig {
 
     pub fn types_for_model(&self, model: &str) -> Vec<String> {
@@ -1177,6 +1237,19 @@ impl ModelProviderConfig {
         self.types_for_model(model)
             .iter()
             .any(|t| t == model_type)
+    }
+
+    pub fn explicit_vision_for_model(&self, model: &str) -> Option<bool> {
+        let needle = model.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        let configured = self.model_types.get(needle)?;
+        let sanitized = sanitize_model_types(configured.iter().map(String::as_str));
+        if sanitized.is_empty() {
+            return None;
+        }
+        Some(sanitized.iter().any(|t| t == "image-understanding"))
     }
 }
 
@@ -3954,6 +4027,7 @@ pub struct ClassificationRule {
 }
 
 pub use crate::config::domain::heartbeat::HeartbeatConfig;
+pub use crate::config::domain::lan::LanConfig;
 
 mod tunnel;
 
@@ -5564,6 +5638,7 @@ impl Default for Config {
             saved_models: Vec::new(),
             embedding_routes: Vec::new(),
             heartbeat: HeartbeatConfig::default(),
+            lan: LanConfig::default(),
             cron: CronConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
@@ -6884,6 +6959,17 @@ impl Config {
             .map(|(name, profile)| (name.clone(), profile.clone()))
     }
 
+    pub fn model_vision_capability(&self, provider_name: &str, model: &str) -> Option<bool> {
+        let needle = provider_name.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        self.model_providers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(needle))
+            .and_then(|(_, profile)| profile.explicit_vision_for_model(model))
+    }
+
     fn apply_named_model_provider_profile(&mut self) {
         let Some(current_provider) = self.default_provider.clone() else {
             return;
@@ -7974,6 +8060,14 @@ impl Config {
 
         if let Ok(services_raw) = std::env::var("SEN_PROXY_SERVICES") {
             self.proxy.services = normalize_service_list(vec![services_raw]);
+        }
+
+        if let Some(detect) = std::env::var("SEN_PROXY_SYSTEM_DETECT")
+            .ok()
+            .as_deref()
+            .and_then(parse_proxy_enabled)
+        {
+            self.proxy.system_detect = detect;
         }
 
         if let Err(error) = self.proxy.validate() {

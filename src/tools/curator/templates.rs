@@ -318,6 +318,9 @@ const SOLUTION_FUNCTIONAL_DRAFT: &str = "# <解决方案标题>\n\n\
 **作者**：<姓名>  \n\
 **评审**：<干系人列表>  \n\
 **日期**：<YYYY-MM-DD>\n\n\
+## 〇、执行摘要\n\n\
+<面向决策者的 5-8 句话：业务问题、方案核心、关键收益（量化）、投入与周期、主要风险。让不读全文的读者也能抓住要点。>\n\n\
+> 图表规范：所有图使用 Mermaid（DOCX 渲染为图片并自动编号「图 N」），所有表使用 Markdown 表格（DOCX 渲染为三线表并自动编号「表 N」）；正文引用写「见图 N」「见表 N」，并用 `[Sn]` 标注证据来源。\n\n\
 ## 一、系统概述\n\n\
 <2-4 段文字：解决的业务问题、整体技术路径、可交付物、与现有系统的关系。引用 `[Sn]` 来自 `sources.md`。>\n\n\
 ## 二、总体架构\n\n\
@@ -417,8 +420,12 @@ const SOLUTION_FUNCTIONAL_DRAFT: &str = "# <解决方案标题>\n\n\
 - 文档验收：<…>\n\n\
 ## 十四、附录\n\n\
 - 名词表 / 缩略语\n\
-- 参考资料（同步至 `sources.md`）\n\
-- 历史版本变更记录\n";
+- 历史版本变更记录\n\
+- 补充图表与数据\n\n\
+## 十五、参考文献\n\n\
+<逐条列出佐证本方案的资料，与 `sources.md` 中的 `[Sn]/[Gn]/[Ln]` 一一对应。示例：\n\
+[S1] 作者/机构. 标题. 来源, 年份. URL.\n\
+[G1] 仓库 owner/repo（commit 短哈希）. 引用要点. URL.>\n";
 
 const SOLUTION_FUNCTIONAL_BLUEPRINT: &str = "# Implementation Blueprint — <Solution Slug>\n\n\
 > Curator template: **Solution Document ⇒ Engineering Delivery**\n\n\
@@ -630,7 +637,9 @@ const SOLUTION_IEEE1016_DRAFT: &str = "# Software Design Description (SDD)\n\n\
 ## 4. Design Rationale\n\n\
 | ID | Decision | Alternatives | Rationale |\n|----|----------|-------------|-----------|\n| DD-001 | <…> | A/B | <…> |\n\n\
 ## 5. Traceability\n\n\
-- Map each design element (DD-NNN) back to a requirement (FR/SR-NNN) and forward to a test case (TC-NNN).\n";
+- Map each design element (DD-NNN) back to a requirement (FR/SR-NNN) and forward to a test case (TC-NNN).\n\n\
+## 6. References\n\n\
+<List every source backing the design, mapped to the `[Sn]/[Gn]/[Ln]` entries in `sources.md`.>\n";
 
 const SOLUTION_ISO12207_DRAFT: &str = "# Software Lifecycle Process Plan\n\n\
 > Curator template: **ISO/IEC/IEEE 12207 — Systems and software engineering — Software lifecycle processes**  \n\
@@ -669,7 +678,9 @@ const SOLUTION_ISO12207_DRAFT: &str = "# Software Lifecycle Process Plan\n\n\
 ### 4.11 Validation\n<…>\n\n\
 ### 4.12 Operation\n<…>\n\n\
 ### 4.13 Maintenance\n<…>\n\n\
-### 4.14 Disposal\n<…>\n";
+### 4.14 Disposal\n<…>\n\n\
+## 5. References\n\n\
+<List the standards, contracts, and sources cited across the life-cycle plan, mapped to the `[Sn]/[Gn]/[Ln]` entries in `sources.md`.>\n";
 
 const TECH_REPORT_DRAFT: &str = "# <Technical Report Title>\n\n\
 > Curator template: **Technical Report**\n\n\

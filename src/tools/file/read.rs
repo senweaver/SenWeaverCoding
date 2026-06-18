@@ -26,7 +26,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents with line numbers. Supports partial reading via offset and limit. Extracts text from PDF; other binary files are read with lossy UTF-8 conversion."
+        "Read file contents with line numbers. Supports partial reading via offset and limit. Extracts text from office documents (Word .docx, Excel .xlsx, PowerPoint .pptx) and PDF; other binary files are read with lossy UTF-8 conversion."
     }
 
     fn mcp_safe(&self) -> bool {
@@ -148,128 +148,140 @@ impl Tool for FileReadTool {
         let has_offset = args.get("offset").and_then(|v| v.as_u64()).is_some();
         let has_limit = args.get("limit").and_then(|v| v.as_u64()).is_some();
 
-        match tokio::fs::read_to_string(&resolved_path).await {
-            Ok(mut contents) => {
-
-                const AUTO_SMART_LINE_THRESHOLD: usize = 1500;
-                const AUTO_SMART_BYTE_THRESHOLD: usize = 128 * 1024;
-                if !explicit_level
-                    && !has_offset
-                    && !has_limit
-                    && crate::token_saver::is_enabled()
-                    && level == crate::token_saver::ReadLevel::Default
-                    && (contents.len() >= AUTO_SMART_BYTE_THRESHOLD
-                        || contents.lines().count() >= AUTO_SMART_LINE_THRESHOLD)
-                {
-                    level = crate::token_saver::ReadLevel::Smart;
-                }
-
-                if level != crate::token_saver::ReadLevel::Default
-                    && crate::token_saver::is_enabled()
-                {
-                    contents = crate::token_saver::compact_file_content(path, &contents, level);
-                    return Ok(ToolResult {
-                        success: true,
-                        output: contents,
-                        error: None,
-                    });
-                }
-                let lines: Vec<&str> = contents.lines().collect();
-                let total = lines.len();
-
-                if total == 0 {
-                    return Ok(ToolResult {
-                        success: true,
-                        output: String::new(),
-                        error: None,
-                    });
-                }
-
-                let offset = args
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| {
-                        usize::try_from(v.max(1))
-                            .unwrap_or(usize::MAX)
-                            .saturating_sub(1)
-                    })
-                    .unwrap_or(0);
-                let start = offset.min(total);
-
-                let end = match args.get("limit").and_then(|v| v.as_u64()) {
-                    Some(l) => {
-                        let limit = usize::try_from(l).unwrap_or(usize::MAX);
-                        (start.saturating_add(limit)).min(total)
+        let mut contents: String =
+            if let Some(kind) = crate::tools::file::office::detect_office_kind_by_ext(path) {
+                let bytes = match tokio::fs::read(&resolved_path).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Failed to read file: {e}")),
+                        });
                     }
-                    None => total,
                 };
-
-                if start >= end {
-                    return Ok(ToolResult {
-                        success: true,
-                        output: format!("[No lines in range, file has {total} lines]"),
-                        error: None,
-                    });
-                }
-
-                let numbered: String = lines[start..end]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, line)| format!("{}: {}", start + i + 1, line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let partial = start > 0 || end < total;
-                let summary = if partial {
-                    format!("\n[Lines {}-{} of {total}]", start + 1, end)
-                } else {
-                    format!("\n[{total} lines total]")
-                };
-
-                Ok(ToolResult {
-                    success: true,
-                    output: format!("{numbered}{summary}"),
-                    error: None,
+                let extracted = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                    match crate::tools::file::office::extract_office_text(kind, &bytes) {
+                        Ok(Some(text)) => Ok(text),
+                        Ok(None) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+                        Err(e) => Err(e),
+                    }
                 })
-            }
-            Err(_) => {
-
-                let bytes = tokio::fs::read(&resolved_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to read file: {e}"))?;
-
-                if let Some(text) = try_extract_pdf_text(&bytes) {
-                    return Ok(ToolResult {
-                        success: true,
-                        output: text,
-                        error: None,
-                    });
+                .await;
+                match extracted {
+                    Ok(Ok(text)) => text,
+                    Ok(Err(e)) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Failed to extract document text: {e}")),
+                        });
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Document extraction task failed: {e}")),
+                        });
+                    }
                 }
+            } else {
+                match tokio::fs::read_to_string(&resolved_path).await {
+                    Ok(text) => text,
+                    Err(_) => {
+                        let bytes = tokio::fs::read(&resolved_path)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to read file: {e}"))?;
+                        tokio::task::spawn_blocking(move || {
+                            match crate::tools::file::office::extract_pdf_text_if_pdf(&bytes) {
+                                Some(text) => text,
+                                None => String::from_utf8_lossy(&bytes).into_owned(),
+                            }
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("File decode task failed: {e}"))?
+                    }
+                }
+            };
 
-                let lossy = String::from_utf8_lossy(&bytes).into_owned();
-                Ok(ToolResult {
-                    success: true,
-                    output: lossy,
-                    error: None,
-                })
-            }
+        const AUTO_SMART_LINE_THRESHOLD: usize = 1500;
+        const AUTO_SMART_BYTE_THRESHOLD: usize = 128 * 1024;
+        if !explicit_level
+            && !has_offset
+            && !has_limit
+            && crate::token_saver::is_enabled()
+            && level == crate::token_saver::ReadLevel::Default
+            && (contents.len() >= AUTO_SMART_BYTE_THRESHOLD
+                || contents.lines().count() >= AUTO_SMART_LINE_THRESHOLD)
+        {
+            level = crate::token_saver::ReadLevel::Smart;
         }
-    }
-}
 
-#[cfg(feature = "rag-pdf")]
-fn try_extract_pdf_text(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 5 || &bytes[..5] != b"%PDF-" {
-        return None;
-    }
-    let text = pdf_extract::extract_text_from_mem(bytes).ok()?;
-    if text.trim().is_empty() {
-        return None;
-    }
-    Some(text)
-}
+        if level != crate::token_saver::ReadLevel::Default && crate::token_saver::is_enabled() {
+            contents = crate::token_saver::compact_file_content(path, &contents, level);
+            return Ok(ToolResult {
+                success: true,
+                output: contents,
+                error: None,
+            });
+        }
 
-#[cfg(not(feature = "rag-pdf"))]
-fn try_extract_pdf_text(_bytes: &[u8]) -> Option<String> {
-    None
+        let lines: Vec<&str> = contents.lines().collect();
+        let total = lines.len();
+
+        if total == 0 {
+            return Ok(ToolResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            });
+        }
+
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .map(|v| {
+                usize::try_from(v.max(1))
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(1)
+            })
+            .unwrap_or(0);
+        let start = offset.min(total);
+
+        let end = match args.get("limit").and_then(|v| v.as_u64()) {
+            Some(l) => {
+                let limit = usize::try_from(l).unwrap_or(usize::MAX);
+                (start.saturating_add(limit)).min(total)
+            }
+            None => total,
+        };
+
+        if start >= end {
+            return Ok(ToolResult {
+                success: true,
+                output: format!("[No lines in range, file has {total} lines]"),
+                error: None,
+            });
+        }
+
+        let numbered: String = lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{}: {}", start + i + 1, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let partial = start > 0 || end < total;
+        let summary = if partial {
+            format!("\n[Lines {}-{} of {total}]", start + 1, end)
+        } else {
+            format!("\n[{total} lines total]")
+        };
+
+        Ok(ToolResult {
+            success: true,
+            output: format!("{numbered}{summary}"),
+            error: None,
+        })
+    }
 }

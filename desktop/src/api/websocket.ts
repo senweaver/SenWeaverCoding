@@ -26,6 +26,7 @@ const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'set_runtime_config',
   'start_design_generation',
   'start_plan_execution',
+  'set_debug_submode',
 ])
 
 function isCriticalMessage(message: ClientMessage): boolean {

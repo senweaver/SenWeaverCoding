@@ -169,6 +169,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         saved_models: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
+        lan: crate::config::domain::lan::LanConfig::default(),
         cron: crate::config::CronConfig::default(),
         channels_config,
         memory: memory_config,
@@ -634,6 +635,7 @@ async fn run_quick_setup_with_home(
         saved_models: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
+        lan: crate::config::domain::lan::LanConfig::default(),
         cron: crate::config::CronConfig::default(),
         channels_config: ChannelsConfig::default(),
         memory: memory_config,
@@ -1422,6 +1424,11 @@ fn models_endpoint_for_provider(provider_name: &str) -> Option<&'static str> {
 }
 
 fn build_model_fetch_client() -> Result<reqwest::Client> {
+    if let Some(services) = crate::services::try_get_services() {
+        return Ok(services
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.discover", 8, 4));
+    }
     reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .connect_timeout(Duration::from_secs(4))
@@ -1505,7 +1512,7 @@ fn parse_ollama_model_ids(payload: &Value) -> Vec<String> {
     normalize_model_ids(ids)
 }
 
-async fn fetch_openai_compatible_models(
+pub(crate) async fn fetch_openai_compatible_models(
     endpoint: &str,
     api_key: Option<&str>,
     allow_unauthenticated: bool,
@@ -1550,7 +1557,7 @@ async fn fetch_openrouter_models(api_key: Option<&str>) -> Result<Vec<String>> {
     Ok(parse_openai_compatible_model_ids(&payload))
 }
 
-async fn fetch_anthropic_models(api_key: Option<&str>) -> Result<Vec<String>> {
+pub(crate) async fn fetch_anthropic_models(api_key: Option<&str>) -> Result<Vec<String>> {
     let Some(api_key) = api_key else {
         bail!("Anthropic model fetch requires API key or OAuth token");
     };
@@ -1587,7 +1594,7 @@ async fn fetch_anthropic_models(api_key: Option<&str>) -> Result<Vec<String>> {
     Ok(parse_openai_compatible_model_ids(&payload))
 }
 
-async fn fetch_gemini_models(api_key: Option<&str>) -> Result<Vec<String>> {
+pub(crate) async fn fetch_gemini_models(api_key: Option<&str>) -> Result<Vec<String>> {
     let Some(api_key) = api_key else {
         bail!("Gemini model fetch requires API key");
     };

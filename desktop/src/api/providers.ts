@@ -11,6 +11,8 @@ import type {
   UpdateProviderInput,
   TestProviderConfigInput,
   ProviderTestResult,
+  DiscoverModelsInput,
+  DiscoverModelsResult,
 } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 
@@ -71,5 +73,9 @@ export const providersApi = {
 
   testConfig(input: TestProviderConfigInput) {
     return api.post<TestResultResponse>('/api/providers/test', input)
+  },
+
+  discoverModels(input: DiscoverModelsInput) {
+    return api.post<DiscoverModelsResult>('/api/providers/discover-models', input)
   },
 }

@@ -14,6 +14,7 @@ pub mod classifier;
 pub mod cli_runtime;
 pub mod coding_mode;
 pub mod context;
+pub mod debug;
 pub mod designer;
 pub mod coordination;
 pub mod dangling_tool_repair;

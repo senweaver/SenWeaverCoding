@@ -434,8 +434,11 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
                  `glob_search` / `file_read`; capture excerpts via \
                  `curator_collect(kind=\"note\", path=..., lines=..., excerpt=...)`. \
              (4) Write the COMPLETE `final.md` in ONE response — do NOT stop at an \
-                 outline. Then write `impl_blueprint.md` describing the implementation \
-                 contract precisely. Drafts are an internal artifact, not the goal. \
+                 outline. Open with an Abstract / Executive Summary and ALWAYS close with a \
+                 dedicated «References / 参考文献» heading listing every `[Sn]`/`[Gn]`/`[Ln]` \
+                 source (the exit quality gate rejects documents without it). Then write \
+                 `impl_blueprint.md` describing the implementation contract precisely. \
+                 Drafts are an internal artifact, not the goal. \
              (5) Cite every non-trivial claim as either `[Sn]` from `sources.md` or \
                  `path:lineStart-lineEnd` from the workspace. \
              (6) Call `exit_curator_mode` IMMEDIATELY after `final.md` and \

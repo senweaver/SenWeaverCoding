@@ -127,6 +127,19 @@ pub fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
 
 #[inline]
 #[must_use]
+pub fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut idx = index;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+#[inline]
+#[must_use]
 pub fn truncate_str_bytes(s: &str, max_bytes: usize) -> &str {
     &s[..floor_char_boundary(s, max_bytes)]
 }
@@ -135,6 +148,25 @@ pub fn truncate_string_bytes(s: &mut String, max_bytes: usize) {
     if s.len() > max_bytes {
         let boundary = floor_char_boundary(s, max_bytes);
         s.truncate(boundary);
+    }
+}
+
+pub trait SafeStrSlice {
+    fn byte_prefix(&self, max_bytes: usize) -> &str;
+
+    fn byte_suffix(&self, max_bytes: usize) -> &str;
+}
+
+impl SafeStrSlice for str {
+    #[inline]
+    fn byte_prefix(&self, max_bytes: usize) -> &str {
+        truncate_str_bytes(self, max_bytes)
+    }
+
+    #[inline]
+    fn byte_suffix(&self, max_bytes: usize) -> &str {
+        let start = self.len().saturating_sub(max_bytes);
+        &self[ceil_char_boundary(self, start)..]
     }
 }
 

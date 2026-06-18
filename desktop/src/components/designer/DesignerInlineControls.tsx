@@ -18,6 +18,7 @@ export function DesignerInlineControls({ sessionId }: { sessionId: string }) {
   const t = useTranslation()
   const locale = useSettingsStore((s) => s.locale)
   const catalog = useDesignerStore((s) => s.catalog)
+  const loaded = useDesignerStore((s) => s.loaded)
   const load = useDesignerStore((s) => s.load)
   const selectedId = useDesignerStore(
     (s) => s.sessions[sessionId]?.selectedSubmodeId ?? null,
@@ -29,8 +30,17 @@ export function DesignerInlineControls({ sessionId }: { sessionId: string }) {
   const setParam = useDesignerStore((s) => s.setParam)
 
   useEffect(() => {
+    if (loaded) return
     void load()
-  }, [load])
+    const timer = window.setInterval(() => {
+      if (useDesignerStore.getState().loaded) {
+        window.clearInterval(timer)
+        return
+      }
+      void load()
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [loaded, load])
 
   useEffect(() => {
     const first = catalog[0]

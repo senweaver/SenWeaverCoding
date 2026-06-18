@@ -3073,6 +3073,16 @@ impl SlackChannel {
 
 const SLACK_TRUNCATION_INDICATOR: &str = "\n\n...[message truncated]";
 
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn split_text_into_chunks(text: &str, max_chars: usize, max_chunks: usize) -> Vec<String> {
     if text.len() <= max_chars {
         return vec![text.to_string()];
@@ -3095,7 +3105,10 @@ fn split_text_into_chunks(text: &str, max_chars: usize, max_chunks: usize) -> Ve
                 chunks.push(remaining.to_string());
             } else {
 
-                let avail = max_chars - SLACK_TRUNCATION_INDICATOR.len();
+                let avail = floor_char_boundary(
+                    remaining,
+                    max_chars.saturating_sub(SLACK_TRUNCATION_INDICATOR.len()),
+                );
                 let break_at = remaining[..avail]
                     .rfind('\n')
                     .map(|i| i + 1)
@@ -3108,12 +3121,19 @@ fn split_text_into_chunks(text: &str, max_chars: usize, max_chunks: usize) -> Ve
             break;
         }
 
-        let limit = max_chars.min(remaining.len());
-        let break_at = remaining[..limit]
+        let limit = floor_char_boundary(remaining, max_chars.min(remaining.len()));
+        let mut break_at = remaining[..limit]
             .rfind('\n')
             .map(|i| i + 1)
             .or_else(|| remaining[..limit].rfind(' ').map(|i| i + 1))
             .unwrap_or(limit);
+
+        if break_at == 0 {
+            break_at = remaining
+                .char_indices()
+                .nth(1)
+                .map_or(remaining.len(), |(i, _)| i);
+        }
 
         chunks.push(remaining[..break_at].to_string());
         remaining = &remaining[break_at..];
