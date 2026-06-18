@@ -2464,7 +2464,10 @@ fn build_and_attach_dock_webview(
             .initialization_script(bridge_js)
             .additional_browser_args(
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                 --autoplay-policy=document-user-activation-required",
+                 --autoplay-policy=document-user-activation-required \
+                 --disable-background-timer-throttling \
+                 --disable-renderer-backgrounding \
+                 --disable-backgrounding-occluded-windows",
             )
             .accept_first_mouse(true)
             .on_navigation(move |target: &Url| {

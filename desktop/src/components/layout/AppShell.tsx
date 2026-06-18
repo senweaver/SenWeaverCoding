@@ -46,6 +46,9 @@ import { useActiveTabWorkDir } from '../../lib/activeWorkDir'
 const Settings = lazy(() =>
   import('../../pages/Settings').then((m) => ({ default: m.Settings })),
 )
+const TemplateLibrary = lazy(() =>
+  import('../../pages/TemplateLibrary').then((m) => ({ default: m.TemplateLibrary })),
+)
 import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
 import { DesignerCanvasPanel } from '../designer/DesignerCanvasPanel'
 import { ResizeHandleCanvas } from './ResizeHandleCanvas'
@@ -68,6 +71,7 @@ export function AppShell() {
   const closeWorkspaceFinder = useUIStore((s) => s.closeWorkspaceFinder)
   const activeWorkDir = useActiveTabWorkDir()
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
+  const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
   const terminalPanelOpen = useTerminalPanelStore((s) => s.open)
   const activeChatTabId = useTabStore((s) => s.activeTabId)
   const browserPanelVisible = useBrowserPanelStore((s) =>
@@ -541,6 +545,13 @@ export function AppShell() {
               <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
                 <Suspense fallback={null}>
                   <Settings />
+                </Suspense>
+              </div>
+            )}
+            {templateLibraryOpen && (
+              <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
+                <Suspense fallback={null}>
+                  <TemplateLibrary />
                 </Suspense>
               </div>
             )}

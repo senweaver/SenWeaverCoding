@@ -36,6 +36,7 @@ import { DESIGN_UNIT_DND_MIME } from '../designer/DesignArtifactFrame'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { RichComposer, type RichComposerHandle } from './RichComposer'
 import { isSessionRef, makeCredToken, parseRefSegments, sessionIdFromRef, toRelativeRefPath } from './composerRefs'
+import { isImageFileName } from '../../lib/clipboardImage'
 import { useFileDragStore } from '../../stores/fileDragStore'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { PrivacyBanner } from './PrivacyBanner'
@@ -562,6 +563,37 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     }
   }, [])
 
+  const addImageAttachmentFromPath = useCallback(
+    async (absPath: string, displayName: string) => {
+      try {
+        const core = (await import(/* @vite-ignore */ '@tauri-apps/api/core')) as {
+          invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
+        }
+        const result = await core.invoke<{ mime: string; dataUrl: string }>(
+          'read_local_image_data_url',
+          { path: absPath },
+        )
+        if (!result?.dataUrl) return
+        const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id,
+            name: displayName || 'image',
+            type: 'image',
+            mimeType: result.mime || undefined,
+            previewUrl: result.dataUrl,
+            data: result.dataUrl,
+          },
+        ])
+        requestAnimationFrame(() => composerRef.current?.focus())
+      } catch (err) {
+        console.warn('[chat] failed to load dropped image as attachment', err)
+      }
+    },
+    [],
+  )
+
   useEffect(() => {
     if (isMemberSession || isWorkspaceMissing) return
     const store = useFileDragStore.getState()
@@ -584,11 +616,19 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           if (alreadyReferenced) return
         }
         const name = (payload.name ?? '').trim() || relPath.split('/').pop() || relPath
+        if (!payload.isDir && !isSessionRef(relPath) && isImageFileName(name)) {
+          const cwd = resolvedWorkDirRef.current || ''
+          const abs = cwd
+            ? `${cwd.replace(/[/\\]+$/, '')}/${relPath.replace(/^[/\\]+/, '')}`
+            : relPath
+          void addImageAttachmentFromPath(abs, name)
+          return
+        }
         composerRef.current?.insertRefAtLastCaret(name, relPath)
       },
     })
     return () => store.unregisterZone('chat-composer')
-  }, [isMemberSession, isWorkspaceMissing, activeTabId])
+  }, [isMemberSession, isWorkspaceMissing, activeTabId, addImageAttachmentFromPath])
 
   useEffect(() => {
     if (isMemberSession || isWorkspaceMissing) return
@@ -643,6 +683,10 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             const trimmed = abs.trim()
             if (!trimmed) continue
             const name = baseName(trimmed)
+            if (isImageFileName(name)) {
+              void addImageAttachmentFromPath(trimmed, name)
+              continue
+            }
             const relPath = cwd
               ? toRelativeRefPath(trimmed, cwd, name)
               : trimmed.replace(/\\/g, '/')
@@ -664,7 +708,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
       cancelled = true
       if (unlisten) unlisten()
     }
-  }, [isMemberSession, isWorkspaceMissing])
+  }, [isMemberSession, isWorkspaceMissing, addImageAttachmentFromPath])
 
   useEffect(() => {
     if (!composerPrefill) return
@@ -1089,7 +1133,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
 
     Array.from(files).forEach((file) => {
       const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      const isImage = file.type.startsWith('image/')
+      const isImage = file.type.startsWith('image/') || isImageFileName(file.name)
       const reader = new FileReader()
       reader.onload = () => {
         setAttachments((prev) => [

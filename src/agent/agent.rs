@@ -253,6 +253,8 @@ pub struct Agent {
     cached_tools_signature: u64,
 
     plan_mode_flag: crate::tools::PlanModeFlag,
+
+    last_turn_interrupted: bool,
 }
 
 pub struct AgentBuilder {
@@ -634,6 +636,7 @@ impl AgentBuilder {
             hook_runner: self.hook_runner,
             cached_tools_signature: 0,
             plan_mode_flag: self.plan_mode_flag.unwrap_or_default(),
+            last_turn_interrupted: false,
         })
     }
 
@@ -861,6 +864,7 @@ impl Agent {
                             history_chat.clone(),
                             plan_exec_focus_base_len,
                         );
+                        self.last_turn_interrupted = true;
                         return Err(AgentError::TurnCancelled);
                     }
                     let is_transport_interruption =
@@ -1753,6 +1757,9 @@ impl Agent {
             super::sqlite_gateway_hydrate::hydrate_gateway_sqlite_messages(&cleaned);
         Self::repair_orphan_tool_result_messages(&mut expanded);
         crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut expanded);
+        if crate::agent::dangling_tool_repair::tail_signals_interrupted_turn(&expanded) {
+            self.last_turn_interrupted = true;
+        }
         self.activate_deferred_tools_from_history(&expanded);
         self.history.extend(expanded);
     }
@@ -3008,9 +3015,10 @@ impl Agent {
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
 
         let current_request = format!(
-            "[CURRENT REQUEST - this is the user's latest message and the single \
-             authoritative task to act on right now. Do not resume or answer any earlier \
-             or interrupted request unless the user explicitly asks again.]\n{user_message}"
+            "[CURRENT REQUEST - this is the user's latest message and the primary task to act \
+             on right now. Judge from the conversation context whether it asks to continue an \
+             earlier or interrupted request, or is a new request; act accordingly, and do not \
+             blindly resume an earlier request when the user has moved on.]\n{user_message}"
         );
 
         if context.is_empty() {
@@ -3166,6 +3174,11 @@ impl Agent {
 
         crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut self.history);
         crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+
+        let was_interrupted = std::mem::take(&mut self.last_turn_interrupted);
+        if was_interrupted {
+            crate::agent::dangling_tool_repair::note_interrupted_turn(&mut self.history);
+        }
 
         let mut enriched = Self::build_user_envelope(user_message, &context);
 

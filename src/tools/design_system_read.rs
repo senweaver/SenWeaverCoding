@@ -65,7 +65,7 @@ impl Tool for DesignSystemReadTool {
                 error: Some("Missing required field `id`.".to_string()),
             });
         }
-        if !design_system::is_known(&id) {
+        if !design_system::resolved_is_known(&id) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -77,7 +77,7 @@ impl Tool for DesignSystemReadTool {
 
         match path {
             None | Some("") => {
-                let files = design_system::list_files(&id);
+                let files = design_system::resolved_list_files(&id);
                 Ok(ToolResult {
                     success: true,
                     output: format!(
@@ -91,9 +91,9 @@ impl Tool for DesignSystemReadTool {
                     error: None,
                 })
             }
-            Some(rel) => match design_system::read_file(&id, rel) {
+            Some(rel) => match design_system::resolved_read_file(&id, rel) {
                 Some(content) => {
-                    let mut body = content.to_string();
+                    let mut body = content;
                     let truncated = body.len() > MAX_OUTPUT;
                     if truncated {
                         crate::util::truncate_string_bytes(&mut body, MAX_OUTPUT);

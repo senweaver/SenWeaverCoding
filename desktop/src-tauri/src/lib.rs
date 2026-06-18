@@ -1060,6 +1060,63 @@ fn reveal_in_explorer_blocking(path: String) -> Result<(), String> {
     Err("unsupported platform".to_string())
 }
 
+#[derive(serde::Serialize)]
+struct LocalImageData {
+    mime: String,
+    #[serde(rename = "dataUrl")]
+    data_url: String,
+}
+
+const MAX_LOCAL_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+fn image_mime_from_ext(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "heic" | "heif" => "image/heic",
+        "tif" | "tiff" => "image/tiff",
+        _ => return None,
+    })
+}
+
+#[tauri::command]
+async fn read_local_image_data_url(path: String) -> Result<LocalImageData, String> {
+    tauri::async_runtime::spawn_blocking(move || read_local_image_data_url_blocking(path))
+        .await
+        .map_err(|err| format!("read image task failed: {err}"))?
+}
+
+fn read_local_image_data_url_blocking(path: String) -> Result<LocalImageData, String> {
+    use base64::Engine as _;
+
+    let p = PathBuf::from(&path);
+    let meta = std::fs::metadata(&p).map_err(|e| format!("cannot stat {path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    if meta.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(format!(
+            "image too large ({} bytes, max {MAX_LOCAL_IMAGE_BYTES})",
+            meta.len()
+        ));
+    }
+    let mime =
+        image_mime_from_ext(&p).ok_or_else(|| format!("unsupported image type: {path}"))?;
+    let bytes = std::fs::read(&p).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(LocalImageData {
+        mime: mime.to_string(),
+        data_url: format!("data:{mime};base64,{b64}"),
+    })
+}
+
 pub fn run() {
     let log_dir = sen_log_dir();
     bootstrap_diag::install_tracing(log_dir.as_deref());
@@ -1088,6 +1145,7 @@ pub fn run() {
             prepare_for_update_install,
             signal_frontend_ready,
             reveal_in_explorer,
+            read_local_image_data_url,
             curator_render_docx_with_diagrams,
             terminal::terminal_spawn,
             terminal::terminal_write,

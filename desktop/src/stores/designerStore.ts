@@ -31,6 +31,7 @@ type DesignerState = {
   sessions: Record<string, DesignerSessionState>
 
   load: () => Promise<void>
+  refresh: () => Promise<void>
   selectSubmode: (sessionId: string, id: string) => void
   setParam: (sessionId: string, submodeId: string, key: string, value: unknown) => void
 }
@@ -62,6 +63,29 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
 
   load: async () => {
     if (get().loaded || get().loading) return
+    set({ loading: true })
+    try {
+      const [res, ds, pt, ht] = await Promise.all([
+        designerApi.submodes(),
+        designerApi.designSystems().catch(() => ({ designSystems: [] })),
+        designerApi.promptTemplates().catch(() => ({ promptTemplates: [] })),
+        designerApi.htmlTemplates().catch(() => ({ htmlTemplates: [] })),
+      ])
+      set({
+        catalog: res.submodes ?? [],
+        designSystems: ds.designSystems ?? [],
+        promptTemplates: pt.promptTemplates ?? [],
+        htmlTemplates: ht.htmlTemplates ?? [],
+        loaded: true,
+        loading: false,
+      })
+    } catch {
+      set({ loading: false })
+    }
+  },
+
+  refresh: async () => {
+    if (get().loading) return
     set({ loading: true })
     try {
       const [res, ds, pt, ht] = await Promise.all([

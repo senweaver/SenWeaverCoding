@@ -4,6 +4,7 @@
 
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 static HTML_TEMPLATES_DIR: Dir<'static> =
@@ -110,8 +111,25 @@ pub fn read(id: &str) -> Option<&'static str> {
         .and_then(|f| f.contents_utf8())
 }
 
+pub fn read_member(id: &str, file: &str) -> Option<&'static str> {
+    let id = id.trim();
+    let file = file.trim();
+    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') {
+        return None;
+    }
+    if file.is_empty() || file.contains("..") || file.contains('\\') || file.starts_with('/') {
+        return None;
+    }
+    if !is_known(id) {
+        return None;
+    }
+    HTML_TEMPLATES_DIR
+        .get_file(format!("{id}/{file}"))
+        .and_then(|f| f.contents_utf8())
+}
+
 pub fn injection(id: &str) -> Option<String> {
-    let meta = meta_for(id)?;
+    let meta = resolved_meta(id)?;
     let mut out = format!(
         "\n\n## Built-in starting template — {title} ({id})\n\n\
          The user picked this curated, self-contained HTML template as the starting point. \
@@ -129,4 +147,71 @@ pub fn injection(id: &str) -> Option<String> {
         out.push_str(&format!("\nTemplate tags: {}", meta.tags.join(", ")));
     }
     Some(out)
+}
+
+fn library_store() -> Option<&'static crate::services::TemplateLibraryStore> {
+    crate::services::try_get_services().map(|s| &s.template_library)
+}
+
+pub fn resolved_is_known(id: &str) -> bool {
+    if is_known(id) {
+        return true;
+    }
+    library_store()
+        .map(|s| s.exists(&format!("designer-templates/{id}/{TEMPLATE_FILE}")))
+        .unwrap_or(false)
+}
+
+fn resolved_meta(id: &str) -> Option<HtmlTemplateMeta> {
+    if let Some(store) = library_store() {
+        if let Some(raw) = store.read(&format!("designer-templates/{id}/manifest.json")) {
+            if let Some(meta) = parse_manifest(&raw, id) {
+                return Some(meta);
+            }
+        }
+    }
+    meta_for(id).cloned()
+}
+
+pub fn resolved_read(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') {
+        return None;
+    }
+    if !resolved_is_known(id) {
+        return None;
+    }
+    if let Some(store) = library_store() {
+        if let Some(content) = store.read(&format!("designer-templates/{id}/{TEMPLATE_FILE}")) {
+            return Some(content);
+        }
+    }
+    read(id).map(str::to_string)
+}
+
+pub fn resolved_catalog() -> Vec<HtmlTemplateMeta> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out: Vec<HtmlTemplateMeta> = Vec::new();
+    for m in catalog() {
+        seen.insert(m.id.clone());
+        out.push(resolved_meta(&m.id).unwrap_or_else(|| m.clone()));
+    }
+    if let Some(store) = library_store() {
+        let mut extra: Vec<String> = store
+            .child_dirs("designer-templates")
+            .into_iter()
+            .filter(|id| {
+                !seen.contains(id)
+                    && store.exists(&format!("designer-templates/{id}/{TEMPLATE_FILE}"))
+                    && store.exists(&format!("designer-templates/{id}/manifest.json"))
+            })
+            .collect();
+        extra.sort();
+        for id in extra {
+            if let Some(meta) = resolved_meta(&id) {
+                out.push(meta);
+            }
+        }
+    }
+    out
 }

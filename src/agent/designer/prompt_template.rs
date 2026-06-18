@@ -4,6 +4,7 @@
 
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 static PROMPT_TEMPLATES_DIR: Dir<'static> =
@@ -130,4 +131,87 @@ pub fn title_for(surface: &str, id: &str) -> Option<String> {
         .iter()
         .find(|m| m.surface == surface && m.id == id)
         .map(|m| m.title.clone())
+}
+
+pub fn read_raw(surface: &str, id: &str) -> Option<&'static str> {
+    if !is_surface(surface) {
+        return None;
+    }
+    let id = id.trim();
+    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') {
+        return None;
+    }
+    PROMPT_TEMPLATES_DIR
+        .get_file(format!("{surface}/{id}.json"))
+        .and_then(|f| f.contents_utf8())
+}
+
+fn library_store() -> Option<&'static crate::services::TemplateLibraryStore> {
+    crate::services::try_get_services().map(|s| &s.template_library)
+}
+
+pub fn resolved_read(surface: &str, id: &str) -> Option<PromptTemplateDetail> {
+    if !is_surface(surface) {
+        return None;
+    }
+    let id = id.trim();
+    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') {
+        return None;
+    }
+    if let Some(store) = library_store() {
+        if let Some(raw) = store.read(&format!("prompt-templates/{surface}/{id}.json")) {
+            if let Some(detail) = parse(&raw, surface, id) {
+                return Some(detail);
+            }
+        }
+    }
+    read(surface, id)
+}
+
+pub fn resolved_catalog() -> Vec<PromptTemplateMeta> {
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut out: Vec<PromptTemplateMeta> = Vec::new();
+    for m in catalog() {
+        seen.insert((m.surface.clone(), m.id.clone()));
+        let mut meta = m.clone();
+        if let Some(store) = library_store() {
+            if let Some(raw) =
+                store.read(&format!("prompt-templates/{}/{}.json", m.surface, m.id))
+            {
+                if let Some(detail) = parse(&raw, &m.surface, &m.id) {
+                    meta = detail.meta;
+                }
+            }
+        }
+        out.push(meta);
+    }
+    if let Some(store) = library_store() {
+        let mut extra: Vec<PromptTemplateMeta> = Vec::new();
+        for surface in SURFACES {
+            for f in store.list_files(&format!("prompt-templates/{surface}")) {
+                let Some(fname) = f.rsplit('/').next() else {
+                    continue;
+                };
+                let Some(id) = fname.strip_suffix(".json") else {
+                    continue;
+                };
+                if seen.contains(&(surface.to_string(), id.to_string())) {
+                    continue;
+                }
+                let Some(raw) = store.read(&f) else {
+                    continue;
+                };
+                if let Some(detail) = parse(&raw, surface, id) {
+                    extra.push(detail.meta);
+                }
+            }
+        }
+        extra.sort_by(|a, b| {
+            a.surface
+                .cmp(&b.surface)
+                .then_with(|| a.title.to_ascii_lowercase().cmp(&b.title.to_ascii_lowercase()))
+        });
+        out.extend(extra);
+    }
+    out
 }

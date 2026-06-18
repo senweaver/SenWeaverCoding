@@ -160,6 +160,7 @@ type UIStore = {
 
   settingsOverlayOpen: boolean
   pendingSettingsTab: SettingsTab | null
+  templateLibraryOpen: boolean
   activeModal: string | null
   workspaceFinderMode: WorkspaceFinderMode | null
   editorCursor: EditorCursor | null
@@ -179,6 +180,9 @@ type UIStore = {
   closeSettingsOverlay: () => void
   toggleSettingsOverlay: (tab?: SettingsTab) => void
   setPendingSettingsTab: (tab: SettingsTab | null) => void
+  openTemplateLibrary: () => void
+  closeTemplateLibrary: () => void
+  toggleTemplateLibrary: () => void
   openModal: (id: string) => void
   closeModal: () => void
   openWorkspaceFinder: (mode: WorkspaceFinderMode) => void
@@ -201,6 +205,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   activeView: 'code',
   settingsOverlayOpen: false,
   pendingSettingsTab: null,
+  templateLibraryOpen: false,
   activeModal: null,
   workspaceFinderMode: null,
   editorCursor: null,
@@ -264,6 +269,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
       }
     }),
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
+  openTemplateLibrary: () => set({ templateLibraryOpen: true }),
+  closeTemplateLibrary: () => set({ templateLibraryOpen: false }),
+  toggleTemplateLibrary: () => set((s) => ({ templateLibraryOpen: !s.templateLibraryOpen })),
   openModal: (id) => set({ activeModal: id }),
   closeModal: () => set({ activeModal: null }),
 

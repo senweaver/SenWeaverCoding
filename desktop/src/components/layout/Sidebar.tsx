@@ -87,6 +87,7 @@ export function Sidebar() {
   const addToast = useUIStore((s) => s.addToast)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
+  const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const designerCanvasOpen = useDesignerCanvasStore((s) =>
     activeTabId ? s.panels[activeTabId]?.visible ?? false : false,
@@ -534,6 +535,23 @@ export function Sidebar() {
         >
           <span className="material-symbols-outlined text-[16px]">share</span>
         </button>
+        <button
+          type="button"
+          data-template-library-toggle
+          onClick={() => useUIStore.getState().toggleTemplateLibrary()}
+          title={t('templateLibrary.open')}
+          aria-label={t('templateLibrary.open')}
+          aria-pressed={templateLibraryOpen}
+          className={
+            `relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+              templateLibraryOpen
+                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
+                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+            }`
+          }
+        >
+          <span className="material-symbols-outlined text-[16px]">dashboard_customize</span>
+        </button>
         <a
           href="https://github.com/senweaver/SenWeaverCoding"
           target="_blank"
@@ -646,7 +664,7 @@ export function Sidebar() {
                             aria-expanded={wsOpen}
                             aria-label={wsOpen ? t('sidebar.collapseWorkspace') : t('sidebar.expandWorkspace')}
                             title={ws.workspacePath || ws.workspaceLabel}
-                            className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1 pr-8 text-left text-xs font-semibold tracking-wide text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
+                            className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1 pr-14 text-left text-xs font-semibold tracking-wide text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)]"
                           >
                             <ChevronRightIcon open={wsOpen} />
                             <FolderIcon existing={ws.workspaceExists} />
@@ -663,6 +681,35 @@ export function Sidebar() {
                               {ws.totalCount}
                             </span>
                           </button>
+                          {ws.workspaceExists && ws.workspaceKey !== WORKSPACE_UNKNOWN_KEY && (
+                            <button
+                              type="button"
+                              onClick={async (e) => {
+                                e.stopPropagation()
+                                try {
+                                  const sessionId = await useSessionStore
+                                    .getState()
+                                    .createSession(ws.workspacePath)
+                                  useTabStore.getState().openTab(sessionId, t('sidebar.newSession'))
+                                  focusSession(sessionId)
+                                } catch (error) {
+                                  addToast({
+                                    type: 'error',
+                                    message:
+                                      error instanceof Error
+                                        ? error.message
+                                        : t('sidebar.sessionListFailed'),
+                                  })
+                                }
+                              }}
+                              aria-label={t('sidebar.newSessionInWorkspaceAria')}
+                              title={t('sidebar.newSessionInWorkspaceAria')}
+                              data-testid={`sidebar-workspace-new-session-${ws.workspaceKey}`}
+                              className="absolute right-8 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[var(--color-text-tertiary)] opacity-0 transition-opacity duration-150 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] group-hover/ws:opacity-100"
+                            >
+                              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">add</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => {

@@ -3,10 +3,10 @@
 // Licensed under the MIT License.
 
 use super::docx::render_docx;
-use super::state::{
-    CuratorActive, CuratorState, CuratorTemplateKind, PendingCurator, PendingCuratorPayload,
+use super::state::{CuratorActive, CuratorState, PendingCurator, PendingCuratorPayload};
+use super::templates::{
+    list_summary, resolved_all, resolved_for, resolved_or_default, ResolvedCuratorTemplate,
 };
-use super::templates::{list_summary, template_for};
 use crate::security::SecurityPolicy;
 use crate::tools::plan_mode::enter::PlanModeFlag;
 use crate::tools::traits::{Tool, ToolResult};
@@ -21,6 +21,38 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 pub type CuratorModeFlag = Arc<CuratorModeRegistry>;
+
+const CURATOR_BUILTIN_TEMPLATE_IDS: &[&str] = &[
+    "paper_imrad",
+    "paper_apa",
+    "paper_mla",
+    "paper_chicago",
+    "paper_gb7714",
+    "solution_functional",
+    "solution_gb8567_2006",
+    "solution_gb8567_1988",
+    "solution_ieee830",
+    "solution_iso29148",
+    "solution_iso42010",
+    "solution_ieee1016",
+    "solution_iso12207",
+    "tech_report",
+    "paper",
+    "solution",
+];
+
+fn curator_template_enum() -> Vec<serde_json::Value> {
+    let mut ids: Vec<String> = CURATOR_BUILTIN_TEMPLATE_IDS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    for tpl in resolved_all() {
+        if !ids.iter().any(|id| id == &tpl.id) {
+            ids.push(tpl.id.clone());
+        }
+    }
+    ids.into_iter().map(serde_json::Value::from).collect()
+}
 
 #[derive(Default)]
 pub struct CuratorModeRegistry {
@@ -120,15 +152,8 @@ impl Tool for EnterCuratorModeTool {
                 "intent": { "type": "string", "description": "Concise restatement of the user's goal (1–3 sentences)." },
                 "template": {
                     "type": "string",
-                    "enum": [
-                        "paper_imrad","paper_apa","paper_mla","paper_chicago","paper_gb7714",
-                        "solution_functional",
-                        "solution_gb8567_2006","solution_gb8567_1988",
-                        "solution_ieee830","solution_iso29148","solution_iso42010","solution_ieee1016","solution_iso12207",
-                        "tech_report",
-                        "paper","solution"
-                    ],
-                    "description": "Target document template. Aliases: `paper` → paper_imrad, `solution` → solution_functional."
+                    "enum": curator_template_enum(),
+                    "description": "Target document template. Aliases: `paper` → paper_imrad, `solution` → solution_functional. Custom templates from the user template library are also included; call `curator_template_list` to discover their ids."
                 },
                 "slug": { "type": "string", "description": "Optional explicit slug for the `.senweavercoding/curators/<slug>/` directory. Multiple parallel curator sessions in the same workspace are supported  -  each one lives under its own slug; if the chosen slug already exists, a numeric suffix is appended automatically (e.g. `my-doc`, `my-doc-2`, `my-doc-3`)." }
             },
@@ -144,11 +169,15 @@ impl Tool for EnterCuratorModeTool {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("enter_curator_mode requires non-empty 'intent'"))?
             .to_string();
-        let template = args
+        let resolved = args
             .get("template")
             .and_then(|v| v.as_str())
-            .map(CuratorTemplateKind::from_str_loose)
-            .unwrap_or_default();
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(resolved_for)
+            .unwrap_or_else(|| resolved_or_default(""));
+        let base_kind = resolved.base_kind;
+        let template_id = resolved.id.clone();
         let explicit_slug = args.get("slug").and_then(|v| v.as_str()).map(str::trim);
         let workspace = self.workspace_root.read().clone();
         let workspace = if workspace.as_os_str().is_empty() {
@@ -166,7 +195,7 @@ impl Tool for EnterCuratorModeTool {
             let intent_seed = intent.clone();
             let now_seed = now.clone();
             tokio::task::spawn_blocking(move || {
-                enter_curator_init(workspace, base_slug, template, &intent_seed, &now_seed)
+                enter_curator_init(workspace, base_slug, resolved, &intent_seed, &now_seed)
             })
             .await
             .map_err(|e| anyhow::anyhow!("enter_curator_mode internal task error: {e}"))??
@@ -182,7 +211,8 @@ impl Tool for EnterCuratorModeTool {
         self.state.set(CuratorActive {
             slug: slug.clone(),
             intent: intent.clone(),
-            template,
+            template: base_kind,
+            template_id: template_id.clone(),
             root_dir: curator_root.clone(),
             started_at: now.clone(),
         });
@@ -894,7 +924,7 @@ impl Tool for CuratorTemplateListTool {
     }
 
     fn description(&self) -> &str {
-        "List all bundled Curator document templates  -  5 academic paper styles (IMRaD / APA 7 / MLA 9 / Chicago 17-18 / GB/T 7714), 8 software solution standards (Functional / GB/T 8567-2006 / 1988 / IEEE 830 / ISO 29148 / ISO 42010 / IEEE 1016 / ISO 12207), and 1 technical report."
+        "List all Curator document templates  -  5 academic paper styles (IMRaD / APA 7 / MLA 9 / Chicago 17-18 / GB/T 7714), 8 software solution standards (Functional / GB/T 8567-2006 / 1988 / IEEE 830 / ISO 29148 / ISO 42010 / IEEE 1016 / ISO 12207), 1 technical report, plus any custom templates added through the user template library."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -937,15 +967,8 @@ impl Tool for CuratorTemplateApplyTool {
             "properties": {
                 "template": {
                     "type": "string",
-                    "enum": [
-                        "paper_imrad","paper_apa","paper_mla","paper_chicago","paper_gb7714",
-                        "solution_functional",
-                        "solution_gb8567_2006","solution_gb8567_1988",
-                        "solution_ieee830","solution_iso29148","solution_iso42010","solution_ieee1016","solution_iso12207",
-                        "tech_report",
-                        "paper","solution"
-                    ],
-                    "description": "Template id to apply. Aliases: `paper` → paper_imrad, `solution` → solution_functional."
+                    "enum": curator_template_enum(),
+                    "description": "Template id to apply. Aliases: `paper` → paper_imrad, `solution` → solution_functional. Custom templates from the user template library are also included; call `curator_template_list` to discover their ids."
                 },
                 "include_blueprint": { "type": "boolean", "description": "Also reset impl_blueprint.md (default true)." },
                 "force": { "type": "boolean", "description": "Overwrite even if draft.md was already edited (default false)." }
@@ -955,11 +978,13 @@ impl Tool for CuratorTemplateApplyTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let template = args
+        let resolved = args
             .get("template")
             .and_then(|v| v.as_str())
-            .map(CuratorTemplateKind::from_str_loose)
-            .ok_or_else(|| anyhow::anyhow!("curator_template_apply requires 'template'"))?;
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(resolved_for)
+            .ok_or_else(|| anyhow::anyhow!("curator_template_apply requires a known 'template'"))?;
         let include_blueprint = args
             .get("include_blueprint")
             .and_then(|v| v.as_bool())
@@ -970,10 +995,10 @@ impl Tool for CuratorTemplateApplyTool {
             .get()
             .ok_or_else(|| anyhow::anyhow!("curator_template_apply requires an active Curator session."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
-        let info = template_for(template);
-        let kind_label = info.kind.label().to_string();
-        let draft_bytes = compose_draft_with_banner(info.draft_markdown).into_bytes();
-        let blueprint_bytes = info.blueprint_markdown.as_bytes().to_vec();
+        let base_kind = resolved.base_kind;
+        let kind_label = resolved.id.clone();
+        let draft_bytes = compose_draft_with_banner(&resolved.draft_markdown).into_bytes();
+        let blueprint_bytes = resolved.blueprint_markdown.as_bytes().to_vec();
         let prep = {
             let root = active.root_dir.clone();
             tokio::task::spawn_blocking(move || -> anyhow::Result<TemplateApplyPrep> {
@@ -1043,7 +1068,7 @@ impl Tool for CuratorTemplateApplyTool {
             }
         };
 
-        self.state.set_template(template);
+        self.state.set_template_with_id(base_kind, kind_label.clone());
         Ok(ToolResult {
             success: true,
             output: format!("Applied template `{}` to: {}", kind_label, applied.join(", ")),
@@ -1437,7 +1462,7 @@ struct EnterInit {
 fn enter_curator_init(
     workspace: std::path::PathBuf,
     base_slug: String,
-    template: CuratorTemplateKind,
+    template: ResolvedCuratorTemplate,
     intent: &str,
     now: &str,
 ) -> anyhow::Result<EnterInit> {
@@ -1447,15 +1472,14 @@ fn enter_curator_init(
     std::fs::create_dir_all(&curator_root)?;
     write_placeholder(&curator_root, "research_notes.md", &research_seed(intent, now))?;
     write_placeholder(&curator_root, "sources.md", &sources_seed(intent, now))?;
-    let tpl = template_for(template);
-    let draft_with_banner = compose_draft_with_banner(tpl.draft_markdown);
+    let draft_with_banner = compose_draft_with_banner(&template.draft_markdown);
     write_placeholder(&curator_root, "draft.md", &draft_with_banner)?;
     write_placeholder(
         &curator_root,
         "final.md",
         "# (final.md  -  populated by exit_curator_mode)\n",
     )?;
-    write_placeholder(&curator_root, "impl_blueprint.md", tpl.blueprint_markdown)?;
+    write_placeholder(&curator_root, "impl_blueprint.md", &template.blueprint_markdown)?;
 
     let placeholder_paths = [
         "research_notes.md",
@@ -1476,7 +1500,7 @@ fn enter_curator_init(
         slug,
         curator_root,
         created,
-        kind_label: tpl.kind.label().to_string(),
+        kind_label: template.id.clone(),
     })
 }
 

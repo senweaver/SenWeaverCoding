@@ -5127,7 +5127,7 @@ pub async fn handle_designer_design_systems(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let systems = crate::agent::designer::design_system::catalog();
+    let systems = crate::agent::designer::design_system::resolved_catalog();
     Json(serde_json::json!({ "designSystems": systems })).into_response()
 }
 
@@ -5138,7 +5138,7 @@ pub async fn handle_designer_prompt_templates(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let templates = crate::agent::designer::prompt_template::catalog();
+    let templates = crate::agent::designer::prompt_template::resolved_catalog();
     Json(serde_json::json!({ "promptTemplates": templates })).into_response()
 }
 
@@ -5149,7 +5149,7 @@ pub async fn handle_designer_html_templates(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let templates = crate::agent::designer::html_template::catalog();
+    let templates = crate::agent::designer::html_template::resolved_catalog();
     Json(serde_json::json!({ "htmlTemplates": templates })).into_response()
 }
 
@@ -6033,13 +6033,13 @@ pub async fn handle_session_design_unit_add(
     let (content, default_stem): (String, String) = match body.source.as_str() {
         "template" => {
             let template_id = body.template_id.as_deref().unwrap_or_default().trim();
-            let Some(html) = crate::agent::designer::html_template::read(template_id) else {
+            let Some(html) = crate::agent::designer::html_template::resolved_read(template_id) else {
                 return Json(serde_json::json!({ "ok": false, "error": "unknown template" }))
                     .into_response();
             };
             let stem = crate::agent::designer::html_template::title_for(template_id)
                 .unwrap_or_else(|| template_id.to_string());
-            (html.to_string(), stem)
+            (html, stem)
         }
         "html" => {
             let html = body.html.as_deref().unwrap_or_default();
@@ -9077,5 +9077,617 @@ pub async fn handle_auto_dream_task_delete(
             Json(serde_json::json!({"error": "task not found"})),
         )
             .into_response()
+    }
+}
+
+fn tl_store() -> Option<&'static crate::services::TemplateLibraryStore> {
+    crate::services::try_get_services().map(|s| &s.template_library)
+}
+
+fn tl_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn tl_builtin_content(path: &str) -> Option<String> {
+    use crate::agent::designer::{design_system, html_template, prompt_template};
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        ["design-systems", id, rest @ ..] if !rest.is_empty() => {
+            let rel = rest.join("/");
+            design_system::read_file(id, &rel).map(str::to_string)
+        }
+        ["designer-templates", id, file] => {
+            html_template::read_member(id, file).map(str::to_string)
+        }
+        ["prompt-templates", surface, file] => {
+            let id = file.strip_suffix(".json")?;
+            prompt_template::read_raw(surface, id).map(str::to_string)
+        }
+        #[cfg(feature = "tool-curator")]
+        ["curator-templates", file] => {
+            let id = file.strip_suffix(".json")?;
+            crate::tools::curator::templates::builtin_json(id)
+        }
+        _ => None,
+    }
+}
+
+fn tl_resolved_content(path: &str) -> Option<String> {
+    if let Some(store) = tl_store() {
+        if let Some(content) = store.read(path) {
+            return Some(content);
+        }
+    }
+    tl_builtin_content(path)
+}
+
+fn tl_file_status(path: &str) -> &'static str {
+    let store = match tl_store() {
+        Some(s) => s,
+        None => return "builtin",
+    };
+    let overlay = store.exists(path);
+    match tl_builtin_content(path) {
+        Some(builtin) => {
+            if !overlay {
+                return "builtin";
+            }
+            match store.baseline_hash(path) {
+                Some(base) => {
+                    let current =
+                        crate::services::template_library::content_hash(builtin.as_bytes());
+                    if base != current {
+                        "stale"
+                    } else {
+                        "customized"
+                    }
+                }
+                None => "customized",
+            }
+        }
+        None => {
+            if overlay {
+                "user"
+            } else {
+                "builtin"
+            }
+        }
+    }
+}
+
+fn tl_file_entry(path: &str, file: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": path,
+        "file": file,
+        "status": tl_file_status(path),
+    })
+}
+
+fn tl_rollup(files: &[serde_json::Value]) -> (bool, bool) {
+    let mut customized = false;
+    let mut stale = false;
+    for f in files {
+        match f.get("status").and_then(|s| s.as_str()) {
+            Some("stale") => {
+                stale = true;
+                customized = true;
+            }
+            Some("customized") => customized = true,
+            _ => {}
+        }
+    }
+    (customized, stale)
+}
+
+fn tl_design_systems() -> Vec<serde_json::Value> {
+    use crate::agent::designer::design_system;
+    let mut out = Vec::new();
+    for meta in design_system::resolved_catalog() {
+        let builtin = design_system::is_known(&meta.id);
+        let mut files = Vec::new();
+        for rel in design_system::resolved_list_files(&meta.id) {
+            let path = format!("design-systems/{}/{}", meta.id, rel);
+            files.push(tl_file_entry(&path, &rel));
+        }
+        let (customized, stale) = tl_rollup(&files);
+        out.push(serde_json::json!({
+            "kind": "design-system",
+            "id": meta.id,
+            "name": meta.name,
+            "category": meta.category,
+            "description": meta.description,
+            "source": if builtin { "builtin" } else { "user" },
+            "customized": customized,
+            "stale": stale,
+            "files": files,
+        }));
+    }
+    out
+}
+
+fn tl_designer_templates() -> Vec<serde_json::Value> {
+    use crate::agent::designer::html_template;
+    let mut out = Vec::new();
+    for meta in html_template::resolved_catalog() {
+        let builtin = html_template::is_known(&meta.id);
+        let mut files = Vec::new();
+        for file in ["manifest.json", "template.html"] {
+            let path = format!("designer-templates/{}/{}", meta.id, file);
+            files.push(tl_file_entry(&path, file));
+        }
+        let (customized, stale) = tl_rollup(&files);
+        out.push(serde_json::json!({
+            "kind": "designer-template",
+            "id": meta.id,
+            "name": meta.title,
+            "category": meta.category,
+            "description": meta.summary,
+            "tags": meta.tags,
+            "source": if builtin { "builtin" } else { "user" },
+            "customized": customized,
+            "stale": stale,
+            "files": files,
+        }));
+    }
+    out
+}
+
+fn tl_prompt_templates() -> Vec<serde_json::Value> {
+    use crate::agent::designer::prompt_template;
+    let mut out = Vec::new();
+    for meta in prompt_template::resolved_catalog() {
+        let builtin = prompt_template::read_raw(&meta.surface, &meta.id).is_some();
+        let path = format!("prompt-templates/{}/{}.json", meta.surface, meta.id);
+        let files = vec![tl_file_entry(&path, &format!("{}.json", meta.id))];
+        let (customized, stale) = tl_rollup(&files);
+        out.push(serde_json::json!({
+            "kind": "prompt-template",
+            "id": meta.id,
+            "surface": meta.surface,
+            "name": meta.title,
+            "category": meta.category,
+            "description": meta.summary,
+            "model": meta.model,
+            "aspect": meta.aspect,
+            "previewImageUrl": meta.preview_image_url,
+            "previewVideoUrl": meta.preview_video_url,
+            "source": if builtin { "builtin" } else { "user" },
+            "customized": customized,
+            "stale": stale,
+            "files": files,
+        }));
+    }
+    out
+}
+
+#[cfg(feature = "tool-curator")]
+fn tl_curator_templates() -> Vec<serde_json::Value> {
+    use crate::tools::curator::templates;
+    let mut out = Vec::new();
+    for tpl in templates::resolved_all() {
+        let path = format!("curator-templates/{}.json", tpl.id);
+        let files = vec![tl_file_entry(&path, &format!("{}.json", tpl.id))];
+        let (customized, stale) = tl_rollup(&files);
+        out.push(serde_json::json!({
+            "kind": "curator-template",
+            "id": tpl.id,
+            "name": tpl.display_name,
+            "category": tpl.base_kind.label(),
+            "description": tpl.description,
+            "source": if tpl.builtin { "builtin" } else { "user" },
+            "customized": customized,
+            "stale": stale,
+            "files": files,
+        }));
+    }
+    out
+}
+
+#[cfg(not(feature = "tool-curator"))]
+fn tl_curator_templates() -> Vec<serde_json::Value> {
+    Vec::new()
+}
+
+pub async fn handle_template_library_catalog(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    Json(serde_json::json!({
+        "designSystems": tl_design_systems(),
+        "designerTemplates": tl_designer_templates(),
+        "promptTemplates": tl_prompt_templates(),
+        "curatorTemplates": tl_curator_templates(),
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateLibraryFileQuery {
+    pub path: String,
+}
+
+pub async fn handle_template_library_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TemplateLibraryFileQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !tl_valid_path(&q.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "invalid path" })),
+        )
+            .into_response();
+    }
+    match tl_resolved_content(&q.path) {
+        Some(content) => Json(serde_json::json!({
+            "ok": true,
+            "path": q.path,
+            "status": tl_file_status(&q.path),
+            "content": content,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "not found" })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_template_library_builtin_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TemplateLibraryFileQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !tl_valid_path(&q.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "invalid path" })),
+        )
+            .into_response();
+    }
+    match tl_builtin_content(&q.path) {
+        Some(content) => Json(serde_json::json!({
+            "ok": true,
+            "path": q.path,
+            "content": content,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "no built-in baseline" })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateLibrarySaveBody {
+    pub path: String,
+    pub content: String,
+}
+
+fn tl_valid_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|p| {
+        p.is_empty() || *p == "." || *p == ".." || p.starts_with('.') || p.ends_with(".tmp")
+    }) {
+        return false;
+    }
+    matches!(
+        parts.first().copied(),
+        Some("design-systems")
+            | Some("designer-templates")
+            | Some("prompt-templates")
+            | Some("curator-templates")
+    )
+}
+
+pub async fn handle_template_library_save(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TemplateLibrarySaveBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !tl_valid_path(&body.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "invalid path" })),
+        )
+            .into_response();
+    }
+    let Some(store) = tl_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "store unavailable" })),
+        )
+            .into_response();
+    };
+    let baseline = tl_builtin_content(&body.path)
+        .map(|c| crate::services::template_library::content_hash(c.as_bytes()));
+    match store.save(&body.path, &body.content, baseline) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "path": body.path,
+            "status": tl_file_status(&body.path),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateLibraryResetBody {
+    pub path: String,
+}
+
+pub async fn handle_template_library_reset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TemplateLibraryResetBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !tl_valid_path(&body.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "invalid path" })),
+        )
+            .into_response();
+    }
+    let Some(store) = tl_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "store unavailable" })),
+        )
+            .into_response();
+    };
+    match store.remove(&body.path) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "path": body.path,
+            "status": tl_file_status(&body.path),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateLibraryCreateBody {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub surface: Option<String>,
+    #[serde(default)]
+    pub base_kind: Option<String>,
+}
+
+pub async fn handle_template_library_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TemplateLibraryCreateBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(store) = tl_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "store unavailable" })),
+        )
+            .into_response();
+    };
+    let id = body.id.trim().to_string();
+    if !tl_valid_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "invalid id" })),
+        )
+            .into_response();
+    }
+    let name = body.name.clone().unwrap_or_else(|| id.clone());
+    let description = body.description.clone().unwrap_or_default();
+    let category = body.category.clone().unwrap_or_else(|| "Custom".to_string());
+    let writes: Vec<(String, String)> = match body.kind.as_str() {
+        "design-system" => {
+            let manifest = serde_json::json!({
+                "id": id,
+                "name": name,
+                "category": category,
+                "description": description,
+            });
+            vec![
+                (
+                    format!("design-systems/{id}/manifest.json"),
+                    serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+                ),
+                (
+                    format!("design-systems/{id}/DESIGN.md"),
+                    format!("# {name}\n\n{description}\n"),
+                ),
+                (
+                    format!("design-systems/{id}/tokens.css"),
+                    ":root {\n  --color-bg: #ffffff;\n  --color-fg: #111111;\n  --color-accent: #3b82f6;\n  --radius: 12px;\n  --space: 16px;\n}\n".to_string(),
+                ),
+                (
+                    format!("design-systems/{id}/components.html"),
+                    "<section style=\"padding:var(--space);background:var(--color-bg);color:var(--color-fg)\">\n  <h1>Sample component</h1>\n  <button style=\"background:var(--color-accent);color:#fff;border:0;border-radius:var(--radius);padding:8px 16px\">Action</button>\n</section>\n".to_string(),
+                ),
+            ]
+        }
+        "designer-template" => {
+            let manifest = serde_json::json!({
+                "id": id,
+                "title": name,
+                "category": category,
+                "summary": description,
+                "tags": [],
+            });
+            vec![
+                (
+                    format!("designer-templates/{id}/manifest.json"),
+                    serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+                ),
+                (
+                    format!("designer-templates/{id}/template.html"),
+                    format!("<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n  <title>{name}</title>\n</head>\n<body>\n  <main>\n    <h1>{name}</h1>\n    <p>{description}</p>\n  </main>\n</body>\n</html>\n"),
+                ),
+            ]
+        }
+        "prompt-template" => {
+            let surface = body
+                .surface
+                .clone()
+                .unwrap_or_else(|| "image".to_string());
+            if surface != "image" && surface != "video" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "ok": false, "error": "invalid surface" })),
+                )
+                    .into_response();
+            }
+            let doc = serde_json::json!({
+                "title": name,
+                "category": category,
+                "summary": description,
+                "prompt": "Describe the scene, subject, style, lighting and composition in detail here.",
+            });
+            vec![(
+                format!("prompt-templates/{surface}/{id}.json"),
+                serde_json::to_string_pretty(&doc).unwrap_or_default(),
+            )]
+        }
+        "curator-template" => {
+            let base_kind = body
+                .base_kind
+                .clone()
+                .unwrap_or_else(|| "solution_functional".to_string());
+            let doc = serde_json::json!({
+                "displayName": name,
+                "description": description,
+                "baseKind": base_kind,
+                "draftMarkdown": format!("# {name}\n\n## Section 1\n\nDraft content.\n"),
+                "blueprintMarkdown": format!("# {name} — Implementation Blueprint\n\n## Overview\n\nBlueprint content.\n"),
+            });
+            vec![(
+                format!("curator-templates/{id}.json"),
+                serde_json::to_string_pretty(&doc).unwrap_or_default(),
+            )]
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "invalid kind" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some((first, _)) = writes.first() {
+        if store.exists(first) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "ok": false, "error": "already exists" })),
+            )
+                .into_response();
+        }
+    }
+    for (path, content) in &writes {
+        if let Err(e) = store.save(path, content, None) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "id": id, "kind": body.kind })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateLibraryDeleteQuery {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub surface: Option<String>,
+}
+
+pub async fn handle_template_library_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TemplateLibraryDeleteQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(store) = tl_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "store unavailable" })),
+        )
+            .into_response();
+    };
+    let id = q.id.trim();
+    if !tl_valid_id(id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "invalid id" })),
+        )
+            .into_response();
+    }
+    let result = match q.kind.as_str() {
+        "design-system" => store.remove_entry(&format!("design-systems/{id}")),
+        "designer-template" => store.remove_entry(&format!("designer-templates/{id}")),
+        "prompt-template" => {
+            let surface = q.surface.as_deref().unwrap_or("image");
+            store.remove(&format!("prompt-templates/{surface}/{id}.json"))
+        }
+        "curator-template" => store.remove(&format!("curator-templates/{id}.json")),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "invalid kind" })),
+            )
+                .into_response();
+        }
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "id": id })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

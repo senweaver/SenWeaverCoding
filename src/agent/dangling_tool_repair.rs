@@ -8,14 +8,17 @@ use crate::providers::traits::{ConversationMessage, ToolResultMessage};
 
 const SYNTHETIC_TOOL_REPLY: &str =
     "[Synthetic tool reply] No stored result exists for this tool_call_id in the transcript \
-     (possible session interruption, context trim, or compaction). Ignore and continue.";
+     (possible session interruption, context trim, or compaction). This is not an error; use \
+     the conversation context and the user's latest message to decide how to proceed.";
 
 const INTERRUPTED_TURN_NOTE: &str =
-    "[System note: the immediately preceding user request was interrupted \
-     (cancelled, errored, or the app restarted) and was never completed. \
-     Do NOT silently resume it. The next user message is the current, \
-     authoritative request - address that. Only revisit the earlier request \
-     if the user explicitly asks again.]";
+    "[System note: the preceding task was interrupted (cancelled, errored, or the app \
+     restarted) before it finished. Use the conversation context together with the user's \
+     latest message to decide what to do: if the latest message asks to continue or finish \
+     that task - whether explicitly (e.g. \"继续\" / \"continue\") or clearly implied by \
+     context - then resume it; otherwise treat the latest message as the current authoritative \
+     request and act on that instead. Do NOT blindly resume the interrupted task when the user \
+     has moved on to a different request. Always judge from context.]";
 
 pub fn drop_payloadless_assistant_messages(history: &mut Vec<ConversationMessage>) {
     let before = history.len();
@@ -49,6 +52,34 @@ fn is_payloadless_assistant(msg: &ConversationMessage) -> bool {
         }
         ConversationMessage::ToolResults(_) => false,
     }
+}
+
+pub fn tail_signals_interrupted_turn(history: &[ConversationMessage]) -> bool {
+    match history.last() {
+        Some(ConversationMessage::Chat(c)) if c.role == "user" => true,
+        Some(ConversationMessage::ToolResults(rows)) => {
+            rows.iter().any(|r| r.content == SYNTHETIC_TOOL_REPLY)
+        }
+        _ => false,
+    }
+}
+
+pub fn note_interrupted_turn(history: &mut Vec<ConversationMessage>) {
+    let already_noted = matches!(
+        history.last(),
+        Some(ConversationMessage::Chat(c))
+            if c.role == "assistant" && c.content == INTERRUPTED_TURN_NOTE
+    );
+    if already_noted {
+        return;
+    }
+    tracing::info!(
+        target: "agent.dangling_tool_repair",
+        "marking the interrupted prior turn as abandoned before the new (fresh) user request"
+    );
+    history.push(ConversationMessage::Chat(
+        crate::providers::traits::ChatMessage::assistant(INTERRUPTED_TURN_NOTE),
+    ));
 }
 
 pub fn close_orphan_user_turns(history: &mut Vec<ConversationMessage>) {

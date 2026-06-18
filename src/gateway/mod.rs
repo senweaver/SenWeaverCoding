@@ -2237,6 +2237,31 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_designer_html_templates),
         )
         .route(
+            "/api/template-library/catalog",
+            get(desktop_routes::handle_template_library_catalog),
+        )
+        .route(
+            "/api/template-library/file",
+            get(desktop_routes::handle_template_library_file)
+                .put(desktop_routes::handle_template_library_save),
+        )
+        .route(
+            "/api/template-library/builtin-file",
+            get(desktop_routes::handle_template_library_builtin_file),
+        )
+        .route(
+            "/api/template-library/reset",
+            post(desktop_routes::handle_template_library_reset),
+        )
+        .route(
+            "/api/template-library/create",
+            post(desktop_routes::handle_template_library_create),
+        )
+        .route(
+            "/api/template-library/entry",
+            axum::routing::delete(desktop_routes::handle_template_library_delete),
+        )
+        .route(
             "/api/settings/sync/export",
             get(desktop_routes::handle_settings_sync_export),
         )

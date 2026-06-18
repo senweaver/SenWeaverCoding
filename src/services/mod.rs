@@ -30,6 +30,7 @@ pub mod prompt_suggestion;
 pub mod settings_sync;
 pub mod team_runtime;
 pub mod team_store;
+pub mod template_library;
 pub mod tool_telemetry;
 
 pub use container::{
@@ -39,6 +40,10 @@ pub use container::{
 
 pub use tool_telemetry::activation_store::{
     ToolActivationRecord, ToolActivationStore, ToolActivationStoreHandle,
+};
+
+pub use template_library::{
+    content_hash as template_library_content_hash, TemplateKind, TemplateLibraryStore,
 };
 
 pub use compact::CompactService;

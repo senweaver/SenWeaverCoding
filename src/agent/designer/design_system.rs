@@ -4,6 +4,7 @@
 
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 static DESIGN_SYSTEMS_DIR: Dir<'static> =
@@ -127,11 +128,11 @@ pub fn read_file(id: &str, rel_path: &str) -> Option<&'static str> {
 
 pub fn pull_index(id: &str) -> Option<String> {
     let trimmed = id.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") || !is_known(trimmed) {
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") || !resolved_is_known(trimmed) {
         return None;
     }
-    let title = name_for(trimmed).unwrap_or(trimmed);
-    let extra: Vec<String> = list_files(trimmed)
+    let title = resolved_name_for(trimmed).unwrap_or_else(|| trimmed.to_string());
+    let extra: Vec<String> = resolved_list_files(trimmed)
         .into_iter()
         .filter(|p| !PUSHED_FILES.contains(&p.as_str()) && p.as_str() != "manifest.json")
         .collect();
@@ -179,15 +180,15 @@ pub fn injection(id: &str, sub: super::submode::DesignerSubMode) -> Option<Strin
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
         return None;
     }
-    if !is_known(trimmed) {
+    if !resolved_is_known(trimmed) {
         return None;
     }
-    let title = name_for(trimmed).unwrap_or(trimmed);
+    let title = resolved_name_for(trimmed).unwrap_or_else(|| trimmed.to_string());
     let binding = binding_for(sub);
 
     let mut out = String::new();
 
-    if let Some(design_md) = read_member(trimmed, "DESIGN.md") {
+    if let Some(design_md) = resolved_read_file(trimmed, "DESIGN.md") {
         let design_md = design_md.trim();
         if !design_md.is_empty() {
             out.push_str(&format!(
@@ -200,7 +201,9 @@ pub fn injection(id: &str, sub: super::submode::DesignerSubMode) -> Option<Strin
         }
     }
 
-    let tokens = read_member(trimmed, "tokens.css")
+    let tokens_owned = resolved_read_file(trimmed, "tokens.css");
+    let tokens = tokens_owned
+        .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty());
 
@@ -217,7 +220,7 @@ pub fn injection(id: &str, sub: super::submode::DesignerSubMode) -> Option<Strin
                      ```css\n{tokens}\n```"
                 ));
             }
-            if let Some(components) = read_member(trimmed, "components.manifest.json") {
+            if let Some(components) = resolved_read_file(trimmed, "components.manifest.json") {
                 let components = components.trim();
                 if !components.is_empty() {
                     out.push_str(&format!(
@@ -297,4 +300,108 @@ pub fn injection(id: &str, sub: super::submode::DesignerSubMode) -> Option<Strin
     } else {
         Some(out)
     }
+}
+
+fn library_store() -> Option<&'static crate::services::TemplateLibraryStore> {
+    crate::services::try_get_services().map(|s| &s.template_library)
+}
+
+pub fn resolved_is_known(id: &str) -> bool {
+    if is_known(id) {
+        return true;
+    }
+    library_store()
+        .map(|s| s.exists(&format!("design-systems/{id}/manifest.json")))
+        .unwrap_or(false)
+}
+
+pub fn resolved_read_file(id: &str, rel_path: &str) -> Option<String> {
+    let rel = rel_path.trim().trim_start_matches('/').replace('\\', "/");
+    if rel.is_empty() || rel.contains("..") {
+        return None;
+    }
+    if !resolved_is_known(id) {
+        return None;
+    }
+    if let Some(store) = library_store() {
+        if let Some(content) = store.read(&format!("design-systems/{id}/{rel}")) {
+            return Some(content);
+        }
+    }
+    read_member(id, &rel).map(str::to_string)
+}
+
+pub fn resolved_list_files(id: &str) -> Vec<String> {
+    let mut set: BTreeSet<String> = list_files(id).into_iter().collect();
+    if let Some(store) = library_store() {
+        let prefix = format!("design-systems/{id}");
+        let entry_prefix = format!("{prefix}/");
+        for f in store.list_files(&prefix) {
+            if let Some(rel) = f.strip_prefix(&entry_prefix) {
+                set.insert(rel.to_string());
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn resolved_meta(id: &str) -> Option<DesignSystemMeta> {
+    if let Some(store) = library_store() {
+        if let Some(raw) = store.read(&format!("design-systems/{id}/manifest.json")) {
+            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let name = manifest
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(id)
+                    .to_string();
+                let category = manifest
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Other")
+                    .to_string();
+                let description = manifest
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Some(DesignSystemMeta {
+                    id: id.to_string(),
+                    name,
+                    category,
+                    description,
+                });
+            }
+        }
+    }
+    catalog().iter().find(|m| m.id == id).cloned()
+}
+
+fn resolved_name_for(id: &str) -> Option<String> {
+    resolved_meta(id).map(|m| m.name)
+}
+
+pub fn resolved_catalog() -> Vec<DesignSystemMeta> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out: Vec<DesignSystemMeta> = Vec::new();
+    for m in catalog() {
+        seen.insert(m.id.clone());
+        out.push(resolved_meta(&m.id).unwrap_or_else(|| m.clone()));
+    }
+    if let Some(store) = library_store() {
+        let mut extra: Vec<String> = store
+            .child_dirs("design-systems")
+            .into_iter()
+            .filter(|id| {
+                !seen.contains(id)
+                    && store.exists(&format!("design-systems/{id}/manifest.json"))
+            })
+            .collect();
+        extra.sort();
+        for id in extra {
+            if let Some(meta) = resolved_meta(&id) {
+                out.push(meta);
+            }
+        }
+    }
+    out
 }

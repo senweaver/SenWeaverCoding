@@ -525,7 +525,7 @@ pub fn selected_prompt_template_block(sub: DesignerSubMode, params: &Value) -> O
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
-    let detail = super::prompt_template::read(surface, id)?;
+    let detail = super::prompt_template::resolved_read(surface, id)?;
     let mut out = format!(
         "\n\n## Reference prompt template — {} ({})\n\n\
          The user picked this curated {} prompt template. Treat the block below as the authoritative \

@@ -123,15 +123,192 @@ pub fn template_for(kind: CuratorTemplateKind) -> &'static TemplateInfo {
         .unwrap_or(&all_templates()[0])
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedCuratorTemplate {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub draft_markdown: String,
+    pub blueprint_markdown: String,
+    pub base_kind: CuratorTemplateKind,
+    pub builtin: bool,
+}
+
+fn library_store() -> Option<&'static crate::services::TemplateLibraryStore> {
+    crate::services::try_get_services().map(|s| &s.template_library)
+}
+
+fn parse_overlay_template(id: &str, raw: &str, builtin: bool) -> Option<ResolvedCuratorTemplate> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let draft = v
+        .get("draftMarkdown")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())?;
+    let blueprint = v
+        .get("blueprintMarkdown")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())?;
+    let base_kind = v
+        .get("baseKind")
+        .and_then(|x| x.as_str())
+        .and_then(CuratorTemplateKind::from_str_strict)
+        .unwrap_or(CuratorTemplateKind::SolutionFunctional);
+    let display_name = v
+        .get("displayName")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| id.to_string());
+    let description = v
+        .get("description")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .unwrap_or_default();
+    Some(ResolvedCuratorTemplate {
+        id: id.to_string(),
+        display_name,
+        description,
+        draft_markdown: draft,
+        blueprint_markdown: blueprint,
+        base_kind,
+        builtin,
+    })
+}
+
+fn resolve_builtin(tpl: &'static TemplateInfo) -> ResolvedCuratorTemplate {
+    let id = tpl.kind.label().to_string();
+    let mut resolved = ResolvedCuratorTemplate {
+        id: id.clone(),
+        display_name: tpl.display_name.to_string(),
+        description: tpl.description.to_string(),
+        draft_markdown: tpl.draft_markdown.to_string(),
+        blueprint_markdown: tpl.blueprint_markdown.to_string(),
+        base_kind: tpl.kind,
+        builtin: true,
+    };
+    if let Some(store) = library_store() {
+        if let Some(raw) = store.read(&format!("curator-templates/{id}.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(s) = v
+                    .get("draftMarkdown")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    resolved.draft_markdown = s.to_string();
+                }
+                if let Some(s) = v
+                    .get("blueprintMarkdown")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    resolved.blueprint_markdown = s.to_string();
+                }
+                if let Some(s) = v
+                    .get("displayName")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    resolved.display_name = s.to_string();
+                }
+                if let Some(s) = v.get("description").and_then(|x| x.as_str()) {
+                    resolved.description = s.to_string();
+                }
+            }
+        }
+    }
+    resolved
+}
+
+pub fn resolved_for(id: &str) -> Option<ResolvedCuratorTemplate> {
+    let key = id.trim();
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(kind) = CuratorTemplateKind::from_str_strict(key) {
+        return Some(resolve_builtin(template_for(kind)));
+    }
+    if let Some(store) = library_store() {
+        if let Some(raw) = store.read(&format!("curator-templates/{key}.json")) {
+            return parse_overlay_template(key, &raw, false);
+        }
+    }
+    None
+}
+
+pub fn resolved_or_default(id: &str) -> ResolvedCuratorTemplate {
+    resolved_for(id).unwrap_or_else(|| resolve_builtin(&all_templates()[0]))
+}
+
+pub fn to_overlay_json(t: &ResolvedCuratorTemplate) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "displayName": t.display_name,
+        "description": t.description,
+        "baseKind": t.base_kind.label(),
+        "draftMarkdown": t.draft_markdown,
+        "blueprintMarkdown": t.blueprint_markdown,
+    }))
+    .unwrap_or_default()
+}
+
+pub fn builtin_json(id: &str) -> Option<String> {
+    let kind = CuratorTemplateKind::from_str_strict(id)?;
+    let tpl = template_for(kind);
+    Some(
+        serde_json::to_string_pretty(&serde_json::json!({
+            "displayName": tpl.display_name,
+            "description": tpl.description,
+            "baseKind": tpl.kind.label(),
+            "draftMarkdown": tpl.draft_markdown,
+            "blueprintMarkdown": tpl.blueprint_markdown,
+        }))
+        .unwrap_or_default(),
+    )
+}
+
+pub fn is_builtin_id(id: &str) -> bool {
+    CuratorTemplateKind::from_str_strict(id).is_some()
+}
+
+pub fn resolved_all() -> Vec<ResolvedCuratorTemplate> {
+    let mut out: Vec<ResolvedCuratorTemplate> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for tpl in all_templates() {
+        let resolved = resolve_builtin(tpl);
+        seen.insert(resolved.id.clone());
+        out.push(resolved);
+    }
+    if let Some(store) = library_store() {
+        for f in store.list_files("curator-templates") {
+            let Some(fname) = f.rsplit('/').next() else {
+                continue;
+            };
+            let Some(id) = fname.strip_suffix(".json") else {
+                continue;
+            };
+            if seen.contains(id) || CuratorTemplateKind::from_str_strict(id).is_some() {
+                continue;
+            }
+            let Some(raw) = store.read(&f) else {
+                continue;
+            };
+            if let Some(t) = parse_overlay_template(id, &raw, false) {
+                seen.insert(id.to_string());
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
 pub fn list_summary() -> String {
     let mut out = String::new();
     out.push_str("# Curator Templates\n\n");
-    for tpl in all_templates() {
+    for tpl in resolved_all() {
         out.push_str(&format!(
             "- `{}` — {}\n  {}\n",
-            tpl.kind.label(),
-            tpl.display_name,
-            tpl.description
+            tpl.id, tpl.display_name, tpl.description
         ));
     }
     out

@@ -63,6 +63,41 @@ impl CuratorTemplateKind {
         }
     }
 
+    pub fn from_str_strict(raw: &str) -> Option<Self> {
+        let key = raw.trim().to_ascii_lowercase().replace('-', "_");
+        match key.as_str() {
+            "paper" | "paper_imrad" | "imrad" => Some(Self::PaperImrad),
+            "paper_apa" | "apa" | "apa7" | "apa_7" => Some(Self::PaperApa),
+            "paper_mla" | "mla" | "mla9" | "mla_9" => Some(Self::PaperMla),
+            "paper_chicago" | "chicago" | "cms" => Some(Self::PaperChicago),
+            "paper_gb7714" | "gb7714" | "gbt7714" | "gb_t_7714" | "guobiao" => {
+                Some(Self::PaperGb7714)
+            }
+            "solution" | "solution_functional" | "functional" => Some(Self::SolutionFunctional),
+            "solution_gb8567_2006"
+            | "gb8567_2006"
+            | "gbt8567"
+            | "gb_t_8567"
+            | "gb_t_8567_2006" => Some(Self::SolutionGb8567_2006),
+            "solution_gb8567_1988" | "gb8567_1988" | "gb_t_8567_1988" => {
+                Some(Self::SolutionGb8567_1988)
+            }
+            "solution_ieee830" | "ieee830" | "ieee_830" | "srs" => Some(Self::SolutionIeee830),
+            "solution_iso29148" | "iso29148" | "iso_29148" | "ieee_29148" => {
+                Some(Self::SolutionIso29148)
+            }
+            "solution_iso42010" | "iso42010" | "iso_42010" | "ieee_42010" | "sad" => {
+                Some(Self::SolutionIso42010)
+            }
+            "solution_ieee1016" | "ieee1016" | "ieee_1016" | "sdd" => Some(Self::SolutionIeee1016),
+            "solution_iso12207" | "iso12207" | "iso_12207" | "ieee_12207" | "lcm" => {
+                Some(Self::SolutionIso12207)
+            }
+            "tech_report" | "techreport" | "report" | "tr" => Some(Self::TechReport),
+            _ => None,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::PaperImrad => "paper_imrad",
@@ -134,6 +169,8 @@ pub struct CuratorActive {
     pub slug: String,
     pub intent: String,
     pub template: CuratorTemplateKind,
+    #[serde(default)]
+    pub template_id: String,
     pub root_dir: PathBuf,
     pub started_at: String,
 }
@@ -165,6 +202,13 @@ impl CuratorState {
     pub fn set_template(&self, template: CuratorTemplateKind) {
         if let Some(active) = self.inner.write().get_mut(&curator_session_key()) {
             active.template = template;
+        }
+    }
+
+    pub fn set_template_with_id(&self, template: CuratorTemplateKind, template_id: String) {
+        if let Some(active) = self.inner.write().get_mut(&curator_session_key()) {
+            active.template = template;
+            active.template_id = template_id;
         }
     }
 

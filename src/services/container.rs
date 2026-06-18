@@ -158,6 +158,8 @@ pub struct ServiceContainer {
 
     pub tool_activation_store: Arc<ToolActivationStore>,
 
+    pub template_library: super::template_library::TemplateLibraryStore,
+
     pub tool_search_invocations_total: Arc<std::sync::atomic::AtomicU64>,
     pub tool_search_activations_total: Arc<std::sync::atomic::AtomicU64>,
     pub tool_search_high_risk_blocked_total: Arc<std::sync::atomic::AtomicU64>,
@@ -301,6 +303,7 @@ impl ServiceContainer {
             tool_activation_store: Arc::new(ToolActivationStore::new(
                 cfg.data_dir.join("tool_activations"),
             )),
+            template_library: super::template_library::TemplateLibraryStore::new(&cfg.data_dir),
             tool_search_invocations_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_search_activations_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_search_high_risk_blocked_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),

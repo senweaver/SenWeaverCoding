@@ -55,7 +55,7 @@ impl Tool for DesignerTemplateReadTool {
             .to_string();
 
         if id.is_empty() {
-            let listing = html_template::catalog()
+            let listing = html_template::resolved_catalog()
                 .iter()
                 .map(|m| format!("- {} ({}) — {}", m.id, m.category, m.title))
                 .collect::<Vec<_>>()
@@ -67,9 +67,9 @@ impl Tool for DesignerTemplateReadTool {
             });
         }
 
-        match html_template::read(&id) {
+        match html_template::resolved_read(&id) {
             Some(content) => {
-                let mut body = content.to_string();
+                let mut body = content;
                 let truncated = body.len() > MAX_OUTPUT;
                 if truncated {
                     crate::util::truncate_string_bytes(&mut body, MAX_OUTPUT);
