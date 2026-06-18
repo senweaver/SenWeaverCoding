@@ -77,10 +77,10 @@ export function SkillList() {
   useEffect(() => {
     let unlisten: (() => void) | null = null
     let cancelled = false
-    void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
+    void import('@tauri-apps/api/webview').then(async ({ getCurrentWebview }) => {
       try {
-        const win = getCurrentWindow()
-        const off = await win.onDragDropEvent((event) => {
+        const webview = getCurrentWebview()
+        const off = await webview.onDragDropEvent((event) => {
           const payload = event.payload as
             | { type: 'enter'; paths: string[]; position: { x: number; y: number } }
             | { type: 'over'; position: { x: number; y: number } }

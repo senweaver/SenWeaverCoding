@@ -222,6 +222,8 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   ])
   const [stopCooldown, setStopCooldown] = useState(false)
   const [sendButtonHover, setSendButtonHover] = useState(false)
+  const [externalDragActive, setExternalDragActive] = useState(false)
+  const [externalDragOver, setExternalDragOver] = useState(false)
   const stopCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!isActive && !stopRequested) {
@@ -452,6 +454,10 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const actAsStopButton = !isMemberSession && isActive && !canSubmit
   const isHeroComposer = variant === 'hero' && !isMemberSession
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
+  const resolvedWorkDirRef = useRef(resolvedWorkDir)
+  useEffect(() => {
+    resolvedWorkDirRef.current = resolvedWorkDir
+  }, [resolvedWorkDir])
   const showNoModelBanner = !isMemberSession && !hasModel
 
   const [promptSuggestions, setPromptSuggestions] = useState<PromptSuggestion[]>([])
@@ -583,6 +589,82 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     })
     return () => store.unregisterZone('chat-composer')
   }, [isMemberSession, isWorkspaceMissing, activeTabId])
+
+  useEffect(() => {
+    if (isMemberSession || isWorkspaceMissing) return
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+    const pointInsideComposer = (physX: number, physY: number): boolean => {
+      const card = composerCardRef.current
+      if (!card) return false
+      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+      const target = document.elementFromPoint(physX / dpr, physY / dpr)
+      return !!target && card.contains(target)
+    }
+    const baseName = (abs: string): string => {
+      const normalized = abs.replace(/\\/g, '/').replace(/\/+$/, '')
+      const segments = normalized.split('/')
+      return segments[segments.length - 1] || normalized
+    }
+    void import('@tauri-apps/api/webview').then(async ({ getCurrentWebview }) => {
+      try {
+        const webview = getCurrentWebview()
+        const off = await webview.onDragDropEvent((event) => {
+          const payload = event.payload as
+            | { type: 'enter'; paths: string[]; position: { x: number; y: number } }
+            | { type: 'over'; position: { x: number; y: number } }
+            | { type: 'drop'; paths: string[]; position: { x: number; y: number } }
+            | { type: 'leave' }
+          if (useUIStore.getState().settingsOverlayOpen) {
+            if (payload.type !== 'leave') {
+              setExternalDragActive(false)
+              setExternalDragOver(false)
+            }
+            return
+          }
+          if (payload.type === 'leave') {
+            setExternalDragActive(false)
+            setExternalDragOver(false)
+            return
+          }
+          if (payload.type === 'enter' || payload.type === 'over') {
+            setExternalDragActive(true)
+            setExternalDragOver(
+              pointInsideComposer(payload.position.x, payload.position.y),
+            )
+            return
+          }
+          const inside = pointInsideComposer(payload.position.x, payload.position.y)
+          setExternalDragActive(false)
+          setExternalDragOver(false)
+          if (!inside || !payload.paths || payload.paths.length === 0) return
+          const cwd = resolvedWorkDirRef.current || ''
+          for (const abs of payload.paths) {
+            const trimmed = abs.trim()
+            if (!trimmed) continue
+            const name = baseName(trimmed)
+            const relPath = cwd
+              ? toRelativeRefPath(trimmed, cwd, name)
+              : trimmed.replace(/\\/g, '/')
+            if (!relPath) continue
+            composerRef.current?.insertRefAtLastCaret(name, relPath)
+          }
+          requestAnimationFrame(() => composerRef.current?.focus())
+        })
+        if (cancelled) {
+          off()
+        } else {
+          unlisten = off
+        }
+      } catch {
+        // not running inside a Tauri webview
+      }
+    })
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
+  }, [isMemberSession, isWorkspaceMissing])
 
   useEffect(() => {
     if (!composerPrefill) return
@@ -1131,10 +1213,10 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           onDragOver={(event) => event.preventDefault()}
           onDrop={handleDrop}
         >
-          {!isMemberSession && fileDragActive && (
+          {!isMemberSession && (fileDragActive || externalDragActive) && (
             <div
               className={`pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-xl border-2 border-dashed transition-colors ${
-                fileDragOverComposer
+                fileDragOverComposer || externalDragOver
                   ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10'
                   : 'border-[var(--color-accent)]/40 bg-[var(--color-accent)]/[0.04]'
               }`}
