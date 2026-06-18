@@ -151,7 +151,7 @@ function ConfirmOverlay({
           <button
             type="button"
             onClick={onConfirm}
-            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:opacity-90"
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-on-accent)] hover:opacity-90"
           >
             {t('templateLibrary.action.delete')}
           </button>
@@ -392,7 +392,7 @@ function TemplateDetail({
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="rounded-md bg-[var(--color-accent)] px-4 py-1.5 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-60"
+              className="rounded-md bg-[var(--color-accent)] px-4 py-1.5 text-[12px] font-medium text-[var(--color-on-accent)] hover:opacity-90 disabled:opacity-60"
             >
               {saving ? t('common.saving') : t('templateLibrary.action.save')}
             </button>
@@ -590,7 +590,7 @@ function CreateForm({
             type="button"
             onClick={submit}
             disabled={busy || !id.trim()}
-            className="rounded-md bg-[var(--color-accent)] px-4 py-1.5 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-60"
+            className="rounded-md bg-[var(--color-accent)] px-4 py-1.5 text-[12px] font-medium text-[var(--color-on-accent)] hover:opacity-90 disabled:opacity-60"
           >
             {t('templateLibrary.create.submit')}
           </button>
@@ -724,7 +724,7 @@ export function TemplateLibrary() {
                 <button
                   type="button"
                   onClick={() => setCreating(true)}
-                  className="flex items-center gap-1 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:opacity-90"
+                  className="flex items-center gap-1 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-on-accent)] hover:opacity-90"
                 >
                   <span className="material-symbols-outlined text-[16px]">add</span>
                   {t('templateLibrary.action.create')}
