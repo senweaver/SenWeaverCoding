@@ -18,6 +18,8 @@ pub struct RemoteSession {
     pub created_at_ms: u64,
     pub last_activity_ms: u64,
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub signing_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,9 +49,10 @@ impl RemoteSessionManager {
     }
 
     pub async fn register_session(&self, session: RemoteSession) -> Arc<SessionWebSocket> {
-        let socket = Arc::new(SessionWebSocket::with_auth(
+        let socket = Arc::new(SessionWebSocket::with_auth_and_signing(
             &session.url,
             session.auth_token.clone(),
+            session.signing_secret.clone(),
         ));
         let entry = RemoteSessionEntry {
             meta: session.clone(),

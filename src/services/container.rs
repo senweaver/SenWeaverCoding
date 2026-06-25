@@ -7,7 +7,6 @@ use std::sync::{Arc, OnceLock};
 
 use super::agent_summary::AgentSummaryService;
 use super::assist::analytics::AnalyticsService;
-use super::auto_dream::AutoDreamService;
 use super::compact::CompactService;
 use super::memory::extract::ExtractionConfig;
 use super::lsp::LspService;
@@ -91,8 +90,6 @@ pub struct ServiceContainer {
     pub oauth: OAuthService,
 
     pub agent_summary: AgentSummaryService,
-
-    pub auto_dream: AutoDreamService,
 
     pub extraction_config: ExtractionConfig,
 
@@ -200,7 +197,6 @@ pub struct ToolSearchMetricsSnapshot {
 
 pub struct ServiceContainerConfig {
     pub data_dir: PathBuf,
-    pub auto_dream_enabled: bool,
     pub team_sync_enabled: bool,
     pub policy_rules: Vec<PolicyRule>,
     pub conflict_strategy: ConflictStrategy,
@@ -212,7 +208,6 @@ impl Default for ServiceContainerConfig {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from(".senweavercoding"),
-            auto_dream_enabled: false,
             team_sync_enabled: false,
             policy_rules: Vec::new(),
             conflict_strategy: ConflictStrategy::LastWriterWins,
@@ -255,7 +250,6 @@ impl ServiceContainer {
             token_estimator: TokenEstimator::new(4.0),
 
             agent_summary: AgentSummaryService,
-            auto_dream: AutoDreamService::new(cfg.auto_dream_enabled),
             extraction_config: ExtractionConfig::default(),
             plugin_service: PluginService::new(),
             policy_limits: PolicyLimitsService::new(cfg.policy_rules),
@@ -557,6 +551,14 @@ impl ServiceContainer {
 static GLOBAL_SERVICES: OnceLock<ServiceContainer> = OnceLock::new();
 
 pub fn init_services(cfg: ServiceContainerConfig) -> &'static ServiceContainer {
+    if GLOBAL_SERVICES.get().is_some() {
+        tracing::warn!(
+            "init_services called after the global ServiceContainer was already initialized; \
+             the new configuration is ignored. Initialize services once at startup before any \
+             component reads them."
+        );
+        return GLOBAL_SERVICES.get().expect("just checked is_some");
+    }
     GLOBAL_SERVICES.get_or_init(|| ServiceContainer::new(cfg))
 }
 

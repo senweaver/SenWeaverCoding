@@ -1168,6 +1168,12 @@ impl CodingMode {
                  when a subsection genuinely branches  -  every heading level now maps to a \
                  distinct DOCX style and feeds the table of contents, so keep the tree clean and \
                  do NOT skip levels (`##` → `####`).\n\
+                 - **No manual separators or page breaks**: NEVER insert horizontal rules (`---`, \
+                 `***`, `___`) or decorative dash/em-dash lines (`— — —`) to divide sections. \
+                 Section spacing, white-space, and per-chapter pagination are produced \
+                 automatically by the renderer from the heading hierarchy; any such separator \
+                 line in `final_content` is stripped before typesetting, so it only adds noise. \
+                 Structure the document with headings alone.\n\
                  - **Clickable references**: render the reference list and any in-text external \
                  link in Markdown link syntax `[Descriptive title](https://…)`  -  these become \
                  real DOCX hyperlinks. Pair each `[Sn]`/`[Gn]`/`[Ln]` id with its link in a \
@@ -1193,6 +1199,8 @@ impl CodingMode {
                  density accordingly.\n\n\
                  ### Forbidden\n\
                  - Editing files OUTSIDE the active `.senweavercoding/curators/<slug>/` directory.\n\
+                 - Inserting manual horizontal rules / decorative dash separators (`---`, `***`, \
+                 `___`, `— — —`) anywhere in `final_content`  -  pagination is automatic.\n\
                  - Running shell commands, browser sessions, or code generation.\n\
                  - Producing a document where claims lack source/path citations.\n\
                  - Calling `exit_curator_mode` before the Hard Quality Gates above are met.\n\

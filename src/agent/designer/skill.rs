@@ -224,9 +224,10 @@ pub fn optimal_skill_for_submode(submode_id: &str) -> Option<String> {
     if !curated.is_empty() && is_known(curated) {
         return Some(curated.to_string());
     }
-    skills_for_submode(submode_id)
-        .first()
-        .map(|m| m.id.clone())
+    // Sub-modes without a curated skill (notably `diagram`, which already carries a rich
+    // in-prompt skill) must NOT fall back to an unrelated first catalog entry (e.g. apple-hig) —
+    // that only adds noise and token cost. Inject nothing instead.
+    None
 }
 
 const SIDE_FILE_HINTS: &[&str] = &[

@@ -172,10 +172,17 @@ impl LspRenameTool {
         let re = Self::word_boundary_regex(symbol_name)?;
 
         let full_pattern = format!("{}/{}", self.security.workspace_dir().display(), pattern);
-        let matches: Vec<PathBuf> = glob_pattern(&full_pattern)?
-            .filter_map(|entry| entry.ok())
-            .filter(|path| path.is_file())
-            .collect();
+        let matches: Vec<PathBuf> = tokio::task::spawn_blocking(
+            move || -> anyhow::Result<Vec<PathBuf>> {
+                let paths = glob_pattern(&full_pattern)?;
+                Ok(paths
+                    .filter_map(|entry| entry.ok())
+                    .filter(|path| path.is_file())
+                    .collect())
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("glob task panicked: {e}"))??;
 
         if matches.is_empty() {
             return Ok(ToolResult {

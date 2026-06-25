@@ -4567,30 +4567,59 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const editBatchId =
             typeof data.editBatchId === 'string' ? data.editBatchId : null
           const now = Date.now()
-          update((s) => ({
-            messages: [
-              ...sealThinkingForSession(sessionId, s),
-              {
-                id: nextId(),
-                type: 'file_edit' as const,
-                path,
-                additions,
-                deletions,
-                diff: typeof data.diff === 'string' ? data.diff : null,
-                editBatchId,
-                timestamp: now,
-              },
-            ],
-            pendingEdits: path
-              ? mergePendingEdit(s.pendingEdits, {
-                  path,
-                  additions,
-                  deletions,
-                  editBatchId,
-                  timestamp: now,
-                })
-              : s.pendingEdits,
-          }))
+          const diffStr = typeof data.diff === 'string' ? data.diff : null
+          update((s) => {
+            const sealed = sealThinkingForSession(sessionId, s)
+            const last = sealed[sealed.length - 1]
+            // Coalesce redundant per-op notifications that belong to the SAME file within the
+            // SAME edit batch into one timeline row, instead of appending a fresh message (and
+            // forcing a full render-model rebuild) for each. Distinct files / batches stay separate.
+            const coalesceTarget =
+              last &&
+              last.type === 'file_edit' &&
+              path !== '' &&
+              last.path === path &&
+              editBatchId !== null &&
+              last.editBatchId === editBatchId
+                ? last
+                : null
+            const messages = coalesceTarget
+              ? [
+                  ...sealed.slice(0, -1),
+                  {
+                    ...coalesceTarget,
+                    additions: coalesceTarget.additions + additions,
+                    deletions: coalesceTarget.deletions + deletions,
+                    diff: diffStr ?? coalesceTarget.diff,
+                    timestamp: now,
+                  },
+                ]
+              : [
+                  ...sealed,
+                  {
+                    id: nextId(),
+                    type: 'file_edit' as const,
+                    path,
+                    additions,
+                    deletions,
+                    diff: diffStr,
+                    editBatchId,
+                    timestamp: now,
+                  },
+                ]
+            return {
+              messages,
+              pendingEdits: path
+                ? mergePendingEdit(s.pendingEdits, {
+                    path,
+                    additions,
+                    deletions,
+                    editBatchId,
+                    timestamp: now,
+                  })
+                : s.pendingEdits,
+            }
+          })
         }
 
         if (msg.subtype === 'command_preview' && msg.data && typeof msg.data === 'object') {
@@ -4661,11 +4690,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
               }
             }
+            const sealed = sealThinkingForSession(sessionId, s)
             return {
-              messages: [
-                ...sealThinkingForSession(sessionId, s),
-                flatMessage,
-              ],
+              messages:
+                parentId && bucketExists
+                  ? sealed
+                  : [...sealed, flatMessage],
               subagentTimelines: nextTimelines,
             }
           })

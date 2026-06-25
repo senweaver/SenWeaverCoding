@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { StreamingMarkdownRenderer } from '../markdown/StreamingMarkdownRenderer'
 import { AssistantMessageActions } from './AssistantMessageActions'
@@ -28,7 +28,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   disableFork,
 }: Props) {
   const safeContent = sanitizeNarration(content)
-  const documentLayout = shouldUseDocumentLayout(safeContent)
+  const documentLayout = useMemo(() => shouldUseDocumentLayout(safeContent), [safeContent])
   const showActions =
     !isStreaming && Boolean(assistantTurnCopyText?.trim())
 

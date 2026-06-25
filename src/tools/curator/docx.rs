@@ -92,6 +92,7 @@ pub fn render_docx_with_diagrams(
     let blocks = parse_blocks(markdown);
     let mut skip_first_h1 = typo.include_cover_page;
     let mut blank_run_after_code = false;
+    let mut content_weight_since_break: usize = 0;
     let mut mermaid_idx = 0usize;
     let figure_word = figure_caption_word(template);
     let mut figure_no = 0usize;
@@ -104,11 +105,20 @@ pub fn render_docx_with_diagrams(
     let positional_fallback_ok = diagrams.len() == total_mermaid_blocks;
 
     for block in &blocks {
+        let weight_before_block = content_weight_since_break;
+        content_weight_since_break += block_text_weight(block);
         match block {
             MdBlock::Heading { level, text } => {
                 if *level == 1 && skip_first_h1 {
                     skip_first_h1 = false;
                     continue;
+                }
+                if *level == 2
+                    && typo.include_toc
+                    && weight_before_block >= MIN_CONTENT_WEIGHT_FOR_PAGE_BREAK
+                {
+                    doc = doc.add_paragraph(page_break_paragraph());
+                    content_weight_since_break = block_text_weight(block);
                 }
                 doc = doc.add_paragraph(
                     Paragraph::new()
@@ -265,16 +275,6 @@ pub fn render_docx_with_diagrams(
                 blank_run_after_code = false;
             }
             MdBlock::HorizontalRule => {
-                doc = doc.add_paragraph(
-                    Paragraph::new()
-                        .align(AlignmentType::Center)
-                        .add_run(
-                            Run::new()
-                                .add_text("— — — — — — — — — — — — —")
-                                .color("999999")
-                                .size(typo.body_size_hp),
-                        ),
-                );
                 blank_run_after_code = false;
             }
         }
@@ -986,6 +986,9 @@ fn page_break_paragraph() -> docx_rs::Paragraph {
 }
 
 #[cfg(feature = "tool-curator")]
+const MIN_CONTENT_WEIGHT_FOR_PAGE_BREAK: usize = 200;
+
+#[cfg(feature = "tool-curator")]
 fn heading_spacing(level: u8, _typo: &Typography) -> docx_rs::LineSpacing {
     use docx_rs::*;
     match level {
@@ -1414,6 +1417,48 @@ enum MdBlock {
 }
 
 #[cfg(feature = "tool-curator")]
+fn is_horizontal_rule(trimmed: &str) -> bool {
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut rule_glyphs = 0usize;
+    for ch in trimmed.chars() {
+        match ch {
+            '-' | '*' | '_' | '\u{2014}' | '\u{2013}' | '\u{2500}' | '\u{2015}' => {
+                rule_glyphs += 1;
+            }
+            ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    rule_glyphs >= 3
+}
+
+#[cfg(feature = "tool-curator")]
+fn block_text_weight(block: &MdBlock) -> usize {
+    match block {
+        MdBlock::Heading { text, .. } => text.chars().count(),
+        MdBlock::Paragraph(text) | MdBlock::Blockquote(text) => text.chars().count(),
+        MdBlock::BulletList(items) | MdBlock::OrderedList(items) => {
+            items.iter().map(|item| item.chars().count()).sum()
+        }
+        MdBlock::CodeBlock { lines, .. } => {
+            lines.iter().map(|line| line.chars().count()).sum()
+        }
+        MdBlock::Table { header, rows } => {
+            header.iter().map(|cell| cell.chars().count()).sum::<usize>()
+                + rows
+                    .iter()
+                    .flat_map(|row| row.iter())
+                    .map(|cell| cell.chars().count())
+                    .sum::<usize>()
+        }
+        MdBlock::Image { .. } => 200,
+        MdBlock::HorizontalRule | MdBlock::Blank => 0,
+    }
+}
+
+#[cfg(feature = "tool-curator")]
 fn parse_blocks(markdown: &str) -> Vec<MdBlock> {
     let lines: Vec<&str> = markdown.lines().map(|l| l.trim_end_matches('\r')).collect();
     let mut blocks: Vec<MdBlock> = Vec::new();
@@ -1461,7 +1506,7 @@ fn parse_blocks(markdown: &str) -> Vec<MdBlock> {
             blocks.push(MdBlock::Heading { level: 1, text: rest.trim().to_string() });
             i += 1; continue;
         }
-        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        if is_horizontal_rule(trimmed) {
             blocks.push(MdBlock::HorizontalRule);
             i += 1; continue;
         }

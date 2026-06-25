@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock};
 
 use parking_lot::RwLock;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::coordination::{Coordinator, CoordinatorHandle};
 use super::registry::{AgentRegistry, AgentRegistryHandle};
@@ -131,8 +131,14 @@ impl MultiAgentRuntime {
                         } => {
                             if let crate::event_bus::types::EventTarget::Agent(agent_id) =
                                 &event.target
+                                && let Err(e) = registry.assign_task(agent_id, request_id)
                             {
-                                let _ = registry.assign_task(agent_id, request_id);
+                                warn!(
+                                    agent_id = %agent_id,
+                                    request_id = %request_id,
+                                    error = %e,
+                                    "event bridge failed to assign task to agent"
+                                );
                             }
                         }
                         crate::event_bus::types::EventPayload::AgentResponse {
@@ -149,6 +155,24 @@ impl MultiAgentRuntime {
                 }
             },
         );
+    }
+
+    pub fn spawn_task_worker(
+        &self,
+        capabilities: Vec<String>,
+        poll_interval: std::time::Duration,
+        executor: super::task_orchestrator::worker::TaskWorkerExecutor,
+    ) -> crate::runtime::task_manager::TaskHandle {
+        let worker = super::task_orchestrator::worker::TaskQueueWorker::new(
+            Arc::clone(self.task_queue.inner_arc()),
+            capabilities,
+            executor,
+        )
+        .with_blackboard(self.blackboard.clone())
+        .with_poll_interval(poll_interval);
+
+        info!(agent_id = %worker.agent_id(), "spawning task queue worker");
+        worker.spawn()
     }
 
     pub fn cancel_subtree(&self, agent_id: &str) -> usize {
@@ -441,13 +465,18 @@ impl MultiAgentRuntimeManager {
     pub fn get_or_init(&self, config: MultiAgentRuntimeConfig) -> Arc<MultiAgentRuntime> {
 
         if let Some(runtime) = self.runtime.read().as_ref() {
-            return runtime.clone();
+            let runtime = runtime.clone();
+            self.merge_config(config);
+            return runtime;
         }
 
         let mut guard = self.runtime.write();
 
         if let Some(runtime) = guard.as_ref() {
-            return runtime.clone();
+            let runtime = runtime.clone();
+            drop(guard);
+            self.merge_config(config);
+            return runtime;
         }
 
         let runtime = Arc::new(MultiAgentRuntime::with_config(
@@ -459,6 +488,39 @@ impl MultiAgentRuntimeManager {
 
         info!("Multi-agent runtime initialized via manager");
         runtime
+    }
+
+    fn merge_config(&self, incoming: MultiAgentRuntimeConfig) {
+        let mut stored = self.config.write();
+        match stored.as_mut() {
+            Some(existing) => {
+                let mut changed = false;
+                for (agent_id, caller_user_id) in incoming.sub_agent_identities {
+                    if let Some(slot) = existing
+                        .sub_agent_identities
+                        .iter_mut()
+                        .find(|(id, _)| *id == agent_id)
+                    {
+                        if slot.1 != caller_user_id {
+                            slot.1 = caller_user_id;
+                            changed = true;
+                        }
+                    } else {
+                        existing.sub_agent_identities.push((agent_id, caller_user_id));
+                        changed = true;
+                    }
+                }
+                if incoming.allow_shared_identity {
+                    existing.allow_shared_identity = true;
+                }
+                if changed {
+                    info!("Multi-agent runtime config updated with new sub-agent identities");
+                }
+            }
+            None => {
+                *stored = Some(incoming);
+            }
+        }
     }
 
     pub fn get(&self) -> Option<Arc<MultiAgentRuntime>> {
@@ -574,8 +636,17 @@ impl MultiAgentRuntime {
 static MANAGER: LazyLock<MultiAgentRuntimeManager> = LazyLock::new(MultiAgentRuntimeManager::new);
 
 pub fn init_global_runtime() -> Arc<MultiAgentRuntime> {
-    init_global_runtime_with_config(MultiAgentRuntimeConfig::default())
-        .unwrap_or_else(|_| MANAGER.get_or_init(MultiAgentRuntimeConfig::default()))
+    match init_global_runtime_with_config(MultiAgentRuntimeConfig::default()) {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "global multi-agent runtime init rejected the configured identities; \
+                 starting with a safe single-identity default instead"
+            );
+            MANAGER.get_or_init(MultiAgentRuntimeConfig::default())
+        }
+    }
 }
 
 pub fn init_global_runtime_with_config(
@@ -611,6 +682,20 @@ pub fn init_global_runtime_with_config(
 
 pub fn global_runtime() -> Option<Arc<MultiAgentRuntime>> {
     MANAGER.get()
+}
+
+pub fn session_scoped_key(key: &str) -> String {
+    match crate::session::current_session_context() {
+        Some(ctx) if !ctx.session_id.is_empty() => format!("{}::{}", ctx.session_id, key),
+        _ => format!("__global__::{key}"),
+    }
+}
+
+pub fn session_scoped_namespace(namespace: &str) -> String {
+    match crate::session::current_session_context() {
+        Some(ctx) if !ctx.session_id.is_empty() => format!("{namespace}:{}", ctx.session_id),
+        _ => namespace.to_string(),
+    }
 }
 
 pub fn register_configured_agents(rt: &MultiAgentRuntime, config: &crate::config::Config) {

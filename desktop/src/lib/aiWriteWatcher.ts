@@ -81,7 +81,10 @@ function handleSessions(
       seenIdsByMessages.set(messages, seen)
     }
 
-    const toolPaths = buildToolPathIndex(messages)
+    // Build the tool_use → paths index lazily: only when an unseen, successful tool_result is
+    // actually encountered. The common streaming case (appended file_edit / tool_use / assistant
+    // messages) then avoids an O(n) full-message scan on every store update.
+    let toolPaths: Map<string, string[]> | null = null
 
     for (const msg of messages) {
       if (msg.type === 'file_edit') {
@@ -99,6 +102,7 @@ function handleSessions(
         if (seen.has(key)) continue
         if (msg.isError) continue
         seen.add(key)
+        if (!toolPaths) toolPaths = buildToolPathIndex(messages)
         const paths = toolPaths.get(msg.toolUseId)
         if (!paths) continue
         for (const rawPath of paths) {

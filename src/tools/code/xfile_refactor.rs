@@ -94,6 +94,13 @@ impl Tool for CodeXfileRefactorTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        tokio::task::spawn_blocking(move || run_xfile_refactor(args))
+            .await
+            .map_err(|e| anyhow::anyhow!("code_xfile_refactor task panicked: {e}"))?
+    }
+}
+
+fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
         let new_name = args.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
         let mode = args
@@ -236,5 +243,4 @@ impl Tool for CodeXfileRefactorTool {
                 error: Some(format!("unknown mode: {other}")),
             }),
         }
-    }
 }

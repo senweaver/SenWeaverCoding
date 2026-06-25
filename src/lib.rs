@@ -92,6 +92,8 @@ pub use commands::registry::{
 
 pub mod apply_model;
 pub mod code_intel;
+#[cfg(feature = "computer-use")]
+pub mod computer;
 pub mod config;
 
 pub mod context_resolver;

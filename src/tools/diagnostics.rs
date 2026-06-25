@@ -224,10 +224,8 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 }
 
 fn format_lsp_diagnostic(file: &Path, workspace: &Path, diag: &LspDiagnostic) -> String {
-    let display_path = file
-        .strip_prefix(workspace)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|_| file.to_path_buf());
+    let display_path = crate::util::path_relative_to(file, workspace)
+        .unwrap_or_else(|| file.to_path_buf());
     let display = display_path.display();
     let line = diag.range.start_line + 1;
     let col = diag.range.start_character + 1;

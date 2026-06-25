@@ -27,8 +27,34 @@ impl Default for CodeGraphQueryTool {
 }
 
 fn resolve_workspace(arg: Option<&str>) -> PathBuf {
-    arg.map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    let base = crate::session::current_session_context()
+        .map(|c| PathBuf::from(c.workspace_dir))
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    match arg {
+        Some(a) if !a.trim().is_empty() => {
+            let candidate = PathBuf::from(a);
+            let abs = if candidate.is_absolute() {
+                candidate
+            } else {
+                base.join(&candidate)
+            };
+            let base_c = base.canonicalize().unwrap_or_else(|_| base.clone());
+            let abs_c = abs.canonicalize().unwrap_or_else(|_| abs.clone());
+            if abs_c.starts_with(&base_c) {
+                abs_c
+            } else {
+                tracing::warn!(
+                    target: "code_intel",
+                    requested = %abs.display(),
+                    "code_graph_query workspace argument escapes session workspace; confining to workspace root"
+                );
+                base_c
+            }
+        }
+        _ => base,
+    }
 }
 
 fn load_or_build_graph(root: &std::path::Path) -> std::io::Result<SymbolGraph> {
@@ -88,6 +114,13 @@ impl Tool for CodeGraphQueryTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        tokio::task::spawn_blocking(move || run_graph_query(args))
+            .await
+            .map_err(|e| anyhow::anyhow!("code_graph_query task panicked: {e}"))?
+    }
+}
+
+fn run_graph_query(args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
         let limit = args
@@ -187,5 +220,4 @@ impl Tool for CodeGraphQueryTool {
             output: payload.to_string(),
             error: None,
         })
-    }
 }

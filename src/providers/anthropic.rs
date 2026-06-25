@@ -773,37 +773,14 @@ impl AnthropicProvider {
             }
         }
 
-        let stream_builder = || {
-            let mut builder = Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                .pool_idle_timeout(std::time::Duration::from_secs(15));
-            if !headers.is_empty() {
-                builder = builder.default_headers(headers.clone());
-            }
-            builder
-        };
-
-        let proxied = crate::services::require_services()
+        crate::services::require_services()
             .proxy_runtime()
-            .apply_to_builder(stream_builder(), "provider.anthropic.stream");
-
-        proxied
-            .build()
-            .or_else(|error| {
-                tracing::warn!(
-                    "Failed to build proxied Anthropic stream client: {error}; retrying without proxy"
-                );
-                stream_builder().build()
-            })
-            .unwrap_or_else(|error| {
-                tracing::warn!("Failed to build Anthropic stream client: {error}");
-                Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                    .build()
-                    .unwrap_or_else(|_| Client::new())
-            })
+            .build_stream_client(
+                "provider.anthropic.stream",
+                read_timeout_secs,
+                10,
+                &headers,
+            )
     }
 
     fn build_streaming_request(

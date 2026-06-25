@@ -786,6 +786,137 @@ fn signal_frontend_ready(
     Ok(())
 }
 
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[cfg(target_os = "windows")]
+fn force_show_foreground_window(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST,
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let raw = hwnd.0 as HWND;
+    if raw.is_null() {
+        return;
+    }
+
+    unsafe {
+        if IsIconic(raw) != 0 {
+            ShowWindow(raw, SW_RESTORE);
+        } else {
+            ShowWindow(raw, SW_SHOW);
+        }
+
+        SetWindowPos(
+            raw,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        SetWindowPos(
+            raw,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        BringWindowToTop(raw);
+        SetForegroundWindow(raw);
+    }
+
+    reapply_chrome_styles(raw);
+}
+
+fn show_and_focus_main_window(app: &AppHandle) {
+    let win = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next())
+        .or_else(|| app.try_state::<MainWindowHandle>().map(|h| h.inner().0.clone()));
+    let Some(win) = win else {
+        tracing::warn!("[sen-desktop] tray reveal: no main window handle available");
+        return;
+    };
+
+    #[cfg(target_os = "windows")]
+    force_show_foreground_window(&win);
+
+    let win_main = win.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        if win_main.is_minimized().unwrap_or(false) {
+            let _ = win_main.unminimize();
+        }
+        if let Err(err) = win_main.show() {
+            tracing::warn!("[sen-desktop] tray reveal show() failed: {err}");
+        }
+        let _ = win_main.set_focus();
+        #[cfg(target_os = "windows")]
+        force_show_foreground_window(&win_main);
+    });
+    if let Err(err) = dispatched {
+        tracing::warn!("[sen-desktop] tray reveal run_on_main_thread failed: {err}");
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+const TRAY_QUIT_EVENT: &str = "tray://quit-requested";
+
+fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show_item = MenuItem::with_id(app, "tray_show", "显示主窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+    let mut builder = TrayIconBuilder::with_id("sen-main-tray")
+        .tooltip("SenWeaverCoding")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray_show" => show_and_focus_main_window(app),
+            "tray_quit" => {
+                if let Err(err) = app.emit(TRAY_QUIT_EVENT, ()) {
+                    tracing::warn!("[sen-desktop] emit {TRAY_QUIT_EVENT} failed: {err}");
+                }
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                show_and_focus_main_window(tray.app_handle());
+            }
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+
+    builder.build(app)?;
+    Ok(())
+}
+
 const FRONTEND_READY_TIMEOUT_MS: u64 = 60_000;
 
 fn show_main_window_now(window: &tauri::WebviewWindow) {
@@ -1132,6 +1263,9 @@ pub fn run() {
         .manage(TerminalState::default())
         .manage(DockSharedState::new())
         .register_uri_scheme_protocol("senbridge", browser_dock::senbridge_protocol_handler)
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_and_focus_main_window(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -1144,6 +1278,7 @@ pub fn run() {
             open_log_dir,
             prepare_for_update_install,
             signal_frontend_ready,
+            quit_app,
             reveal_in_explorer,
             read_local_image_data_url,
             curator_render_docx_with_diagrams,
@@ -1200,6 +1335,10 @@ pub fn run() {
 
             browser_dock::install_into(app.handle());
             fetch_worker::install_into(app.handle());
+
+            if let Err(err) = setup_system_tray(app.handle()) {
+                tracing::warn!("[sen-desktop] system tray setup failed: {err}");
+            }
 
             let handle = app.handle().clone();
 
@@ -1278,12 +1417,12 @@ pub fn run() {
 
     app.run(|app_handle, event| match event {
         RunEvent::ExitRequested { .. } => {
-
+            let _ = app_handle.remove_tray_by_id("sen-main-tray");
             process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(8));
             kill_gateway_child();
         }
         RunEvent::Exit => {
-
+            let _ = app_handle.remove_tray_by_id("sen-main-tray");
             process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(2));
             kill_gateway_child();
         }

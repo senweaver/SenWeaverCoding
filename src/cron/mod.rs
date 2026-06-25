@@ -5,18 +5,20 @@ use crate::config::Config;
 use crate::security::SecurityPolicy;
 use anyhow::{Result, anyhow, bail};
 
+mod legacy_import;
 mod schedule;
 mod store;
 mod types;
 
 pub mod scheduler;
+pub use legacy_import::import_legacy_auto_dream;
 pub use schedule::{
     next_run_for_schedule, normalize_expression, schedule_cron_expression, validate_schedule,
 };
 pub use store::{
-    add_agent_job, all_overdue_jobs, claim_job, due_jobs, finalize_run, get_job, list_jobs,
-    list_runs, record_last_run, record_run, remove_job, reschedule_after_run, reset_running_runs,
-    reset_stale_running, start_run, sync_declarative_jobs, update_job,
+    activity_jobs, add_agent_job, all_overdue_jobs, claim_job, due_jobs, finalize_run, get_job,
+    list_jobs, list_runs, record_last_run, record_run, remove_job, reschedule_after_run,
+    reset_running_runs, reset_stale_running, start_run, sync_declarative_jobs, update_job,
 };
 pub use types::{
     AgentJobOptions, CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,

@@ -105,8 +105,8 @@ impl EditHistory {
     }
 
     fn relative_key(&self, path: &Path) -> String {
-        path.strip_prefix(&self.workspace_dir)
-            .unwrap_or(path)
+        crate::util::path_relative_to(path, &self.workspace_dir)
+            .unwrap_or_else(|| path.to_path_buf())
             .to_string_lossy()
             .replace('\\', "/")
     }

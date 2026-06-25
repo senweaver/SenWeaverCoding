@@ -96,6 +96,10 @@ pub enum Schedule {
     Every {
         every_ms: u64,
     },
+    Idle {
+        after_idle_ms: u64,
+    },
+    OnSessionEnd,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,6 +157,12 @@ pub struct AgentJobOptions {
     pub notification: Option<serde_json::Value>,
 
     pub task_description: Option<String>,
+
+    pub max_duration_ms: Option<u64>,
+
+    pub require_idle_ms: Option<u64>,
+
+    pub priority: Option<String>,
 }
 
 impl Default for AgentJobOptions {
@@ -169,6 +179,9 @@ impl Default for AgentJobOptions {
             use_worktree: None,
             notification: None,
             task_description: None,
+            max_duration_ms: None,
+            require_idle_ms: None,
+            priority: None,
         }
     }
 }
@@ -216,6 +229,15 @@ pub struct CronJob {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_description: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_duration_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_idle_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,4 +269,7 @@ pub struct CronJobPatch {
     pub use_worktree: Option<bool>,
     pub notification: Option<serde_json::Value>,
     pub task_description: Option<String>,
+    pub max_duration_ms: Option<u64>,
+    pub require_idle_ms: Option<u64>,
+    pub priority: Option<String>,
 }

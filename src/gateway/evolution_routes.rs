@@ -440,24 +440,35 @@ pub async fn handle_rescore(
         )
             .into_response();
     }
-    let store = engine.store();
-    let weights = engine.config_snapshot().signal_weights;
-    let mut rescored: u64 = 0;
-    let mut errors: u64 = 0;
-    let outcome = store.for_each_turn(|mut turn| {
-        let scores = crate::evolution::run_fast_evaluators(&turn);
-        turn.reward = crate::evolution::fuse_signals(&scores, &weights);
-        match store.update_turn_reward(&turn.id, &turn.reward) {
-            Ok(()) => rescored = rescored.saturating_add(1),
-            Err(_) => errors = errors.saturating_add(1),
-        }
-        Ok(())
-    });
-    let total_seen = match outcome {
-        Ok(n) => n,
-        Err(error) => {
+    let result = tokio::task::spawn_blocking(move || {
+        let store = engine.store();
+        let weights = engine.config_snapshot().signal_weights;
+        let mut rescored: u64 = 0;
+        let mut errors: u64 = 0;
+        let outcome = store.for_each_turn(|mut turn| {
+            let scores = crate::evolution::run_fast_evaluators(&turn);
+            turn.reward = crate::evolution::fuse_signals(&scores, &weights);
+            match store.update_turn_reward(&turn.id, &turn.reward) {
+                Ok(()) => rescored = rescored.saturating_add(1),
+                Err(_) => errors = errors.saturating_add(1),
+            }
+            Ok(())
+        });
+        outcome.map(|total_seen| (rescored, errors, total_seen))
+    })
+    .await;
+    let (rescored, errors, total_seen) = match result {
+        Ok(Ok(v)) => v,
+        Ok(Err(error)) => {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
                 .into_response();
+        }
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("rescore task failed: {e}"),
+            )
+            .into_response();
         }
     };
     Json(serde_json::json!({
@@ -841,21 +852,38 @@ pub async fn handle_export_create(
             .into_response();
     }
     if body.preview.unwrap_or(false) {
-        match crate::evolution::preview_export(&engine, format, &body.filter, &body.options, 5) {
-            Ok(preview) => Json(serde_json::json!({
+        let filter = body.filter;
+        let options = body.options;
+        let result = tokio::task::spawn_blocking(move || {
+            crate::evolution::preview_export(&engine, format, &filter, &options, 5)
+        })
+        .await;
+        match result {
+            Ok(Ok(preview)) => Json(serde_json::json!({
                 "format": preview.format.as_str(),
                 "totalEligible": preview.total_eligible,
                 "samples": preview.samples,
             }))
             .into_response(),
-            Err(error) => {
+            Ok(Err(error)) => {
                 json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()).into_response()
             }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("export preview task failed: {e}"),
+            )
+            .into_response(),
         }
     } else {
-        match crate::evolution::export_to_file(&engine, format, &body.filter, &body.options) {
-            Ok(record) => Json(export_record_to_json(record)).into_response(),
-            Err(error) => {
+        let filter = body.filter;
+        let options = body.options;
+        let result = tokio::task::spawn_blocking(move || {
+            crate::evolution::export_to_file(&engine, format, &filter, &options)
+        })
+        .await;
+        match result {
+            Ok(Ok(record)) => Json(export_record_to_json(record)).into_response(),
+            Ok(Err(error)) => {
                 let msg = error.to_string();
                 if msg == "persistence_disabled" {
                     return (
@@ -866,6 +894,11 @@ pub async fn handle_export_create(
                 }
                 json_error(StatusCode::INTERNAL_SERVER_ERROR, &msg).into_response()
             }
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("export task failed: {e}"),
+            )
+            .into_response(),
         }
     }
 }

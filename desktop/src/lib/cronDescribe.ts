@@ -5,8 +5,38 @@
 
 
 import type { TranslationKey } from '../i18n'
+import type { CronTask } from '../types/task'
 
 type TFunc = (key: TranslationKey, params?: Record<string, string | number>) => string
+
+function describeDuration(ms: number, t: TFunc): string {
+  const totalMinutes = Math.max(1, Math.round(ms / 60000))
+  if (totalMinutes % 60 === 0) {
+    return t('automations.trigger.hoursValue', { n: totalMinutes / 60 })
+  }
+  return t('automations.trigger.minutesValue', { n: totalMinutes })
+}
+
+export function describeTrigger(task: CronTask, t: TFunc): string {
+  switch (task.triggerType) {
+    case 'idle':
+      return t('automations.trigger.idleDesc', {
+        duration: describeDuration(task.afterIdleMs ?? 0, t),
+      })
+    case 'session_end':
+      return t('automations.trigger.sessionEndDesc')
+    case 'interval':
+      return t('automations.trigger.intervalDesc', {
+        duration: describeDuration(task.everyMs ?? 0, t),
+      })
+    case 'once':
+      return t('automations.trigger.onceDesc', {
+        time: task.runAt ? new Date(task.runAt).toLocaleString() : '',
+      })
+    default:
+      return describeCron(task.cron, t)
+  }
+}
 
 function pad(n: number): string {
   return n.toString().padStart(2, '0')

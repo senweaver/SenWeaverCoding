@@ -4,7 +4,7 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -17,7 +17,7 @@ pub struct MochatChannel {
     allowed_users: Vec<String>,
     poll_interval_secs: u64,
 
-    dedup: Arc<RwLock<HashSet<String>>>,
+    dedup: Arc<RwLock<(HashSet<String>, VecDeque<String>)>>,
 }
 
 impl MochatChannel {
@@ -32,7 +32,7 @@ impl MochatChannel {
             api_token,
             allowed_users,
             poll_interval_secs,
-            dedup: Arc::new(RwLock::new(HashSet::new())),
+            dedup: Arc::new(RwLock::new((HashSet::new(), VecDeque::new()))),
         }
     }
 
@@ -52,7 +52,7 @@ impl MochatChannel {
         }
 
         let dedup = self.dedup.read().await;
-        dedup.contains(msg_id)
+        dedup.0.contains(msg_id)
     }
 
     async fn mark_processed(&self, msg_id: &str) {
@@ -62,18 +62,21 @@ impl MochatChannel {
 
         let mut dedup = self.dedup.write().await;
 
-        if dedup.contains(msg_id) {
+        if dedup.0.contains(msg_id) {
             return;
         }
 
-        if dedup.len() >= DEDUP_CAPACITY {
-            let to_remove: Vec<String> = dedup.iter().take(DEDUP_CAPACITY / 2).cloned().collect();
-            for key in to_remove {
-                dedup.remove(&key);
+        while dedup.0.len() >= DEDUP_CAPACITY {
+            match dedup.1.pop_front() {
+                Some(oldest) => {
+                    dedup.0.remove(&oldest);
+                }
+                None => break,
             }
         }
 
-        dedup.insert(msg_id.to_string());
+        dedup.0.insert(msg_id.to_string());
+        dedup.1.push_back(msg_id.to_string());
     }
 }
 

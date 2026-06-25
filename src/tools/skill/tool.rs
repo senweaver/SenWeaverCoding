@@ -98,7 +98,14 @@ impl Tool for SkillShellTool {
             });
         }
 
-        match self.security.validate_command_execution(&command, true) {
+        let command_approved = args
+            .get("approved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match self
+            .security
+            .validate_command_execution(&command, command_approved)
+        {
             Ok(_) => {}
             Err(reason) => {
                 return Ok(ToolResult {
@@ -125,14 +132,39 @@ impl Tool for SkillShellTool {
             });
         }
 
-        let mut cmd = crate::util::hidden_async_command("sh");
-        cmd.arg("-c").arg(&command);
+        let mut cmd = if cfg!(windows) {
+            let mut c = crate::util::hidden_async_command("cmd");
+            c.arg("/C").arg(&command);
+            c
+        } else {
+            let mut c = crate::util::hidden_async_command("sh");
+            c.arg("-c").arg(&command);
+            c
+        };
         cmd.current_dir(self.security.workspace_dir());
         cmd.env_clear();
 
-        for var in &[
+        const UNIX_ENV_PASSTHROUGH: &[&str] = &[
             "PATH", "HOME", "TERM", "LANG", "LC_ALL", "USER", "SHELL", "TMPDIR",
-        ] {
+        ];
+        const WINDOWS_ENV_PASSTHROUGH: &[&str] = &[
+            "PATH",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "TEMP",
+            "TMP",
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+        ];
+        let passthrough = if cfg!(windows) {
+            WINDOWS_ENV_PASSTHROUGH
+        } else {
+            UNIX_ENV_PASSTHROUGH
+        };
+        for var in passthrough {
             if let Ok(val) = std::env::var(var) {
                 cmd.env(var, val);
             }

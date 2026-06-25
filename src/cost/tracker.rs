@@ -5,7 +5,7 @@ use super::types::{BudgetCheck, CostRecord, CostSummary, ModelStats, TokenUsage,
 use crate::config::schema::CostConfig;
 use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, NaiveDate, Utc};
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -221,7 +221,11 @@ impl CostTracker {
     }
 }
 
-static GLOBAL_COST_TRACKER: OnceLock<Option<Arc<CostTracker>>> = OnceLock::new();
+static GLOBAL_COST_TRACKER: OnceLock<RwLock<Option<Arc<CostTracker>>>> = OnceLock::new();
+
+fn global_cost_tracker_slot() -> &'static RwLock<Option<Arc<CostTracker>>> {
+    GLOBAL_COST_TRACKER.get_or_init(|| RwLock::new(None))
+}
 
 pub type UsageNotifyCallback = Arc<dyn Fn(&CostRecord) + Send + Sync + 'static>;
 
@@ -243,24 +247,63 @@ pub(crate) fn fire_usage_notify(record: &CostRecord) {
 impl CostTracker {
 
     pub fn get_or_init_global(config: CostConfig, workspace_dir: &Path) -> Option<Arc<Self>> {
-        GLOBAL_COST_TRACKER
-            .get_or_init(|| {
-                if !config.enabled {
-                    return None;
-                }
-                match Self::new(config, workspace_dir) {
-                    Ok(ct) => Some(Arc::new(ct)),
-                    Err(e) => {
-                        tracing::warn!("Failed to initialize global cost tracker: {e}");
-                        None
-                    }
-                }
-            })
-            .clone()
+        let slot = global_cost_tracker_slot();
+        if let Some(existing) = slot.read().clone() {
+            return Some(existing);
+        }
+        let mut guard = slot.write();
+        if let Some(existing) = guard.as_ref() {
+            return Some(existing.clone());
+        }
+        if !config.enabled {
+            return None;
+        }
+        match Self::new(config, workspace_dir) {
+            Ok(ct) => {
+                let arc = Arc::new(ct);
+                *guard = Some(Arc::clone(&arc));
+                Some(arc)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize global cost tracker: {e}");
+                None
+            }
+        }
+    }
+
+    pub fn reconfigure_global(config: CostConfig, workspace_dir: &Path) -> Option<Arc<Self>> {
+        let slot = global_cost_tracker_slot();
+        let mut guard = slot.write();
+        if !config.enabled {
+            *guard = None;
+            return None;
+        }
+        if let Some(existing) = guard.as_ref() {
+            return Some(existing.clone());
+        }
+        match Self::new(config, workspace_dir) {
+            Ok(ct) => {
+                let arc = Arc::new(ct);
+                *guard = Some(Arc::clone(&arc));
+                Some(arc)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to (re)initialize global cost tracker: {e}");
+                *guard = None;
+                None
+            }
+        }
     }
 
     pub fn try_get_global() -> Option<Arc<Self>> {
-        GLOBAL_COST_TRACKER.get().and_then(|opt| opt.clone())
+        global_cost_tracker_slot().read().clone()
+    }
+
+    pub fn daily_cost_usd(&self) -> f64 {
+        self.lock_storage()
+            .get_aggregated_costs()
+            .map(|(daily, _)| daily)
+            .unwrap_or(0.0)
     }
 }
 

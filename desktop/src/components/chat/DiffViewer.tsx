@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+import { memo } from 'react'
 import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
 import { Highlight, type PrismTheme } from 'prism-react-renderer'
 import { CopyButton } from '../shared/CopyButton'
@@ -114,7 +115,7 @@ const diffStyles = {
   },
 }
 
-export function DiffViewer({ filePath, oldString, newString }: Props) {
+function DiffViewerImpl({ filePath, oldString, newString }: Props) {
   const language = inferLanguage(filePath)
 
   const oldLines = oldString.split('\n')
@@ -169,3 +170,11 @@ export function DiffViewer({ filePath, oldString, newString }: Props) {
     </div>
   )
 }
+
+export const DiffViewer = memo(
+  DiffViewerImpl,
+  (prev, next) =>
+    prev.filePath === next.filePath &&
+    prev.oldString === next.oldString &&
+    prev.newString === next.newString,
+)

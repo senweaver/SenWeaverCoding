@@ -38,7 +38,7 @@ pub mod validator;
 pub mod workspace;
 pub use schema::{
     AgentConfig, AssemblyAiSttConfig, AuditConfig, AutonomyConfig, BackupConfig,
-    BrowserComputerUseConfig, BrowserConfig, BuddyConfig, BuiltinHooksConfig, ChannelsConfig,
+    BrowserConfig, BuddyConfig, BuiltinHooksConfig, ChannelsConfig,
     ClassificationRule, ClaudeCodeConfig, ClaudeCodeRunnerConfig, CloudOpsConfig, CodexCliConfig,
     ComposioConfig, Config, CostConfig, CronConfig, CronJobDecl,
     CronScheduleDecl, CustomToolDef, CustomToolsConfig, DEFAULT_GWS_SERVICES,

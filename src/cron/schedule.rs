@@ -3,9 +3,15 @@
 // Licensed under the MIT License.
 use crate::cron::Schedule;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use cron::Schedule as CronExprSchedule;
 use std::str::FromStr;
+
+pub fn activity_trigger_sentinel() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(9999, 1, 1, 0, 0, 0)
+        .single()
+        .unwrap_or_else(Utc::now)
+}
 
 pub fn next_run_for_schedule(schedule: &Schedule, from: DateTime<Utc>) -> Result<DateTime<Utc>> {
     match schedule {
@@ -38,6 +44,7 @@ pub fn next_run_for_schedule(schedule: &Schedule, from: DateTime<Utc>) -> Result
             from.checked_add_signed(delta)
                 .ok_or_else(|| anyhow::anyhow!("every_ms overflowed DateTime"))
         }
+        Schedule::Idle { .. } | Schedule::OnSessionEnd => Ok(activity_trigger_sentinel()),
     }
 }
 
@@ -60,6 +67,13 @@ pub fn validate_schedule(schedule: &Schedule, now: DateTime<Utc>) -> Result<()> 
             }
             Ok(())
         }
+        Schedule::Idle { after_idle_ms } => {
+            if *after_idle_ms == 0 {
+                anyhow::bail!("Invalid schedule: after_idle_ms must be > 0");
+            }
+            Ok(())
+        }
+        Schedule::OnSessionEnd => Ok(()),
     }
 }
 

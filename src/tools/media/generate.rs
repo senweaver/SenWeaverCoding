@@ -72,7 +72,7 @@ impl MediaGenTool {
         None
     }
 
-    fn resolve_workspace_file(&self, raw: &str, what: &str) -> anyhow::Result<PathBuf> {
+    async fn resolve_workspace_file(&self, raw: &str, what: &str) -> anyhow::Result<PathBuf> {
         let cleaned = raw.replace('\\', "/");
         let p = PathBuf::from(&cleaned);
         let abs = if p.is_absolute() {
@@ -80,9 +80,11 @@ impl MediaGenTool {
         } else {
             self.workspace_dir.join(p)
         };
-        let canon = std::fs::canonicalize(&abs)
+        let canon = tokio::fs::canonicalize(&abs)
+            .await
             .map_err(|_| anyhow::anyhow!("{what} `{raw}` not found in the workspace"))?;
-        let ws = std::fs::canonicalize(&self.workspace_dir)
+        let ws = tokio::fs::canonicalize(&self.workspace_dir)
+            .await
             .unwrap_or_else(|_| self.workspace_dir.clone());
         if !canon.starts_with(&ws) {
             anyhow::bail!("{what} `{raw}` resolves outside the workspace");
@@ -210,7 +212,7 @@ impl MediaGenTool {
         let mut fidelity: Option<String> = None;
         if surface == MediaSurface::Image {
             if let Some(raw) = Self::str_arg(&args, &["source_image", "sourceImage", "image"]) {
-                match self.resolve_workspace_file(raw, "source_image") {
+                match self.resolve_workspace_file(raw, "source_image").await {
                     Ok(p) => source_image_path = Some(p),
                     Err(e) => {
                         return Ok(ToolResult {
@@ -231,7 +233,7 @@ impl MediaGenTool {
                         ),
                     });
                 }
-                match self.resolve_workspace_file(raw, "mask") {
+                match self.resolve_workspace_file(raw, "mask").await {
                     Ok(p) => mask_path = Some(p),
                     Err(e) => {
                         return Ok(ToolResult {

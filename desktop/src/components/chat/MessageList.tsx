@@ -380,6 +380,8 @@ type ListFooterContext = {
   showPlanningIndicator: boolean
   awaitingWorkers: boolean
   planningLabel: string
+  activeThinkingId: string | null
+  onLiveThinkingGrow: () => void
 }
 
 function ListHeader() {
@@ -396,9 +398,18 @@ function ListFooter({ context }: { context?: ListFooterContext }) {
     showPlanningIndicator,
     awaitingWorkers,
     planningLabel,
+    activeThinkingId,
+    onLiveThinkingGrow,
   } = context
   return (
     <div className="mx-auto w-full max-w-[860px] px-4 pb-4">
+      {resolvedSessionId && activeThinkingId && (
+        <ActiveThinkingBlock
+          sessionId={resolvedSessionId}
+          onContentGrow={onLiveThinkingGrow}
+        />
+      )}
+
       {streamingText && (
         <SectionErrorBoundary label="streaming" resetKeys={[resolvedSessionId ?? '']}>
           <AssistantMessage content={streamingText} isStreaming={isStreaming} />
@@ -489,6 +500,8 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const scrollRafRef = useRef<number | null>(null)
   const prevFirstKeyRef = useRef<string | null>(null)
   const prevListLenRef = useRef(0)
+  const initialPinPendingRef = useRef(true)
+  const initialPinDeadlineRef = useRef(0)
   const t = useTranslation()
   const [rewindTarget, setRewindTarget] = useState<{
     userMessageIndex: number
@@ -523,20 +536,18 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const [firstItemIndex, setFirstItemIndex] = useState(FIRST_ITEM_INDEX_BASE)
 
   const scrollFollowToBottom = useCallback(() => {
-    if (!scrollerElRef.current) return
-    if (scrollRafRef.current != null) return
+    if (!followRef.current) return
+    if (typeof document !== 'undefined' && document.hidden) return
+    const node = scrollerElRef.current
+    if (!node) return
+    const target = node.scrollHeight - node.clientHeight
+    if (target - node.scrollTop <= 1) return
+    programmaticScrollRef.current = true
+    node.scrollTop = target
+    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null
-      const node = scrollerElRef.current
-      if (!node) return
-      programmaticScrollRef.current = true
-      const target = node.scrollHeight - node.clientHeight
-      if (target - node.scrollTop > 2) {
-        node.scrollTop = target
-      }
-      requestAnimationFrame(() => {
-        programmaticScrollRef.current = false
-      })
+      programmaticScrollRef.current = false
     })
   }, [])
 
@@ -584,15 +595,11 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     atTopRef.current = false
     prevFirstKeyRef.current = null
     prevListLenRef.current = 0
+    initialPinPendingRef.current = true
+    initialPinDeadlineRef.current = 0
     setFirstItemIndex(FIRST_ITEM_INDEX_BASE)
     setShowScrollToBottom(false)
   }, [resolvedSessionId])
-
-  useLayoutEffect(() => {
-    if (!followRef.current) return
-    if (typeof document !== 'undefined' && document.hidden) return
-    scrollFollowToBottom()
-  }, [streamingText, chatState, scrollFollowToBottom])
 
   const handleLiveThinkingGrow = useCallback(() => {
     if (!followRef.current) return
@@ -687,31 +694,26 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
   const childResultsByParentRef = useRef<Map<string, Map<string, Extract<UIMessage, { type: 'tool_result' }>>>>(new Map())
 
-  const messagesWithLiveThinking = useMemo(() => {
+  const baseMessages = useMemo(() => {
     if (!activeThinkingId) return messages
+    let hasActive = false
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (!m) continue
       if (m.type === 'thinking' && m.id === activeThinkingId) {
-        return messages
+        hasActive = true
+        break
       }
     }
-    const now = Date.now()
-    return [
-      ...messages,
-      {
-        id: activeThinkingId,
-        type: 'thinking',
-        content: '',
-        timestamp: now,
-        startedAt: now,
-      },
-    ] as UIMessage[]
+    if (!hasActive) return messages
+    return messages.filter(
+      (m) => !(m.type === 'thinking' && m.id === activeThinkingId),
+    )
   }, [messages, activeThinkingId])
 
   const { toolResultMap, renderItems, childToolCallsByParent } = useMemo(
-    () => buildRenderModel(messagesWithLiveThinking),
-    [messagesWithLiveThinking],
+    () => buildRenderModel(baseMessages),
+    [baseMessages],
   )
 
   const childResultsByParent = useMemo(() => {
@@ -779,6 +781,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     prevFirstKeyRef.current = firstKey
     prevListLenRef.current = listRenderItems.length
   }, [listRenderItems])
+
+  useLayoutEffect(() => {
+    if (!initialPinPendingRef.current) return
+    if (listRenderItems.length === 0) return
+    initialPinPendingRef.current = false
+    initialPinDeadlineRef.current = Date.now() + 1500
+    followRef.current = true
+    atBottomRef.current = true
+    setShowScrollToBottom(false)
+    requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
+    })
+  }, [listRenderItems.length])
 
   const rewindIndexByMsgId = useMemo(() => {
     const map = new Map<string, number>()
@@ -945,8 +960,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       awaitingWorkers: chatState === 'awaiting_workers',
       planningLabel:
         t('chat.willResumeWhenWorkersFinish') || 'Will resume when subagents finish',
+      activeThinkingId,
+      onLiveThinkingGrow: handleLiveThinkingGrow,
     }),
-    [streamingText, chatState, resolvedSessionId, showRetryBanner, showPlanningIndicator, t],
+    [
+      streamingText,
+      chatState,
+      resolvedSessionId,
+      showRetryBanner,
+      showPlanningIndicator,
+      t,
+      activeThinkingId,
+      handleLiveThinkingGrow,
+    ],
   )
 
   const handleRequestRewindCb = useCallback(
@@ -1056,12 +1082,33 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
               ? assistantTurnCopyByMsgId.get(msg.id) ?? null
               : null
 
+          const resolvedToolResult =
+            msg.type === 'tool_use'
+              ? (() => {
+                  const r = toolResultMap.get(msg.toolUseId)
+                  return r ? { content: r.content, isError: r.isError } : null
+                })()
+              : null
+          // Narrow chatState to per-block booleans that stay constant for completed blocks:
+          // only the in-flight tool (no result yet) and the last assistant segment can change,
+          // so streaming<->tool transitions no longer invalidate the whole history.
+          const toolStreaming =
+            msg.type === 'tool_use' &&
+            chatState === 'tool_executing' &&
+            resolvedToolResult == null
+          const tailMenuEnabled =
+            msg.type === 'assistant_text' &&
+            chatState === 'idle' &&
+            Boolean(turnCopy?.isLastAssistantSegmentInTurn) &&
+            Boolean((turnCopy?.fullText ?? '').trim())
+
           const block = (
             <SectionErrorBoundary key={msg.id} label="message" resetKeys={[msg.id]}>
             <MessageBlock
               message={msg}
               activeThinkingId={activeThinkingId}
-              chatState={chatState}
+              toolStreaming={toolStreaming}
+              tailMenuEnabled={tailMenuEnabled}
               assistantTurnCopy={turnCopy}
               sessionId={resolvedSessionId}
               sessionWorkDir={activeSessionMeta?.workDir ?? null}
@@ -1076,14 +1123,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
                   ? childResultsByParent.get(msg.toolUseId) ?? undefined
                   : undefined
               }
-              toolResult={
-                msg.type === 'tool_use'
-                  ? (() => {
-                      const r = toolResultMap.get(msg.toolUseId)
-                      return r ? { content: r.content, isError: r.isError } : null
-                    })()
-                  : null
-              }
+              toolResult={resolvedToolResult}
               rewindableUserIndex={rewindableUserIndex}
               isRestoreAnchor={isRestoreAnchor}
               onRequestRewind={onRequestRewindHandler}
@@ -1113,10 +1153,14 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         computeItemKey={(_, item) => renderItemKey(item)}
         firstItemIndex={firstItemIndex}
         initialTopMostItemIndex={Math.max(0, listRenderItems.length - 1)}
-        followOutput={() => (followRef.current ? 'auto' : false)}
+        followOutput={false}
         totalListHeightChanged={() => {
           if (!followRef.current) return
           if (typeof document !== 'undefined' && document.hidden) return
+          if (Date.now() < initialPinDeadlineRef.current) {
+            virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
+            return
+          }
           if (chatState === 'idle' && !atBottomRef.current) return
           scrollFollowToBottom()
         }}
@@ -1384,13 +1428,16 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   )
 }
 
-type ChatStateLite = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending' | 'awaiting_workers'
-
 type MessageBlockProps = {
   message: UIMessage
   activeThinkingId: string | null
   toolResult?: { content: unknown; isError: boolean } | null
-  chatState: ChatStateLite
+  // Narrowed, history-stable flags derived from chatState in the parent. Passing the raw
+  // chatState into every block made all memoized history blocks invalidate on every
+  // streaming<->tool_executing transition (flicker / layout jump during active editing).
+  // These booleans are constant for completed blocks, so only the active block re-renders.
+  toolStreaming: boolean
+  tailMenuEnabled: boolean
   assistantTurnCopy: AssistantTurnCopyInfo | null
   sessionId?: string | null
   sessionWorkDir?: string | null
@@ -1417,7 +1464,8 @@ function areMessageBlockPropsEqual(
 ): boolean {
   if (prev.message !== next.message) return false
   if (prev.activeThinkingId !== next.activeThinkingId) return false
-  if (prev.chatState !== next.chatState) return false
+  if (prev.toolStreaming !== next.toolStreaming) return false
+  if (prev.tailMenuEnabled !== next.tailMenuEnabled) return false
   if (prev.sessionId !== next.sessionId) return false
   if (prev.sessionWorkDir !== next.sessionWorkDir) return false
   if (prev.disableFork !== next.disableFork) return false
@@ -1454,7 +1502,8 @@ export const MessageBlock = memo(function MessageBlock({
   message,
   activeThinkingId,
   toolResult,
-  chatState,
+  toolStreaming,
+  tailMenuEnabled,
   assistantTurnCopy,
   sessionId,
   sessionWorkDir,
@@ -1512,10 +1561,7 @@ export const MessageBlock = memo(function MessageBlock({
       )
     case 'assistant_text': {
       const fullTurn = assistantTurnCopy?.fullText ?? ''
-      const allowTailMenu =
-        chatState === 'idle' &&
-        Boolean(assistantTurnCopy?.isLastAssistantSegmentInTurn) &&
-        Boolean(fullTurn.trim())
+      const allowTailMenu = tailMenuEnabled
       return supersededWrap(
         <AssistantMessage
           content={message.content}
@@ -1593,9 +1639,7 @@ export const MessageBlock = memo(function MessageBlock({
           toolUseId={message.toolUseId}
           input={message.input}
           result={toolResult ?? null}
-          isStreaming={
-            chatState === 'tool_executing' && (toolResult == null)
-          }
+          isStreaming={toolStreaming}
           parentSessionId={sessionId}
           toolTimestamp={message.timestamp}
           childCalls={childCalls}

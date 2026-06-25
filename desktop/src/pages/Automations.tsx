@@ -11,7 +11,7 @@ import { TaskList } from '../components/tasks/TaskList'
 import { TaskEmptyState } from '../components/tasks/TaskEmptyState'
 import { NewTaskModal } from '../components/tasks/NewTaskModal'
 
-export function ScheduledTasks() {
+export function Automations() {
   const tasks = useTaskStore((s) => s.tasks)
   const fetchTasks = useTaskStore((s) => s.fetchTasks)
   const isLoading = useTaskStore((s) => s.isLoading)
@@ -28,29 +28,23 @@ export function ScheduledTasks() {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="px-10 py-8">
-        {}
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{t('scheduledPage.title')}</h1>
+            <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{t('automations.page.title')}</h1>
             <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              {(() => {
-                const parts = t('scheduledPage.subtitle').split('{code}')
-                return <>{parts[0]}<code className="px-1 py-0.5 rounded bg-[var(--color-surface-container)] text-xs font-[var(--font-mono)]">/schedule</code>{parts[1]}</>
-              })()}
+              {t('automations.page.subtitle')}
             </p>
           </div>
           <Button onClick={() => openModal('new-task')}>{t('tasks.newTask')}</Button>
         </div>
 
-        {}
         <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-warning)]/8 border border-[var(--color-warning)]/15 mb-6">
           <span className="material-symbols-outlined text-[18px] text-[var(--color-warning)]">schedule</span>
           <span className="text-xs text-[var(--color-text-secondary)]">
-            {t('scheduledPage.desktopNotice')}
+            {t('automations.page.desktopNotice')}
           </span>
         </div>
 
-        {}
         {!initialized && isLoading ? (
           <div className="flex items-center justify-center py-16">
             <div className="animate-spin w-6 h-6 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
@@ -62,7 +56,6 @@ export function ScheduledTasks() {
         )}
       </div>
 
-      {}
       {activeModal === 'new-task' && (
         <NewTaskModal
           open

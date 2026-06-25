@@ -431,8 +431,16 @@ impl FileEditTool {
         };
 
         let scope_range: Option<std::ops::Range<usize>> = if let Some(ref name) = scope_name {
-            let range =
-                crate::code_intel::outline::locate_named_scope(resolved_target, name);
+            // locate_named_scope reads the file from disk; run it on the blocking pool so the
+            // async worker thread is not stalled on I/O for scoped edits.
+            let target = resolved_target.to_path_buf();
+            let name_owned = name.clone();
+            let range = tokio::task::spawn_blocking(move || {
+                crate::code_intel::outline::locate_named_scope(&target, &name_owned)
+            })
+            .await
+            .ok()
+            .flatten();
             if range.is_none() {
                 tracing::warn!(
                     scope = %name,

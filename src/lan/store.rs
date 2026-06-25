@@ -130,7 +130,13 @@ impl LanStore {
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_transfers_peer ON transfers(peer_id, created_at);",
+             CREATE INDEX IF NOT EXISTS idx_transfers_peer ON transfers(peer_id, created_at);
+             CREATE TABLE IF NOT EXISTS pinned_keys (
+                 user_id TEXT PRIMARY KEY,
+                 public_key TEXT NOT NULL,
+                 trusted INTEGER NOT NULL DEFAULT 0,
+                 first_pinned INTEGER NOT NULL
+             );",
         )?;
         let version: i64 = conn
             .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
@@ -177,6 +183,38 @@ impl LanStore {
         )
         .ok()
         .flatten()
+    }
+
+    pub fn pinned_public_key(&self, user_id: &str) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT public_key FROM pinned_keys WHERE user_id = ?1",
+            params![user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    pub fn pin_public_key(&self, user_id: &str, public_key: &str, now: i64) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO pinned_keys (user_id, public_key, trusted, first_pinned)
+             VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT(user_id) DO NOTHING",
+            params![user_id, public_key, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_peer_trusted(&self, user_id: &str, public_key: &str, now: i64) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO pinned_keys (user_id, public_key, trusted, first_pinned)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET public_key = excluded.public_key, trusted = 1",
+            params![user_id, public_key, now],
+        )?;
+        Ok(())
     }
 
     pub fn peer_nickname(&self, user_id: &str) -> Option<String> {

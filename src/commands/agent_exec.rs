@@ -129,10 +129,10 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
 
             if let Some(rt) = crate::agent::multi_agent_runtime::global_runtime() {
                 rt.blackboard.inner().write(
-                    format!(
+                    crate::agent::multi_agent_runtime::session_scoped_key(&format!(
                         "/agent_exec/{name}/{}",
                         chrono::Utc::now().timestamp_millis()
-                    ),
+                    )),
                     serde_json::json!({
                         "agent": name,
                         "provider": &provider_name,
@@ -142,7 +142,7 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
                         "elapsed_ms": start.elapsed().as_millis() as u64,
                     }),
                     "agent_exec",
-                    "invocations",
+                    crate::agent::multi_agent_runtime::session_scoped_namespace("invocations"),
                 );
             }
 

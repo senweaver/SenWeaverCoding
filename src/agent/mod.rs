@@ -6,7 +6,6 @@ mod sqlite_gateway_hydrate;
 pub mod activity;
 #[allow(clippy::module_inception)]
 pub mod agent;
-pub mod auto_dream_scheduler;
 pub mod auto_title;
 pub mod bridge_types;
 pub mod builtin_skills;
@@ -36,6 +35,7 @@ pub mod memory_loader;
 pub mod mode;
 pub mod model_switch;
 pub mod multi_agent_runtime;
+pub mod observe;
 pub mod parallel_executor;
 pub mod pipeline;
 pub mod plan_mode;

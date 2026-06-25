@@ -1002,7 +1002,7 @@ impl IncrementalOptimizeTool {
                     }
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     if extensions.contains(&ext) {
-                        if let Ok(rel) = path.strip_prefix(workspace) {
+                        if let Some(rel) = crate::util::path_relative_to(&path, workspace) {
                             files.push(rel.to_string_lossy().to_string());
                         }
                     }

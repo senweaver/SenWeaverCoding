@@ -401,11 +401,18 @@ pub async fn handle_lan_file_raw_get(
     let Some(lan) = lan_service() else {
         return service_unavailable();
     };
-    match lan.read_shared_file(&params.path) {
-        Ok((bytes, mime)) => raw_bytes_response(bytes, &mime),
-        Err(err) => (
+    let path = params.path.clone();
+    let result = tokio::task::spawn_blocking(move || lan.read_shared_file(&path)).await;
+    match result {
+        Ok(Ok((bytes, mime))) => raw_bytes_response(bytes, &mime),
+        Ok(Err(err)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("file read task failed: {e}") })),
         )
             .into_response(),
     }
@@ -1033,9 +1040,14 @@ pub async fn handle_lan_group_document_raw_get(
     let Some(group) = group_service() else {
         return service_unavailable();
     };
-    match group.document_content(&params.group_id, &params.doc_id) {
-        Ok(Some((bytes, mime, _name))) => raw_bytes_response(bytes, &mime),
-        Ok(None) => {
+    let group_for_read = group.clone();
+    let gid = params.group_id.clone();
+    let did = params.doc_id.clone();
+    let result =
+        tokio::task::spawn_blocking(move || group_for_read.document_content(&gid, &did)).await;
+    match result {
+        Ok(Ok(Some((bytes, mime, _name)))) => raw_bytes_response(bytes, &mime),
+        Ok(Ok(None)) => {
             let _ = group.request_download(&params.group_id, &params.doc_id);
             (
                 StatusCode::NOT_FOUND,
@@ -1043,7 +1055,12 @@ pub async fn handle_lan_group_document_raw_get(
             )
                 .into_response()
         }
-        Err(err) => bad_request(&err.to_string()),
+        Ok(Err(err)) => bad_request(&err.to_string()),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("document read task failed: {e}") })),
+        )
+            .into_response(),
     }
 }
 

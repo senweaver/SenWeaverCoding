@@ -24,7 +24,8 @@ pub fn resolve_text_object(obj: TextObject, text: &str, cursor: usize) -> Option
     if char_len == 0 {
         return None;
     }
-    let char_pos = text[..cursor.min(text.len())]
+    let cursor_byte = crate::util::floor_char_boundary(text, cursor.min(text.len()));
+    let char_pos = text[..cursor_byte]
         .chars()
         .count()
         .min(char_len.saturating_sub(1));

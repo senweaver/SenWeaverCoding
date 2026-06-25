@@ -17,13 +17,15 @@ import { describeCron, isValidCron, parseCron, type FrequencyKey } from '../../l
 import type { PermissionMode } from '../../types/settings'
 import type { CodingModeId } from '../../types/codingMode'
 import { DEFAULT_CODING_MODE } from '../../types/codingMode'
-import type { CronTask } from '../../types/task'
+import type { CronTask, TaskPriority } from '../../types/task'
 
 type Props = {
   open: boolean
   onClose: () => void
   editTask?: CronTask
 }
+
+type TriggerKind = 'schedule' | 'idle' | 'sessionEnd'
 
 const MINUTE_INTERVALS = [5, 10, 15, 20, 30]
 const HOUR_INTERVALS = [1, 2, 3, 4, 6, 8, 12]
@@ -107,6 +109,25 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
   const [notifyChannels, setNotifyChannels] = useState<('telegram' | 'feishu')[]>(editTask?.notification?.channels || [])
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  const initialTrigger: TriggerKind =
+    editTask?.triggerType === 'idle'
+      ? 'idle'
+      : editTask?.triggerType === 'session_end'
+        ? 'sessionEnd'
+        : 'schedule'
+  const [triggerKind, setTriggerKind] = useState<TriggerKind>(initialTrigger)
+  const [afterIdleMinutes, setAfterIdleMinutes] = useState(
+    editTask?.afterIdleMs ? Math.max(1, Math.round(editTask.afterIdleMs / 60000)) : 30,
+  )
+  const [priority, setPriority] = useState<TaskPriority>(editTask?.priority ?? 'normal')
+  const [maxDurationMinutes, setMaxDurationMinutes] = useState(
+    editTask?.maxDurationMs ? Math.max(0, Math.round(editTask.maxDurationMs / 60000)) : 0,
+  )
+  const [requireIdle, setRequireIdle] = useState(!!editTask?.requireIdleMs)
+  const [requireIdleMinutes, setRequireIdleMinutes] = useState(
+    editTask?.requireIdleMs ? Math.max(1, Math.round(editTask.requireIdleMs / 60000)) : 10,
+  )
+
   const [minuteInterval, setMinuteInterval] = useState(parsed?.minuteInterval || 15)
   const [hourInterval, setHourInterval] = useState(parsed?.hourInterval || 1)
   const [minuteOffset, setMinuteOffset] = useState(parsed?.minuteOffset || 0)
@@ -120,21 +141,23 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
     minuteInterval, hourInterval, minuteOffset, selectedDays, monthDay, customCron,
   })
 
-  const canSubmit =
-    name.trim() &&
-    description.trim() &&
-    prompt.trim() &&
+  const scheduleValid =
     (frequency !== 'customCron' || isValidCron(customCron)) &&
     (frequency !== 'specificDays' || selectedDays.length > 0)
+
+  const canSubmit =
+    !!name.trim() &&
+    !!description.trim() &&
+    !!prompt.trim() &&
+    (triggerKind === 'schedule' ? scheduleValid : triggerKind === 'idle' ? afterIdleMinutes > 0 : true)
 
   const handleSubmit = async () => {
     if (!canSubmit) return
     setIsSubmitting(true)
     try {
-      const payload = {
+      const base = {
         name: name.trim(),
         description: description.trim(),
-        cron: cronValue,
         prompt: prompt.trim(),
         model: model || undefined,
         permissionMode,
@@ -144,11 +167,30 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         notification: notifyEnabled && notifyChannels.length > 0
           ? { enabled: true, channels: notifyChannels }
           : undefined,
+        priority,
+        maxDurationMs: maxDurationMinutes > 0 ? maxDurationMinutes * 60000 : undefined,
       }
+
+      const trigger =
+        triggerKind === 'idle'
+          ? {
+              triggerType: 'idle' as const,
+              afterIdleMs: afterIdleMinutes * 60000,
+            }
+          : triggerKind === 'sessionEnd'
+            ? { triggerType: 'session_end' as const }
+            : {
+                triggerType: 'cron' as const,
+                cron: cronValue,
+                requireIdleMs:
+                  requireIdle && requireIdleMinutes > 0 ? requireIdleMinutes * 60000 : undefined,
+              }
+
+      const payload = { ...base, ...trigger }
       if (isEdit) {
         await updateTask(editTask!.id, payload)
       } else {
-        await createTask({ ...payload, enabled: true, recurring: true })
+        await createTask({ ...payload, enabled: true, recurring: triggerKind !== 'sessionEnd' })
       }
       onClose()
     } catch (err) {
@@ -217,6 +259,48 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         />
 
         {}
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.trigger.label')}</label>
+          <div className="relative">
+            <select
+              value={triggerKind}
+              onChange={(e) => setTriggerKind(e.target.value as TriggerKind)}
+              className={selectClass}
+            >
+              <option value="schedule">{t('automations.trigger.schedule')}</option>
+              <option value="idle">{t('automations.trigger.idle')}</option>
+              <option value="sessionEnd">{t('automations.trigger.sessionEnd')}</option>
+            </select>
+            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
+              expand_more
+            </span>
+          </div>
+        </div>
+
+        {triggerKind === 'idle' && (
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.trigger.afterIdle')}</label>
+            <input
+              type="number"
+              min={1}
+              value={afterIdleMinutes}
+              onChange={(e) => setAfterIdleMinutes(Math.max(1, Number(e.target.value) || 1))}
+              className="w-auto h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+              style={{ maxWidth: 160 }}
+            />
+            <span className="text-xs text-[var(--color-text-tertiary)]">{t('automations.trigger.idleHint')}</span>
+          </div>
+        )}
+
+        {triggerKind === 'sessionEnd' && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
+            <span className="material-symbols-outlined text-[16px]">bedtime</span>
+            <span>{t('automations.trigger.sessionEndHint')}</span>
+          </div>
+        )}
+
+        {triggerKind === 'schedule' && (
+        <>
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('newTask.frequency')}</label>
           <div className="relative">
@@ -337,6 +421,70 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         )}
 
         {}
+        <div className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={requireIdle}
+              onChange={(e) => setRequireIdle(e.target.checked)}
+              className="w-4 h-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
+            />
+            <div>
+              <span className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.requireIdle')}</span>
+              <p className="text-xs text-[var(--color-text-tertiary)]">{t('automations.requireIdleHint')}</p>
+            </div>
+          </label>
+          {requireIdle && (
+            <div className="pl-7">
+              <input
+                type="number"
+                min={1}
+                value={requireIdleMinutes}
+                onChange={(e) => setRequireIdleMinutes(Math.max(1, Number(e.target.value) || 1))}
+                className="w-auto h-9 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+                style={{ maxWidth: 140 }}
+              />
+              <span className="ml-2 text-xs text-[var(--color-text-tertiary)]">{t('automations.minutesUnit')}</span>
+            </div>
+          )}
+        </div>
+        </>
+        )}
+
+        {}
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.priority.label')}</label>
+          <div className="relative">
+            <select
+              value={priority}
+              onChange={(e) => setPriority(e.target.value as TaskPriority)}
+              className={selectClass}
+            >
+              <option value="high">{t('automations.priority.high')}</option>
+              <option value="normal">{t('automations.priority.normal')}</option>
+              <option value="low">{t('automations.priority.low')}</option>
+            </select>
+            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
+              expand_more
+            </span>
+          </div>
+        </div>
+
+        {}
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.maxDuration')}</label>
+          <input
+            type="number"
+            min={0}
+            value={maxDurationMinutes}
+            onChange={(e) => setMaxDurationMinutes(Math.max(0, Number(e.target.value) || 0))}
+            className="w-auto h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+            style={{ maxWidth: 160 }}
+          />
+          <span className="text-xs text-[var(--color-text-tertiary)]">{t('automations.maxDurationHint')}</span>
+        </div>
+
+        {}
         <div className="flex flex-col gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
           <label className="flex items-center gap-3 cursor-pointer">
             <input
@@ -399,15 +547,17 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         </div>
 
         {}
-        <div className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
-          <span className="material-symbols-outlined text-[16px]">schedule</span>
-          <span>
-            {frequency === 'customCron' && customCron.trim() && !isValidCron(customCron)
-              ? t('newTask.invalidCron')
-              : describeCron(cronValue, t)
-            }
-          </span>
-        </div>
+        {triggerKind === 'schedule' && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
+            <span className="material-symbols-outlined text-[16px]">schedule</span>
+            <span>
+              {frequency === 'customCron' && customCron.trim() && !isValidCron(customCron)
+                ? t('newTask.invalidCron')
+                : describeCron(cronValue, t)
+              }
+            </span>
+          </div>
+        )}
 
         <p className="text-xs text-[var(--color-text-tertiary)]">
           {t('newTask.delayNote')}

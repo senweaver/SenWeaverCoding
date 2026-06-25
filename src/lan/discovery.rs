@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -12,6 +13,9 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::Serialize;
 
 pub const LAN_PROTOCOL: &str = "senweaver-lan-v1";
+
+const MDNS_START_ATTEMPTS: u32 = 6;
+const MDNS_RETRY_BASE_DELAY: Duration = Duration::from_millis(180);
 
 #[derive(Debug, Clone)]
 pub struct PeerRecord {
@@ -109,8 +113,6 @@ impl Discovery {
         registry: Arc<PeerRegistry>,
         on_change: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self> {
-        let daemon = ServiceDaemon::new().context("creating mdns daemon")?;
-
         let mut properties: HashMap<String, String> = HashMap::new();
         properties.insert("uid".to_string(), params.user_id.clone());
         properties.insert("nick".to_string(), params.nickname.clone());
@@ -119,18 +121,8 @@ impl Discovery {
 
         let instance = sanitize_instance(&params.user_id);
         let host_name = format!("{instance}.local.");
-        let service = ServiceInfo::new(
-            &params.service_type,
-            &instance,
-            &host_name,
-            "",
-            params.port,
-            properties,
-        )
-        .context("building mdns service info")?
-        .enable_addr_auto();
 
-        daemon.register(service).context("registering mdns service")?;
+        let daemon = Self::bind_with_retry(&params, &instance, &host_name, &properties)?;
 
         let receiver = daemon
             .browse(&params.service_type)
@@ -164,6 +156,50 @@ impl Discovery {
             .context("spawning mdns browse thread")?;
 
         Ok(Self { daemon })
+    }
+
+    fn bind_with_retry(
+        params: &DiscoveryParams,
+        instance: &str,
+        host_name: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<ServiceDaemon> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MDNS_START_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(MDNS_RETRY_BASE_DELAY * attempt);
+            }
+            match Self::try_bind(params, instance, host_name, properties) {
+                Ok(daemon) => return Ok(daemon),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("creating mdns daemon")))
+    }
+
+    fn try_bind(
+        params: &DiscoveryParams,
+        instance: &str,
+        host_name: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<ServiceDaemon> {
+        let daemon = ServiceDaemon::new().context("creating mdns daemon")?;
+        let service = ServiceInfo::new(
+            &params.service_type,
+            instance,
+            host_name,
+            "",
+            params.port,
+            properties.clone(),
+        )
+        .context("building mdns service info")?
+        .enable_addr_auto();
+
+        if let Err(err) = daemon.register(service) {
+            let _ = daemon.shutdown();
+            return Err(anyhow::Error::new(err).context("registering mdns service"));
+        }
+        Ok(daemon)
     }
 }
 

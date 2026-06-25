@@ -1328,9 +1328,13 @@ impl DelegateTool {
         .with_max_iterations(agent_config.max_iterations)
         .with_on_delta(on_delta_for_loop);
 
+        let sub_agent_mode = crate::agent::coding_mode::CodingMode::default();
         let result = tokio::time::timeout(
             Duration::from_secs(agentic_timeout_secs),
-            crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history),
+            crate::agent::coding_mode::scope_coding_mode(
+                sub_agent_mode,
+                crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history),
+            ),
         )
         .await;
         if let Some(h) = bridge_handle {

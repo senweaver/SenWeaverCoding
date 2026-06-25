@@ -8,7 +8,6 @@ use anyhow::Context;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::net::ToSocketAddrs;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -208,47 +207,6 @@ mod dock {
     }
 }
 
-#[derive(Clone)]
-pub struct ComputerUseConfig {
-    pub enabled: bool,
-    pub endpoint: String,
-    pub api_key: Option<String>,
-    pub timeout_ms: u64,
-    pub allow_remote_endpoint: bool,
-    pub window_allowlist: Vec<String>,
-    pub max_coordinate_x: Option<i64>,
-    pub max_coordinate_y: Option<i64>,
-}
-
-impl std::fmt::Debug for ComputerUseConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ComputerUseConfig")
-            .field("enabled", &self.enabled)
-            .field("endpoint", &self.endpoint)
-            .field("timeout_ms", &self.timeout_ms)
-            .field("allow_remote_endpoint", &self.allow_remote_endpoint)
-            .field("window_allowlist", &self.window_allowlist)
-            .field("max_coordinate_x", &self.max_coordinate_x)
-            .field("max_coordinate_y", &self.max_coordinate_y)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Default for ComputerUseConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: "http://127.0.0.1:8787/v1/actions".into(),
-            api_key: None,
-            timeout_ms: 15_000,
-            allow_remote_endpoint: false,
-            window_allowlist: Vec::new(),
-            max_coordinate_x: None,
-            max_coordinate_y: None,
-        }
-    }
-}
-
 #[allow(dead_code)]
 pub struct BrowserTool {
     security: Arc<SecurityPolicy>,
@@ -258,7 +216,6 @@ pub struct BrowserTool {
     native_headless: bool,
     native_webdriver_url: String,
     native_chrome_path: Option<String>,
-    computer_use: ComputerUseConfig,
     #[cfg(feature = "browser-native")]
     native_state: tokio::sync::Mutex<native_backend::NativeBrowserState>,
     preferred_tab: tokio::sync::Mutex<Option<u32>>,
@@ -268,7 +225,6 @@ pub struct BrowserTool {
 enum BrowserBackendKind {
     AgentBrowser,
     RustNative,
-    ComputerUse,
 
     TauriDock,
     Auto,
@@ -278,7 +234,6 @@ enum BrowserBackendKind {
 enum ResolvedBackend {
     AgentBrowser,
     RustNative,
-    ComputerUse,
     TauriDock,
 }
 
@@ -288,11 +243,10 @@ impl BrowserBackendKind {
         match key.as_str() {
             "agent_browser" | "agentbrowser" => Ok(Self::AgentBrowser),
             "rust_native" | "native" => Ok(Self::RustNative),
-            "computer_use" | "computeruse" => Ok(Self::ComputerUse),
             "tauri_dock" | "tauridock" | "dock" | "embedded" => Ok(Self::TauriDock),
             "auto" => Ok(Self::Auto),
             _ => anyhow::bail!(
-                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', 'tauri_dock', or 'auto'"
+                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'tauri_dock', or 'auto'"
             ),
         }
     }
@@ -301,7 +255,6 @@ impl BrowserBackendKind {
         match self {
             Self::AgentBrowser => "agent_browser",
             Self::RustNative => "rust_native",
-            Self::ComputerUse => "computer_use",
             Self::TauriDock => "tauri_dock",
             Self::Auto => "auto",
         }
@@ -361,16 +314,6 @@ fn cap_agent_browser_response(resp: AgentBrowserResponse) -> AgentBrowserRespons
         })),
         error: resp.error,
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ComputerUseResponse {
-    #[serde(default)]
-    success: Option<bool>,
-    #[serde(default)]
-    data: Option<Value>,
-    #[serde(default)]
-    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -706,7 +649,6 @@ impl BrowserTool {
             true,
             "http://127.0.0.1:9515".into(),
             None,
-            ComputerUseConfig::default(),
         )
     }
 
@@ -719,7 +661,6 @@ impl BrowserTool {
         native_headless: bool,
         native_webdriver_url: String,
         native_chrome_path: Option<String>,
-        computer_use: ComputerUseConfig,
     ) -> Self {
         Self {
             security,
@@ -729,7 +670,6 @@ impl BrowserTool {
             native_headless,
             native_webdriver_url,
             native_chrome_path,
-            computer_use,
             #[cfg(feature = "browser-native")]
             native_state: tokio::sync::Mutex::new(native_backend::NativeBrowserState::default()),
             preferred_tab: tokio::sync::Mutex::new(None),
@@ -792,52 +732,6 @@ impl BrowserTool {
         }
     }
 
-    fn computer_use_endpoint_url(&self) -> anyhow::Result<reqwest::Url> {
-        if self.computer_use.timeout_ms == 0 {
-            anyhow::bail!("browser.computer_use.timeout_ms must be > 0");
-        }
-
-        let endpoint = self.computer_use.endpoint.trim();
-        if endpoint.is_empty() {
-            anyhow::bail!("browser.computer_use.endpoint cannot be empty");
-        }
-
-        let parsed = reqwest::Url::parse(endpoint).map_err(|_| {
-            anyhow::anyhow!(
-                "Invalid browser.computer_use.endpoint: '{endpoint}'. Expected http(s) URL"
-            )
-        })?;
-
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            anyhow::bail!("browser.computer_use.endpoint must use http:// or https://");
-        }
-
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("browser.computer_use.endpoint must include host"))?;
-
-        let host_is_private = is_private_host(host);
-        if !self.computer_use.allow_remote_endpoint && !host_is_private {
-            anyhow::bail!(
-                "browser.computer_use.endpoint host '{host}' is public. Set browser.computer_use.allow_remote_endpoint=true to allow it"
-            );
-        }
-
-        if self.computer_use.allow_remote_endpoint && !host_is_private && scheme != "https" {
-            anyhow::bail!(
-                "browser.computer_use.endpoint must use https:// when allow_remote_endpoint=true and host is public"
-            );
-        }
-
-        Ok(parsed)
-    }
-
-    fn computer_use_available(&self) -> anyhow::Result<bool> {
-        let endpoint = self.computer_use_endpoint_url()?;
-        Ok(endpoint_reachable(&endpoint, Duration::from_millis(500)))
-    }
-
     async fn resolve_backend(&self) -> anyhow::Result<ResolvedBackend> {
         let configured = self.configured_backend()?;
 
@@ -879,19 +773,6 @@ impl BrowserTool {
                 }
                 Ok(ResolvedBackend::RustNative)
             }
-            BrowserBackendKind::ComputerUse => {
-                if !self.computer_use.enabled {
-                    anyhow::bail!(
-                        "browser.backend='computer_use' but Computer Use is disabled. Enable it in Settings → Computer Use"
-                    );
-                }
-                if !self.computer_use_available()? {
-                    anyhow::bail!(
-                        "browser.backend='computer_use' but sidecar endpoint is unreachable. Check browser.computer_use.endpoint and sidecar status"
-                    );
-                }
-                Ok(ResolvedBackend::ComputerUse)
-            }
             BrowserBackendKind::Auto => {
                 if dock_controller().is_some() {
                     return Ok(ResolvedBackend::TauriDock);
@@ -903,35 +784,14 @@ impl BrowserTool {
                     return Ok(ResolvedBackend::AgentBrowser);
                 }
 
-                let computer_use_err = if !self.computer_use.enabled {
-                    None
-                } else {
-                    match self.computer_use_available() {
-                        Ok(true) => return Ok(ResolvedBackend::ComputerUse),
-                        Ok(false) => None,
-                        Err(err) => Some(err.to_string()),
-                    }
-                };
-
                 if Self::rust_native_compiled() {
-                    if let Some(err) = computer_use_err {
-                        anyhow::bail!(
-                            "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use invalid: {err})"
-                        );
-                    }
                     anyhow::bail!(
-                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use sidecar unreachable)"
+                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable)"
                     )
                 }
 
-                if let Some(err) = computer_use_err {
-                    anyhow::bail!(
-                        "browser.backend='auto' needs agent-browser CLI, browser-native, or valid computer-use sidecar (error: {err})"
-                    );
-                }
-
                 anyhow::bail!(
-                    "browser.backend='auto' needs agent-browser CLI, browser-native, or computer-use sidecar"
+                    "browser.backend='auto' needs agent-browser CLI or browser-native"
                 )
             }
         }
@@ -1340,181 +1200,6 @@ impl BrowserTool {
         }
     }
 
-    fn validate_coordinate(&self, key: &str, value: i64, max: Option<i64>) -> anyhow::Result<()> {
-        if value < 0 {
-            anyhow::bail!("'{key}' must be >= 0")
-        }
-        if let Some(limit) = max {
-            if limit < 0 {
-                anyhow::bail!("Configured coordinate limit for '{key}' must be >= 0")
-            }
-            if value > limit {
-                anyhow::bail!("'{key}'={value} exceeds configured limit {limit}")
-            }
-        }
-        Ok(())
-    }
-
-    fn read_required_i64(
-        &self,
-        params: &serde_json::Map<String, Value>,
-        key: &str,
-    ) -> anyhow::Result<i64> {
-        params
-            .get(key)
-            .and_then(Value::as_i64)
-            .ok_or_else(|| anyhow::anyhow!("Missing or invalid '{key}' parameter"))
-    }
-
-    fn validate_computer_use_action(
-        &self,
-        action: &str,
-        params: &serde_json::Map<String, Value>,
-    ) -> anyhow::Result<()> {
-        match action {
-            "open" => {
-                let url = params
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'url' for open action"))?;
-                self.validate_url(url, self.url_validation_permissive())?;
-            }
-            "mouse_move" | "mouse_click" => {
-                let x = self.read_required_i64(params, "x")?;
-                let y = self.read_required_i64(params, "y")?;
-                self.validate_coordinate("x", x, self.computer_use.max_coordinate_x)?;
-                self.validate_coordinate("y", y, self.computer_use.max_coordinate_y)?;
-            }
-            "mouse_drag" => {
-                let from_x = self.read_required_i64(params, "from_x")?;
-                let from_y = self.read_required_i64(params, "from_y")?;
-                let to_x = self.read_required_i64(params, "to_x")?;
-                let to_y = self.read_required_i64(params, "to_y")?;
-                self.validate_coordinate("from_x", from_x, self.computer_use.max_coordinate_x)?;
-                self.validate_coordinate("to_x", to_x, self.computer_use.max_coordinate_x)?;
-                self.validate_coordinate("from_y", from_y, self.computer_use.max_coordinate_y)?;
-                self.validate_coordinate("to_y", to_y, self.computer_use.max_coordinate_y)?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn execute_computer_use_action(
-        &self,
-        action: &str,
-        args: &Value,
-    ) -> anyhow::Result<ToolResult> {
-        let endpoint = self.computer_use_endpoint_url()?;
-
-        let mut params = args
-            .as_object()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("browser args must be a JSON object"))?;
-        params.remove("action");
-
-        self.validate_computer_use_action(action, &params)?;
-
-        let payload = json!({
-            "action": action,
-            "params": params,
-            "policy": {
-                "allowed_domains": self.allowed_domains,
-                "window_allowlist": self.computer_use.window_allowlist,
-                "max_coordinate_x": self.computer_use.max_coordinate_x,
-                "max_coordinate_y": self.computer_use.max_coordinate_y,
-            },
-            "metadata": {
-                "session_name": self.session_name,
-                "source": "sen.browser",
-                "version": env!("CARGO_PKG_VERSION"),
-            }
-        });
-
-        let client = crate::services::require_services()
-            .proxy_runtime()
-            .build_client("tool.browser");
-        let mut request = client
-            .post(endpoint)
-            .timeout(Duration::from_millis(self.computer_use.timeout_ms))
-            .json(&payload);
-
-        if let Some(api_key) = self.computer_use.api_key.as_deref() {
-            let token = api_key.trim();
-            if !token.is_empty() {
-                request = request.bearer_auth(token);
-            }
-        }
-
-        let response = request.send().await.with_context(|| {
-            format!(
-                "Failed to call computer-use sidecar at {}",
-                self.computer_use.endpoint
-            )
-        })?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("Failed to read computer-use sidecar response body")?;
-
-        if let Ok(parsed) = serde_json::from_str::<ComputerUseResponse>(&body) {
-            if status.is_success() && parsed.success.unwrap_or(true) {
-                let output = parsed
-                    .data
-                    .map(|data| serde_json::to_string_pretty(&data).unwrap_or_default())
-                    .unwrap_or_else(|| {
-                        serde_json::to_string_pretty(&json!({
-                            "backend": "computer_use",
-                            "action": action,
-                            "ok": true,
-                        }))
-                        .unwrap_or_default()
-                    });
-
-                return Ok(ToolResult {
-                    success: true,
-                    output,
-                    error: None,
-                });
-            }
-
-            let error = parsed.error.or_else(|| {
-                if status.is_success() && parsed.success == Some(false) {
-                    Some("computer-use sidecar returned success=false".to_string())
-                } else {
-                    Some(format!(
-                        "computer-use sidecar request failed with status {status}"
-                    ))
-                }
-            });
-
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error,
-            });
-        }
-
-        if status.is_success() {
-            return Ok(ToolResult {
-                success: true,
-                output: body,
-                error: None,
-            });
-        }
-
-        Ok(ToolResult {
-            success: false,
-            output: String::new(),
-            error: Some(format!(
-                "computer-use sidecar request failed with status {status}: {}",
-                body.trim()
-            )),
-        })
-    }
-
     async fn execute_action(
         &self,
         action: BrowserAction,
@@ -1527,9 +1212,6 @@ impl BrowserTool {
             ResolvedBackend::TauriDock => {
                 self.execute_tauri_dock_action(action, request_tab_id).await
             }
-            ResolvedBackend::ComputerUse => anyhow::bail!(
-                "Internal error: computer_use backend must be handled before BrowserAction parsing"
-            ),
         }
     }
 
@@ -2452,10 +2134,8 @@ impl Tool for BrowserTool {
             "MUST NOT additionally call `browser_open`, `browser_delegate`, or any external/system-browser launcher; ",
             "doing so causes the URL to also pop in Chrome/Edge which the user has explicitly forbidden. ",
             "Backends: `auto` selects tauri_dock inside the desktop app (TauriDockController) so every ",
-            "navigate/click/fill/screenshot is rendered live in the dock; other backends (agent-browser, rust-native, ",
-            "computer_use) are fallbacks. ",
-            "Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, ",
-            "key_type, key_press, screen_capture) through a computer-use sidecar. ",
+            "navigate/click/fill/screenshot is rendered live in the dock; other backends (agent-browser, rust-native) ",
+            "are fallbacks. ",
             "**Selector formats** (all backends): `@e1`-style refs returned by `snapshot`, raw CSS (e.g. `#id`, ",
             "`.class`, `[data-x=y]`), `text=<exact-or-substring>`, and `label=<label-text>`. ",
             "**Workflow**: call `action='snapshot'` to enumerate interactive elements (each gets an `@e<n>` ref), ",
@@ -2495,14 +2175,12 @@ impl Tool for BrowserTool {
                              "hover", "scroll", "is_visible", "close", "find",
                              "open_tab", "close_tab", "activate_tab", "list_tabs",
                              "attach_tab", "collect_links", "network_errors",
-                             "mouse_move", "mouse_click", "mouse_drag", "key_type",
-                             "key_press", "screen_capture",
                              "assert", "console_logs", "network_idle", "clear_storage",
                              "back", "forward", "reload",
                              "pin_test_target", "clear_test_target", "get_test_target",
                              "perf_vitals", "emulate", "network_capture",
                              "web_tools_list", "web_tools_call", "run_steps"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use; tab_*/QA/test-target actions require backend=tauri_dock). Use pin_test_target/get_test_target/clear_test_target in Debug mode to lock automated testing onto a user-pre-authenticated tab. Use get_styles for visual QA: with 'selector' it returns the element's computed styles (color/background/font/border-radius/box-shadow/spacing + bounding rect); without 'selector' it returns a page-level style audit aggregating distinct text colors, background colors, font families, font sizes and border radii across visible elements - use it to quantify theme consistency and compare against design tokens. Use perf_vitals to read real Core Web Vitals (LCP/FCP/CLS/INP-worst, long tasks, TTFB, transfer bytes) collected since page load. Use emulate (CDP, Windows dock) to test responsive layouts (viewport={width,height,mobile}) and degraded networks (network=offline|slow-3g|fast-3g|none, cpu_rate=1..20); ALWAYS call emulate with reset=true when done. Use network_capture (CDP, Windows dock) for full request/response auditing: mode=start before exercising the page, then mode=dump (filters: api_only/only_failures/url_contains/limit) to cross-check API data against rendered UI, mode=body with request_id to inspect a JSON response, mode=stop when finished. Use web_tools_list to discover WebMCP tools the page registered via navigator.modelContext, and web_tools_call (name + tool_args) to invoke one as a structured fast path instead of clicking through the UI - always re-verify the visible UI afterwards. Use run_steps with steps=[{action,...},...] to execute up to 20 simple actions in one call (no nested run_steps; stops on first failure unless continue_on_error)."
+                    "description": "Browser action to perform (tab_*/QA/test-target actions require backend=tauri_dock). Use pin_test_target/get_test_target/clear_test_target in Debug mode to lock automated testing onto a user-pre-authenticated tab. Use get_styles for visual QA: with 'selector' it returns the element's computed styles (color/background/font/border-radius/box-shadow/spacing + bounding rect); without 'selector' it returns a page-level style audit aggregating distinct text colors, background colors, font families, font sizes and border radii across visible elements - use it to quantify theme consistency and compare against design tokens. Use perf_vitals to read real Core Web Vitals (LCP/FCP/CLS/INP-worst, long tasks, TTFB, transfer bytes) collected since page load. Use emulate (CDP, Windows dock) to test responsive layouts (viewport={width,height,mobile}) and degraded networks (network=offline|slow-3g|fast-3g|none, cpu_rate=1..20); ALWAYS call emulate with reset=true when done. Use network_capture (CDP, Windows dock) for full request/response auditing: mode=start before exercising the page, then mode=dump (filters: api_only/only_failures/url_contains/limit) to cross-check API data against rendered UI, mode=body with request_id to inspect a JSON response, mode=stop when finished. Use web_tools_list to discover WebMCP tools the page registered via navigator.modelContext, and web_tools_call (name + tool_args) to invoke one as a structured fast path instead of clicking through the UI - always re-verify the visible UI afterwards. Use run_steps with steps=[{action,...},...] to execute up to 20 simple actions in one call (no nested run_steps; stops on first failure unless continue_on_error)."
                 },
                 "tab": {
                     "type": "integer",
@@ -2539,35 +2217,6 @@ impl Tool for BrowserTool {
                 "key": {
                     "type": "string",
                     "description": "Key to press (Enter, Tab, Escape, etc.)"
-                },
-                "x": {
-                    "type": "integer",
-                    "description": "Screen X coordinate (computer_use: mouse_move/mouse_click)"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Screen Y coordinate (computer_use: mouse_move/mouse_click)"
-                },
-                "from_x": {
-                    "type": "integer",
-                    "description": "Drag source X coordinate (computer_use: mouse_drag)"
-                },
-                "from_y": {
-                    "type": "integer",
-                    "description": "Drag source Y coordinate (computer_use: mouse_drag)"
-                },
-                "to_x": {
-                    "type": "integer",
-                    "description": "Drag target X coordinate (computer_use: mouse_drag)"
-                },
-                "to_y": {
-                    "type": "integer",
-                    "description": "Drag target Y coordinate (computer_use: mouse_drag)"
-                },
-                "button": {
-                    "type": "string",
-                    "enum": ["left", "right", "middle"],
-                    "description": "Mouse button for computer_use mouse_click"
                 },
                 "direction": {
                     "type": "string",
@@ -2807,18 +2456,6 @@ impl Tool for BrowserTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Unknown action: {action_str}")),
-            });
-        }
-
-        if backend == ResolvedBackend::ComputerUse {
-            return self.execute_computer_use_action(action_str, &args).await;
-        }
-
-        if is_computer_use_only_action(action_str) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(unavailable_action_for_backend_error(action_str, backend)),
             });
         }
 
@@ -3926,12 +3563,6 @@ fn is_supported_browser_action(action: &str) -> bool {
             | "close_tab"
             | "activate_tab"
             | "list_tabs"
-            | "mouse_move"
-            | "mouse_click"
-            | "mouse_drag"
-            | "key_type"
-            | "key_press"
-            | "screen_capture"
             | "assert"
             | "console_logs"
             | "network_idle"
@@ -3948,22 +3579,6 @@ fn is_supported_browser_action(action: &str) -> bool {
     )
 }
 
-fn is_computer_use_only_action(action: &str) -> bool {
-    matches!(
-        action,
-        "mouse_move" | "mouse_click" | "mouse_drag" | "key_type" | "key_press" | "screen_capture"
-    )
-}
-
-fn backend_name(backend: ResolvedBackend) -> &'static str {
-    match backend {
-        ResolvedBackend::AgentBrowser => "agent_browser",
-        ResolvedBackend::RustNative => "rust_native",
-        ResolvedBackend::ComputerUse => "computer_use",
-        ResolvedBackend::TauriDock => "tauri_dock",
-    }
-}
-
 fn dock_ok_result(action: &str, value: Value) -> ToolResult {
     let payload = json!({
         "backend": "tauri_dock",
@@ -3978,12 +3593,6 @@ fn dock_ok_result(action: &str, value: Value) -> ToolResult {
     }
 }
 
-fn unavailable_action_for_backend_error(action: &str, backend: ResolvedBackend) -> String {
-    format!(
-        "Action '{action}' is unavailable for backend '{}'",
-        backend_name(backend)
-    )
-}
 #[cfg(feature = "browser-native")]
 fn is_recoverable_rust_native_error(err: &anyhow::Error) -> bool {
     let message = format!("{err:#}").to_ascii_lowercase();
@@ -4006,30 +3615,6 @@ fn normalize_domains(domains: Vec<String>) -> Vec<String> {
         .map(|d| d.trim().to_lowercase())
         .filter(|d| !d.is_empty())
         .collect()
-}
-
-fn endpoint_reachable(endpoint: &reqwest::Url, timeout: Duration) -> bool {
-    let host = match endpoint.host_str() {
-        Some(host) if !host.is_empty() => host,
-        _ => return false,
-    };
-
-    let port = match endpoint.port_or_known_default() {
-        Some(port) => port,
-        None => return false,
-    };
-
-    let mut addrs = match (host, port).to_socket_addrs() {
-        Ok(addrs) => addrs,
-        Err(_) => return false,
-    };
-
-    let addr = match addrs.next() {
-        Some(addr) => addr,
-        None => return false,
-    };
-
-    std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
 }
 
 fn extract_host(url_str: &str) -> anyhow::Result<String> {

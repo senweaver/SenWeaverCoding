@@ -4,10 +4,12 @@
 
 use crate::config::{SandboxBackend, SecurityConfig};
 use crate::security::traits::Sandbox;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
+pub fn create_sandbox(config: &SecurityConfig, workspace: Option<&Path>) -> Arc<dyn Sandbox> {
     let backend = &config.sandbox.backend;
+    let _workspace: Option<PathBuf> = workspace.map(Path::to_path_buf);
 
     if matches!(backend, SandboxBackend::None) || config.sandbox.enabled == Some(false) {
         return Arc::new(super::traits::NoopSandbox);
@@ -19,7 +21,9 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
             {
                 #[cfg(target_os = "linux")]
                 {
-                    if let Ok(sandbox) = super::landlock::LandlockSandbox::new() {
+                    if let Ok(sandbox) =
+                        super::landlock::LandlockSandbox::with_workspace(_workspace.clone())
+                    {
                         return Arc::new(sandbox);
                     }
                 }
@@ -58,6 +62,10 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
         }
         SandboxBackend::Docker => {
             if let Ok(sandbox) = super::docker::DockerSandbox::new() {
+                let sandbox = match _workspace.clone() {
+                    Some(ws) => sandbox.with_workspace(ws),
+                    None => sandbox,
+                };
                 return Arc::new(sandbox);
             }
             tracing::warn!("Docker requested but not available, falling back to application-layer");
@@ -82,20 +90,19 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
             );
             Arc::new(super::traits::NoopSandbox)
         }
-        SandboxBackend::Auto | SandboxBackend::None => {
-
-            detect_best_sandbox()
-        }
+        SandboxBackend::Auto | SandboxBackend::None => detect_best_sandbox(_workspace),
     }
 }
 
-fn detect_best_sandbox() -> Arc<dyn Sandbox> {
+fn detect_best_sandbox(workspace: Option<PathBuf>) -> Arc<dyn Sandbox> {
+    let _ = &workspace;
     #[cfg(target_os = "linux")]
     {
 
         #[cfg(feature = "sandbox-landlock")]
         {
-            if let Ok(sandbox) = super::landlock::LandlockSandbox::probe() {
+            if let Ok(sandbox) = super::landlock::LandlockSandbox::with_workspace(workspace.clone())
+            {
                 tracing::info!("Landlock sandbox enabled (Linux kernel 5.13+)");
                 return Arc::new(sandbox);
             }
@@ -135,6 +142,10 @@ fn detect_best_sandbox() -> Arc<dyn Sandbox> {
     }
 
     if let Ok(sandbox) = super::docker::DockerSandbox::probe() {
+        let sandbox = match workspace.clone() {
+            Some(ws) => sandbox.with_workspace(ws),
+            None => sandbox,
+        };
         tracing::info!("Docker sandbox enabled");
         return Arc::new(sandbox);
     }

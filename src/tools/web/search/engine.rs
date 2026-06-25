@@ -272,15 +272,13 @@ impl SearchContext {
     }
 
     pub fn build_http_client(&self) -> anyhow::Result<reqwest::Client> {
-        let builder = reqwest::Client::builder()
-            .timeout(self.timeout)
-            .user_agent(self.user_agent.as_str());
-        let builder = crate::services::require_services()
+        Ok(crate::services::require_services()
             .proxy_runtime()
-            .apply_to_builder(builder, "tool.web_search");
-        builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build HTTP client for web_search: {e}"))
+            .build_search_client(
+                "tool.web_search",
+                self.timeout.as_secs().max(1),
+                self.user_agent.as_str(),
+            ))
     }
 }
 

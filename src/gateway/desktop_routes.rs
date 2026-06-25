@@ -4849,6 +4849,128 @@ pub async fn handle_permissions_autonomy_put(
     Json(autonomy_view_json(&next_cfg)).into_response()
 }
 
+fn loop_controls_view_json(cfg: &crate::config::schema::Config) -> serde_json::Value {
+    serde_json::json!({
+        "selfEvalEnabled": cfg.self_eval.enabled,
+        "evaluateCodeEdits": cfg.self_eval.evaluate_code_edits,
+        "evaluatorModel": cfg.self_eval.evaluator_model.clone().unwrap_or_default(),
+        "maxEvaluatorRetries": cfg.self_eval.max_evaluator_retries,
+        "frozenRubricPath": cfg.self_eval.frozen_rubric_path.clone().unwrap_or_default(),
+        "maxCostPerDayCents": cfg.autonomy.max_cost_per_day_cents,
+        "estopEnabled": cfg.security.estop.enabled,
+        "costTrackingEnabled": cfg.cost.enabled,
+    })
+}
+
+pub async fn handle_loop_controls_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let view = match crate::services::try_get_services() {
+        Some(svc) => loop_controls_view_json(&svc.config()),
+        None => loop_controls_view_json(&crate::config::schema::Config::default()),
+    };
+    Json(view).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetLoopControlsBody {
+    #[serde(default, rename = "selfEvalEnabled")]
+    pub self_eval_enabled: Option<bool>,
+    #[serde(default, rename = "evaluateCodeEdits")]
+    pub evaluate_code_edits: Option<bool>,
+    #[serde(default, rename = "evaluatorModel")]
+    pub evaluator_model: Option<String>,
+    #[serde(default, rename = "maxEvaluatorRetries")]
+    pub max_evaluator_retries: Option<u32>,
+    #[serde(default, rename = "frozenRubricPath")]
+    pub frozen_rubric_path: Option<String>,
+    #[serde(default, rename = "maxCostPerDayCents")]
+    pub max_cost_per_day_cents: Option<u32>,
+    #[serde(default, rename = "estopEnabled")]
+    pub estop_enabled: Option<bool>,
+    #[serde(default, rename = "costTrackingEnabled")]
+    pub cost_tracking_enabled: Option<bool>,
+}
+
+pub async fn handle_loop_controls_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SetLoopControlsBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(svc) = crate::services::try_get_services() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "service container not initialized" })),
+        )
+            .into_response();
+    };
+
+    let mut next_cfg: crate::config::schema::Config = (*svc.config()).clone();
+    if let Some(v) = body.self_eval_enabled {
+        next_cfg.self_eval.enabled = v;
+    }
+    if let Some(v) = body.evaluate_code_edits {
+        next_cfg.self_eval.evaluate_code_edits = v;
+    }
+    if let Some(v) = body.evaluator_model {
+        let trimmed = v.trim();
+        next_cfg.self_eval.evaluator_model =
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    }
+    if let Some(v) = body.max_evaluator_retries {
+        next_cfg.self_eval.max_evaluator_retries = v;
+    }
+    if let Some(v) = body.frozen_rubric_path {
+        let trimmed = v.trim();
+        next_cfg.self_eval.frozen_rubric_path =
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    }
+    if let Some(v) = body.max_cost_per_day_cents {
+        next_cfg.autonomy.max_cost_per_day_cents = v;
+    }
+    if let Some(v) = body.estop_enabled {
+        next_cfg.security.estop.enabled = v;
+    }
+    if let Some(v) = body.cost_tracking_enabled {
+        next_cfg.cost.enabled = v;
+    }
+
+    if let Err(e) = next_cfg.save().await {
+        tracing::error!(
+            target: "gateway.loop_controls",
+            error = %e,
+            "loop controls config save failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "config_save_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+    svc.update_config(next_cfg.clone());
+    *state.config.lock() = next_cfg.clone();
+    state.push_live_config(next_cfg.clone());
+
+    if body.cost_tracking_enabled.is_some() {
+        crate::cost::CostTracker::reconfigure_global(
+            next_cfg.cost.clone(),
+            &next_cfg.workspace_dir,
+        );
+    }
+
+    Json(loop_controls_view_json(&next_cfg)).into_response()
+}
+
 pub async fn handle_coding_modes_list(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5255,24 +5377,39 @@ pub async fn handle_scheduled_tasks_list(
 }
 
 fn cron_job_to_payload(j: crate::cron::CronJob) -> serde_json::Value {
+    use crate::cron::Schedule;
+    let is_activity = matches!(j.schedule, Schedule::Idle { .. } | Schedule::OnSessionEnd);
     serde_json::json!({
         "id": j.id,
         "name": j.name.clone().unwrap_or_else(|| j.id.clone()),
         "description": j.task_description.clone().unwrap_or_default(),
         "cron": cron_schedule_string(&j.schedule),
         "schedule": cron_schedule_string(&j.schedule),
+        "triggerType": cron_trigger_type(&j.schedule),
+        "everyMs": match &j.schedule {
+            Schedule::Every { every_ms } => Some(*every_ms),
+            _ => None,
+        },
+        "runAt": match &j.schedule {
+            Schedule::At { at } => Some(at.to_rfc3339()),
+            _ => None,
+        },
+        "afterIdleMs": match &j.schedule {
+            Schedule::Idle { after_idle_ms } => Some(*after_idle_ms),
+            _ => None,
+        },
         "type": if j.prompt.is_some() { "agent" } else { "shell" },
         "command": j.command,
         "prompt": j.prompt.clone().unwrap_or_default(),
         "enabled": j.enabled,
-        "recurring": matches!(j.schedule, crate::cron::Schedule::Cron { .. } | crate::cron::Schedule::Every { .. }),
+        "recurring": matches!(j.schedule, Schedule::Cron { .. } | Schedule::Every { .. } | Schedule::Idle { .. }),
         "permanent": !j.delete_after_run,
         "createdAt": j.created_at.timestamp_millis(),
         "lastRunAt": j.last_run.map(|t| t.timestamp_millis()),
         "lastFiredAt": j.last_run.map(|t| t.to_rfc3339()),
-        "nextRunAt": j.next_run.timestamp_millis(),
+        "nextRunAt": if is_activity { serde_json::Value::Null } else { serde_json::json!(j.next_run.timestamp_millis()) },
         "lastResult": j.last_status,
-        "nextRun": j.next_run.to_rfc3339(),
+        "nextRun": if is_activity { serde_json::Value::Null } else { serde_json::json!(j.next_run.to_rfc3339()) },
         "model": j.model,
         "deleteAfterRun": j.delete_after_run,
         "permissionMode": j.permission_mode.clone(),
@@ -5280,14 +5417,86 @@ fn cron_job_to_payload(j: crate::cron::CronJob) -> serde_json::Value {
         "folderPath": j.folder_path.clone(),
         "useWorktree": j.use_worktree.unwrap_or(false),
         "notification": j.notification.clone(),
+        "maxDurationMs": j.max_duration_ms,
+        "requireIdleMs": j.require_idle_ms,
+        "priority": j.priority.clone().unwrap_or_else(|| "normal".to_string()),
+        "allowedTools": j.allowed_tools.clone(),
     })
+}
+
+fn cron_trigger_type(schedule: &crate::cron::Schedule) -> &'static str {
+    match schedule {
+        crate::cron::Schedule::Cron { .. } => "cron",
+        crate::cron::Schedule::At { .. } => "once",
+        crate::cron::Schedule::Every { .. } => "interval",
+        crate::cron::Schedule::Idle { .. } => "idle",
+        crate::cron::Schedule::OnSessionEnd => "session_end",
+    }
 }
 
 fn cron_schedule_string(schedule: &crate::cron::Schedule) -> String {
     match schedule {
         crate::cron::Schedule::Cron { expr, .. } => expr.clone(),
         crate::cron::Schedule::At { at } => at.to_rfc3339(),
-        other => format!("{other:?}"),
+        crate::cron::Schedule::Every { every_ms } => format!("every:{every_ms}"),
+        crate::cron::Schedule::Idle { after_idle_ms } => format!("idle:{after_idle_ms}"),
+        crate::cron::Schedule::OnSessionEnd => "session_end".to_string(),
+    }
+}
+
+fn parse_allowed_tools(body: &serde_json::Value) -> Option<Vec<String>> {
+    let arr = body.get("allowedTools")?.as_array()?;
+    let tools: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+fn build_schedule_from_body(body: &serde_json::Value) -> Result<crate::cron::Schedule, String> {
+    let trigger_type = body
+        .get("triggerType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cron");
+    match trigger_type {
+        "interval" => {
+            let every_ms = body
+                .get("everyMs")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|v| *v > 0)
+                .ok_or_else(|| "interval trigger requires a positive everyMs".to_string())?;
+            Ok(crate::cron::Schedule::Every { every_ms })
+        }
+        "once" => {
+            let raw = body
+                .get("runAt")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "once trigger requires runAt (RFC3339)".to_string())?;
+            let at = chrono::DateTime::parse_from_rfc3339(raw)
+                .map_err(|e| format!("invalid runAt timestamp: {e}"))?
+                .with_timezone(&chrono::Utc);
+            Ok(crate::cron::Schedule::At { at })
+        }
+        "idle" => {
+            let after_idle_ms = body
+                .get("afterIdleMs")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|v| *v > 0)
+                .ok_or_else(|| "idle trigger requires a positive afterIdleMs".to_string())?;
+            Ok(crate::cron::Schedule::Idle { after_idle_ms })
+        }
+        "session_end" => Ok(crate::cron::Schedule::OnSessionEnd),
+        _ => {
+            let expr = body
+                .get("cron")
+                .and_then(|v| v.as_str())
+                .or_else(|| body.get("schedule").and_then(|v| v.as_str()))
+                .unwrap_or("0 0 * * *")
+                .to_string();
+            Ok(crate::cron::Schedule::Cron { expr, tz: None })
+        }
     }
 }
 
@@ -5337,15 +5546,15 @@ pub async fn handle_scheduled_tasks_create(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let schedule_expr = body
-        .get("cron")
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("schedule").and_then(|v| v.as_str()))
-        .unwrap_or("0 0 * * *")
-        .to_string();
-    let schedule = crate::cron::Schedule::Cron {
-        expr: schedule_expr,
-        tz: None,
+    let schedule = match build_schedule_from_body(&body) {
+        Ok(schedule) => schedule,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
     };
     let prompt = body
         .get("prompt")
@@ -5392,6 +5601,14 @@ pub async fn handle_scheduled_tasks_create(
 
     let notification = body.get("notification").cloned();
 
+    let max_duration_ms = body.get("maxDurationMs").and_then(serde_json::Value::as_u64);
+    let require_idle_ms = body.get("requireIdleMs").and_then(serde_json::Value::as_u64);
+    let priority = body
+        .get("priority")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let allowed_tools = parse_allowed_tools(&body);
+
     let job = if let Some(prompt) = prompt {
         crate::cron::add_agent_job(
             &config,
@@ -5403,13 +5620,16 @@ pub async fn handle_scheduled_tasks_create(
                 model,
                 delivery: None,
                 delete_after_run,
-                allowed_tools: None,
+                allowed_tools,
                 permission_mode,
                 coding_mode,
                 folder_path,
                 use_worktree,
                 notification,
                 task_description,
+                max_duration_ms,
+                require_idle_ms,
+                priority,
             },
         )
     } else if let Some(command) = command {
@@ -5453,7 +5673,18 @@ pub async fn handle_scheduled_tasks_update(
     }
     let config = state.live_config.load_ref();
     let mut patch = crate::cron::CronJobPatch::default();
-    if let Some(expr) = body
+    if body.get("triggerType").is_some() {
+        match build_schedule_from_body(&body) {
+            Ok(schedule) => patch.schedule = Some(schedule),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        }
+    } else if let Some(expr) = body
         .get("cron")
         .and_then(|v| v.as_str())
         .or_else(|| body.get("schedule").and_then(|v| v.as_str()))
@@ -5501,6 +5732,18 @@ pub async fn handle_scheduled_tasks_update(
     }
     if let Some(v) = body.get("notification") {
         patch.notification = Some(v.clone());
+    }
+    if let Some(v) = body.get("maxDurationMs").and_then(serde_json::Value::as_u64) {
+        patch.max_duration_ms = Some(v);
+    }
+    if let Some(v) = body.get("requireIdleMs").and_then(serde_json::Value::as_u64) {
+        patch.require_idle_ms = Some(v);
+    }
+    if let Some(v) = body.get("priority").and_then(|x| x.as_str()) {
+        patch.priority = Some(v.to_string());
+    }
+    if let Some(tools) = parse_allowed_tools(&body) {
+        patch.allowed_tools = Some(tools);
     }
 
     match crate::cron::update_job(&config, &id, patch) {
@@ -8854,230 +9097,6 @@ pub async fn handle_background_shell_stream(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
-}
-
-fn build_browser_computer_use_payload(config: &crate::config::Config) -> serde_json::Value {
-    let cu = &config.browser.computer_use;
-    serde_json::json!({
-        "enabled": cu.enabled,
-        "endpoint": cu.endpoint,
-        "timeoutMs": cu.timeout_ms,
-        "allowRemoteEndpoint": cu.allow_remote_endpoint,
-        "windowAllowlist": cu.window_allowlist,
-        "apiKeySet": cu.api_key.is_some(),
-    })
-}
-
-pub async fn handle_browser_config_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let config = state.live_config.load_ref();
-    Json(build_browser_computer_use_payload(&config)).into_response()
-}
-
-pub async fn handle_browser_config_put(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(endpoint) = body.get("endpoint").and_then(|v| v.as_str()) {
-        if endpoint.trim().is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "endpoint must not be empty"})),
-            )
-                .into_response();
-        }
-    }
-    if let Some(ms) = body.get("timeoutMs").and_then(|v| v.as_u64()) {
-        if ms == 0 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "timeoutMs must be greater than 0"})),
-            )
-                .into_response();
-        }
-    }
-
-    let snapshot = {
-        let mut cfg = state.config.lock();
-        let cu = &mut cfg.browser.computer_use;
-        if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
-            cu.enabled = enabled;
-        }
-        if let Some(endpoint) = body.get("endpoint").and_then(|v| v.as_str()) {
-            cu.endpoint = endpoint.trim().to_string();
-        }
-        if let Some(ms) = body.get("timeoutMs").and_then(|v| v.as_u64()) {
-            cu.timeout_ms = ms;
-        }
-        if let Some(allow) = body.get("allowRemoteEndpoint").and_then(|v| v.as_bool()) {
-            cu.allow_remote_endpoint = allow;
-        }
-        if let Some(list) = body.get("windowAllowlist").and_then(|v| v.as_array()) {
-            cu.window_allowlist = list
-                .iter()
-                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-        cfg.clone()
-    };
-
-    if let Err(e) = snapshot.save().await {
-        tracing::error!("Failed to save config (browser.computer_use): {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Failed to save configuration"})),
-        )
-            .into_response();
-    }
-    *state.config.lock() = snapshot.clone();
-    state.push_live_config(snapshot.clone());
-    Json(build_browser_computer_use_payload(&snapshot)).into_response()
-}
-
-fn dream_task_payload(task: &crate::services::auto_dream::DreamTask) -> serde_json::Value {
-    serde_json::to_value(task)
-        .map(to_camel_case_keys)
-        .unwrap_or_else(|_| serde_json::json!({}))
-}
-
-fn auto_dream_state_payload(state: &crate::services::auto_dream::AutoDreamState) -> serde_json::Value {
-    serde_json::json!({
-        "enabled": state.enabled,
-        "maxConcurrent": state.max_concurrent,
-        "tasks": state.tasks.iter().map(dream_task_payload).collect::<Vec<_>>(),
-    })
-}
-
-fn auto_dream_unavailable() -> axum::response::Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({"error": "services unavailable"})),
-    )
-        .into_response()
-}
-
-pub async fn handle_auto_dream_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let Some(svc) = crate::services::try_get_services() else {
-        return auto_dream_unavailable();
-    };
-    let snap = svc.auto_dream.snapshot_state().await;
-    Json(auto_dream_state_payload(&snap)).into_response()
-}
-
-pub async fn handle_auto_dream_put(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let Some(svc) = crate::services::try_get_services() else {
-        return auto_dream_unavailable();
-    };
-    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
-        svc.auto_dream.set_enabled(enabled).await;
-    }
-    let snap = svc.auto_dream.snapshot_state().await;
-    Json(auto_dream_state_payload(&snap)).into_response()
-}
-
-pub async fn handle_auto_dream_task_create(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let Some(svc) = crate::services::try_get_services() else {
-        return auto_dream_unavailable();
-    };
-    let snake = to_snake_case_keys(body);
-    let input = match serde_json::from_value::<crate::services::auto_dream::DreamTaskInput>(snake) {
-        Ok(input) => input,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("invalid task payload: {err}")})),
-            )
-                .into_response();
-        }
-    };
-    let task = svc.auto_dream.create_task(input).await;
-    Json(dream_task_payload(&task)).into_response()
-}
-
-pub async fn handle_auto_dream_task_update(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let Some(svc) = crate::services::try_get_services() else {
-        return auto_dream_unavailable();
-    };
-    let snake = to_snake_case_keys(body);
-    let input = match serde_json::from_value::<crate::services::auto_dream::DreamTaskInput>(snake) {
-        Ok(input) => input,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("invalid task payload: {err}")})),
-            )
-                .into_response();
-        }
-    };
-    match svc.auto_dream.update_task(&id, input).await {
-        Some(task) => Json(dream_task_payload(&task)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "task not found"})),
-        )
-            .into_response(),
-    }
-}
-
-pub async fn handle_auto_dream_task_delete(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-    let Some(svc) = crate::services::try_get_services() else {
-        return auto_dream_unavailable();
-    };
-    if svc.auto_dream.remove_task(&id).await {
-        Json(serde_json::json!({"status": "ok", "id": id})).into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "task not found"})),
-        )
-            .into_response()
-    }
 }
 
 fn tl_store() -> Option<&'static crate::services::TemplateLibraryStore> {

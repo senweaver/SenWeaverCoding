@@ -62,9 +62,10 @@ fn write_to_disk(cache: &PersistedCache) -> std::io::Result<()> {
 }
 
 fn workspace_key(workspace: &Path) -> String {
-    workspace
+    let canonical = workspace
         .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf())
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    crate::util::strip_verbatim_prefix(canonical)
         .to_string_lossy()
         .to_string()
 }

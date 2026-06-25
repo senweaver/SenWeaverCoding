@@ -843,11 +843,89 @@ impl SecurityPolicy {
         }
     }
 
+    pub fn is_catastrophic_command(command: &str) -> bool {
+        let compact: String = command
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if compact.contains(":(){:|:&};:") {
+            return true;
+        }
+
+        for segment in split_unquoted_segments(command) {
+            let cmd_part = skip_env_assignments(segment.trim());
+            let mut words = cmd_part.split_whitespace();
+            let Some(base_raw) = words.next() else {
+                continue;
+            };
+            let base_owned = command_basename(strip_wrapping_quotes(base_raw)).to_ascii_lowercase();
+            let base = strip_windows_exe_suffix(&base_owned);
+            let rest: Vec<String> = words
+                .map(|w| strip_wrapping_quotes(w).to_ascii_lowercase())
+                .collect();
+
+            if base == "mkfs" || base.starts_with("mkfs.") {
+                return true;
+            }
+
+            if base == "dd"
+                && rest.iter().any(|a| {
+                    a.starts_with("of=/dev/")
+                        || a.starts_with("of=\\\\.\\physicaldrive")
+                        || a.starts_with("of=\\\\.\\")
+                })
+            {
+                return true;
+            }
+
+            if base == "format"
+                && rest
+                    .iter()
+                    .any(|a| a.len() == 2 && a.ends_with(':') && a.as_bytes()[0].is_ascii_alphabetic())
+            {
+                return true;
+            }
+
+            if base == "rm" {
+                let recursive_force = rest.iter().any(|a| {
+                    a.starts_with('-')
+                        && !a.starts_with("--")
+                        && a.contains('r')
+                        && a.contains('f')
+                }) || (rest
+                    .iter()
+                    .any(|a| a == "-r" || a == "-rf" || a == "--recursive")
+                    && rest.iter().any(|a| a == "-f" || a == "--force"));
+                if recursive_force {
+                    if rest.iter().any(|a| a == "--no-preserve-root") {
+                        return true;
+                    }
+                    for t in rest.iter().filter(|a| !a.starts_with('-')) {
+                        if matches!(t.as_str(), "/" | "/*" | "~" | "~/" | "$home" | "$home/") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     pub fn validate_command_execution(
         &self,
         command: &str,
         approved: bool,
     ) -> Result<CommandRiskLevel, String> {
+        if Self::is_catastrophic_command(command) {
+            tracing::error!(
+                "Security: refused irreversible/destructive command regardless of policy state"
+            );
+            return Err(
+                "Command blocked: irreversible/destructive operation is never permitted".into(),
+            );
+        }
         if !self.is_command_policy_enabled() {
             if self.autonomy == AutonomyLevel::ReadOnly {
                 return Err("Command blocked: autonomy level is ReadOnly".into());
@@ -1116,11 +1194,11 @@ impl SecurityPolicy {
         };
         let normalised = lexically_normalise(&absolute);
 
-        let in_workspace = normalised.starts_with(&workspace);
+        let in_workspace = crate::util::path_is_within(&normalised, &workspace);
         let in_allowed_root = self
             .allowed_roots
             .iter()
-            .any(|root| normalised.starts_with(root));
+            .any(|root| crate::util::path_is_within(&normalised, root));
 
         if in_workspace || in_allowed_root {
             return true;
@@ -1132,7 +1210,7 @@ impl SecurityPolicy {
 
         for forbidden in &self.forbidden_paths {
             let forbidden_path = expand_user_path(forbidden);
-            if normalised.starts_with(forbidden_path) {
+            if crate::util::path_is_within(&normalised, &forbidden_path) {
                 return false;
             }
         }
@@ -1147,20 +1225,20 @@ impl SecurityPolicy {
 
         let ws = self.workspace_dir();
         let workspace_root = ws.canonicalize().unwrap_or(ws);
-        if resolved.starts_with(&workspace_root) {
+        if crate::util::path_is_within(resolved, &workspace_root) {
             return true;
         }
 
         for root in &self.allowed_roots {
             let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-            if resolved.starts_with(&canonical) {
+            if crate::util::path_is_within(resolved, &canonical) {
                 return true;
             }
         }
 
         for forbidden in &self.forbidden_paths {
             let forbidden_path = expand_user_path(forbidden);
-            if resolved.starts_with(&forbidden_path) {
+            if crate::util::path_is_within(resolved, &forbidden_path) {
                 return false;
             }
         }
@@ -1315,7 +1393,8 @@ impl SecurityPolicy {
         }
         self.allowed_roots.iter().any(|root| {
             let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-            expanded.starts_with(&canonical) || expanded.starts_with(root)
+            crate::util::path_is_within(&expanded, &canonical)
+                || crate::util::path_is_within(&expanded, root)
         })
     }
 

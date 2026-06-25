@@ -1377,6 +1377,7 @@ impl Agent {
             p.retarget_session_workspace_root(path.clone());
             self.security_summary = Some(p.prompt_summary());
         }
+        crate::security::register_workspace_root(&path);
         self.workspace_dir = path.clone();
 
         crate::agent::token::optimizer::ensure_workspace_optimizer(path.clone());

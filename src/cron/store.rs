@@ -90,6 +90,9 @@ pub fn add_agent_job(
         use_worktree,
         notification,
         task_description,
+        max_duration_ms,
+        require_idle_ms,
+        priority,
     } = opts;
 
     let now = Utc::now();
@@ -115,8 +118,9 @@ pub fn add_agent_job(
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
                 enabled, delivery, delete_after_run, allowed_tools,
                 permission_mode, coding_mode, folder_path, use_worktree, notification, task_description,
+                max_duration_ms, require_idle_ms, priority,
                 created_at, next_run
-             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 id,
                 expression,
@@ -134,6 +138,9 @@ pub fn add_agent_job(
                 use_worktree.map(|b| i32::from(b)),
                 notification_json,
                 task_description,
+                max_duration_ms.map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+                require_idle_ms.map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+                priority,
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
             ],
@@ -151,7 +158,7 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
                     allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
-                    task_description
+                    task_description, max_duration_ms, require_idle_ms, priority
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -171,7 +178,7 @@ pub fn get_job(config: &Config, job_id: &str) -> Result<CronJob> {
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
                     allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
-                    task_description
+                    task_description, max_duration_ms, require_idle_ms, priority
              FROM cron_jobs WHERE id = ?1",
         )?;
 
@@ -206,7 +213,7 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
                     allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
-                    task_description
+                    task_description, max_duration_ms, require_idle_ms, priority
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
                AND NOT EXISTS (
@@ -283,7 +290,7 @@ pub fn all_overdue_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJ
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                     enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
                     allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
-                    task_description
+                    task_description, max_duration_ms, require_idle_ms, priority
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC",
@@ -295,6 +302,42 @@ pub fn all_overdue_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJ
         for row in rows {
             match row {
                 Ok(job) => jobs.push(job),
+                Err(e) => tracing::warn!("Skipping cron job with unparseable row data: {e}"),
+            }
+        }
+        Ok(jobs)
+    })
+}
+
+pub fn activity_jobs(config: &Config) -> Result<Vec<CronJob>> {
+    with_connection(config, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
+                    enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
+                    allowed_tools, source, permission_mode, coding_mode, folder_path, use_worktree, notification,
+                    task_description, max_duration_ms, require_idle_ms, priority
+             FROM cron_jobs
+             WHERE enabled = 1
+               AND NOT EXISTS (
+                 SELECT 1 FROM cron_runs r
+                 WHERE r.job_id = cron_jobs.id AND r.status = 'running'
+               )",
+        )?;
+
+        let rows = stmt.query_map([], map_cron_job_row)?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            match row {
+                Ok(job)
+                    if matches!(
+                        job.schedule,
+                        Schedule::Idle { .. } | Schedule::OnSessionEnd
+                    ) =>
+                {
+                    jobs.push(job);
+                }
+                Ok(_) => {}
                 Err(e) => tracing::warn!("Skipping cron job with unparseable row data: {e}"),
             }
         }
@@ -363,6 +406,15 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
     if let Some(td) = patch.task_description.clone() {
         job.task_description = (!td.trim().is_empty()).then_some(td);
     }
+    if let Some(md) = patch.max_duration_ms {
+        job.max_duration_ms = (md > 0).then_some(md);
+    }
+    if let Some(ri) = patch.require_idle_ms {
+        job.require_idle_ms = (ri > 0).then_some(ri);
+    }
+    if let Some(p) = patch.priority.clone() {
+        job.priority = (!p.trim().is_empty()).then_some(p);
+    }
 
     if schedule_changed {
         job.next_run = next_run_for_schedule(&job.schedule, Utc::now())?;
@@ -379,8 +431,9 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                  allowed_tools = ?12,
                  permission_mode = ?13, coding_mode = ?14, folder_path = ?15, use_worktree = ?16,
                  notification = ?17, task_description = ?18,
-                 next_run = ?19
-             WHERE id = ?20",
+                 max_duration_ms = ?19, require_idle_ms = ?20, priority = ?21,
+                 next_run = ?22
+             WHERE id = ?23",
             params![
                 job.expression,
                 job.command,
@@ -400,6 +453,9 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
                 job.use_worktree.map(|b| i32::from(b)),
                 notification_db,
                 job.task_description,
+                job.max_duration_ms.map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+                job.require_idle_ms.map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+                job.priority,
                 job.next_run.to_rfc3339(),
                 job.id,
             ],
@@ -697,6 +753,9 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
     let notification_raw: Option<String> = row.get(23)?;
     let notification = decode_optional_json(notification_raw.as_deref()).map_err(sql_conversion_error)?;
     let task_description: Option<String> = row.get(24)?;
+    let max_duration_ms: Option<i64> = row.get(25)?;
+    let require_idle_ms: Option<i64> = row.get(26)?;
+    let priority: Option<String> = row.get(27)?;
 
     Ok(CronJob {
         id: row.get(0)?,
@@ -728,6 +787,9 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         use_worktree,
         notification,
         task_description,
+        max_duration_ms: max_duration_ms.map(|v| v.max(0) as u64),
+        require_idle_ms: require_idle_ms.map(|v| v.max(0) as u64),
+        priority,
     })
 }
 
@@ -1148,6 +1210,9 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     add_column_if_missing(&conn, "use_worktree", "INTEGER")?;
     add_column_if_missing(&conn, "notification", "TEXT")?;
     add_column_if_missing(&conn, "task_description", "TEXT")?;
+    add_column_if_missing(&conn, "max_duration_ms", "INTEGER")?;
+    add_column_if_missing(&conn, "require_idle_ms", "INTEGER")?;
+    add_column_if_missing(&conn, "priority", "TEXT")?;
 
     f(&conn)
 }

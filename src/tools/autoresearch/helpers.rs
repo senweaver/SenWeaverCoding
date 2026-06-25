@@ -339,9 +339,8 @@ fn push_file_sample(
         Ok(s) => s.to_string(),
         Err(_) => return Ok(()),
     };
-    let rel = canonical
-        .strip_prefix(workspace_root)
-        .unwrap_or(&canonical)
+    let rel = crate::util::path_relative_to(&canonical, workspace_root)
+        .unwrap_or_else(|| canonical.clone())
         .display()
         .to_string()
         .replace('\\', "/");
@@ -436,7 +435,7 @@ pub fn build_scope_context_snippet(samples: &[ScopeSample], max_chars: usize) ->
         }
         let remain = max_chars.saturating_sub(buf.len());
         let head = if sample.head.len() > remain {
-            &sample.head[..remain]
+            &sample.head[..crate::util::floor_char_boundary(&sample.head, remain)]
         } else {
             &sample.head[..]
         };

@@ -461,7 +461,7 @@ impl Tool for DelegateParallelTool {
 
                 let _ = rt.registry.assign_task(&agent_info.id, &id);
                 rt.blackboard.inner().write(
-                    &id,
+                    crate::agent::multi_agent_runtime::session_scoped_key(&id),
                     serde_json::json!({
                         "delegated_to": &agent_info.id,
                         "agent_name": &agent_info.name,
@@ -470,7 +470,7 @@ impl Tool for DelegateParallelTool {
                         "started_at": chrono::Utc::now().to_rfc3339(),
                     }),
                     "delegate_parallel",
-                    "delegations",
+                    crate::agent::multi_agent_runtime::session_scoped_namespace("delegations"),
                 );
 
                 let resolved_provider_name = match crate::services::try_get_services() {
@@ -571,7 +571,7 @@ impl Tool for DelegateParallelTool {
                         rt.registry.complete_task(&agent_info.id, true);
 
                         rt.blackboard.inner().write(
-                            &id,
+                            crate::agent::multi_agent_runtime::session_scoped_key(&id),
                             serde_json::json!({
                                 "delegated_to": &agent_info.id,
                                 "output_preview": output.chars().take(200).collect::<String>(),
@@ -579,7 +579,7 @@ impl Tool for DelegateParallelTool {
                                 "agentic": agentic,
                             }),
                             "delegate_parallel",
-                            "results",
+                            crate::agent::multi_agent_runtime::session_scoped_namespace("results"),
                         );
                         Ok(output)
                     }

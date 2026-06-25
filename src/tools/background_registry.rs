@@ -47,6 +47,8 @@ pub enum BackgroundShellSignal {
 struct ChildHandle {
     command: String,
 
+    session_id: Option<String>,
+
     kill_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -99,6 +101,7 @@ pub(crate) fn register(
         id.clone(),
         ChildHandle {
             command: command.clone(),
+            session_id: session_id.clone(),
             kill_tx: Some(kill_tx),
         },
     );
@@ -202,12 +205,20 @@ pub fn kill_foreground(session_id: &str, connection_id: Option<&str>) -> bool {
     killed
 }
 pub fn snapshot() -> Vec<(String, String)> {
+    let scope = crate::session::current_session_context()
+        .map(|ctx| ctx.session_id)
+        .filter(|s| !s.is_empty());
     let guard = registry()
         .children
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     guard
         .iter()
+        .filter(|(_, v)| match (&scope, &v.session_id) {
+            (Some(want), Some(have)) => want == have,
+            (Some(_), None) => false,
+            (None, _) => true,
+        })
         .map(|(k, v)| (k.clone(), v.command.clone()))
         .collect()
 }

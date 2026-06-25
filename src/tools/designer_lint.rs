@@ -76,7 +76,7 @@ impl Tool for DesignerLintTool {
                 });
             }
         };
-        let content = match std::fs::read_to_string(&abs) {
+        let content = match tokio::fs::read_to_string(&abs).await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult {

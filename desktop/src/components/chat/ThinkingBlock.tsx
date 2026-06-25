@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '../../i18n'
 import { useChatStore } from '../../stores/chatStore'
@@ -29,6 +29,7 @@ export function ThinkingBlock({
   const t = useTranslation()
   const [userOverride, setUserOverride] = useState<boolean | null>(null)
   const [elapsedSec, setElapsedSec] = useState(0)
+  const [isContentScrollable, setIsContentScrollable] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
   const prevIsActiveRef = useRef<boolean>(isActive)
 
@@ -61,10 +62,17 @@ export function ThinkingBlock({
   }, [isActive, startedAt])
 
   useEffect(() => {
-    if (expanded && isActive && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight
+    const el = contentRef.current
+    if (!el || !expanded) {
+      if (isContentScrollable) setIsContentScrollable(false)
+      return
     }
-  }, [content, expanded, isActive])
+    if (isActive) {
+      el.scrollTop = el.scrollHeight
+    }
+    const scrollable = el.scrollHeight - el.clientHeight > 1
+    setIsContentScrollable((prev) => (prev === scrollable ? prev : scrollable))
+  }, [content, expanded, isActive, isContentScrollable])
 
   const lines = content.split('\n').filter((l) => l.trim())
   const firstLine = lines[0]?.replace(/\s+/g, ' ').trim() || ''
@@ -76,7 +84,18 @@ export function ThinkingBlock({
   const hasContent = content.trim().length > 0
   const canExpand = hasContent
   const showInlinePreview = (compact || isActive) && !expanded
-  const contentMaxHeightClass = isActive ? 'max-h-[240px]' : 'max-h-[320px]'
+  const contentSizeClass = isActive
+    ? compact
+      ? 'max-h-[160px]'
+      : 'max-h-[240px]'
+    : 'max-h-[320px]'
+  const activeScrollMask =
+    isActive && isContentScrollable
+      ? {
+          maskImage: 'linear-gradient(to bottom, transparent 0, #000 16px)',
+          WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, #000 16px)',
+        }
+      : undefined
 
   return (
     <div className={compact ? 'mb-1' : 'mb-1.5'}>
@@ -124,7 +143,8 @@ export function ThinkingBlock({
       {expanded && canExpand && (
         <div
           ref={contentRef}
-          className={`mt-1 ${contentMaxHeightClass} overflow-y-auto rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-lowest)] px-2.5 py-2 font-[var(--font-mono)] text-[11px] leading-[1.45] whitespace-pre-wrap break-words text-[var(--color-text-secondary)]`}
+          style={activeScrollMask}
+          className={`mt-1 ${contentSizeClass} overflow-y-auto rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-lowest)] px-2.5 py-2 font-[var(--font-mono)] text-[11px] leading-[1.45] whitespace-pre-wrap break-words text-[var(--color-text-secondary)]`}
         >
           {content}
         </div>
@@ -151,7 +171,7 @@ export function ActiveThinkingBlock({
       }
     }),
   )
-  useLayoutEffect(() => {
+  useEffect(() => {
     onContentGrow?.()
   }, [content, onContentGrow])
   return (

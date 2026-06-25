@@ -85,8 +85,11 @@ impl Tool for FlowRollbackTool {
             if let Some(cp) = store.load_persisted(&session, &cp_id).await {
                 let mut reverted_paths: Vec<String> = Vec::new();
                 if let Some(batch_id) = cp.edit_batch_id.as_ref() {
-                    let workspace = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let workspace = crate::session::current_session_context()
+                        .map(|ctx| std::path::PathBuf::from(ctx.workspace_dir))
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
                     let batch_id_owned = batch_id.clone();
                     let revert = tokio::task::spawn_blocking(move || {
                         crate::tools::edit_history::EditHistory::new(workspace)

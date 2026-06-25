@@ -380,8 +380,30 @@ impl OpsApplier {
         batch: EditBatch,
     ) -> Result<BatchOutcome, ApplyBatchError> {
         let ws = self.workspace_snapshot();
-        for op in &batch.ops {
-            op.validate_preconditions(&ws)?;
+        {
+            // Precondition checks read files from disk; run them on the blocking pool so the
+            // async worker thread (and the agent loop sharing it) is never stalled per edit.
+            let batch_for_validate = batch.clone();
+            let validate = tokio::task::spawn_blocking(move || -> Result<(), ApplyBatchError> {
+                for op in &batch_for_validate.ops {
+                    op.validate_preconditions(&ws)?;
+                }
+                Ok(())
+            })
+            .await;
+            match validate {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(e) => {
+                    return Err(ApplyBatchError::Io {
+                        op_index: 0,
+                        path: PathBuf::new(),
+                        source: std::io::Error::other(format!(
+                            "validate_preconditions join error: {e}"
+                        )),
+                    });
+                }
+            }
         }
 
         let unique_paths = unique_touched_paths(&batch);
@@ -524,8 +546,8 @@ impl OpsApplier {
             }
         }
 
-        self.append_footer(journal_path.as_deref(), JournalStatus::Committed, degraded);
-        self.rotate_journals();
+        self.finalize_journal_async(journal_path.clone(), JournalStatus::Committed, degraded)
+            .await;
 
         if let Some(history) = self.edit_history.as_ref() {
             history.stamp_latest_with_batch(unique_paths.iter(), &batch.batch_id);
@@ -1155,30 +1177,23 @@ impl OpsApplier {
         append_footer_to_path(path, status, degraded);
     }
 
-    fn rotate_journals(&self) {
-        let Ok(entries) = std::fs::read_dir(self.journal_dir_snapshot()) else {
-            return;
-        };
-        let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                    let m = e.metadata().ok().and_then(|m| m.modified().ok())?;
-                    Some((m, p))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if files.len() <= self.journal_retention {
-            return;
-        }
-        files.sort_by_key(|(t, _)| *t);
-        let to_remove = files.len() - self.journal_retention;
-        for (_, path) in files.into_iter().take(to_remove) {
-            let _ = std::fs::remove_file(path);
-        }
+    /// Write the journal footer (when present) and rotate old journals entirely on the blocking
+    /// pool, keeping the async worker thread free on the per-edit success path.
+    async fn finalize_journal_async(
+        &self,
+        journal_path: Option<PathBuf>,
+        status: JournalStatus,
+        degraded: bool,
+    ) {
+        let dir = self.journal_dir_snapshot();
+        let retention = self.journal_retention;
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(p) = journal_path {
+                append_footer_to_path(&p, status, degraded);
+            }
+            rotate_journals_in(&dir, retention);
+        })
+        .await;
     }
 
 }
@@ -1431,6 +1446,32 @@ fn capture_pre_images(
         }
     }
     Ok(map)
+}
+
+fn rotate_journals_in(dir: &Path, retention: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                let m = e.metadata().ok().and_then(|m| m.modified().ok())?;
+                Some((m, p))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if files.len() <= retention {
+        return;
+    }
+    files.sort_by_key(|(t, _)| *t);
+    let to_remove = files.len() - retention;
+    for (_, path) in files.into_iter().take(to_remove) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn append_footer_to_path(path: &Path, status: JournalStatus, degraded: bool) {

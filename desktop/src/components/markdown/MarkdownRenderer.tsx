@@ -25,7 +25,15 @@ function shouldRenderAsMermaid(block: CodeBlock): boolean {
   return isMermaidBlock(block.language, block.code)
 }
 
+const ENHANCE_CACHE = new Map<string, string>()
+const ENHANCE_CACHE_MAX = 200
+
 function enhanceMarkdownHtml(html: string): string {
+  // Sanitizing + DOM table-wrapping + link-hardening is pure in `html`; cache the result so
+  // re-renders (e.g. during streaming, where finalized blocks are stable) don't redo the DOM work.
+  const cached = ENHANCE_CACHE.get(html)
+  if (cached !== undefined) return cached
+
   const cleanHtml = DOMPurify.sanitize(html, {
     ADD_TAGS: ['use'],
     ADD_ATTR: ['xlink:href'],
@@ -51,7 +59,13 @@ function enhanceMarkdownHtml(html: string): string {
     link.setAttribute('rel', 'noreferrer noopener')
   })
 
-  return container.innerHTML
+  const result = container.innerHTML
+  if (ENHANCE_CACHE.size >= ENHANCE_CACHE_MAX) {
+    const oldest = ENHANCE_CACHE.keys().next().value
+    if (oldest !== undefined) ENHANCE_CACHE.delete(oldest)
+  }
+  ENHANCE_CACHE.set(html, result)
+  return result
 }
 
 const BASE_PROSE_CLASSES = `markdown-prose prose prose-sm max-w-none text-[var(--color-text-primary)]

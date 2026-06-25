@@ -20,6 +20,7 @@ import { useTabStore } from '../../stores/tabStore'
 import { focusSession } from '../../lib/focusSession'
 import { useUIStore } from '../../stores/uiStore'
 import { useUpdateStore } from '../../stores/updateStore'
+import { performSafeExit } from '../../lib/appClose'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 const isMacOSEnv =
@@ -186,12 +187,7 @@ export function TitleBar() {
   const quitApp = async () => {
     closeAll()
     if (!isTauri) return
-    try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window')
-      await getCurrentWindow().close()
-    } catch {
-
-    }
+    await performSafeExit()
   }
 
   const checkForUpdatesMenu = () => {
@@ -295,6 +291,8 @@ export function TitleBar() {
 
         <div className="min-w-8 flex-1" data-tauri-drag-region aria-hidden="true" />
       </div>
+
+      <ComputerModeToggle t={t} />
 
       {showWindowsCaption && <WindowsCaptionButtons isMaximized={captionMaximized} t={t} />}
 
@@ -468,6 +466,29 @@ function MacTrafficLightsStrip({ t }: { t: T }) {
         className="h-[11px] w-[11px] shrink-0 rounded-full bg-[#28c840] ring-1 ring-black/[0.12] hover:brightness-95 dark:ring-black/35"
       />
     </div>
+  )
+}
+
+function ComputerModeToggle({ t }: { t: T }) {
+  const appMode = useUIStore((s) => s.appMode)
+  const toggleAppMode = useUIStore((s) => s.toggleAppMode)
+  const active = appMode === 'computer'
+  const label = active ? t('titlebar.computerUse.exit') : t('titlebar.computerUse.enter')
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      onClick={() => toggleAppMode()}
+      className={`inline-flex h-full shrink-0 items-center gap-1 px-3 text-[12px] transition-colors ${
+        active
+          ? 'bg-[var(--color-brand)]/12 text-[var(--color-brand)]'
+          : 'text-[var(--color-text-secondary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.08]'
+      }`}
+    >
+      <span className="material-symbols-outlined text-[18px]">desktop_windows</span>
+    </button>
   )
 }
 

@@ -12,13 +12,16 @@ const SYNTHETIC_TOOL_REPLY: &str =
      the conversation context and the user's latest message to decide how to proceed.";
 
 const INTERRUPTED_TURN_NOTE: &str =
-    "[System note: the preceding task was interrupted (cancelled, errored, or the app \
-     restarted) before it finished. Use the conversation context together with the user's \
-     latest message to decide what to do: if the latest message asks to continue or finish \
-     that task - whether explicitly (e.g. \"继续\" / \"continue\") or clearly implied by \
-     context - then resume it; otherwise treat the latest message as the current authoritative \
-     request and act on that instead. Do NOT blindly resume the interrupted task when the user \
-     has moved on to a different request. Always judge from context.]";
+    "[System note: your MOST RECENT task - the user request immediately above this note - was \
+     interrupted (cancelled, errored, or the app restarted) before it finished. This note refers \
+     ONLY to that single most-recent task. If the user's latest message asks to continue or finish \
+     it - whether explicitly (e.g. \"继续\" / \"continue\") or clearly implied by context - then \
+     resume THAT most-recent interrupted task and nothing else, picking up from where it stopped. \
+     Do NOT resume, restate, or merge in any OLDER interrupted, stopped, superseded, or \
+     already-finished task from earlier in this conversation (including earlier design-task \
+     contracts and their artifacts) - those are done or abandoned. If the latest message is a \
+     different request, treat it as the current authoritative request instead. Always judge from \
+     context, anchored to the most recent task.]";
 
 pub fn drop_payloadless_assistant_messages(history: &mut Vec<ConversationMessage>) {
     let before = history.len();

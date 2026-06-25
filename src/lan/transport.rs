@@ -120,6 +120,8 @@ pub struct LanTransport {
     identity: Arc<LanIdentity>,
     registry: Arc<PeerRegistry>,
     events: Arc<dyn LanEvents>,
+    store: Arc<super::store::LanStore>,
+    require_trusted: bool,
     downloads_dir: PathBuf,
     chunk_size: usize,
     max_frame: usize,
@@ -131,10 +133,13 @@ pub struct LanTransport {
 }
 
 impl LanTransport {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         identity: Arc<LanIdentity>,
         registry: Arc<PeerRegistry>,
         events: Arc<dyn LanEvents>,
+        store: Arc<super::store::LanStore>,
+        require_trusted: bool,
         downloads_dir: PathBuf,
         chunk_size: usize,
         max_frame: usize,
@@ -144,6 +149,8 @@ impl LanTransport {
             identity,
             registry,
             events,
+            store,
+            require_trusted,
             downloads_dir,
             chunk_size,
             max_frame,
@@ -152,6 +159,52 @@ impl LanTransport {
             inbound: Arc::new(DashMap::new()),
             finished: Arc::new(DashMap::new()),
             listen_port: AtomicU16::new(0),
+        }
+    }
+
+    fn authorize_peer(&self, hello: &Hello, discovered: bool) -> Result<()> {
+        if hello.protocol != super::discovery::LAN_PROTOCOL {
+            return Err(anyhow!(
+                "lan handshake rejected: unexpected protocol '{}' (expected '{}')",
+                hello.protocol,
+                super::discovery::LAN_PROTOCOL
+            ));
+        }
+        if hello.user_id.trim().is_empty() {
+            return Err(anyhow!("lan handshake rejected: empty peer user_id"));
+        }
+        if public_from_b64(&hello.public_key).is_none() {
+            return Err(anyhow!("lan handshake rejected: invalid peer public key"));
+        }
+
+        match self.store.pinned_public_key(&hello.user_id) {
+            Some(pinned) => {
+                if pinned != hello.public_key {
+                    return Err(anyhow!(
+                        "lan handshake rejected: peer '{}' presented a public key that does not \
+                         match the pinned identity (possible impersonation)",
+                        hello.user_id
+                    ));
+                }
+                Ok(())
+            }
+            None => {
+                if self.require_trusted && !discovered {
+                    return Err(anyhow!(
+                        "lan handshake rejected: peer '{}' is not trusted and \
+                         require_trusted_peers is enabled",
+                        hello.user_id
+                    ));
+                }
+                let now = chrono::Utc::now().timestamp_millis();
+                if let Err(err) =
+                    self.store
+                        .pin_public_key(&hello.user_id, &hello.public_key, now)
+                {
+                    tracing::warn!(error = %err, peer = %hello.user_id, "lan: failed to pin peer public key");
+                }
+                Ok(())
+            }
         }
     }
 
@@ -202,6 +255,12 @@ impl LanTransport {
         let hello_bytes = read_frame(&mut read_half, 64 * 1024).await?;
         let peer_hello: Hello =
             serde_json::from_slice(&hello_bytes).context("parsing peer hello")?;
+
+        let discovered = self.registry.get(&peer_hello.user_id).is_some();
+        if let Err(err) = self.authorize_peer(&peer_hello, discovered) {
+            tracing::warn!(error = %err, "lan: rejecting inbound connection");
+            return Err(err);
+        }
 
         let our_hello = self.build_hello();
         write_frame(&mut write_half, &serde_json::to_vec(&our_hello)?).await?;
@@ -256,7 +315,7 @@ impl LanTransport {
 
         let mut streams = Vec::with_capacity(self.num_streams);
         for _ in 0..self.num_streams {
-            let (write_half, key) = self.dial_stream(record.addr).await?;
+            let (write_half, key) = self.dial_stream(record.addr, &record.public_key).await?;
             let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
             spawn_stream_writer(write_half, rx, SessionCipher::new(&key));
             streams.push(tx);
@@ -271,7 +330,11 @@ impl LanTransport {
         Ok(link)
     }
 
-    async fn dial_stream(self: &Arc<Self>, addr: std::net::SocketAddr) -> Result<(OwnedWriteHalf, [u8; 32])> {
+    async fn dial_stream(
+        self: &Arc<Self>,
+        addr: std::net::SocketAddr,
+        expected_public_key: &str,
+    ) -> Result<(OwnedWriteHalf, [u8; 32])> {
         let stream = TcpStream::connect(addr)
             .await
             .with_context(|| format!("connecting to {addr}"))?;
@@ -283,6 +346,14 @@ impl LanTransport {
         let hello_bytes = read_frame(&mut read_half, 64 * 1024).await?;
         let peer_hello: Hello =
             serde_json::from_slice(&hello_bytes).context("parsing peer hello")?;
+
+        if !expected_public_key.is_empty() && peer_hello.public_key != expected_public_key {
+            return Err(anyhow!(
+                "lan dial rejected: peer at {addr} presented a public key that does not match \
+                 the key advertised via discovery (possible impersonation)"
+            ));
+        }
+        self.authorize_peer(&peer_hello, true)?;
 
         let peer_pub = public_from_b64(&peer_hello.public_key)
             .ok_or_else(|| anyhow!("invalid peer public key"))?;

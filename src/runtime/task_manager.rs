@@ -156,7 +156,10 @@ where
 }
 
 pub fn abort_all() -> usize {
-    let infos: Vec<TaskInfo> = REGISTRY.lock().clone();
+    let infos: Vec<TaskInfo> = {
+        let mut guard = REGISTRY.lock();
+        std::mem::take(&mut *guard)
+    };
     let count = infos.len();
     for info in infos {
         info.abort_handle.abort();

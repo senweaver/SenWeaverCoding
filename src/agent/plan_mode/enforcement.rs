@@ -4,6 +4,8 @@
 
 pub const MAX_PLAN_NUDGES: usize = 3;
 
+pub const HARD_PLAN_NUDGE_LIMIT: usize = 9;
+
 pub const ASK_QUESTION_WAIT_SENTINEL: &str = "__WAITING_FOR_USER_RESPONSE__";
 
 pub const ASK_QUESTION_PAUSE_NOTICE: &str =
@@ -86,6 +88,16 @@ pub fn evaluate_plan_mode_exit(
         return PlanModeExitDecision::Allow;
     }
     if !in_plan_mode || state.exit_plan_mode_called {
+        return PlanModeExitDecision::Allow;
+    }
+
+    if state.nudge_count >= HARD_PLAN_NUDGE_LIMIT {
+        tracing::error!(
+            target: "agent.plan_mode",
+            nudge_count = state.nudge_count,
+            "Plan mode nudging exceeded hard limit; stopping nudges to avoid a live-lock \
+             (provider/model is not honoring exit_plan_mode)"
+        );
         return PlanModeExitDecision::Allow;
     }
 

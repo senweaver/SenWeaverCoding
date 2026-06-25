@@ -194,13 +194,51 @@ impl ProxyRuntime {
         }
         let b = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
-            .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs));
+            .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30));
         let c = self
             .apply_to_builder(b, service_key)
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(service_key, "Failed to build proxied timeout client: {e}");
                 timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
+            });
+        self.set_cached_client(ck, c.clone());
+        c
+    }
+
+    pub fn build_search_client(
+        &self,
+        service_key: &str,
+        timeout_secs: u64,
+        user_agent: &str,
+    ) -> reqwest::Client {
+        crate::services::proxy::registry::register(service_key);
+        let ck = format!(
+            "{}|ua={}|{}",
+            cache_key(service_key, Some(timeout_secs), None),
+            user_agent,
+            self.proxy_fingerprint(service_key)
+        );
+        if let Some(c) = self.cached_client(&ck) {
+            return c;
+        }
+        let b = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .user_agent(user_agent);
+        let c = self
+            .apply_to_builder(b, service_key)
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!(service_key, "Failed to build proxied search client: {e}");
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(timeout_secs))
+                    .user_agent(user_agent)
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new())
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -247,13 +285,6 @@ impl ProxyRuntime {
         headers: &HashMap<String, String>,
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
-        if headers.is_empty() {
-            return self.build_client_with_timeouts(
-                service_key,
-                timeout_secs,
-                connect_timeout_secs,
-            );
-        }
 
         let mut header_map = reqwest::header::HeaderMap::with_capacity(headers.len());
         for (key, value) in headers {
@@ -298,6 +329,43 @@ impl ProxyRuntime {
             );
             timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
         })
+    }
+
+    pub fn build_stream_client(
+        &self,
+        service_key: &str,
+        read_timeout_secs: u64,
+        connect_timeout_secs: u64,
+        headers: &reqwest::header::HeaderMap,
+    ) -> reqwest::Client {
+        crate::services::proxy::registry::register(service_key);
+        let build = || {
+            let mut builder = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                .pool_idle_timeout(std::time::Duration::from_secs(15));
+            if !headers.is_empty() {
+                builder = builder.default_headers(headers.clone());
+            }
+            builder
+        };
+        self.apply_to_builder(build(), service_key)
+            .build()
+            .or_else(|error| {
+                tracing::warn!(
+                    service_key,
+                    "Failed to build proxied stream client: {error}; retrying without proxy"
+                );
+                build().build()
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!(service_key, "Failed to build stream client: {error}");
+                reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new())
+            })
     }
 
     pub fn build_channel_client(

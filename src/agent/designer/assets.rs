@@ -26,6 +26,13 @@ layout shell with an end-of-content marker comment), then grow it with `file_edi
 (`mode=append` / `insert_before` the marker) in batches, keeping every single tool call under \
 ~250 lines of content. Oversized single responses regularly hit provider output limits, stall the \
 stream and abort the whole turn.\n\
+- Authoring tool discipline (HARD): author every artifact ONLY with `file_write` and `file_edit`. \
+NEVER assemble files through the `shell` tool — no `echo`/`>>`/`>` redirection, no `cat <<EOF` \
+heredocs, and no writing a Python/Node helper script to emit the markup. Shell echo mangles `<`, \
+`>`, quotes and braces on Windows `cmd`, produces no visible progress, and trips the loop-detector \
+circuit breaker that aborts the whole turn. If content contains `<`, `>` or quotes (it always does \
+for HTML/SVG), that is exactly why you must use `file_write`/`file_edit`, which handle any bytes \
+verbatim in a single call.\n\
 - The user's brief is the authoritative subject of the design. Never replace it with an invented \
 example topic, and never ask the user to re-choose what the brief already states.\n\n\
 ### Quality bar\n\

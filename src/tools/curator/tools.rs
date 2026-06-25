@@ -1156,12 +1156,14 @@ impl Tool for ExitCuratorModeTool {
             .ok_or_else(|| anyhow::anyhow!("exit_curator_mode requires an active Curator session."))?;
         ensure_inside_curator(&active.root_dir, &self.security)?;
 
-        let final_content = args
+        let final_content_raw = args
             .get("final_content")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("exit_curator_mode requires non-empty 'final_content'"))?;
+        let final_content_owned = strip_decorative_separators(final_content_raw);
+        let final_content = final_content_owned.as_str();
         let impl_blueprint = args
             .get("impl_blueprint")
             .and_then(|v| v.as_str())
@@ -1520,8 +1522,70 @@ const CURATOR_CONTENT_BANNER: &str = "\
 > 3. **禁止** `path/file.ext:行号` 形式的源码引用；**禁止**裸贴 `func Foo(`/`def bar(`/`fn baz(`/`class Quux:` 等函数签名。  \n\
 > 4. **禁止**在正文里直接点名具体开源项目（One-API / LiteLLM / OpenRouter / Portkey / vLLM / LangChain / llama.cpp / Ollama …），改用「某 Go 语言的 LLM 网关开源项目」「某 Python 多供应商 LLM 代理库」等中性描述；如确需对比，集中放在唯一一张「替代方案对比」表里，正文外提及 ≤3 次。  \n\
 > 5. **允许**的代码块：```bash```/```sh```（部署/验收命令）、```yaml```/```toml```/```json```/```ini```/```nginx```/```dockerfile```（配置样本）、```mermaid```（图示）、```text```（≤10 行伪代码/Schema/EBNF）。  \n\
-> 6. 写作重心：**功能描述（输入/输出/边界） · 技术原理（算法/协议/数据结构/关键参数） · 量化关键指标（带测试方法） · 数据与 API Schema · 实现要点（依赖类别/失败模式/重试/限流/可观测埋点） · 部署拓扑与运维**。\n\n\
----\n\n";
+> 6. 写作重心：**功能描述（输入/输出/边界） · 技术原理（算法/协议/数据结构/关键参数） · 量化关键指标（带测试方法） · 数据与 API Schema · 实现要点（依赖类别/失败模式/重试/限流/可观测埋点） · 部署拓扑与运维**。  \n\
+> 7. **禁止**手写任何水平分隔线或装饰性分隔符（`---` / `***` / `___` / `— — —` 等整行破折号）：章节切分、留白与分页全部由排版器依据 `#`/`##`/`###` 标题层级自动完成；正文里出现这类符号只会被当作噪声删除。\n\n";
+
+fn is_decorative_separator_line(trimmed: &str) -> bool {
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains('|') {
+        return false;
+    }
+    let mut rule_glyphs = 0usize;
+    for ch in trimmed.chars() {
+        match ch {
+            '-' | '*' | '_' | '\u{2014}' | '\u{2013}' | '\u{2500}' | '\u{2015}' => {
+                rule_glyphs += 1;
+            }
+            ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    rule_glyphs >= 3
+}
+
+fn strip_decorative_separators(markdown: &str) -> String {
+    let mut out_lines: Vec<&str> = Vec::new();
+    let mut in_code_fence = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            out_lines.push(line);
+            continue;
+        }
+        if in_code_fence {
+            out_lines.push(line);
+            continue;
+        }
+        if is_decorative_separator_line(trimmed) {
+            continue;
+        }
+        if trimmed.is_empty()
+            && out_lines
+                .last()
+                .map(|prev| prev.trim().is_empty())
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        out_lines.push(line);
+    }
+    let start = out_lines
+        .iter()
+        .position(|l| !l.trim().is_empty())
+        .unwrap_or(0);
+    let end = out_lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    if start >= end {
+        return String::new();
+    }
+    out_lines[start..end].join("\n")
+}
 
 fn compose_draft_with_banner(draft_body: &str) -> String {
     let mut out = String::with_capacity(CURATOR_CONTENT_BANNER.len() + draft_body.len());

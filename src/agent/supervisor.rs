@@ -304,12 +304,22 @@ impl Supervisor {
         let _ = self.registry.set_state(agent_id, AgentState::Restarting);
 
         let callback = self.restart_callback.read();
-        let restart_succeeded = if let (Some(cb), Some(info)) = (callback.as_ref(), agent_info) {
-            cb(&info)
-        } else {
-
-            let _ = self.registry.set_state(agent_id, AgentState::Idle);
-            true
+        let restart_succeeded = match (callback.as_ref(), agent_info) {
+            (Some(cb), Some(info)) => cb(&info),
+            (None, _) => {
+                error!(
+                    agent_id = %agent_id,
+                    "Supervisor: no restart callback registered; cannot restart agent"
+                );
+                false
+            }
+            (Some(_), None) => {
+                error!(
+                    agent_id = %agent_id,
+                    "Supervisor: agent missing from registry; cannot restart"
+                );
+                false
+            }
         };
 
         if restart_succeeded {

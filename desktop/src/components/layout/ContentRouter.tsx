@@ -5,7 +5,7 @@
 import { useTabStore } from '../../stores/tabStore'
 import { EmptySession } from '../../pages/EmptySession'
 import { ActiveSession } from '../../pages/ActiveSession'
-import { ScheduledTasks } from '../../pages/ScheduledTasks'
+import { Automations } from '../../pages/Automations'
 import { WorkerSession } from '../../pages/WorkerSession'
 
 export function ContentRouter() {
@@ -17,7 +17,7 @@ export function ContentRouter() {
   }
 
   if (activeTabType === 'scheduled') {
-    return <ScheduledTasks />
+    return <Automations />
   }
 
   if (activeTabType === 'worker') {

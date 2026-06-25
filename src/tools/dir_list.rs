@@ -87,7 +87,7 @@ impl Tool for DirListTool {
         }
 
         let full_path = self.security.resolve_tool_path(path_str);
-        let full_path = match full_path.canonicalize() {
+        let full_path = match tokio::fs::canonicalize(&full_path).await {
             Ok(p) => p,
             Err(_) => full_path,
         };

@@ -11,9 +11,20 @@ use std::sync::Arc;
 pub type AgentMailbox = Arc<RwLock<HashMap<String, VecDeque<AgentMessage>>>>;
 
 pub fn global_mailbox() -> AgentMailbox {
-    static GLOBAL: std::sync::OnceLock<AgentMailbox> = std::sync::OnceLock::new();
-    GLOBAL
-        .get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+    static GLOBAL: std::sync::OnceLock<RwLock<HashMap<String, AgentMailbox>>> =
+        std::sync::OnceLock::new();
+    let scope = match crate::session::current_session_context() {
+        Some(ctx) if !ctx.session_id.is_empty() => ctx.session_id,
+        _ => "__global__".to_string(),
+    };
+    let map = GLOBAL.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(mb) = map.read().get(&scope) {
+        return mb.clone();
+    }
+    let mut guard = map.write();
+    guard
+        .entry(scope)
+        .or_insert_with(|| Arc::new(RwLock::new(HashMap::new())))
         .clone()
 }
 

@@ -9,6 +9,7 @@ pub mod update;
 
 pub mod add_dir;
 pub mod agent_exec;
+pub mod autoloop;
 pub mod clear;
 pub mod color;
 pub mod compact;
@@ -29,6 +30,7 @@ pub mod metrics;
 pub mod mode;
 pub mod model;
 pub mod multi_agent;
+pub mod observe;
 pub mod permissions;
 pub mod plan;
 pub mod plugin_cmd;

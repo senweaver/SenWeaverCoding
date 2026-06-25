@@ -407,7 +407,7 @@ fn ensure_inside(root: &Path, path: &Path) -> Result<(), PreconditionError> {
     let normal = normalize(path);
     let root = normalize(root);
 
-    if normal == root || normal.starts_with(&root) {
+    if crate::util::path_is_within(&normal, &root) {
         return Ok(());
     }
     Err(PreconditionError::PathEscape { path: normal })

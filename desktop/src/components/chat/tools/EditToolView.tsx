@@ -19,6 +19,19 @@ function readString(input: unknown, key: string): string {
   return typeof v === 'string' ? v : ''
 }
 
+function langFromPath(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  const map: Record<string, string> = {
+    ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
+    py: 'python', rs: 'rust', go: 'go', rb: 'ruby', java: 'java',
+    c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cs: 'csharp',
+    json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
+    md: 'markdown', css: 'css', scss: 'scss', html: 'html', xml: 'xml',
+    sql: 'sql', sh: 'bash', bash: 'bash', zsh: 'bash',
+  }
+  return map[ext] || 'plaintext'
+}
+
 type MultiEditEntry = {
   oldString: string
   newString: string
@@ -337,7 +350,16 @@ export function EditDetail({ toolName, input, result, isStreaming }: ToolViewPro
     return <DiffViewer filePath={path} oldString={oldStr} newString={newStr} />
   }
   if ((toolName === 'file_write' || toolName === 'Write' || toolName === 'file_create') && content) {
-    return <DiffViewer filePath={path} oldString="" newString={content} />
+    // A whole-file write is all-additions: rendering it through the diff engine is needlessly
+    // heavy. Show a truncated, syntax-highlighted code preview instead.
+    return (
+      <CodeViewer
+        code={content}
+        language={langFromPath(path)}
+        maxLines={40}
+        showLineNumbers={false}
+      />
+    )
   }
 
   const text = result ? extractTextContent(result.content) : ''

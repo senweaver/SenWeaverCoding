@@ -232,6 +232,20 @@ impl PluginHost {
             .collect()
     }
 
+    pub fn tool_plugin_specs(&self) -> Vec<(String, Option<String>, PathBuf)> {
+        self.loaded
+            .values()
+            .filter(|p| p.manifest.capabilities.contains(&PluginCapability::Tool))
+            .map(|p| {
+                (
+                    p.manifest.name.clone(),
+                    p.manifest.description.clone(),
+                    p.wasm_path.clone(),
+                )
+            })
+            .collect()
+    }
+
     pub fn channel_plugins(&self) -> Vec<&PluginManifest> {
         self.loaded
             .values()

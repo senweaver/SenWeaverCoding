@@ -79,15 +79,24 @@ impl Tool for SkillHttpTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let raw_url = self.substitute_args(&args);
 
-        let (allowed_domains, allow_private_hosts) = crate::services::try_get_services()
-            .map(|svc| {
+        let (allowed_domains, allow_private_hosts) = match crate::services::try_get_services() {
+            Some(svc) => {
                 let cfg = svc.config();
                 (
                     cfg.http_request.allowed_domains.clone(),
                     cfg.http_request.allow_private_hosts,
                 )
-            })
-            .unwrap_or_default();
+            }
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "skill http blocked: service container unavailable (fail-closed)".into(),
+                    ),
+                });
+            }
+        };
 
         let url = match crate::tools::http_request::validate_outbound_url(
             &raw_url,

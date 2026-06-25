@@ -155,7 +155,10 @@ export function ToolCard({
     Boolean(result && hasMeaningfulOutput(result.content))
   const hideVerb = category === 'web'
 
-  const categoryDefaultExpanded = category === 'edit'
+  // Edit cards used to auto-expand, which synchronously mounts a heavy diff (word-level diff +
+  // syntax highlight) the instant a tool completes — a major source of jank during active
+  // editing. The collapsed header still shows the +/- line-count badge; users expand on click.
+  const categoryDefaultExpanded = false
   const initialExpanded = defaultExpanded ?? categoryDefaultExpanded
   const [expanded, setExpanded] = useState<boolean>(initialExpanded)
 

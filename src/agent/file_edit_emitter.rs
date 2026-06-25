@@ -25,10 +25,7 @@ pub fn relativize_for_workspace(path: &Path) -> PathBuf {
     }
     let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let abs_ws = std::fs::canonicalize(&workspace).unwrap_or(workspace);
-    abs_path
-        .strip_prefix(&abs_ws)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| path.to_path_buf())
+    crate::util::path_relative_to(&abs_path, &abs_ws).unwrap_or_else(|| path.to_path_buf())
 }
 
 #[must_use]
@@ -244,43 +241,50 @@ pub async fn emit_file_edit(
     let Some(tx) = take_parent_draft_channel() else {
         return;
     };
-    let before_text = before_bytes
-        .map(String::from_utf8_lossy)
-        .unwrap_or_default()
-        .into_owned();
-    let after_text = after_bytes
-        .map(String::from_utf8_lossy)
-        .unwrap_or_default()
-        .into_owned();
-    let (additions, deletions) = if before_bytes.is_none() {
-        let lines = after_text.split('\n').count() as i32;
-        let trailing = i32::from(after_text.ends_with('\n'));
-        (std::cmp::max(0, lines - trailing), 0i32)
-    } else if after_bytes.is_none() {
-        let lines = before_text.split('\n').count() as i32;
-        let trailing = i32::from(before_text.ends_with('\n'));
-        (0i32, std::cmp::max(0, lines - trailing))
-    } else {
-        count_line_changes(&before_text, &after_text)
-    };
-    if additions == 0 && deletions == 0 && before_bytes.is_some() && after_bytes.is_some() {
-        return;
+    // Offload all CPU-heavy work (utf8 decode of full files, LCS line-change counting,
+    // unified-diff rendering, path canonicalization) onto the blocking pool so the async
+    // worker thread / agent loop is never stalled by large file edits. The send is still
+    // awaited afterwards to preserve event ordering.
+    let before_owned = before_bytes.map(<[u8]>::to_vec);
+    let after_owned = after_bytes.map(<[u8]>::to_vec);
+    let path_owned = path.to_path_buf();
+    let built = tokio::task::spawn_blocking(move || -> Option<DraftEvent> {
+        let before_text = before_owned
+            .as_deref()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
+        let after_text = after_owned
+            .as_deref()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
+        let (additions, deletions) = if before_owned.is_none() {
+            let lines = after_text.split('\n').count() as i32;
+            let trailing = i32::from(after_text.ends_with('\n'));
+            (std::cmp::max(0, lines - trailing), 0i32)
+        } else if after_owned.is_none() {
+            let lines = before_text.split('\n').count() as i32;
+            let trailing = i32::from(before_text.ends_with('\n'));
+            (0i32, std::cmp::max(0, lines - trailing))
+        } else {
+            count_line_changes(&before_text, &after_text)
+        };
+        if additions == 0 && deletions == 0 && before_owned.is_some() && after_owned.is_some() {
+            return None;
+        }
+        let rel = relativize_for_workspace(&path_owned);
+        let diff = render_minimal_diff(&rel, &before_text, &after_text);
+        Some(DraftEvent::FileEdit {
+            path: rel.to_string_lossy().into_owned(),
+            additions,
+            deletions,
+            diff,
+            edit_batch_id,
+        })
+    })
+    .await;
+    if let Ok(Some(event)) = built {
+        let _ = tx.send(event).await;
     }
-    let rel = {
-        let path_owned = path.to_path_buf();
-        tokio::task::spawn_blocking(move || relativize_for_workspace(&path_owned))
-            .await
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let diff = render_minimal_diff(&rel, &before_text, &after_text);
-    let event = DraftEvent::FileEdit {
-        path: rel.to_string_lossy().into_owned(),
-        additions,
-        deletions,
-        diff,
-        edit_batch_id,
-    };
-    let _ = tx.send(event).await;
 }
 
 pub async fn emit_file_create(

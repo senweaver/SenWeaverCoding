@@ -16,7 +16,10 @@ pub fn grammar_for(lang: &str) -> Option<Language> {
             Some(tree_sitter_javascript::LANGUAGE.into())
         }
 
-        "typescript" | "ts" | "tsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "typescript" | "ts" | "mts" | "cts" => {
+            Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        }
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
         "toml" => Some(tree_sitter_toml_ng::LANGUAGE.into()),
         "markdown" | "md" => Some(tree_sitter_md::LANGUAGE.into()),

@@ -65,6 +65,12 @@ pub struct BlackboardChange {
 
     #[serde(default)]
     pub seq: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,7 +99,7 @@ pub enum BlackboardError {
 const CHANGE_CHANNEL_CAPACITY: usize = 4096;
 
 pub struct BlackboardJournal {
-    writer: std::sync::mpsc::Sender<Vec<u8>>,
+    writer: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     path: PathBuf,
     in_memory: parking_lot::Mutex<Vec<BlackboardChange>>,
 }
@@ -127,13 +133,13 @@ impl BlackboardJournal {
             }
         };
 
-        let (writer, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        match lock {
+        let writer = match lock {
             Some(lock) => {
                 let file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&path)?;
+                let (writer, rx) = std::sync::mpsc::channel::<Vec<u8>>();
                 let spawned = std::thread::Builder::new()
                     .name("blackboard-journal".to_string())
                     .spawn(move || {
@@ -160,10 +166,14 @@ impl BlackboardJournal {
                         }
                         drop(lock);
                     });
-                if let Err(e) = spawned {
-                    warn!(
-                        "blackboard journal writer thread failed to start: {e}; persistence disabled"
-                    );
+                match spawned {
+                    Ok(_) => Some(writer),
+                    Err(e) => {
+                        warn!(
+                            "blackboard journal writer thread failed to start: {e}; persistence disabled"
+                        );
+                        None
+                    }
                 }
             }
             None => {
@@ -171,8 +181,9 @@ impl BlackboardJournal {
                     path = %path.display(),
                     "another process is journaling this blackboard session; persistence disabled (in-memory only)"
                 );
+                None
             }
-        }
+        };
 
         Ok(Self {
             writer,
@@ -186,9 +197,11 @@ impl BlackboardJournal {
     }
 
     pub fn append(&self, change: &BlackboardChange) {
-        if let Ok(mut line) = serde_json::to_string(change) {
-            line.push('\n');
-            let _ = self.writer.send(line.into_bytes());
+        if let Some(writer) = self.writer.as_ref() {
+            if let Ok(mut line) = serde_json::to_string(change) {
+                line.push('\n');
+                let _ = writer.send(line.into_bytes());
+            }
         }
         const MAX_IN_MEMORY_CHANGES: usize = 4096;
         let mut buf = self.in_memory.lock();
@@ -214,7 +227,10 @@ pub struct Blackboard {
     change_sender: broadcast::Sender<BlackboardChange>,
     seq: AtomicU64,
     journal: Option<Arc<BlackboardJournal>>,
+    write_count: AtomicU64,
 }
+
+const EVICT_EVERY_N_WRITES: u64 = 256;
 
 impl Blackboard {
 
@@ -225,6 +241,7 @@ impl Blackboard {
             change_sender,
             seq: AtomicU64::new(0),
             journal: None,
+            write_count: AtomicU64::new(0),
         }
     }
 
@@ -234,13 +251,9 @@ impl Blackboard {
             match BlackboardJournal::open(&dir, session.as_ref()) {
                 Ok(journal) => {
 
-                    let last_seq = journal
-                        .in_memory
-                        .lock()
-                        .iter()
-                        .map(|c| c.seq)
-                        .max()
-                        .unwrap_or(0);
+                    let records = journal.in_memory.lock().clone();
+                    let last_seq = records.iter().map(|c| c.seq).max().unwrap_or(0);
+                    bb.hydrate_from_changes(&records);
                     bb.seq = AtomicU64::new(last_seq);
                     bb.journal = Some(Arc::new(journal));
                 }
@@ -256,6 +269,46 @@ impl Blackboard {
         bb
     }
 
+    fn hydrate_from_changes(&self, changes: &[BlackboardChange]) {
+        let now = Utc::now();
+        let mut restored = 0usize;
+        for change in changes {
+            match change.kind {
+                ChangeKind::Created | ChangeKind::Updated => {
+                    let Some(value) = change.value.clone() else {
+                        continue;
+                    };
+                    let ttl = change.ttl_ms.map(Duration::from_millis);
+                    let key = change.key.clone();
+                    let namespace = change.namespace.clone();
+                    let agent = change.agent.clone();
+                    let version = change.version;
+                    self.entries.with_shard_mut(&key, |shard| {
+                        let entry = BlackboardEntry {
+                            key: key.clone(),
+                            value: value.clone(),
+                            owner: agent.clone(),
+                            version,
+                            created_at: now,
+                            updated_at: now,
+                            namespace: namespace.clone(),
+                            ttl,
+                            ttl_start: ttl.map(|_| Instant::now()),
+                        };
+                        shard.insert(key.clone(), entry);
+                    });
+                    restored += 1;
+                }
+                ChangeKind::Deleted => {
+                    self.entries.remove(&change.key);
+                }
+            }
+        }
+        if restored > 0 {
+            debug!(restored, "hydrated blackboard entries from journal");
+        }
+    }
+
     pub fn shard_count(&self) -> usize {
         self.entries.shard_count()
     }
@@ -267,10 +320,33 @@ impl Blackboard {
         agent: impl Into<String>,
         namespace: impl Into<String>,
     ) -> u64 {
+        self.write_inner(key, value, agent, namespace, None)
+    }
+
+    pub fn write_with_ttl(
+        &self,
+        key: impl Into<String>,
+        value: serde_json::Value,
+        agent: impl Into<String>,
+        namespace: impl Into<String>,
+        ttl: Duration,
+    ) -> u64 {
+        self.write_inner(key, value, agent, namespace, Some(ttl))
+    }
+
+    fn write_inner(
+        &self,
+        key: impl Into<String>,
+        value: serde_json::Value,
+        agent: impl Into<String>,
+        namespace: impl Into<String>,
+        ttl: Option<Duration>,
+    ) -> u64 {
         let key = key.into();
         let agent = agent.into();
         let namespace = namespace.into();
         let now = Utc::now();
+        let value_for_journal = value.clone();
 
         let (version, kind) = self.entries.with_shard_mut(&key, |shard| {
             if let Some(existing) = shard.get_mut(&key) {
@@ -278,7 +354,12 @@ impl Blackboard {
                 existing.owner = agent.clone();
                 existing.version += 1;
                 existing.updated_at = now;
-                existing.ttl_start = existing.ttl.map(|_| Instant::now());
+                if let Some(ttl) = ttl {
+                    existing.ttl = Some(ttl);
+                    existing.ttl_start = Some(Instant::now());
+                } else {
+                    existing.ttl_start = existing.ttl.map(|_| Instant::now());
+                }
                 (existing.version, ChangeKind::Updated)
             } else {
                 let entry = BlackboardEntry {
@@ -289,8 +370,8 @@ impl Blackboard {
                     created_at: now,
                     updated_at: now,
                     namespace: namespace.clone(),
-                    ttl: None,
-                    ttl_start: None,
+                    ttl,
+                    ttl_start: ttl.map(|_| Instant::now()),
                 };
                 shard.insert(key.clone(), entry);
                 (1, ChangeKind::Created)
@@ -304,29 +385,11 @@ impl Blackboard {
             agent,
             version,
             seq: 0,
+            value: None,
+            ttl_ms: None,
         };
-        self.publish_change(change);
+        self.publish_change(change, Some(value_for_journal), ttl);
         debug!(key = %key, version, "blackboard write");
-        version
-    }
-
-    pub fn write_with_ttl(
-        &self,
-        key: impl Into<String>,
-        value: serde_json::Value,
-        agent: impl Into<String>,
-        namespace: impl Into<String>,
-        ttl: Duration,
-    ) -> u64 {
-        let key_str: String = key.into();
-        let version = self.write(key_str.clone(), value, agent, namespace);
-
-        self.entries.with_shard_mut(&key_str, |shard| {
-            if let Some(entry) = shard.get_mut(&key_str) {
-                entry.ttl = Some(ttl);
-                entry.ttl_start = Some(Instant::now());
-            }
-        });
         version
     }
 
@@ -368,6 +431,7 @@ impl Blackboard {
         let agent = agent.into();
         let namespace = namespace.into();
         let now = Utc::now();
+        let value_for_journal = value.clone();
 
         let cas_result: Result<(u64, ChangeKind), BlackboardError> =
             self.entries.with_shard_mut(&key, |shard| {
@@ -414,8 +478,10 @@ impl Blackboard {
             agent,
             version,
             seq: 0,
+            value: None,
+            ttl_ms: None,
         };
-        self.publish_change(change);
+        self.publish_change(change, Some(value_for_journal), None);
         debug!(key = %key, version, "blackboard CAS write");
         Ok(version)
     }
@@ -446,8 +512,10 @@ impl Blackboard {
                 agent: agent.to_string(),
                 version: removed.version + 1,
                 seq: 0,
+                value: None,
+                ttl_ms: None,
             };
-            self.publish_change(change);
+            self.publish_change(change, None, None);
             debug!(key = %key, "blackboard delete");
             true
         } else {
@@ -455,14 +523,27 @@ impl Blackboard {
         }
     }
 
-    fn publish_change(&self, mut change: BlackboardChange) {
+    fn publish_change(
+        &self,
+        mut change: BlackboardChange,
+        journal_value: Option<serde_json::Value>,
+        journal_ttl: Option<Duration>,
+    ) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         change.seq = seq;
         if let Some(journal) = self.journal.as_ref() {
-            journal.append(&change);
+            let mut record = change.clone();
+            record.value = journal_value;
+            record.ttl_ms = journal_ttl.map(|d| d.as_millis() as u64);
+            journal.append(&record);
         }
         coordination_metrics::incr_blackboard_published();
         let _ = self.change_sender.send(change);
+
+        if self.write_count.fetch_add(1, Ordering::Relaxed) + 1 >= EVICT_EVERY_N_WRITES {
+            self.write_count.store(0, Ordering::Relaxed);
+            self.evict_expired();
+        }
     }
 
     pub fn next_seq(&self) -> u64 {

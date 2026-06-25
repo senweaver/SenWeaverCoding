@@ -337,36 +337,12 @@ impl SqliteMemory {
         Ok(())
     }
 
+    const CURRENT_SCHEMA_VERSION: i32 = 7;
+
     fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         let current = Self::get_schema_version(conn)?;
 
-        let baseline = if current == 0 {
-            let schema_sql: String = conn
-                .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'")
-                .and_then(|mut stmt| stmt.query_row([], |row| row.get::<_, String>(0)))
-                .unwrap_or_default();
-            let mut v = 0i32;
-            if schema_sql.contains("session_id") {
-                v = 1;
-            }
-            if schema_sql.contains("namespace") {
-                v = 2;
-            }
-            if schema_sql.contains("importance") {
-                v = 3;
-            }
-            if schema_sql.contains("superseded_by") {
-                v = 4;
-            }
-            if schema_sql.contains("embedding_norm") {
-                v = v.max(6);
-            }
-            v
-        } else {
-            current
-        };
-
-        const MIGRATIONS: &[(i32, &str)] = &[
+        const COLUMN_MIGRATIONS: &[(i32, &str)] = &[
             (
                 1,
                 "ALTER TABLE memories ADD COLUMN session_id TEXT;
@@ -388,34 +364,150 @@ impl SqliteMemory {
                  CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
                  CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);",
             ),
-
             (6, "ALTER TABLE memories ADD COLUMN embedding_norm REAL;"),
         ];
 
-        let effective = baseline.max(current);
-        for &(version, sql) in MIGRATIONS {
-            if version > effective {
-                if let Err(e) = conn.execute_batch(sql) {
-                    let msg = e.to_string();
-                    if msg.contains("duplicate column name")
-                        || msg.contains("already exists")
-                    {
-                        tracing::debug!(
-                            "memories migration v{version} idempotent skip: {msg}"
-                        );
-                        continue;
-                    }
-                    return Err(e.into());
+        for &(version, sql) in COLUMN_MIGRATIONS {
+            if version <= current {
+                continue;
+            }
+            if let Err(e) = conn.execute_batch(sql) {
+                let msg = e.to_string();
+                if msg.contains("duplicate column name") || msg.contains("already exists") {
+                    tracing::debug!("memories migration v{version} idempotent skip: {msg}");
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
+
+        if current < 7 {
+            Self::apply_composite_identity_migration(conn)?;
+        }
+
+        if Self::CURRENT_SCHEMA_VERSION > current {
+            Self::set_schema_version(conn, Self::CURRENT_SCHEMA_VERSION)?;
+        }
+        Ok(())
+    }
+
+    fn migration_backup_path(conn: &Connection) -> Option<PathBuf> {
+        let db_file: String = conn
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if db_file.trim().is_empty() {
+            return None;
+        }
+        let db_path = PathBuf::from(db_file);
+        let parent = db_path.parent()?;
+        let stem = db_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("memory");
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let backup_dir = parent.join("migrations");
+        std::fs::create_dir_all(&backup_dir).ok()?;
+        Some(backup_dir.join(format!("{stem}-pre-v7-{ts}.db")))
+    }
+
+    fn apply_composite_identity_migration(conn: &Connection) -> anyhow::Result<()> {
+        let already: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_memories_identity'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if already {
+            return Ok(());
+        }
+
+        if let Some(backup) = Self::migration_backup_path(conn) {
+            if backup.exists() {
+                tracing::debug!("memory v7 backup already present at {}", backup.display());
+            } else {
+                match conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()]) {
+                    Ok(_) => tracing::info!(
+                        "memory v7 pre-migration backup written to {}",
+                        backup.display()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "memory v7 pre-migration backup failed ({e}); continuing with migration"
+                    ),
                 }
             }
         }
 
-        let final_version = MIGRATIONS
-            .last()
-            .map_or(effective, |&(v, _)| v.max(effective));
-        if final_version > current {
-            Self::set_schema_version(conn, final_version)?;
-        }
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS memories_v7;
+            CREATE TABLE memories_v7 (
+                id            TEXT PRIMARY KEY,
+                key           TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                category      TEXT NOT NULL DEFAULT 'core',
+                embedding     BLOB,
+                embedding_norm REAL,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                session_id    TEXT,
+                namespace     TEXT DEFAULT 'default',
+                importance    REAL DEFAULT 0.5,
+                superseded_by TEXT
+            );
+            INSERT INTO memories_v7 (
+                id, key, content, category, embedding, embedding_norm,
+                created_at, updated_at, session_id, namespace, importance, superseded_by
+            )
+            SELECT id, key, content, category, embedding, embedding_norm,
+                   created_at, updated_at, session_id,
+                   COALESCE(namespace, 'default'), COALESCE(importance, 0.5), superseded_by
+            FROM memories
+            WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY key,
+                                            COALESCE(namespace, 'default'),
+                                            COALESCE(session_id, '')
+                               ORDER BY updated_at DESC, rowid DESC
+                           ) AS rn
+                    FROM memories
+                ) WHERE rn = 1
+            );
+            DROP TABLE memories;
+            ALTER TABLE memories_v7 RENAME TO memories;
+            CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+            CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key);
+            CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
+            CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
+            CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_identity
+                ON memories(key, COALESCE(namespace, 'default'), COALESCE(session_id, ''));
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, key, content)
+                VALUES (new.rowid, new.key, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, key, content)
+                VALUES ('delete', old.rowid, old.key, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, key, content)
+                VALUES ('delete', old.rowid, old.key, old.content);
+                INSERT INTO memories_fts(rowid, key, content)
+                VALUES (new.rowid, new.key, new.content);
+            END;
+            INSERT INTO memories_fts(memories_fts) VALUES ('rebuild');",
+        )?;
+        tx.commit()?;
+        tracing::info!("memory schema migrated to v7 (composite identity key,namespace,session)");
         Ok(())
     }
 
@@ -858,7 +950,7 @@ impl Memory for SqliteMemory {
                     conn.execute(
                         "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, namespace, importance)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'default', 0.5)
-                         ON CONFLICT(key) DO UPDATE SET
+                         ON CONFLICT(key, COALESCE(namespace, 'default'), COALESCE(session_id, '')) DO UPDATE SET
                             content = excluded.content,
                             category = excluded.category,
                             embedding = excluded.embedding,
@@ -1481,7 +1573,7 @@ impl Memory for SqliteMemory {
             conn.execute(
                 "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, namespace, importance)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(key) DO UPDATE SET
+                 ON CONFLICT(key, COALESCE(namespace, 'default'), COALESCE(session_id, '')) DO UPDATE SET
                     content = excluded.content,
                     category = excluded.category,
                     embedding = excluded.embedding,

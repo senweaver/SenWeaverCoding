@@ -433,7 +433,7 @@ fn resolve_inside(root: &Path, path: &Path) -> Result<PathBuf, DiffSessionError>
             other => normal.push(other.as_os_str()),
         }
     }
-    if !normal.starts_with(root) {
+    if !crate::util::path_is_within(&normal, root) {
         return Err(DiffSessionError::PathEscape(normal));
     }
     Ok(normal)

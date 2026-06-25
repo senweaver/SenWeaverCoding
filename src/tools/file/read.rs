@@ -218,10 +218,17 @@ impl Tool for FileReadTool {
         }
 
         if level != crate::token_saver::ReadLevel::Default && crate::token_saver::is_enabled() {
-            contents = crate::token_saver::compact_file_content(path, &contents, level);
+            let path_owned = path.to_string();
+            let body = std::mem::take(&mut contents);
+            let level_for_compact = level;
+            let compacted = tokio::task::spawn_blocking(move || {
+                crate::token_saver::compact_file_content(&path_owned, &body, level_for_compact)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("file compact task failed: {e}"))?;
             return Ok(ToolResult {
                 success: true,
-                output: contents,
+                output: compacted,
                 error: None,
             });
         }

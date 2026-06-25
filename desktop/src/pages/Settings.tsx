@@ -13,7 +13,7 @@ import { Modal } from '../components/shared/Modal'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
 import { Input } from '../components/shared/Input'
 import { Button } from '../components/shared/Button'
-import type { EffortLevel, ThemeMode } from '../types/settings'
+import type { EffortLevel, ThemeMode, CloseBehavior } from '../types/settings'
 import type { Locale } from '../i18n'
 import type {
   SavedProvider,
@@ -77,12 +77,6 @@ const KeyboardShortcutsSettings = lazy(() =>
 const CredentialsSettings = lazy(() =>
   import('./CredentialsSettings').then((m) => ({ default: m.CredentialsSettings })),
 )
-const AutoDreamSettings = lazy(() =>
-  import('./AutoDreamSettings').then((m) => ({ default: m.AutoDreamSettings })),
-)
-const ComputerUseSettings = lazy(() =>
-  import('./ComputerUseSettings').then((m) => ({ default: m.ComputerUseSettings })),
-)
 const PluginList = lazy(() =>
   import('../components/plugins/PluginList').then((m) => ({ default: m.PluginList })),
 )
@@ -97,8 +91,6 @@ function SettingsTabFallback() {
     </div>
   )
 }
-
-const SHOW_COMPUTER_USE_TAB = true
 
 export function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -132,10 +124,6 @@ export function Settings() {
             <TabButton icon="code" label={t('settings.tab.lsp')} active={activeTab === 'lsp'} onClick={() => setActiveTab('lsp')} />
             <TabButton icon="keyboard" label={t('settings.tab.keyboard')} active={activeTab === 'keyboard'} onClick={() => setActiveTab('keyboard')} />
             <TabButton icon="key" label={t('settings.tab.credentials')} active={activeTab === 'credentials'} onClick={() => setActiveTab('credentials')} />
-            <TabButton icon="bedtime" label={t('settings.tab.autoDream')} active={activeTab === 'autoDream'} onClick={() => setActiveTab('autoDream')} />
-            {SHOW_COMPUTER_USE_TAB && (
-              <TabButton icon="smart_toy" label={t('settings.tab.computerUse')} active={activeTab === 'computerUse'} onClick={() => setActiveTab('computerUse')} />
-            )}
             <TabButton icon="webhook" label={t('settings.tab.hooks')} active={activeTab === 'hooks'} onClick={() => setActiveTab('hooks')} />
           </div>
           <div className="flex-shrink-0 border-t border-[var(--color-border)] pt-2 mt-2">
@@ -165,8 +153,6 @@ export function Settings() {
             {activeTab === 'usage' && <UsageSettings />}
             {activeTab === 'evolution' && <EvolutionSettings />}
             {activeTab === 'credentials' && <CredentialsSettings />}
-            {activeTab === 'autoDream' && <AutoDreamSettings />}
-            {SHOW_COMPUTER_USE_TAB && activeTab === 'computerUse' && <ComputerUseSettings />}
           </Suspense>
         </div>
       </div>
@@ -1940,6 +1926,8 @@ function GeneralSettings() {
   const setLocale = useSettingsStore((s) => s.setLocale)
   const theme = useSettingsStore((s) => s.theme)
   const setTheme = useSettingsStore((s) => s.setTheme)
+  const closeBehavior = useSettingsStore((s) => s.closeBehavior)
+  const setCloseBehavior = useSettingsStore((s) => s.setCloseBehavior)
   const autonomyData = useAutonomyStore((s) => s.data)
   const autonomyFetch = useAutonomyStore((s) => s.fetch)
   const autonomyUpdate = useAutonomyStore((s) => s.updatePartial)
@@ -1973,6 +1961,12 @@ function GeneralSettings() {
     { value: 'dark', label: t('settings.general.appearance.dark') },
   ]
 
+  const CLOSE_BEHAVIORS: Array<{ value: CloseBehavior; label: string }> = [
+    { value: 'minimize', label: t('settings.general.closeBehavior.minimize') },
+    { value: 'exit', label: t('settings.general.closeBehavior.exit') },
+    { value: 'ask', label: t('settings.general.closeBehavior.ask') },
+  ]
+
   return (
     <div>
       {}
@@ -1986,6 +1980,25 @@ function GeneralSettings() {
             className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
               theme === value
                 ? 'bg-[image:var(--gradient-btn-primary)] text-[var(--color-btn-primary-fg)] border-transparent shadow-[var(--shadow-button-primary)]'
+                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {}
+      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.closeBehaviorTitle')}</h2>
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.closeBehaviorDescription')}</p>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {CLOSE_BEHAVIORS.map(({ value, label }) => (
+          <button
+            key={value}
+            onClick={() => void setCloseBehavior(value)}
+            className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
+              closeBehavior === value
+                ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
                 : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
             }`}
           >

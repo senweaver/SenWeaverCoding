@@ -11,6 +11,8 @@ pub mod sse;
 
 pub mod tls;
 pub mod ws;
+#[cfg(feature = "computer-use")]
+pub mod computer;
 pub mod credential_routes;
 pub mod desktop_bridge;
 pub mod desktop_routes;
@@ -304,6 +306,10 @@ pub struct AppState {
     pub webhook_secret_hash: Option<Arc<str>>,
     pub pairing: Arc<PairingGuard>,
     pub trust_forwarded_headers: bool,
+
+    pub exposed: bool,
+
+    pub signing_secret: Option<Arc<str>>,
     pub rate_limiter: Arc<GatewayRateLimiter>,
     pub auth_limiter: Arc<auth_rate_limit::AuthRateLimiter>,
     pub idempotency_store: Arc<IdempotencyStore>,
@@ -638,9 +644,19 @@ async fn run_gateway_inner(
     });
     if let Some(svc) = crate::services::try_get_services() {
         svc.update_config(config.clone());
-        svc.auto_dream
-            .bind_persistence(svc_data_dir.join("auto_dream.json"))
-            .await;
+    }
+    {
+        let legacy_path = svc_data_dir.join("auto_dream.json");
+        match crate::cron::import_legacy_auto_dream(&config, &legacy_path) {
+            Ok(count) if count > 0 => {
+                tracing::info!(
+                    count,
+                    "Migrated legacy auto_dream tasks into the unified automations scheduler"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to migrate legacy auto_dream tasks"),
+        }
     }
     #[cfg(feature = "lan-comms")]
     {
@@ -656,16 +672,6 @@ async fn run_gateway_inner(
                 }
             }
         }
-    }
-    if with_scheduler {
-        crate::runtime::task_manager::spawn_supervised_restartable(
-            "gateway.auto_dream_scheduler",
-            3,
-            || async {
-                crate::agent::auto_dream_scheduler::run().await;
-            },
-        );
-        tracing::info!("AutoDream scheduler started alongside gateway");
     }
     crate::event_bus::integration::publish_system(
         "gateway",
@@ -1446,6 +1452,13 @@ async fn run_gateway_inner(
         webhook_secret_hash,
         pairing,
         trust_forwarded_headers: config.gateway.trust_forwarded_headers,
+        exposed: crate::security::pairing::is_public_bind(host) || tunnel_url.is_some(),
+        signing_secret: config
+            .gateway
+            .signing_secret
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(Arc::from),
         rate_limiter,
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store,
@@ -1513,6 +1526,15 @@ async fn run_gateway_inner(
     let config_put_router = Router::new()
         .route("/api/config", put(api::handle_api_config_put))
         .layer(RequestBodyLimitLayer::new(1_048_576));
+
+    #[cfg(feature = "computer-use")]
+    let computer_router: Router<AppState> = Router::new()
+        .route("/ws/computer/{run_id}", get(computer::handle_ws_computer))
+        .route(
+            "/api/computer/vision-models",
+            get(computer::handle_vision_models),
+        )
+        .route("/api/computer/stop", post(computer::handle_stop));
 
     #[cfg(feature = "lan-comms")]
     let lan_router: Router<AppState> = Router::new()
@@ -1911,25 +1933,6 @@ async fn run_gateway_inner(
                 .put(desktop_routes::handle_web_fetch_put),
         )
         .route(
-            "/api/browser-config",
-            get(desktop_routes::handle_browser_config_get)
-                .put(desktop_routes::handle_browser_config_put),
-        )
-        .route(
-            "/api/auto-dream",
-            get(desktop_routes::handle_auto_dream_get)
-                .put(desktop_routes::handle_auto_dream_put),
-        )
-        .route(
-            "/api/auto-dream/tasks",
-            post(desktop_routes::handle_auto_dream_task_create),
-        )
-        .route(
-            "/api/auto-dream/tasks/{id}",
-            put(desktop_routes::handle_auto_dream_task_update)
-                .delete(desktop_routes::handle_auto_dream_task_delete),
-        )
-        .route(
             "/api/guardrails",
             put(desktop_routes::handle_guardrails_put),
         )
@@ -2196,6 +2199,10 @@ async fn run_gateway_inner(
             get(desktop_routes::handle_permissions_autonomy_get).put(desktop_routes::handle_permissions_autonomy_put),
         )
         .route(
+            "/api/agents/loop-controls",
+            get(desktop_routes::handle_loop_controls_get).put(desktop_routes::handle_loop_controls_put),
+        )
+        .route(
             "/api/background-shell/stream",
             get(desktop_routes::handle_background_shell_stream),
         )
@@ -2421,16 +2428,40 @@ async fn run_gateway_inner(
         .merge(config_put_router)
         .merge(workspace_files_writes_router);
 
+    #[cfg(feature = "computer-use")]
+    let inner = inner.merge(computer_router);
+
     #[cfg(feature = "lan-comms")]
     let inner = inner.merge(lan_router);
 
     #[cfg(feature = "lan-comms")]
     let lan_media_state = state.clone();
 
+    let exposed = state.exposed;
+    let workers_router = {
+        let r = crate::workers::router::router();
+        if exposed {
+            r.route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                api::auth_middleware,
+            ))
+        } else {
+            r
+        }
+    };
+    let a2a_router = if exposed {
+        a2a_router.route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::auth_middleware,
+        ))
+    } else {
+        a2a_router
+    };
+
     let inner = inner
         .with_state(state)
 
-        .merge(crate::workers::router::router())
+        .merge(workers_router)
         .merge(agent_turn_router)
         .merge(a2a_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))

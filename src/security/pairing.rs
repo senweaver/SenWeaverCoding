@@ -168,6 +168,13 @@ impl PairingGuard {
         if !self.require_pairing {
             return true;
         }
+        self.is_authenticated_strict(token)
+    }
+
+    pub fn is_authenticated_strict(&self, token: &str) -> bool {
+        if token.is_empty() {
+            return false;
+        }
         let hashed = hash_token(token);
         let tokens = self.paired_tokens.lock();
         tokens.contains(&hashed)

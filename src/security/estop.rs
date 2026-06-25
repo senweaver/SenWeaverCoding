@@ -5,10 +5,46 @@ use crate::config::EstopConfig;
 use crate::security::domain_matcher::DomainMatcher;
 use crate::security::otp::OtpValidator;
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static RUNTIME_STATE: OnceLock<RwLock<EstopState>> = OnceLock::new();
+
+fn runtime_cell() -> &'static RwLock<EstopState> {
+    RUNTIME_STATE.get_or_init(|| RwLock::new(EstopState::default()))
+}
+
+pub fn publish_runtime_state(state: EstopState) {
+    *runtime_cell().write() = state;
+}
+
+pub fn runtime_state() -> EstopState {
+    runtime_cell().read().clone()
+}
+
+pub fn is_kill_all() -> bool {
+    runtime_cell().read().kill_all
+}
+
+pub fn is_network_killed() -> bool {
+    runtime_cell().read().network_kill
+}
+
+pub fn is_tool_frozen(tool_name: &str) -> bool {
+    let needle = tool_name.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    runtime_cell()
+        .read()
+        .frozen_tools
+        .iter()
+        .any(|t| *t == needle)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EstopLevel {
@@ -116,6 +152,8 @@ impl EstopManager {
             let _ = manager.persist_state();
         }
 
+        publish_runtime_state(manager.state.clone());
+
         Ok(manager)
     }
 
@@ -218,6 +256,7 @@ impl EstopManager {
     }
 
     fn persist_state(&mut self) -> Result<()> {
+        publish_runtime_state(self.state.clone());
         if let Some(parent) = self.state_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create estop state dir {}", parent.display())

@@ -60,6 +60,8 @@ pub mod delegate;
 pub mod spawn_workers;
 pub mod diagnostics;
 pub mod dir_list;
+#[cfg(feature = "office-docs")]
+pub mod document;
 #[cfg(feature = "tool-search-social")]
 pub mod discord_search;
 pub mod edit_history;
@@ -146,7 +148,7 @@ pub use ask::question::AskQuestionTool;
 pub use ask::user::AskUserTool;
 pub use backup_tool::BackupTool;
 pub use brief::BriefTool;
-pub use browser::{BrowserTool, ComputerUseConfig};
+pub use browser::BrowserTool;
 pub use browser::delegate::{BrowserDelegateConfig, BrowserDelegateTool};
 pub use browser::open::BrowserOpenTool;
 #[cfg(feature = "tool-utility-misc")]
@@ -182,6 +184,12 @@ pub use data_management::DataManagementTool;
 pub use delegate::DelegateTool;
 pub use diagnostics::DiagnosticsTool;
 pub use dir_list::DirListTool;
+#[cfg(feature = "office-docs")]
+pub use document::DocumentConvertTool;
+#[cfg(feature = "office-docs")]
+pub use document::PdfOpsTool;
+#[cfg(feature = "office-docs")]
+pub use document::PresentationCreateTool;
 pub use error::ToolErrorCause;
 
 pub use code::graph_query::CodeGraphQueryTool;
@@ -592,7 +600,25 @@ pub fn all_tools_with_runtime(
     PlanModeFlag,
 ) {
     let has_shell_access = runtime.has_shell_access();
-    let sandbox = create_sandbox(&root_config.security);
+    let workspace_root_pb = security.workspace_root_handle().read().clone();
+    crate::security::configure_fs_confinement(
+        root_config.security.sandbox.confine_filesystem,
+        Some(workspace_root_pb.clone()),
+        root_config
+            .autonomy
+            .allowed_roots
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
+    );
+    let sandbox = create_sandbox(
+        &root_config.security,
+        if workspace_root_pb.as_os_str().is_empty() {
+            None
+        } else {
+            Some(workspace_root_pb.as_path())
+        },
+    );
     let plan_mode_flag: PlanModeFlag = PlanModeFlag::new();
     let task_manager: TaskManagerHandle = Arc::new(RwLock::new(TaskManager::new()));
     #[cfg(not(feature = "tool-utility-misc"))]
@@ -1003,16 +1029,6 @@ pub fn all_tools_with_runtime(
             browser_config.native_headless,
             browser_config.native_webdriver_url.clone(),
             browser_config.native_chrome_path.clone(),
-            ComputerUseConfig {
-                enabled: browser_config.computer_use.enabled,
-                endpoint: browser_config.computer_use.endpoint.clone(),
-                api_key: browser_config.computer_use.api_key.clone(),
-                timeout_ms: browser_config.computer_use.timeout_ms,
-                allow_remote_endpoint: browser_config.computer_use.allow_remote_endpoint,
-                window_allowlist: browser_config.computer_use.window_allowlist.clone(),
-                max_coordinate_x: browser_config.computer_use.max_coordinate_x,
-                max_coordinate_y: browser_config.computer_use.max_coordinate_y,
-            },
         )));
     }
 
@@ -1237,6 +1253,13 @@ pub fn all_tools_with_runtime(
     }
 
     tool_arcs.push(Arc::new(PdfReadTool::new(security.clone())));
+
+    #[cfg(feature = "office-docs")]
+    tool_arcs.push(Arc::new(DocumentConvertTool::new(security.clone())));
+    #[cfg(feature = "office-docs")]
+    tool_arcs.push(Arc::new(PdfOpsTool::new(security.clone())));
+    #[cfg(feature = "office-docs")]
+    tool_arcs.push(Arc::new(PresentationCreateTool::new(security.clone())));
 
     #[cfg(feature = "tool-image")]
     tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
@@ -1524,13 +1547,13 @@ pub fn all_tools_with_runtime(
                 plugin_path.parent().unwrap_or(&plugin_path),
             ) {
                 Ok(host) => {
-                    let tool_manifests = host.tool_plugins();
-                    let count = tool_manifests.len();
-                    for manifest in tool_manifests {
+                    let tool_specs = host.tool_plugin_specs();
+                    let count = tool_specs.len();
+                    for (plugin_name, description, wasm_path) in tool_specs {
                         tool_arcs.push(Arc::new(crate::plugins::wasm::tool::WasmTool::new(
-                            manifest.name.clone(),
-                            manifest.description.clone().unwrap_or_default(),
-                            manifest.name.clone(),
+                            plugin_name,
+                            description.unwrap_or_default(),
+                            wasm_path.to_string_lossy().into_owned(),
                             "call".to_string(),
                             serde_json::json!({
                                 "type": "object",

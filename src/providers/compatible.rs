@@ -266,110 +266,50 @@ impl OpenAiCompatibleProvider {
     }
 
     fn http_client(&self) -> Client {
-        let timeout = self.timeout_secs;
-        let has_user_agent = self.user_agent.is_some();
-        let has_extra_headers = !self.extra_headers.is_empty();
-
-        if has_user_agent || has_extra_headers {
-            let mut headers = HeaderMap::new();
-            if let Some(ua) = self.user_agent.as_deref() {
-                if let Ok(value) = HeaderValue::from_str(ua) {
-                    headers.insert(USER_AGENT, value);
-                }
-            }
-            for (key, value) in &self.extra_headers {
-                match (
-                    reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                    HeaderValue::from_str(value),
-                ) {
-                    (Ok(name), Ok(val)) => {
-                        headers.insert(name, val);
-                    }
-                    _ => {
-                        tracing::warn!(header = key, "Skipping invalid extra header name or value");
-                    }
-                }
-            }
-
-            let builder = Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout))
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .default_headers(headers);
-            let builder = crate::services::require_services()
-                .proxy_runtime()
-                .apply_to_builder(builder, "provider.compatible");
-
-            return builder.build().unwrap_or_else(|error| {
-                tracing::warn!(
-                    "Failed to build proxied timeout client with custom headers: {error}"
-                );
-                Client::new()
-            });
+        let mut headers = self.extra_headers.clone();
+        if let Some(ua) = self.user_agent.as_deref() {
+            headers.insert("user-agent".to_string(), ua.to_string());
         }
-
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts("provider.compatible", timeout, 5)
+            .build_client_with_timeouts_and_headers(
+                "provider.compatible",
+                self.timeout_secs,
+                5,
+                &headers,
+            )
     }
 
     fn stream_http_client(&self) -> Client {
-        let has_user_agent = self.user_agent.is_some();
-        let has_extra_headers = !self.extra_headers.is_empty();
-
         let mut headers = HeaderMap::new();
-        if has_user_agent || has_extra_headers {
-            if let Some(ua) = self.user_agent.as_deref() {
-                if let Ok(value) = HeaderValue::from_str(ua) {
-                    headers.insert(USER_AGENT, value);
-                }
+        if let Some(ua) = self.user_agent.as_deref() {
+            if let Ok(value) = HeaderValue::from_str(ua) {
+                headers.insert(USER_AGENT, value);
             }
-            for (key, value) in &self.extra_headers {
-                match (
-                    reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                    HeaderValue::from_str(value),
-                ) {
-                    (Ok(name), Ok(val)) => {
-                        headers.insert(name, val);
-                    }
-                    _ => {
-                        tracing::warn!(header = key, "Skipping invalid extra header name or value");
-                    }
+        }
+        for (key, value) in &self.extra_headers {
+            match (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                HeaderValue::from_str(value),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    headers.insert(name, val);
+                }
+                _ => {
+                    tracing::warn!(header = key, "Skipping invalid extra header name or value");
                 }
             }
         }
 
         let read_timeout_secs = self.timeout_secs.max(300);
-        let stream_builder = || {
-            let mut builder = Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                .pool_idle_timeout(std::time::Duration::from_secs(15));
-            if !headers.is_empty() {
-                builder = builder.default_headers(headers.clone());
-            }
-            builder
-        };
-
-        let proxied = crate::services::require_services()
+        crate::services::require_services()
             .proxy_runtime()
-            .apply_to_builder(stream_builder(), "provider.compatible.stream");
-
-        proxied
-            .build()
-            .or_else(|error| {
-                tracing::warn!(
-                    "Failed to build proxied stream client: {error}; retrying without proxy"
-                );
-                stream_builder().build()
-            })
-            .unwrap_or_else(|error| {
-                tracing::warn!("Failed to build stream client: {error}");
-                Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(5))
-                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                    .build()
-                    .unwrap_or_else(|_| Client::new())
-            })
+            .build_stream_client(
+                "provider.compatible.stream",
+                read_timeout_secs,
+                5,
+                &headers,
+            )
     }
 
     fn chat_completions_url(&self) -> String {

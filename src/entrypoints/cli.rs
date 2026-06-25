@@ -306,7 +306,36 @@ impl CliEntrypoint {
 
         tracing::info!(url = %format!("ws://{host}:{port}/ws/chat"), "Remote mode: connecting to gateway");
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.map_err(|e| {
+        let connect_future = {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let mut request = url
+                .as_str()
+                .into_client_request()
+                .map_err(|e| anyhow::anyhow!("remote 模式构造请求失败：{e}"))?;
+            if let Some(secret) = config
+                .gateway
+                .signing_secret
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+            {
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                let ts = chrono::Utc::now().timestamp().to_string();
+                if let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+                    mac.update(ts.as_bytes());
+                    let sig = hex::encode(mac.finalize().into_bytes());
+                    if let (Ok(ts_v), Ok(sig_v)) = (
+                        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&ts),
+                        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&sig),
+                    ) {
+                        request.headers_mut().insert("x-sen-timestamp", ts_v);
+                        request.headers_mut().insert("x-sen-signature", sig_v);
+                    }
+                }
+            }
+            tokio_tungstenite::connect_async(request)
+        };
+        let (ws_stream, _) = connect_future.await.map_err(|e| {
             anyhow::anyhow!(
                 "remote 模式连接 gateway 失败（ws://{host}:{port}/ws/chat）：{e}\n\
                  请确认：1) gateway 已启动（运行 `sen gateway`）；2) config.toml 的 [gateway] host/port 配置正确；\

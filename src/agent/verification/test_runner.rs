@@ -380,7 +380,10 @@ impl Verifier for TestRunnerVerifier {
             }
             ParserKind::StderrTail => {
                 let summary = if stderr.len() > self.config.stderr_tail_chars {
-                    let start = stderr.len() - self.config.stderr_tail_chars;
+                    let start = crate::util::ceil_char_boundary(
+                        &stderr,
+                        stderr.len() - self.config.stderr_tail_chars,
+                    );
                     format!("label={label} ...{}", &stderr[start..])
                 } else {
                     format!("label={label} {stderr}")

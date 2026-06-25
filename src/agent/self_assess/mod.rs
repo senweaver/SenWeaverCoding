@@ -3,5 +3,6 @@
 // Licensed under the MIT License.
 
 pub mod consistency;
+pub mod critic;
 pub mod eval;
 pub mod reflection;

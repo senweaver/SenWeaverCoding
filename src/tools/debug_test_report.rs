@@ -62,18 +62,34 @@ fn report_home_dir() -> Option<PathBuf> {
     }
 }
 
-static ACTIVE_RUN_ID: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+static ACTIVE_RUN_ID: OnceLock<RwLock<std::collections::HashMap<String, String>>> = OnceLock::new();
 
-fn active_run_slot() -> &'static RwLock<Option<String>> {
-    ACTIVE_RUN_ID.get_or_init(|| RwLock::new(None))
+fn active_run_map() -> &'static RwLock<std::collections::HashMap<String, String>> {
+    ACTIVE_RUN_ID.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+fn active_run_scope() -> String {
+    match crate::session::current_session_context() {
+        Some(ctx) if !ctx.session_id.is_empty() => ctx.session_id,
+        _ => "__global__".to_string(),
+    }
 }
 
 pub fn set_active_run_id(run_id: Option<String>) {
-    *active_run_slot().write() = run_id;
+    let scope = active_run_scope();
+    let mut guard = active_run_map().write();
+    match run_id {
+        Some(id) => {
+            guard.insert(scope, id);
+        }
+        None => {
+            guard.remove(&scope);
+        }
+    }
 }
 
 pub fn active_run_id() -> Option<String> {
-    active_run_slot().read().clone()
+    active_run_map().read().get(&active_run_scope()).cloned()
 }
 
 pub fn record_browser_action(

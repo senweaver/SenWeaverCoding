@@ -33,9 +33,14 @@ pub async fn handle_ws_desktop(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if state.pairing.require_pairing() {
+    if state.exposed || state.pairing.require_pairing() {
         let token = super::extract_ws_token(&headers, None).unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
+        let authed = if state.exposed {
+            state.pairing.is_authenticated_strict(token)
+        } else {
+            state.pairing.is_authenticated(token)
+        };
+        if !authed {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 "Unauthorized  - provide Authorization header or pairing token",
@@ -1942,16 +1947,29 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 } else {
                     Vec::new()
                 };
-                let trigger_content = crate::agent::designer::pipeline::build_design_task_message(
-                    submode,
-                    &params,
-                    &brief,
-                    ref_artifact.as_deref(),
-                    ref_element.as_deref(),
-                    ref_element_label.as_deref(),
-                    &session_id,
-                    &existing_decks,
-                );
+                let brief_is_resume = ref_artifact
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+                    && crate::agent::designer::pipeline::is_continuation_brief(&brief);
+                let trigger_content = if brief_is_resume {
+                    crate::agent::designer::pipeline::build_design_resume_message(
+                        &session_id,
+                        &brief,
+                    )
+                } else {
+                    crate::agent::designer::pipeline::build_design_task_message(
+                        submode,
+                        &params,
+                        &brief,
+                        ref_artifact.as_deref(),
+                        ref_element.as_deref(),
+                        ref_element_label.as_deref(),
+                        &session_id,
+                        &existing_decks,
+                    )
+                };
 
                 let persisted_user_text = if brief.trim().is_empty() {
                     trigger_content.clone()
@@ -2948,6 +2966,13 @@ async fn run_turn(
     let mut current_tool_use_id: Option<String> = None;
     let mut tool_use_id_for_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // Persistent fallback: the most recent tool-use id per tool name. Unlike
+    // `tool_use_id_for_name` (cleared by ToolResult) and `current_tool_use_id` (nulled by
+    // ToolResult), this is never cleared, so a PermissionRequest that arrives AFTER its own
+    // ToolResult (the ask_question/ask_user pause path always emits ToolResult before
+    // PermissionRequest) can still recover the exact id of the tool-use card it belongs to.
+    let mut last_tool_use_id_for_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut accumulated_text = String::new();
     let started = std::time::Instant::now();
 
@@ -3181,6 +3206,7 @@ async fn run_turn(
                         .unwrap_or_else(next_tool_use_id);
                     current_tool_use_id = Some(id.clone());
                     tool_use_id_for_name.insert(name.clone(), id.clone());
+                    last_tool_use_id_for_name.insert(name.clone(), id.clone());
                     let safe_args = crate::services::governance::credential_vault::redact_args_optional(&args);
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
                         pg.on_tool_use(&name, &id, safe_args.clone());
@@ -3482,7 +3508,12 @@ async fn run_turn(
                     let tool_use_id = tool_use_id_for_name
                         .get(&tool_name)
                         .cloned()
-                        .or_else(|| current_tool_use_id.clone());
+                        .or_else(|| current_tool_use_id.clone())
+                        // ask_question/ask_user emit their ToolResult (which clears the two maps
+                        // above) BEFORE this PermissionRequest, so fall back to the persistent
+                        // per-name id to keep the desktop's pendingPermission.toolUseId aligned
+                        // with the tool-use card it must unblock.
+                        .or_else(|| last_tool_use_id_for_name.get(&tool_name).cloned());
                     let mut frame = serde_json::json!({
                         "type": "permission_request",
                         "requestId": request_id,

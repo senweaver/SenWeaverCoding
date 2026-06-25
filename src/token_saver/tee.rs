@@ -57,12 +57,7 @@ pub fn sanitize_slug(command: &str) -> String {
         tokens.join("-")
     };
     let mut s = joined;
-    if s.len() > 60 {
-        s.truncate(60);
-        while !s.is_char_boundary(s.len()) {
-            s.pop();
-        }
-    }
+    crate::util::truncate_string_bytes(&mut s, 60);
     s
 }
 

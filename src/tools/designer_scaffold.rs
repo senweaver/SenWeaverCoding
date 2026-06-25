@@ -110,7 +110,7 @@ impl Tool for DesignerScaffoldTool {
                     }
                 };
                 if let Some(parent) = abs.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
                         return Ok(ToolResult {
                             success: false,
                             output: String::new(),
@@ -118,7 +118,7 @@ impl Tool for DesignerScaffoldTool {
                         });
                     }
                 }
-                if let Err(e) = std::fs::write(&abs, content) {
+                if let Err(e) = tokio::fs::write(&abs, content).await {
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),

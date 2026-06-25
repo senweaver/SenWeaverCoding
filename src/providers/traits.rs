@@ -533,7 +533,14 @@ pub trait Provider: Send + Sync {
         _options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
 
-        stream::empty().boxed()
+        stream::once(async {
+            Err(StreamError::Provider(
+                "streaming is not implemented by this provider; check supports_streaming() \
+                 before requesting a stream"
+                    .to_string(),
+            ))
+        })
+        .boxed()
     }
 
     fn stream_chat_with_history(

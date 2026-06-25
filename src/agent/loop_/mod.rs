@@ -1587,6 +1587,26 @@ async fn execute_one_tool(
     });
     let start = Instant::now();
 
+    if crate::security::estop::is_kill_all() || crate::security::estop::is_tool_frozen(call_name) {
+        let reason = if crate::security::estop::is_kill_all() {
+            "Emergency stop engaged (kill_all): all tool execution is halted".to_string()
+        } else {
+            format!("Tool '{call_name}' is frozen by an active emergency stop")
+        };
+        let duration = start.elapsed();
+        observer.record_event(&ObserverEvent::ToolCall {
+            tool: call_name.to_string(),
+            duration,
+            success: false,
+        });
+        return Ok(ToolExecutionOutcome {
+            output: reason.clone(),
+            success: false,
+            error_reason: Some(reason),
+            duration,
+        });
+    }
+
     let static_handle = find_tool(tools_registry, call_name, tool_registry);
     let activated_arc = if static_handle.is_none() {
         activated_tools.and_then(|at| at.lock().get_resolved(call_name))
@@ -2690,6 +2710,9 @@ pub(crate) async fn run_unified_loop_impl(
     let mut parse_issue_nudges_used = 0usize;
     const MAX_PARSE_ISSUE_NUDGES: usize = 2;
 
+    let mut turn_modified_files = false;
+    let mut evaluator_retries = 0u32;
+
     let mut compression_retry_floor: Option<usize> = None;
 
     let mut pacing_break_reason: Option<crate::agent::executor_core::PacingExceeded> = None;
@@ -3775,6 +3798,52 @@ pub(crate) async fn run_unified_loop_impl(
                 }
             }
 
+            if turn_modified_files && !awaiting_user_input {
+                if let Some(critic) = crate::agent::flows::global_critic_context() {
+                    let max_retries = critic.config().max_evaluator_retries;
+                    if critic.config().enabled
+                        && evaluator_retries < max_retries
+                        && _pacing_gov.remaining_iterations() > 1
+                    {
+                        if let Some(verdict) =
+                            crate::agent::self_assess::critic::IndependentCritic::review_turn(
+                                &critic,
+                                &user_msg_for_hooks,
+                                &display_text,
+                            )
+                            .await
+                        {
+                            if verdict.should_retry {
+                                evaluator_retries += 1;
+                                turn_modified_files = false;
+                                runtime_trace::record_event(
+                                    "evaluator_gate_retry",
+                                    Some(channel_name),
+                                    Some(provider_name),
+                                    Some(model),
+                                    Some(&turn_id),
+                                    Some(false),
+                                    None,
+                                    serde_json::json!({
+                                        "retry": evaluator_retries,
+                                        "max": max_retries,
+                                        "score": verdict.score,
+                                        "findings": verdict.findings.len(),
+                                    }),
+                                );
+                                if !response_text.trim().is_empty() {
+                                    history.push(ChatMessage::assistant(&response_text));
+                                }
+                                history.push(ChatMessage::system(
+                                    render_evaluator_feedback(&verdict),
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
             let sc_cfg = resolve_self_consistency_config();
             let (response_text, display_text) = if sc_cfg.should_engage() {
                 let (winner, _agreement, overridden, samples_used) =
@@ -4771,6 +4840,7 @@ pub(crate) async fn run_unified_loop_impl(
             if outcome.success
                 && crate::agent::mode::effects::is_file_mutation_tool(call.name.as_str())
             {
+                turn_modified_files = true;
                 {
                     let mode = crate::agent::coding_mode::active_coding_mode();
                     if let Some(nudge) =
@@ -4804,6 +4874,12 @@ pub(crate) async fn run_unified_loop_impl(
                         .tool_call_id
                         .clone()
                         .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    // Register the pending request so the user's reply (sent back as a
+                    // `permission_response` with the same request_id) passes the gateway's
+                    // `claim_pending_gateway_approval` gate. Without this the reply is dropped
+                    // and the paused turn never resumes — the question tool pauses but the
+                    // agent can never continue after the user answers.
+                    crate::approval::register_pending_gateway_approval(request_id.clone());
                     let description = match call.name.as_str() {
                         "ask_question" => Some(
                             "Assistant is asking you a clarifying question before proceeding."
@@ -5287,13 +5363,52 @@ pub(crate) async fn run_unified_loop_impl(
     Ok(overflow_text)
 }
 
+fn render_evaluator_feedback(
+    verdict: &crate::agent::self_assess::critic::CriticVerdict,
+) -> String {
+    let mut out = String::from("<evaluator_feedback>\n");
+    out.push_str(
+        "An independent reviewer (separate from you, with no access to your reasoning) evaluated \
+         your last response and judged it does not yet meet the bar. Address the following \
+         concretely, then finalize.\n",
+    );
+    if !verdict.rationale.trim().is_empty() {
+        out.push_str("Reviewer summary: ");
+        out.push_str(verdict.rationale.trim());
+        out.push('\n');
+    }
+    if verdict.findings.is_empty() {
+        out.push_str(
+            "- The response was judged low quality; re-examine the task and improve correctness \
+             and completeness.\n",
+        );
+    } else {
+        for f in &verdict.findings {
+            out.push_str(&format!("- [{}] {}\n", f.severity, f.message));
+        }
+    }
+    out.push_str("</evaluator_feedback>");
+    out
+}
+
 fn loop_recovery_nudge(reason: &str) -> String {
-    format!(
+    let mut nudge = format!(
         "[Loop Recovery] {reason}\n\nYou are repeating the same unproductive action. Do NOT repeat \
          it verbatim. Take a fundamentally different approach; if you genuinely cannot make \
          progress, stop and clearly summarize what you have done and what is blocking you, then \
          wait for the user instead of looping."
-    )
+    );
+    if reason.contains("tool 'shell'") {
+        nudge.push_str(
+            "\n\nIf you are building or editing a file through the shell (echo, `>>`/`>` \
+             redirection, `cat <<EOF` heredocs, or a helper script that emits the file), STOP \
+             immediately: shell redirection mangles `<`, `>`, quotes and braces and makes no \
+             progress. Write the file in ONE call with the `file_write` tool (it accepts arbitrary \
+             content verbatim), or use `file_edit` to append/insert. Do not retry the shell \
+             approach.",
+        );
+    }
+    nudge
 }
 
 async fn finalize_loop_recovery(
@@ -5702,6 +5817,59 @@ pub async fn run(
         ),
     ));
 
+    let critic_eval_provider: Option<std::sync::Arc<dyn Provider>> = match config
+        .self_eval
+        .evaluator_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(eval_model) => {
+            match crate::tools::media::credentials::provider_for_model(&config, eval_model) {
+                Some(eval_provider_id) if eval_provider_id != provider_name => {
+                    let resolved = crate::tools::media::credentials::resolve(
+                        &config,
+                        Some(&eval_provider_id),
+                        eval_model,
+                    );
+                    let eval_wire_name =
+                        providers::resolve_runtime_provider_name(&eval_provider_id, &config);
+                    match providers::create_resilient_provider_with_options_async(
+                        eval_wire_name,
+                        resolved.api_key.clone(),
+                        Some(resolved.base_url.clone()),
+                        config.reliability.clone(),
+                        provider_runtime_options.clone(),
+                    )
+                    .await
+                    {
+                        Ok(p) => Some(std::sync::Arc::from(p)),
+                        Err(e) => {
+                            tracing::warn!(
+                                provider = eval_provider_id.as_str(),
+                                model = eval_model,
+                                error = %e,
+                                "failed to build dedicated evaluator provider; reusing main provider"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
+    crate::agent::flows::set_global_critic_context(
+        crate::agent::self_assess::critic::CriticContext::new(
+            std::sync::Arc::clone(&provider),
+            model_name.clone(),
+            config.self_eval.clone(),
+        )
+        .with_eval_provider(critic_eval_provider),
+    );
+
     observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.to_string(),
         model: model_name.to_string(),
@@ -5718,6 +5886,26 @@ pub async fn run(
     if crate::agent::multi_agent_runtime::global_runtime().is_none() {
         let _ = crate::agent::multi_agent_runtime::init_global_runtime();
     }
+
+    if config.security.estop.enabled {
+        if let Some(config_dir) = config.config_path.parent() {
+            match crate::security::EstopManager::load(&config.security.estop, config_dir) {
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    target: "security.estop",
+                    error = %e,
+                    "failed to hydrate persisted emergency-stop state at agent startup",
+                ),
+            }
+        }
+    } else {
+        crate::security::estop::publish_runtime_state(crate::security::EstopState::default());
+    }
+
+    let _ = crate::cost::CostTracker::get_or_init_global(
+        config.cost.clone(),
+        &config.workspace_dir,
+    );
 
     let hardware_rag: Option<crate::rag::HardwareRag> = if let Some(dir) = config
         .peripherals

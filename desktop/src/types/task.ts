@@ -12,6 +12,10 @@ export type TaskNotificationConfig = {
   channels: ('telegram' | 'feishu')[]
 }
 
+export type TaskTriggerType = 'cron' | 'interval' | 'once' | 'idle' | 'session_end'
+
+export type TaskPriority = 'low' | 'normal' | 'high'
+
 export type CronTask = {
   id: string
   name: string
@@ -31,12 +35,20 @@ export type CronTask = {
   folderPath?: string
   useWorktree?: boolean
   notification?: TaskNotificationConfig
+  triggerType?: TaskTriggerType
+  everyMs?: number
+  runAt?: string
+  afterIdleMs?: number
+  maxDurationMs?: number
+  requireIdleMs?: number
+  priority?: TaskPriority
+  allowedTools?: string[]
 }
 
 export type CreateTaskInput = {
   name: string
   description?: string
-  cron: string
+  cron?: string
   prompt: string
   enabled?: boolean
   recurring?: boolean
@@ -47,6 +59,14 @@ export type CreateTaskInput = {
   folderPath?: string
   useWorktree?: boolean
   notification?: TaskNotificationConfig
+  triggerType?: TaskTriggerType
+  everyMs?: number
+  runAt?: string
+  afterIdleMs?: number
+  maxDurationMs?: number
+  requireIdleMs?: number
+  priority?: TaskPriority
+  allowedTools?: string[]
 }
 
 export type TaskRun = {

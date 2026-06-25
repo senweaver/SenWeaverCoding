@@ -13,9 +13,9 @@ use crate::agent::coding_mode::CodingMode;
 use crate::config::Config;
 use crate::config::schema::{AutonomyConfig, CronJobDecl, CronScheduleDecl};
 use crate::cron::{
-    CronJob, CronJobPatch, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs,
-    due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job, reschedule_after_run,
-    sync_declarative_jobs, update_job,
+    CronJob, CronJobPatch, DeliveryConfig, JobType, Schedule, activity_jobs, all_overdue_jobs,
+    due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job,
+    reschedule_after_run, sync_declarative_jobs, update_job,
 };
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use anyhow::Result;
@@ -149,6 +149,7 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     let stale_threshold = stale_running_threshold(&config);
+    let mut was_active = false;
 
     loop {
         interval.tick().await;
@@ -169,8 +170,15 @@ pub async fn run(config: Config) -> Result<()> {
             }
         }
 
-        let jobs = match due_jobs(&config, Utc::now()) {
-            Ok(jobs) => jobs,
+        let now = Utc::now();
+        let jobs = match due_jobs(&config, now) {
+            Ok(mut jobs) => {
+                jobs.retain(|job| match job.require_idle_ms {
+                    Some(ms) => crate::agent::activity::is_idle(ms),
+                    None => true,
+                });
+                jobs
+            }
             Err(e) => {
                 crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string());
                 tracing::warn!("Scheduler query failed: {e}");
@@ -179,7 +187,82 @@ pub async fn run(config: Config) -> Result<()> {
         };
 
         process_due_jobs(&config, &security, jobs, SCHEDULER_COMPONENT).await;
+
+        was_active = process_activity_jobs(&config, &security, was_active, now).await;
     }
+}
+
+fn priority_rank(priority: Option<&str>) -> u8 {
+    match priority.map(str::to_ascii_lowercase).as_deref() {
+        Some("high") => 0,
+        Some("low") => 2,
+        _ => 1,
+    }
+}
+
+async fn process_activity_jobs(
+    config: &Config,
+    security: &Arc<SecurityPolicy>,
+    was_active: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    let currently_active = crate::agent::activity::active_turns() > 0;
+
+    let jobs = match activity_jobs(config) {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::warn!("Scheduler activity query failed: {e}");
+            return currently_active;
+        }
+    };
+    if jobs.is_empty() {
+        return currently_active;
+    }
+
+    let session_ended = was_active && !currently_active;
+    let mut ready: Vec<CronJob> = jobs
+        .into_iter()
+        .filter(|job| match &job.schedule {
+            Schedule::Idle { after_idle_ms } => {
+                crate::agent::activity::is_idle(*after_idle_ms)
+                    && job.last_run.is_none_or(|lr| {
+                        (now - lr).num_milliseconds().max(0) as u64 >= *after_idle_ms
+                    })
+            }
+            Schedule::OnSessionEnd => session_ended,
+            _ => false,
+        })
+        .collect();
+
+    if ready.is_empty() {
+        return currently_active;
+    }
+
+    ready.sort_by_key(|job| priority_rank(job.priority.as_deref()));
+
+    let max_concurrent = config.scheduler.max_concurrent.max(1);
+    let mut in_flight = stream::iter(ready.into_iter().map(|job| {
+        let config = config.clone();
+        let security = Arc::clone(security);
+        async move {
+            Box::pin(execute_and_persist_job(
+                &config,
+                security.as_ref(),
+                &job,
+                SCHEDULER_COMPONENT,
+            ))
+            .await
+        }
+    }))
+    .buffer_unordered(max_concurrent);
+
+    while let Some((job_id, success, output)) = in_flight.next().await {
+        if !success {
+            tracing::warn!("Scheduler activity job '{job_id}' failed: {output}");
+        }
+    }
+
+    currently_active
 }
 
 async fn catch_up_overdue_jobs(config: &Config, security: &Arc<SecurityPolicy>) {
@@ -401,22 +484,32 @@ async fn run_agent_job(
         .as_deref()
         .and_then(CodingMode::from_str_loose);
 
-    let run_result = match job.session_target {
-        SessionTarget::Main | SessionTarget::Isolated => {
-            Box::pin(crate::agent::run(
-                effective_config,
-                Some(prefixed_prompt),
-                None,
-                model_override,
-                config.default_temperature,
-                vec![],
-                false,
-                None,
-                job.allowed_tools.clone(),
-                coding_override,
-            ))
-            .await
+    let run_future = crate::agent::run(
+        effective_config,
+        Some(prefixed_prompt),
+        None,
+        model_override,
+        config.default_temperature,
+        vec![],
+        false,
+        None,
+        job.allowed_tools.clone(),
+        coding_override,
+    );
+
+    let run_result = match job.max_duration_ms {
+        Some(ms) if ms > 0 => {
+            match time::timeout(Duration::from_millis(ms), Box::pin(run_future)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return (
+                        false,
+                        format!("agent job timed out after {ms}ms (max_duration_ms)"),
+                    );
+                }
+            }
         }
+        _ => Box::pin(run_future).await,
     };
 
     match run_result {
@@ -547,7 +640,7 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
                 _ => false,
             }
         }
-        Schedule::At { .. } => false,
+        Schedule::At { .. } | Schedule::Idle { .. } | Schedule::OnSessionEnd => false,
     };
 
     if too_frequent {

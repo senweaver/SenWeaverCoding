@@ -101,7 +101,54 @@ impl ToolSearchTool {
 
     async fn evaluate_activation(&self, name: &str) -> ActivationOutcome {
         let entry: ToolTierEntry = classify(name, self.current_surface());
-        ActivationOutcome::Allowed { entry }
+
+        if entry.risk != crate::tools::handler::tier::ToolRiskLevel::HighRisk {
+            return ActivationOutcome::Allowed { entry };
+        }
+
+        if self.allowlist.read().iter().any(|t| t == name) {
+            return ActivationOutcome::Allowed { entry };
+        }
+
+        let Some(gate) = self.gate.as_ref() else {
+            return ActivationOutcome::Allowed { entry };
+        };
+
+        let workspace_key = self.current_workspace_key();
+        match gate.request_tool_activation(&workspace_key, name).await {
+            Ok(crate::security::permissions::ToolActivationDecision::Yes) => {
+                ActivationOutcome::Allowed { entry }
+            }
+            Ok(crate::security::permissions::ToolActivationDecision::Always) => {
+                ActivationOutcome::PromoteAllowlist { entry }
+            }
+            Ok(crate::security::permissions::ToolActivationDecision::No) => {
+                ActivationOutcome::Denied
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "tool_search",
+                    tool = %name,
+                    error = %e,
+                    "tool activation gate failed; denying activation (fail-closed)"
+                );
+                ActivationOutcome::Denied
+            }
+        }
+    }
+
+    async fn activation_permitted(&self, name: &str) -> bool {
+        match self.evaluate_activation(name).await {
+            ActivationOutcome::Allowed { .. } => true,
+            ActivationOutcome::PromoteAllowlist { .. } => {
+                let mut list = self.allowlist.write();
+                if !list.iter().any(|t| t == name) {
+                    list.push(name.to_string());
+                }
+                true
+            }
+            ActivationOutcome::Denied => false,
+        }
     }
     fn note_activations<I, S>(&self, names: I)
     where
@@ -191,6 +238,10 @@ impl Tool for ToolSearchTool {
 }
 
 impl ToolSearchTool {
+    pub fn deferred_mcp_set(&self) -> DeferredMcpToolSet {
+        self.deferred.clone()
+    }
+
     async fn execute_inner(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let query = args
             .get("query")
@@ -250,9 +301,7 @@ impl ToolSearchTool {
 
         for name in &mcp_results {
             if let Some(spec) = self.deferred.tool_spec(name) {
-                if let ActivationOutcome::Allowed { .. } =
-                    self.evaluate_activation(name).await
-                {
+                if self.activation_permitted(name).await {
                     let mut guard = self.activated.lock();
                     if !guard.is_activated(name) {
                         if let Some(tool) = self.deferred.activate(name) {
@@ -271,9 +320,7 @@ impl ToolSearchTool {
 
         for name in &builtin_results {
             if let Some(spec) = self.builtin.tool_spec(name) {
-                if let ActivationOutcome::Allowed { .. } =
-                    self.evaluate_activation(name).await
-                {
+                if self.activation_permitted(name).await {
                     let mut guard = self.activated.lock();
                     if !guard.is_activated(name) {
                         guard.activate_spec(name.clone(), spec.clone());
@@ -318,9 +365,7 @@ impl ToolSearchTool {
                 continue;
             }
             if let Some(spec) = self.deferred.tool_spec(name) {
-                if let ActivationOutcome::Allowed { .. } =
-                    self.evaluate_activation(name).await
-                {
+                if self.activation_permitted(name).await {
                     let mut guard = self.activated.lock();
                     if !guard.is_activated(name) {
                         if let Some(tool) = self.deferred.activate(name) {
@@ -337,9 +382,7 @@ impl ToolSearchTool {
                 continue;
             }
             if let Some(spec) = self.builtin.tool_spec(name) {
-                if let ActivationOutcome::Allowed { .. } =
-                    self.evaluate_activation(name).await
-                {
+                if self.activation_permitted(name).await {
                     let mut guard = self.activated.lock();
                     if !guard.is_activated(name) {
                         guard.activate_spec((*name).to_string(), spec.clone());

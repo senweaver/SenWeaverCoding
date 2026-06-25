@@ -23,7 +23,10 @@ pub use code_edit_plan::{
 };
 pub use plan_exec_verify::{LayeredPlan, PlanExecVerifyFlow, PlanExecVerifyOptions};
 pub use provider_handle::ProviderAgentHandle;
-pub use registry::{global_agent_handle, global_checkpoint_store, set_global_agent_handle};
+pub use registry::{
+    global_agent_handle, global_checkpoint_store, global_critic_context, set_global_agent_handle,
+    set_global_critic_context,
+};
 pub use traits::{
     AgentHandle, Artifact, ExecOutcome, Executor, Flow, FlowContext, FlowError, FlowOutcome,
     Planner, Step, TranscriptEntry, VerificationVerdict, Verifier as FlowVerifier,

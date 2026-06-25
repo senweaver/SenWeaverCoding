@@ -40,6 +40,70 @@ fn extract_figma_url(text: &str) -> Option<String> {
 
 pub const DESIGN_TASK_PREFIX: &str = "[Design task — EXCLUSIVE TASK FOR THIS TURN]";
 
+pub fn is_continuation_brief(brief: &str) -> bool {
+    let normalized: String = brief
+        .trim()
+        .trim_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '.' | '。' | '!' | '！' | '~' | '～' | ',' | '，' | ':' | '：' | '、'
+                )
+        })
+        .to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    const PHRASES: &[&str] = &[
+        "继续",
+        "继续吧",
+        "请继续",
+        "继续完成",
+        "继续生成",
+        "继续刚才的",
+        "继续之前的",
+        "继续上面的",
+        "继续未完成的",
+        "接着",
+        "接着写",
+        "接着做",
+        "接着完成",
+        "go on",
+        "continue",
+        "please continue",
+        "keep going",
+        "carry on",
+        "resume",
+        "go ahead",
+        "proceed",
+    ];
+    PHRASES.iter().any(|p| normalized == *p)
+}
+
+pub fn build_design_resume_message(session_id: &str, brief: &str) -> String {
+    let out_dir = designer_session_dir(session_id);
+    let said = brief.trim();
+    format!(
+        "{DESIGN_TASK_PREFIX} The user asked to CONTINUE the most recent unfinished design in this \
+         session (they said \"{said}\"). This is a RESUME of in-progress work, NOT a new design and \
+         NOT a request to restart anything.\n\n\
+         Resume protocol (HARD):\n\
+         1. List `{out_dir}/` and identify the MOST RECENTLY modified design unit — that is the work \
+         that was in progress when it stopped (for a slide deck it is the newest `deck-*/` \
+         directory; otherwise the newest design file).\n\
+         2. Read that unit's files FIRST to recover the intended subject, the design system in use, \
+         and how far it got. The subject is whatever that in-progress design is about — NEVER treat \
+         the literal word \"{said}\" as the subject, and never switch to an unrelated topic.\n\
+         3. Continue from where it stopped, following the Designer pipeline, and finish it by \
+         editing the SAME files in place. Do not create a new unrelated design unit and do not void \
+         or restart the existing work.\n\
+         4. Only if `{out_dir}/` is empty or you genuinely cannot tell what was in progress, ask the \
+         user ONCE via `ask_question` what they want continued instead of guessing.\n\n\
+         Do NOT resume or restate older, already-finished designs from earlier in the conversation — \
+         only the single most-recent in-progress one."
+    )
+}
+
 fn unique_deck_dir_name() -> String {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

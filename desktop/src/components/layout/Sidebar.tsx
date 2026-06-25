@@ -5,6 +5,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
+import { waitForSessionsIdle } from '../../lib/sessionLifecycle'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
 import { ProjectFilter } from './ProjectFilter'
@@ -590,11 +591,11 @@ export function Sidebar() {
         <NavItem
           active={activeTabId === SCHEDULED_TAB_ID}
           collapsed={!sidebarOpen}
-          label={t('sidebar.scheduled')}
-          onClick={() => useTabStore.getState().openTab(SCHEDULED_TAB_ID, t('sidebar.scheduled'), 'scheduled')}
+          label={t('sidebar.automations')}
+          onClick={() => useTabStore.getState().openTab(SCHEDULED_TAB_ID, t('sidebar.automations'), 'scheduled')}
           icon={<ClockIcon />}
         >
-          {t('sidebar.scheduled')}
+          {t('sidebar.automations')}
         </NavItem>
       </div>
 
@@ -998,30 +999,6 @@ function sessionIdsForWorkspaceKey(
   return sessions
     .filter((s) => sessionWorkspaceKey(s) === workspaceKey)
     .map((s) => s.id)
-}
-
-function waitForSessionsIdle(ids: string[], timeoutMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    const allIdle = () =>
-      ids.every((id) => !useSessionRunStateStore.getState().running.has(id))
-    if (allIdle()) {
-      resolve()
-      return
-    }
-    let settled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const unsubscribe = useSessionRunStateStore.subscribe(() => {
-      if (!settled && allIdle()) finish()
-    })
-    const finish = () => {
-      if (settled) return
-      settled = true
-      unsubscribe()
-      if (timer) clearTimeout(timer)
-      resolve()
-    }
-    timer = setTimeout(finish, timeoutMs)
-  })
 }
 
 function ChevronRightIcon({ open, size = 'md' }: { open: boolean; size?: 'sm' | 'md' }) {

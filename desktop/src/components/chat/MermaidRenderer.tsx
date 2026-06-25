@@ -52,6 +52,9 @@ function initMermaid(theme: MermaidTheme) {
 
 let mermaidIdCounter = 0
 
+const MERMAID_SVG_CACHE = new Map<string, string>()
+const MERMAID_SVG_CACHE_MAX = 80
+
 const MERMAID_FOREIGN_OBJECT_TAGS = [
   'foreignObject',
   'div',
@@ -188,6 +191,15 @@ export function MermaidRenderer({ code }: Props) {
 
   useEffect(() => {
     if (!shouldRender) return
+    // Mermaid layout/SVG generation is CPU-heavy; cache by theme+source so identical diagrams
+    // (e.g. re-mounted while streaming the surrounding markdown) reuse the rendered SVG.
+    const cacheKey = `${mermaidTheme}::${code}`
+    const cachedSvg = MERMAID_SVG_CACHE.get(cacheKey)
+    if (cachedSvg !== undefined) {
+      setSvg(cachedSvg)
+      setError(null)
+      return
+    }
     let cancelled = false
     let cancelIdle: (() => void) | null = null
     initMermaid(mermaidTheme)
@@ -197,6 +209,11 @@ export function MermaidRenderer({ code }: Props) {
       mermaid.render(id, code).then(
         ({ svg: renderedSvg }) => {
           if (!cancelled) {
+            if (MERMAID_SVG_CACHE.size >= MERMAID_SVG_CACHE_MAX) {
+              const oldest = MERMAID_SVG_CACHE.keys().next().value
+              if (oldest !== undefined) MERMAID_SVG_CACHE.delete(oldest)
+            }
+            MERMAID_SVG_CACHE.set(cacheKey, renderedSvg)
             setSvg(renderedSvg)
             setError(null)
           }

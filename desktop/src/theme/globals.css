@@ -910,4 +910,9 @@ button, input, textarea, select, a, [role="button"] {
 
 .message-list-scroll {
   overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+
+.message-list-scroll * {
+  overflow-anchor: none;
 }

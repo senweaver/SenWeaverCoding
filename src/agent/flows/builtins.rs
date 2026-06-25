@@ -17,6 +17,7 @@ use super::traits::{
     AgentHandle, Artifact, ExecOutcome, Executor, Flow, FlowContext, FlowError, FlowOutcome,
     Planner, Step, TranscriptEntry, VerificationVerdict, Verifier,
 };
+use crate::agent::self_assess::critic::CriticContext;
 use crate::apply_model::edit_op::{EditBatch, EditOp, EditOrigin};
 use crate::apply_model::ops_applier::OpsApplier;
 use crate::code_intel::outline::extract_outline;
@@ -26,6 +27,7 @@ pub struct CodeEditFlow {
     pub language: String,
     pub options: PlanExecVerifyOptions,
     pub code_edit_cfg: CodeEditSection,
+    pub critic: Option<CriticContext>,
 }
 
 impl Default for CodeEditFlow {
@@ -41,6 +43,7 @@ impl Default for CodeEditFlow {
                 emit_checkpoints: false,
             },
             code_edit_cfg: cfg,
+            critic: None,
         }
     }
 }
@@ -65,7 +68,13 @@ impl CodeEditFlow {
                 emit_checkpoints: false,
             },
             code_edit_cfg: code_edit,
+            critic: None,
         }
+    }
+
+    pub fn with_critic(mut self, critic: Option<CriticContext>) -> Self {
+        self.critic = critic;
+        self
     }
 }
 
@@ -89,7 +98,9 @@ impl Flow for CodeEditFlow {
                 language: self.language.clone(),
                 cfg: self.code_edit_cfg.clone(),
             },
-            CodeEditVerifier,
+            CodeEditVerifier {
+                critic: self.critic.clone(),
+            },
         )
         .with_options(self.options.clone());
 
@@ -947,6 +958,8 @@ pub enum FailureKind {
 
     DiagnosticFailure,
 
+    CriticRejected,
+
     Unknown,
 }
 
@@ -974,13 +987,15 @@ pub struct FixDiagnostic {
     pub stage: String,
 }
 
-struct CodeEditVerifier;
+struct CodeEditVerifier {
+    critic: Option<CriticContext>,
+}
 
 #[async_trait]
 impl Verifier for CodeEditVerifier {
     async fn verify(
         &self,
-        _ctx: &mut FlowContext,
+        ctx: &mut FlowContext,
         artifact: &Artifact,
     ) -> Result<VerificationVerdict, FlowError> {
 
@@ -1045,6 +1060,55 @@ impl Verifier for CodeEditVerifier {
             .await
             .map_err(|e| FlowError::Verifier(e.to_string()))?;
         if report.passed {
+            if let Some(critic) = self.critic.as_ref().filter(|c| c.is_code_edit_review_enabled()) {
+                if let Some(verdict) = crate::agent::self_assess::critic::IndependentCritic::review_code_edit(
+                    critic,
+                    &ctx.goal,
+                    &path,
+                    &artifact.content,
+                )
+                .await
+                {
+                    if verdict.should_retry {
+                        let diagnostics: Vec<FixDiagnostic> = verdict
+                            .findings
+                            .iter()
+                            .map(|f| FixDiagnostic {
+                                severity: f.severity.clone(),
+                                message: f.message.clone(),
+                                path: Some(path.clone()),
+                                line: None,
+                                column: None,
+                                stage: "independent_critic".to_string(),
+                            })
+                            .collect();
+                        tracing::info!(
+                            target: "agent.flows.code_edit",
+                            stage = "critic",
+                            score = verdict.score,
+                            findings = diagnostics.len(),
+                            "independent_critic_rejected",
+                        );
+                        let reason_payload = StructuredFixReason {
+                            failure: FailureKind::CriticRejected,
+                            diagnostics,
+                            attempted_diff: None,
+                            previous_error: if verdict.rationale.is_empty() {
+                                None
+                            } else {
+                                Some(verdict.rationale)
+                            },
+                            failed_stages: vec!["independent_critic".to_string()],
+                        };
+                        let reason_json = serde_json::to_string(&reason_payload)
+                            .unwrap_or_else(|_| "{\"failure\":\"critic_rejected\"}".into());
+                        return Ok(VerificationVerdict::Fail {
+                            reason: reason_json,
+                            retryable: true,
+                        });
+                    }
+                }
+            }
             return Ok(VerificationVerdict::Pass);
         }
 

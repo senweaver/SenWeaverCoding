@@ -346,6 +346,15 @@ impl TaskRouter {
 
         let reason = self.build_reason(&best, task);
 
+        if let Err(e) = self.registry.assign_task(&best.agent_id, &task.id) {
+            tracing::warn!(
+                agent_id = %best.agent_id,
+                task_id = %task.id,
+                error = %e,
+                "router failed to reserve agent load after routing decision"
+            );
+        }
+
         crate::event_bus::integration::publish_task_delegation_now(
             "task_router",
             &task.id,

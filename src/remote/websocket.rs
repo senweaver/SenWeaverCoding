@@ -16,6 +16,19 @@ const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_BROADCAST_CAPACITY: usize = 1024;
 
+fn sign_timestamp(secret: &str) -> (String, String) {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let ts = chrono::Utc::now().timestamp().to_string();
+    let signature = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map(|mut mac| {
+            mac.update(ts.as_bytes());
+            hex::encode(mac.finalize().into_bytes())
+        })
+        .unwrap_or_default();
+    (ts, signature)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WsState {
     Disconnected,
@@ -33,6 +46,7 @@ pub struct WsMessage {
 pub struct SessionWebSocket {
     url: String,
     auth_token: Option<String>,
+    signing_secret: Option<String>,
     state: Arc<RwLock<WsState>>,
     connecting_since: Arc<parking_lot::Mutex<Option<Instant>>>,
     message_tx: broadcast::Sender<WsMessage>,
@@ -52,11 +66,20 @@ impl SessionWebSocket {
     }
 
     pub fn with_auth(url: &str, auth_token: Option<String>) -> Self {
+        Self::with_auth_and_signing(url, auth_token, None)
+    }
+
+    pub fn with_auth_and_signing(
+        url: &str,
+        auth_token: Option<String>,
+        signing_secret: Option<String>,
+    ) -> Self {
         let (out_tx, out_rx) = mpsc::channel(256);
         let (message_tx, _) = broadcast::channel(REMOTE_BROADCAST_CAPACITY);
         Self {
             url: url.to_string(),
             auth_token,
+            signing_secret: signing_secret.filter(|s| !s.trim().is_empty()),
             state: Arc::new(RwLock::new(WsState::Disconnected)),
             connecting_since: Arc::new(parking_lot::Mutex::new(None)),
             message_tx,
@@ -134,6 +157,16 @@ impl SessionWebSocket {
                                 return Err(anyhow::anyhow!(
                                     "invalid remote auth token for Authorization header: {e}"
                                 ));
+                            }
+                        }
+                        if let Some(secret) = self.signing_secret.as_deref() {
+                            let (ts, sig) = sign_timestamp(secret);
+                            if let (Ok(ts_v), Ok(sig_v)) = (
+                                tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&ts),
+                                tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&sig),
+                            ) {
+                                request.headers_mut().insert("x-sen-timestamp", ts_v);
+                                request.headers_mut().insert("x-sen-signature", sig_v);
                             }
                         }
                         tokio_tungstenite::connect_async(request).await

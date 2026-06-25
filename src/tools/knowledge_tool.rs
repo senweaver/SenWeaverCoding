@@ -91,18 +91,27 @@ impl Tool for KnowledgeTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        let graph = Arc::clone(&self.graph);
+        tokio::task::spawn_blocking(move || KnowledgeTool { graph }.dispatch(&args))
+            .await
+            .map_err(|e| anyhow::anyhow!("knowledge task panicked: {e}"))?
+    }
+}
+
+impl KnowledgeTool {
+    fn dispatch(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
         let action = args
             .get("action")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'action' parameter"))?;
 
         match action {
-            "capture" => self.handle_capture(&args),
-            "search" => self.handle_search(&args),
-            "relate" => self.handle_relate(&args),
-            "suggest" => self.handle_suggest(&args),
-            "expert_find" => self.handle_expert_find(&args),
-            "lessons_extract" => self.handle_lessons_extract(&args),
+            "capture" => self.handle_capture(args),
+            "search" => self.handle_search(args),
+            "relate" => self.handle_relate(args),
+            "suggest" => self.handle_suggest(args),
+            "expert_find" => self.handle_expert_find(args),
+            "lessons_extract" => self.handle_lessons_extract(args),
             "graph_stats" => self.handle_graph_stats(),
             other => Ok(ToolResult {
                 success: false,
@@ -111,9 +120,7 @@ impl Tool for KnowledgeTool {
             }),
         }
     }
-}
 
-impl KnowledgeTool {
     fn handle_capture(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
         let node_type_str = args
             .get("node_type")

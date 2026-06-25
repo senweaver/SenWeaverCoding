@@ -5,6 +5,7 @@
 pub mod retry;
 
 use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
@@ -43,6 +44,40 @@ pub fn set_runtime_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
 pub fn remove_runtime_var<K: AsRef<OsStr>>(key: K) {
     let key = key.as_ref().to_string_lossy().into_owned();
     registry().vars.remove(&key);
+}
+
+pub fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    path
+}
+
+pub fn path_is_within(child: &Path, ancestor: &Path) -> bool {
+    let c = strip_verbatim_prefix(child.to_path_buf());
+    let a = strip_verbatim_prefix(ancestor.to_path_buf());
+    #[cfg(windows)]
+    {
+        let cs = c.to_string_lossy().to_lowercase();
+        let asr = a.to_string_lossy().to_lowercase();
+        let sep_back = format!("{asr}\\");
+        let sep_fwd = format!("{asr}/");
+        cs == asr || cs.starts_with(&sep_back) || cs.starts_with(&sep_fwd)
+    }
+    #[cfg(not(windows))]
+    {
+        c == a || c.starts_with(&a)
+    }
+}
+
+pub fn path_relative_to(child: &Path, ancestor: &Path) -> Option<PathBuf> {
+    let c = strip_verbatim_prefix(child.to_path_buf());
+    let a = strip_verbatim_prefix(ancestor.to_path_buf());
+    c.strip_prefix(&a).ok().map(Path::to_path_buf)
 }
 
 pub fn set_runtime_vars_batch(entries: &[(impl AsRef<str>, Option<impl AsRef<str>>)]) {

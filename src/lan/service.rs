@@ -90,6 +90,8 @@ impl LanService {
             Arc::clone(&identity),
             Arc::clone(&registry),
             sink,
+            Arc::clone(&store),
+            lan_cfg.require_trusted_peers,
             downloads_dir.clone(),
             lan_cfg.chunk_size.max(4096),
             lan_cfg.max_frame_bytes.max(lan_cfg.chunk_size + 4096),
@@ -131,7 +133,7 @@ impl LanService {
             return Ok(());
         }
         let port = self.transport.bind_listener(self.configured_port).await?;
-        self.spawn_discovery(port)?;
+        self.spawn_discovery(port).await?;
         self.running.store(true, Ordering::Relaxed);
         self.emit_status();
         self.emit_peers();
@@ -149,7 +151,7 @@ impl LanService {
         self.emit_peers();
     }
 
-    fn spawn_discovery(&self, port: u16) -> Result<()> {
+    async fn spawn_discovery(&self, port: u16) -> Result<()> {
         let registry = Arc::clone(&self.registry);
         let runtime = tokio::runtime::Handle::current();
         let on_change: Arc<dyn Fn() + Send + Sync> = {
@@ -168,17 +170,18 @@ impl LanService {
                 });
             })
         };
-        let discovery = Discovery::start(
-            DiscoveryParams {
-                service_type: self.service_type.clone(),
-                user_id: self.identity.user_id().to_string(),
-                nickname: self.identity.nickname(),
-                public_key: self.identity.public_b64(),
-                port,
-            },
-            registry,
-            on_change,
-        )?;
+        let params = DiscoveryParams {
+            service_type: self.service_type.clone(),
+            user_id: self.identity.user_id().to_string(),
+            nickname: self.identity.nickname(),
+            public_key: self.identity.public_b64(),
+            port,
+        };
+        let discovery = tokio::task::spawn_blocking(move || {
+            Discovery::start(params, registry, on_change)
+        })
+        .await
+        .context("joining mdns startup task")??;
         *self.discovery.lock() = Some(discovery);
         Ok(())
     }
@@ -201,7 +204,12 @@ impl LanService {
         self.identity.set_profile(nickname, email)?;
         if self.is_running() {
             let port = self.transport.listen_port();
-            let _ = self.spawn_discovery(port);
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(err) = this.spawn_discovery(port).await {
+                    tracing::warn!(error = %err, "failed to restart LAN discovery after profile change");
+                }
+            });
         }
         emit_lan("lan_identity", self.identity_snapshot());
         Ok(())

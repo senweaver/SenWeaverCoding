@@ -553,10 +553,13 @@ async fn run_image(
     };
     let abs = workspace.join(&rel_path);
     if let Some(parent) = abs.parent() {
-        std::fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|e| format!("Could not create directory for `{rel_path}`: {e}"))?;
     }
-    std::fs::write(&abs, &bytes).map_err(|e| format!("Could not write `{rel_path}`: {e}"))?;
+    tokio::fs::write(&abs, &bytes)
+        .await
+        .map_err(|e| format!("Could not write `{rel_path}`: {e}"))?;
     crate::agent::designer::record_artifact_if_designer(&abs);
     Ok(format!(
         "Exported node `{node_id}` at {scale}x to `{rel_path}` ({} KB). Use `view_image` on that \

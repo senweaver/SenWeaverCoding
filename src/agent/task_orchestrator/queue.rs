@@ -206,8 +206,6 @@ pub struct TaskQueue {
 
     tasks: RwLock<HashMap<TaskId, Task>>,
 
-    queue: RwLock<BinaryHeap<PrioritizedTask>>,
-
     capability_index: RwLock<BTreeMap<String, BinaryHeap<PrioritizedTask>>>,
 }
 
@@ -216,7 +214,6 @@ impl TaskQueue {
     pub fn new() -> Self {
         Self {
             tasks: RwLock::new(HashMap::new()),
-            queue: RwLock::new(BinaryHeap::new()),
             capability_index: RwLock::new(BTreeMap::new()),
         }
     }
@@ -240,10 +237,9 @@ impl TaskQueue {
             .write()
             .entry(task.required_capability.clone())
             .or_default()
-            .push(prioritized.clone());
+            .push(prioritized);
 
         self.tasks.write().insert(task_id.clone(), task);
-        self.queue.write().push(prioritized);
         task_id
     }
 
@@ -299,8 +295,12 @@ impl TaskQueue {
 
     pub fn fail(&self, task_id: &str, error: impl Into<String>) -> Result<(), TaskQueueError> {
         let error_str = error.into();
-        let mut tasks = self.tasks.write();
-        if let Some(task) = tasks.get_mut(task_id) {
+
+        let requeue = {
+            let mut tasks = self.tasks.write();
+            let Some(task) = tasks.get_mut(task_id) else {
+                return Err(TaskQueueError::TaskNotFound(task_id.to_string()));
+            };
             if task.status != TaskStatus::Running {
                 return Err(TaskQueueError::StatusMismatch {
                     task_id: task_id.to_string(),
@@ -310,36 +310,38 @@ impl TaskQueue {
             }
 
             if task.can_retry() {
-
                 task.status = TaskStatus::Queued;
                 task.claimed_by = None;
                 task.claimed_at = None;
                 task.error = Some(error_str);
                 warn!(task_id = %task_id, attempts = task.attempts, "Task failed, re-queuing");
 
-                let prioritized = PrioritizedTask {
-                    task_id: task_id.to_string(),
-                    priority: task.priority,
-                    submitted_at: task.submitted_at,
-                };
-
-                self.capability_index
-                    .write()
-                    .entry(task.required_capability.clone())
-                    .or_default()
-                    .push(prioritized.clone());
-
-                self.queue.write().push(prioritized);
+                Some((
+                    task.required_capability.clone(),
+                    PrioritizedTask {
+                        task_id: task_id.to_string(),
+                        priority: task.priority,
+                        submitted_at: task.submitted_at,
+                    },
+                ))
             } else {
                 task.status = TaskStatus::Failed;
                 task.error = Some(error_str);
                 task.finished_at = Some(Utc::now());
                 warn!(task_id = %task_id, "Task failed permanently (retries exhausted)");
+                None
             }
-            Ok(())
-        } else {
-            Err(TaskQueueError::TaskNotFound(task_id.to_string()))
+        };
+
+        if let Some((capability, prioritized)) = requeue {
+            self.capability_index
+                .write()
+                .entry(capability)
+                .or_default()
+                .push(prioritized);
         }
+
+        Ok(())
     }
 
     pub fn cancel(&self, task_id: &str) -> Result<(), TaskQueueError> {
@@ -471,6 +473,10 @@ impl TaskQueueHandle {
     }
 
     pub fn inner(&self) -> &TaskQueue {
+        &self.inner
+    }
+
+    pub fn inner_arc(&self) -> &Arc<TaskQueue> {
         &self.inner
     }
 

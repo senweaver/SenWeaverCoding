@@ -73,25 +73,110 @@ pub(in crate::gateway) fn require_auth(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if !state.pairing.require_pairing() {
+    require_auth_with_peer(state, headers, None)
+}
 
-        if is_request_from_localhost(headers) {
-            return Ok(());
+pub(in crate::gateway) fn require_auth_with_peer(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if state.exposed {
+        let token = extract_bearer_token(headers).unwrap_or("");
+        if !state.pairing.is_authenticated_strict(token) {
+            return Err(unauthorized(
+                "Unauthorized  - this gateway is exposed (public bind/tunnel); a valid Bearer \
+                 token is mandatory. Pair via POST /pair, then send Authorization: Bearer <token>",
+            ));
         }
+        if let Some(secret) = state.signing_secret.as_deref() {
+            verify_request_signature(secret, headers)?;
+        }
+        return Ok(());
+    }
 
+    if !state.pairing.require_pairing() && peer_is_loopback(headers, peer) {
+        return Ok(());
     }
 
     let token = extract_bearer_token(headers).unwrap_or("");
     if state.pairing.is_authenticated(token) {
         Ok(())
     } else {
-        Err((
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({
-                "error": "Unauthorized  - pair first via POST /pair, then send Authorization: Bearer <token>"
-            })),
+        Err(unauthorized(
+            "Unauthorized  - pair first via POST /pair, then send Authorization: Bearer <token>",
         ))
     }
+}
+
+fn unauthorized(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": msg })),
+    )
+}
+
+fn peer_is_loopback(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> bool {
+    if let Some(addr) = peer {
+        return addr.ip().is_loopback();
+    }
+    is_request_from_localhost(headers)
+}
+
+fn verify_request_signature(
+    secret: &str,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let ts = headers
+        .get("x-sen-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let sig = headers
+        .get("x-sen-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if ts.is_empty() || sig.is_empty() {
+        return Err(unauthorized(
+            "Unauthorized  - request signing is required on this exposed gateway; send \
+             X-Sen-Timestamp and X-Sen-Signature headers",
+        ));
+    }
+
+    let ts_secs: i64 = ts.parse().unwrap_or(0);
+    let now = chrono::Utc::now().timestamp();
+    if (now - ts_secs).abs() > 300 {
+        return Err(unauthorized(
+            "Unauthorized  - request signature timestamp is stale or invalid (replay protection)",
+        ));
+    }
+
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return Err(unauthorized("Unauthorized  - signing misconfigured")),
+    };
+    mac.update(ts.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+    if constant_time_eq(expected.as_bytes(), sig.as_bytes()) {
+        Ok(())
+    } else {
+        Err(unauthorized(
+            "Unauthorized  - request signature verification failed",
+        ))
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn is_request_from_localhost(headers: &HeaderMap) -> bool {
@@ -110,7 +195,11 @@ pub async fn auth_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
-    require_auth(&state, request.headers())?;
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0);
+    require_auth_with_peer(&state, request.headers(), peer)?;
     Ok(next.run(request).await)
 }
 
@@ -1334,7 +1423,6 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
     mask_vec_secrets(&mut masked.reliability.api_keys);
     mask_vec_secrets(&mut masked.gateway.paired_tokens);
     mask_optional_secret(&mut masked.composio.api_key);
-    mask_optional_secret(&mut masked.browser.computer_use.api_key);
     mask_optional_secret(&mut masked.web_search.brave_api_key);
     mask_optional_secret(&mut masked.storage.provider.config.db_url);
     mask_optional_secret(&mut masked.memory.qdrant.api_key);
@@ -1583,10 +1671,6 @@ fn restore_masked_sensitive_fields(
         &current.reliability.api_keys,
     );
     restore_optional_secret(&mut incoming.composio.api_key, &current.composio.api_key);
-    restore_optional_secret(
-        &mut incoming.browser.computer_use.api_key,
-        &current.browser.computer_use.api_key,
-    );
     restore_optional_secret(
         &mut incoming.web_search.brave_api_key,
         &current.web_search.brave_api_key,
@@ -2168,22 +2252,30 @@ pub async fn handle_api_session_messages(
         .unwrap_or_else(|_| (Vec::new(), 0, 0, chrono::Utc::now().to_rfc3339()))
     };
 
-    let messages: Vec<serde_json::Value> = loaded
-        .iter()
-        .enumerate()
-        .map(|(i, lm)| (first_index + i, lm))
-        .filter(|(_, lm)| !lm.hidden_for_ui)
-        .filter(|(_, lm)| !(lm.message.role == "system" && lm.message.content.is_empty()))
-        .map(|(i, lm)| {
-            message_entry_with_tombstone(
-                &id,
-                i,
-                &lm.message,
-                &last_activity,
-                lm.tombstoned_at.is_some(),
-            )
+    let messages: Vec<serde_json::Value> = {
+        let id_for_map = id.clone();
+        let last_activity_for_map = last_activity.clone();
+        tokio::task::spawn_blocking(move || {
+            loaded
+                .iter()
+                .enumerate()
+                .map(|(i, lm)| (first_index + i, lm))
+                .filter(|(_, lm)| !lm.hidden_for_ui)
+                .filter(|(_, lm)| !(lm.message.role == "system" && lm.message.content.is_empty()))
+                .map(|(i, lm)| {
+                    message_entry_with_tombstone(
+                        &id_for_map,
+                        i,
+                        &lm.message,
+                        &last_activity_for_map,
+                        lm.tombstoned_at.is_some(),
+                    )
+                })
+                .collect()
         })
-        .collect();
+        .await
+        .unwrap_or_default()
+    };
 
     let pending_rewind = {
         let backend_arc = std::sync::Arc::clone(backend);
@@ -3941,6 +4033,8 @@ pub struct RemoteSessionRegisterBody {
     #[serde(default)]
     pub auth_token: Option<String>,
     #[serde(default)]
+    pub signing_secret: Option<String>,
+    #[serde(default)]
     pub connect: bool,
 }
 
@@ -3985,6 +4079,7 @@ pub async fn handle_api_remote_sessions_register(
         created_at_ms: now,
         last_activity_ms: now,
         auth_token: body.auth_token.clone(),
+        signing_secret: body.signing_secret.clone(),
     };
     svc.remote_sessions.register_session(session).await;
     if body.connect {

@@ -10,11 +10,14 @@ import { Button } from '../components/shared/Button'
 import { Input } from '../components/shared/Input'
 import { useAgentSettingsStore } from '../stores/agentSettingsStore'
 import { useAutonomyStore } from '../stores/autonomyStore'
+import { useLoopControlsStore } from '../stores/loopControlsStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useEvolutionStore } from '../stores/evolutionStore'
 import { useUIStore } from '../stores/uiStore'
 import { useDockSuspend } from '../hooks/useDockSuspend'
 import type { GlobalDirective, ThinkingLevel } from '../types/agentSettings'
-import type { AutonomySettings, PermissionMode } from '../types/settings'
+import type { AutonomySettings, LoopControlsSettings, PermissionMode } from '../types/settings'
+import type { AvailableModelEntry } from '../types/evolution'
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'max']
 const TOOL_DISPATCHERS = ['auto', 'sequential', 'parallel']
@@ -59,6 +62,8 @@ export function AgentsSettings() {
       </div>
 
       <AutoRunSection />
+
+      <LoopEngineeringSection />
 
       {error && (
         <div className="rounded-md border border-[var(--color-error-container)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-error)]">
@@ -1380,6 +1385,284 @@ function ContextToolsSection({
       />
 
       <SaveBar onSave={saveFetch} isSaving={isSaving} />
+    </Section>
+  )
+}
+
+function NumberRow({
+  label,
+  hint,
+  value,
+  min,
+  onCommit,
+  disabled,
+  suffix,
+}: {
+  label: string
+  hint: string
+  value: number
+  min: number
+  onCommit: (next: number) => void
+  disabled?: boolean
+  suffix?: string
+}) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => {
+    setDraft(String(value))
+  }, [value])
+
+  const commit = () => {
+    const parsed = Number.parseInt(draft, 10)
+    if (Number.isNaN(parsed) || parsed < min) {
+      setDraft(String(value))
+      return
+    }
+    if (parsed !== value) onCommit(parsed)
+  }
+
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">{label}</div>
+        <div className="mt-0.5 text-xs leading-snug text-[var(--color-text-tertiary)]">{hint}</div>
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-1.5">
+        <Input
+          type="number"
+          min={min}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              commit()
+            }
+          }}
+          className="h-8 w-24 text-xs"
+          disabled={disabled}
+        />
+        {suffix && (
+          <span className="text-xs text-[var(--color-text-tertiary)]">{suffix}</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TextRow({
+  label,
+  hint,
+  value,
+  placeholder,
+  onCommit,
+  disabled,
+}: {
+  label: string
+  hint: string
+  value: string
+  placeholder: string
+  onCommit: (next: string) => void
+  disabled?: boolean
+}) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => {
+    setDraft(value)
+  }, [value])
+
+  const commit = () => {
+    if (draft !== value) onCommit(draft)
+  }
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2.5">
+      <div className="text-xs font-semibold text-[var(--color-text-primary)]">{label}</div>
+      <div className="mt-0.5 mb-2 text-xs leading-snug text-[var(--color-text-tertiary)]">{hint}</div>
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            commit()
+          }
+        }}
+        placeholder={placeholder}
+        className="h-8 w-full text-xs"
+        disabled={disabled}
+      />
+    </div>
+  )
+}
+
+function ModelSelectRow({
+  label,
+  hint,
+  value,
+  models,
+  defaultLabel,
+  onCommit,
+  disabled,
+}: {
+  label: string
+  hint: string
+  value: string
+  models: AvailableModelEntry[]
+  defaultLabel: string
+  onCommit: (next: string) => void
+  disabled?: boolean
+}) {
+  const trimmed = value.trim()
+  const known = models.some((m) => m.id === trimmed)
+  const optionLabel = (m: AvailableModelEntry) =>
+    m.providerName ? `${m.id} · ${m.providerName}` : m.id
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2.5">
+      <div className="text-xs font-semibold text-[var(--color-text-primary)]">{label}</div>
+      <div className="mt-0.5 mb-2 text-xs leading-snug text-[var(--color-text-tertiary)]">{hint}</div>
+      <select
+        value={value}
+        onChange={(e) => onCommit(e.target.value)}
+        disabled={disabled}
+        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-brand)] focus:outline-none disabled:opacity-60"
+      >
+        <option value="">{defaultLabel}</option>
+        {trimmed.length > 0 && !known && <option value={trimmed}>{trimmed}</option>}
+        {models.map((m) => (
+          <option key={`${m.providerId}::${m.id}`} value={m.id}>
+            {optionLabel(m)}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+function LoopEngineeringSection() {
+  const t = useTranslation()
+  const addToast = useUIStore((s) => s.addToast)
+  const data = useLoopControlsStore((s) => s.data)
+  const isLoading = useLoopControlsStore((s) => s.isLoading)
+  const isSaving = useLoopControlsStore((s) => s.isSaving)
+  const hasFetched = useLoopControlsStore((s) => s.hasFetched)
+  const fetchLoopControls = useLoopControlsStore((s) => s.fetch)
+  const updatePartial = useLoopControlsStore((s) => s.updatePartial)
+
+  const availableModels = useEvolutionStore((s) => s.availableModels)
+  const fetchAvailableModels = useEvolutionStore((s) => s.fetchAvailableModels)
+
+  useEffect(() => {
+    if (!hasFetched && !isLoading) {
+      void fetchLoopControls()
+    }
+  }, [hasFetched, isLoading, fetchLoopControls])
+
+  useEffect(() => {
+    if (availableModels.length === 0) {
+      void fetchAvailableModels()
+    }
+  }, [availableModels.length, fetchAvailableModels])
+
+  const onPatch = async (patch: Partial<LoopControlsSettings>) => {
+    try {
+      await updatePartial(patch)
+    } catch (e) {
+      addToast({ type: 'error', message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  if (!data) {
+    return (
+      <Section
+        title={t('settings.agents.loopEng.title')}
+        hint={t('settings.agents.loopEng.hint')}
+      >
+        <div className="text-xs text-[var(--color-text-secondary)]">…</div>
+      </Section>
+    )
+  }
+
+  const selfEvalOff = !data.selfEvalEnabled
+
+  return (
+    <Section
+      title={t('settings.agents.loopEng.title')}
+      hint={t('settings.agents.loopEng.hint')}
+    >
+      <div className="space-y-1.5">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
+          {t('settings.agents.loopEng.reviewGroup')}
+        </div>
+        <ToggleRow
+          label={t('settings.agents.loopEng.selfEval')}
+          hint={t('settings.agents.loopEng.selfEvalHint')}
+          checked={data.selfEvalEnabled}
+          onChange={(next) => void onPatch({ selfEvalEnabled: next })}
+          disabled={isSaving}
+        />
+        <ToggleRow
+          label={t('settings.agents.loopEng.evaluateCodeEdits')}
+          hint={t('settings.agents.loopEng.evaluateCodeEditsHint')}
+          checked={data.evaluateCodeEdits}
+          onChange={(next) => void onPatch({ evaluateCodeEdits: next })}
+          disabled={isSaving || selfEvalOff}
+        />
+        <NumberRow
+          label={t('settings.agents.loopEng.maxRetries')}
+          hint={t('settings.agents.loopEng.maxRetriesHint')}
+          value={data.maxEvaluatorRetries}
+          min={0}
+          onCommit={(next) => void onPatch({ maxEvaluatorRetries: next })}
+          disabled={isSaving || selfEvalOff}
+        />
+        <ModelSelectRow
+          label={t('settings.agents.loopEng.evaluatorModel')}
+          hint={t('settings.agents.loopEng.evaluatorModelHint')}
+          value={data.evaluatorModel}
+          models={availableModels}
+          defaultLabel={t('settings.agents.loopEng.evaluatorModelDefault')}
+          onCommit={(next) => void onPatch({ evaluatorModel: next })}
+          disabled={isSaving || selfEvalOff}
+        />
+        <TextRow
+          label={t('settings.agents.loopEng.frozenRubric')}
+          hint={t('settings.agents.loopEng.frozenRubricHint')}
+          value={data.frozenRubricPath}
+          placeholder={t('settings.agents.loopEng.frozenRubricPlaceholder')}
+          onCommit={(next) => void onPatch({ frozenRubricPath: next })}
+          disabled={isSaving || selfEvalOff}
+        />
+      </div>
+
+      <div className="mt-4 space-y-1.5">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
+          {t('settings.agents.loopEng.guardGroup')}
+        </div>
+        <NumberRow
+          label={t('settings.agents.loopEng.maxCost')}
+          hint={t('settings.agents.loopEng.maxCostHint')}
+          value={data.maxCostPerDayCents}
+          min={0}
+          suffix={t('settings.agents.loopEng.cents')}
+          onCommit={(next) => void onPatch({ maxCostPerDayCents: next })}
+          disabled={isSaving}
+        />
+        <ToggleRow
+          label={t('settings.agents.loopEng.costTracking')}
+          hint={t('settings.agents.loopEng.costTrackingHint')}
+          checked={data.costTrackingEnabled}
+          onChange={(next) => void onPatch({ costTrackingEnabled: next })}
+          disabled={isSaving}
+        />
+        <ToggleRow
+          label={t('settings.agents.loopEng.estop')}
+          hint={t('settings.agents.loopEng.estopHint')}
+          checked={data.estopEnabled}
+          onChange={(next) => void onPatch({ estopEnabled: next })}
+          disabled={isSaving}
+        />
+      </div>
     </Section>
   )
 }

@@ -65,7 +65,9 @@ pub use rbac::{
 pub use taint::{TaintLabel, TaintSink, TaintViolation, TaintedValue};
 pub use workspace_boundary::{BoundaryVerdict, WorkspaceBoundary};
 
-pub use sandbox::{is_sandbox_active, sandbox_allows_path};
+pub use sandbox::{
+    configure_fs_confinement, is_sandbox_active, register_workspace_root, sandbox_allows_path,
+};
 
 pub use job_object::{spawn_in_job, JobLimits, JobObjectGuard, JobObjectSandbox};
 

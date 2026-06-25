@@ -22,7 +22,6 @@ pub mod token_estimation;
 pub mod voice_stt;
 
 pub mod agent_summary;
-pub mod auto_dream;
 pub mod magic_docs;
 pub mod plugin_service;
 pub mod prevent_sleep;

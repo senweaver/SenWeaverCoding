@@ -8,6 +8,26 @@ use serde_json::{json, Value};
 use super::traits::{Tool, ToolResult};
 use crate::agent::designer::deck::compile;
 
+fn discover_deck_dir(workspace: &std::path::Path, session_rel: &str) -> Option<String> {
+    let base = workspace.join(session_rel.replace('\\', "/").trim_start_matches('/'));
+    let entries = std::fs::read_dir(&base).ok()?;
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.join(compile::MANIFEST_FILE).is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            candidates.push((mtime, format!("{}/{}", session_rel.trim_end_matches('/'), name)));
+        }
+    }
+    candidates.sort_by_key(|(t, _)| *t);
+    candidates.pop().map(|(_, rel)| rel)
+}
+
 pub struct DeckCompileTool;
 
 impl DeckCompileTool {
@@ -59,18 +79,24 @@ impl Tool for DeckCompileTool {
             });
         };
         let workspace = std::path::PathBuf::from(&session.workspace_dir);
-        let rel = args
+        let rel = match args
             .get("dir")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                format!(
-                    "{}/deck",
-                    crate::agent::designer::pipeline::designer_session_dir(&session.session_id)
-                )
-            });
+        {
+            Some(d) => d.to_string(),
+            None => {
+                // The pipeline creates the deck under a unique `deck-<hex>/` directory, not a
+                // fixed `deck/`. When the agent omits `dir`, auto-discover the actual deck
+                // directory (the most recently modified subdir containing deck.json) so compile
+                // does not fail on a stale default path.
+                let session_rel =
+                    crate::agent::designer::pipeline::designer_session_dir(&session.session_id);
+                discover_deck_dir(&workspace, &session_rel)
+                    .unwrap_or_else(|| format!("{session_rel}/deck"))
+            }
+        };
         if rel.contains("..") {
             return Ok(ToolResult {
                 success: false,

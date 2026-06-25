@@ -420,7 +420,7 @@ pub fn select_interpreter(
         .unwrap_or_else(|_| interpreter_path.to_path_buf());
     let venv_root = workspace.join(".venv");
     let canon_venv = venv_root.canonicalize().unwrap_or(venv_root);
-    let is_in_workspace_venv = canon.starts_with(&canon_venv);
+    let is_in_workspace_venv = crate::util::path_is_within(&canon, &canon_venv);
     let mut state = status_for(workspace);
     state.interpreter_path = Some(canon.clone());
     state.is_isolated = is_in_workspace_venv;

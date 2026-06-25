@@ -548,37 +548,9 @@ impl OpenAiProvider {
         }
 
         let read_timeout_secs = self.timeout_secs.max(300);
-        let stream_builder = || {
-            let mut builder = Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                .pool_idle_timeout(std::time::Duration::from_secs(15));
-            if !headers.is_empty() {
-                builder = builder.default_headers(headers.clone());
-            }
-            builder
-        };
-
-        let proxied = crate::services::require_services()
+        crate::services::require_services()
             .proxy_runtime()
-            .apply_to_builder(stream_builder(), "provider.openai.stream");
-
-        proxied
-            .build()
-            .or_else(|error| {
-                tracing::warn!(
-                    "Failed to build proxied OpenAI stream client: {error}; retrying without proxy"
-                );
-                stream_builder().build()
-            })
-            .unwrap_or_else(|error| {
-                tracing::warn!("Failed to build OpenAI stream client: {error}");
-                Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                    .build()
-                    .unwrap_or_else(|_| Client::new())
-            })
+            .build_stream_client("provider.openai.stream", read_timeout_secs, 10, &headers)
     }
 
     fn stream_chunks_for_messages(

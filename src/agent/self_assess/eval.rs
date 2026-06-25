@@ -26,6 +26,18 @@ pub struct SelfEvalConfig {
 
     #[serde(default = "default_true")]
     pub persist_scores: bool,
+
+    #[serde(default)]
+    pub evaluator_model: Option<String>,
+
+    #[serde(default)]
+    pub evaluate_code_edits: bool,
+
+    #[serde(default = "default_max_evaluator_retries")]
+    pub max_evaluator_retries: u32,
+
+    #[serde(default)]
+    pub frozen_rubric_path: Option<String>,
 }
 
 fn default_eval_votes() -> u32 {
@@ -43,6 +55,9 @@ fn default_judge_max_tokens() -> u32 {
 fn default_true() -> bool {
     true
 }
+fn default_max_evaluator_retries() -> u32 {
+    2
+}
 
 impl Default for SelfEvalConfig {
     fn default() -> Self {
@@ -53,6 +68,10 @@ impl Default for SelfEvalConfig {
             accept_threshold: default_accept_threshold(),
             judge_max_tokens: default_judge_max_tokens(),
             persist_scores: default_true(),
+            evaluator_model: None,
+            evaluate_code_edits: false,
+            max_evaluator_retries: default_max_evaluator_retries(),
+            frozen_rubric_path: None,
         }
     }
 }

@@ -3,7 +3,12 @@
 // Licensed under the MIT License.
 
 import { api } from './client'
-import type { AutonomySettings, PermissionMode, UserSettings } from '../types/settings'
+import type {
+  AutonomySettings,
+  LoopControlsSettings,
+  PermissionMode,
+  UserSettings,
+} from '../types/settings'
 
 export type CliLauncherStatus = {
   supported: boolean
@@ -42,6 +47,14 @@ export const settingsApi = {
 
   setAutonomy(patch: Partial<AutonomySettings>) {
     return api.put<AutonomySettings>('/api/permissions/autonomy', patch)
+  },
+
+  getLoopControls() {
+    return api.get<LoopControlsSettings>('/api/agents/loop-controls')
+  },
+
+  setLoopControls(patch: Partial<LoopControlsSettings>) {
+    return api.put<LoopControlsSettings>('/api/agents/loop-controls', patch)
   },
 
   getCliLauncherStatus() {

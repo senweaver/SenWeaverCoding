@@ -96,19 +96,46 @@ fn current_ts() -> i64 {
         .unwrap_or(0)
 }
 
-fn derive_key(salt: &[u8]) -> [u8; 32] {
-    let machine_hint = hostname::get()
+const CURRENT_VAULT_VERSION: u32 = 2;
+
+fn machine_hint() -> String {
+    hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "senweavercoding-default-host".to_string());
+        .unwrap_or_else(|| "senweavercoding-default-host".to_string())
+}
+
+fn derive_key_legacy(salt: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"senweavercoding.credential_vault.v1");
-    hasher.update(machine_hint.as_bytes());
+    hasher.update(machine_hint().as_bytes());
     hasher.update(salt);
     let out = hasher.finalize();
     let mut key = [0u8; 32];
     key.copy_from_slice(&out);
     key
+}
+
+fn derive_key_argon2(salt: &[u8]) -> Result<[u8; 32]> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let mut secret = Vec::with_capacity(64);
+    secret.extend_from_slice(b"senweavercoding.credential_vault.v2");
+    secret.extend_from_slice(machine_hint().as_bytes());
+    let params = Params::default();
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon
+        .hash_password_into(&secret, salt, &mut key)
+        .map_err(|e| anyhow::anyhow!("argon2 key derivation failed: {e}"))?;
+    Ok(key)
+}
+
+fn derive_key_for_version(version: u32, salt: &[u8]) -> Result<[u8; 32]> {
+    if version >= 2 {
+        derive_key_argon2(salt)
+    } else {
+        Ok(derive_key_legacy(salt))
+    }
 }
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
@@ -200,13 +227,14 @@ impl CredentialVault {
             salt
         };
 
+        let mut needs_upgrade = false;
         let payload = if data_path.exists() {
             let raw = std::fs::read(&data_path).context("reading vault file")?;
             if raw.is_empty() {
                 VaultPayload::default()
             } else {
                 let file: VaultFile = serde_json::from_slice(&raw).context("parsing vault file")?;
-                let key_bytes = derive_key(&salt);
+                let key_bytes = derive_key_for_version(file.version, &salt)?;
                 let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
                 let nonce_bytes = b64().decode(file.nonce.as_bytes()).context("decoding nonce")?;
                 let cipher_bytes = b64()
@@ -219,6 +247,7 @@ impl CredentialVault {
                 let plaintext = cipher
                     .decrypt(nonce, cipher_bytes.as_ref())
                     .map_err(|e| anyhow::anyhow!("vault decrypt failed: {e}"))?;
+                needs_upgrade = file.version < CURRENT_VAULT_VERSION;
                 serde_json::from_slice::<VaultPayload>(&plaintext)
                     .context("parsing vault payload")?
             }
@@ -230,18 +259,32 @@ impl CredentialVault {
             .context("compiling credential placeholder regex")?;
         let redact_re = placeholder_re.clone();
 
-        Ok(Arc::new(Self {
+        let vault = Arc::new(Self {
             data_path,
             salt,
             state: RwLock::new(payload),
             placeholder_re,
             redact_re,
-        }))
+        });
+
+        if needs_upgrade {
+            let snapshot = vault.state.read().clone();
+            if let Err(err) = vault.write_locked(&snapshot) {
+                tracing::warn!(
+                    error = %err,
+                    "credential vault KDF upgrade to argon2id failed; keeping legacy file"
+                );
+            } else {
+                tracing::info!("credential vault re-encrypted with argon2id KDF");
+            }
+        }
+
+        Ok(vault)
     }
 
     fn write_locked(&self, payload: &VaultPayload) -> Result<()> {
         let plaintext = serde_json::to_vec(payload).context("serializing vault payload")?;
-        let key_bytes = derive_key(&self.salt);
+        let key_bytes = derive_key_for_version(CURRENT_VAULT_VERSION, &self.salt)?;
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -250,7 +293,7 @@ impl CredentialVault {
             .encrypt(nonce, plaintext.as_ref())
             .map_err(|e| anyhow::anyhow!("vault encrypt failed: {e}"))?;
         let file = VaultFile {
-            version: 1,
+            version: CURRENT_VAULT_VERSION,
             salt: b64().encode(&self.salt),
             nonce: b64().encode(nonce_bytes),
             cipher: b64().encode(&cipher_bytes),

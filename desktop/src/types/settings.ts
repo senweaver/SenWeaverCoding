@@ -21,8 +21,20 @@ export type AutonomySettings = {
   enableCommandPolicy: boolean
 }
 
+export type LoopControlsSettings = {
+  selfEvalEnabled: boolean
+  evaluateCodeEdits: boolean
+  evaluatorModel: string
+  maxEvaluatorRetries: number
+  frozenRubricPath: string
+  maxCostPerDayCents: number
+  estopEnabled: boolean
+  costTrackingEnabled: boolean
+}
+
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 export type ThemeMode = 'light' | 'dark'
+export type CloseBehavior = 'minimize' | 'exit' | 'ask'
 
 export type ModelInfo = {
   id: string
@@ -37,6 +49,7 @@ export type UserSettings = {
   effort?: EffortLevel
   permissionMode?: PermissionMode
   theme?: ThemeMode
+  closeBehavior?: CloseBehavior
   lanNickname?: string
   lanEmail?: string | null
   lanDiscoveryEnabled?: boolean

@@ -8,7 +8,7 @@ import { modelsApi } from '../api/models'
 import { codingModesApi } from '../api/codingModes'
 import { ApiError } from '../api/client'
 import { wsManager } from '../api/websocket'
-import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode } from '../types/settings'
+import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode, CloseBehavior } from '../types/settings'
 import type { CodingModeId, CodingModeInfo } from '../types/codingMode'
 import {
   DEFAULT_CODING_MODE,
@@ -30,6 +30,26 @@ function getStoredLocale(): Locale {
     if (stored === 'en' || stored === 'zh') return stored
   } catch {  }
   return 'zh'
+}
+
+const CLOSE_BEHAVIOR_STORAGE_KEY = 'sen-close-behavior'
+
+function normalizeCloseBehavior(raw: unknown): CloseBehavior | null {
+  return raw === 'minimize' || raw === 'exit' || raw === 'ask' ? raw : null
+}
+
+export function getStoredCloseBehavior(): CloseBehavior {
+  try {
+    const stored = normalizeCloseBehavior(localStorage.getItem(CLOSE_BEHAVIOR_STORAGE_KEY))
+    if (stored) return stored
+  } catch {  }
+  return 'ask'
+}
+
+function storeCloseBehavior(value: CloseBehavior): void {
+  try {
+    localStorage.setItem(CLOSE_BEHAVIOR_STORAGE_KEY, value)
+  } catch {  }
 }
 
 export const PII_KIND_LABELS = [
@@ -149,6 +169,7 @@ type SettingsStore = {
   activeProviderName: string | null
   locale: Locale
   theme: ThemeMode
+  closeBehavior: CloseBehavior
   isLoading: boolean
   error: string | null
 
@@ -171,6 +192,7 @@ type SettingsStore = {
   setEffort: (level: EffortLevel) => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
+  setCloseBehavior: (behavior: CloseBehavior) => Promise<void>
 
   setPiiEnabled: (enabled: boolean) => void
   setPiiKindEnabled: (kind: PiiKindLabel, enabled: boolean) => void
@@ -188,6 +210,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   activeProviderName: null,
   locale: getStoredLocale(),
   theme: useUIStore.getState().theme,
+  closeBehavior: getStoredCloseBehavior(),
   isLoading: false,
   error: null,
   pendingCodingModeTransition: null,
@@ -281,6 +304,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
     const theme = userSettings.theme === 'dark' ? 'dark' : 'light'
     useUIStore.getState().setTheme(theme)
+    const closeBehavior =
+      normalizeCloseBehavior((userSettings as { closeBehavior?: unknown }).closeBehavior) ??
+      previous.closeBehavior
+    storeCloseBehavior(closeBehavior)
     const initialMode: CodingModeId = isVisibleCodingMode(codingCurrent.mode)
       ? codingCurrent.mode
       : DEFAULT_CODING_MODE
@@ -293,6 +320,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       currentModel,
       effortLevel,
       theme,
+      closeBehavior,
       isLoading: false,
       error: failures.length > 0 ? failures.join(' | ') : null,
     })
@@ -445,6 +473,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } catch {
       set({ theme: prev })
       useUIStore.getState().setTheme(prev)
+    }
+  },
+
+  setCloseBehavior: async (behavior) => {
+    const prev = get().closeBehavior
+    set({ closeBehavior: behavior })
+    storeCloseBehavior(behavior)
+    try {
+      await settingsApi.updateUser({ closeBehavior: behavior })
+    } catch {
+      set({ closeBehavior: prev })
+      storeCloseBehavior(prev)
     }
   },
 

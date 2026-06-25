@@ -294,6 +294,34 @@ fn is_valid_env_var_name(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+fn is_sensitive_env_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const NEEDLES: &[&str] = &[
+        "API_KEY",
+        "APIKEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+        "PRIVATEKEY",
+        "ACCESS_KEY",
+        "SESSION_KEY",
+        "BEARER",
+        "OPENAI",
+        "ANTHROPIC",
+        "GEMINI",
+        "CLAUDE",
+        "AWS_SECRET",
+        "AWS_SESSION",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "SENAGENTOS",
+    ];
+    NEEDLES.iter().any(|n| upper.contains(n))
+}
+
 const MIRROR_MAX_LINES_PER_STREAM: usize = 2048;
 
 pub(crate) fn emit_mirror_chunks(
@@ -479,6 +507,20 @@ impl Tool for ShellTool {
             for var in collect_allowed_shell_env_vars(&self.security) {
                 if let Ok(val) = std::env::var(&var) {
                     cmd.env(&var, val);
+                }
+            }
+        } else {
+            let passthrough: HashSet<&str> = self
+                .security
+                .shell_env_passthrough
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            for (key, _) in std::env::vars_os() {
+                if let Some(k) = key.to_str() {
+                    if is_sensitive_env_var(k) && !passthrough.contains(k) {
+                        cmd.env_remove(k);
+                    }
                 }
             }
         }

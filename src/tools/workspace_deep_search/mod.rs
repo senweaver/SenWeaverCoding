@@ -107,7 +107,12 @@ impl Tool for WorkspaceDeepSearchTool {
                 scope_path.display()
             );
         }
-        if !scope_path.starts_with(&workspace_root) && scope_path.canonicalize().ok().is_none_or(|p| !p.starts_with(&workspace_root)) {
+        if !crate::util::path_is_within(&scope_path, &workspace_root)
+            && scope_path
+                .canonicalize()
+                .ok()
+                .is_none_or(|p| !crate::util::path_is_within(&p, &workspace_root))
+        {
             anyhow::bail!(
                 "Scope '{}' escapes workspace root {}",
                 scope,

@@ -76,7 +76,18 @@ impl ResponseCache {
     }
 
     pub fn cache_key(model: &str, system_prompt: Option<&str>, user_prompt: &str) -> String {
+        let scope = crate::session::current_session_context()
+            .map(|c| {
+                if c.workspace_key.is_empty() {
+                    c.session_id
+                } else {
+                    format!("{}/{}", c.workspace_key, c.session_id)
+                }
+            })
+            .unwrap_or_else(|| "__global__".to_string());
         let mut hasher = Sha256::new();
+        hasher.update(scope.as_bytes());
+        hasher.update(b"|");
         hasher.update(model.as_bytes());
         hasher.update(b"|");
         if let Some(sys) = system_prompt {

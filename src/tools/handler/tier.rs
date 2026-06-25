@@ -181,6 +181,24 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("sessions_history", SAFE, "Read session history"),
         ("sessions_search", SAFE, "Search a session's history for a keyword"),
         ("sessions_send", MODERATE, "Send a message to another session"),
+        #[cfg(feature = "office-docs")]
+        (
+            "document_convert",
+            MODERATE,
+            "Generate a real xlsx/csv/docx/md/html/pdf file from structured content",
+        ),
+        #[cfg(feature = "office-docs")]
+        (
+            "pdf_ops",
+            MODERATE,
+            "Native PDF page operations: merge/split/extract/delete/rotate/info",
+        ),
+        #[cfg(feature = "office-docs")]
+        (
+            "presentation_create",
+            MODERATE,
+            "Create a real .pptx presentation from a slide outline",
+        ),
         ("web_search_tool", SAFE, "Search the web with the default provider"),
         ("web_fetch", SAFE, "Fetch content from a URL"),
         ("multi_search", SAFE, "Search the web across multiple providers"),
@@ -533,15 +551,20 @@ pub fn apply_builtin_deferred_registration_with_options(
         }
     };
 
-    tools_registry.retain(|t| t.name() != "tool_search");
-    let tool = crate::tools::ToolSearchTool::new(
-        crate::tools::DeferredMcpToolSet {
+    let preserved_mcp_set = tools_registry
+        .iter()
+        .find(|t| t.name() == "tool_search")
+        .and_then(|t| t.as_any())
+        .and_then(|any| any.downcast_ref::<crate::tools::ToolSearchTool>())
+        .map(|existing| existing.deferred_mcp_set())
+        .unwrap_or_else(|| crate::tools::DeferredMcpToolSet {
             stubs: Vec::new(),
             registry: std::sync::Arc::new(crate::tools::McpRegistry::empty()),
-        },
-        handle,
-    )
-    .with_builtin(deferred_builtin_set.clone())
+        });
+
+    tools_registry.retain(|t| t.name() != "tool_search");
+    let tool = crate::tools::ToolSearchTool::new(preserved_mcp_set, handle)
+        .with_builtin(deferred_builtin_set.clone())
     .with_surface(surface)
     .with_workspace_key(options.workspace_key)
     .with_allowlist(options.allowlist)

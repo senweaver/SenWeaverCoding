@@ -2391,6 +2391,12 @@ pub struct GatewayConfig {
 
     #[serde(default)]
     pub tls: Option<GatewayTlsConfig>,
+
+    #[serde(
+        default,
+        serialize_with = "crate::config::redact::redact_optional_string"
+    )]
+    pub signing_secret: Option<String>,
 }
 
 pub use crate::config::domain::rpc::{RpcConfig, RpcHttpConfig};
@@ -2451,6 +2457,7 @@ impl Default for GatewayConfig {
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
             tls: None,
+            signing_secret: None,
         }
     }
 }
@@ -2638,57 +2645,6 @@ impl Default for SecretsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct BrowserComputerUseConfig {
-
-    #[serde(default)]
-    pub enabled: bool,
-
-    #[serde(default = "default_browser_computer_use_endpoint")]
-    pub endpoint: String,
-
-    #[serde(default)]
-    pub api_key: Option<String>,
-
-    #[serde(default = "default_browser_computer_use_timeout_ms")]
-    pub timeout_ms: u64,
-
-    #[serde(default)]
-    pub allow_remote_endpoint: bool,
-
-    #[serde(default)]
-    pub window_allowlist: Vec<String>,
-
-    #[serde(default)]
-    pub max_coordinate_x: Option<i64>,
-
-    #[serde(default)]
-    pub max_coordinate_y: Option<i64>,
-}
-
-fn default_browser_computer_use_endpoint() -> String {
-    "http://127.0.0.1:8787/v1/actions".into()
-}
-
-fn default_browser_computer_use_timeout_ms() -> u64 {
-    15_000
-}
-
-impl Default for BrowserComputerUseConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: default_browser_computer_use_endpoint(),
-            api_key: None,
-            timeout_ms: default_browser_computer_use_timeout_ms(),
-            allow_remote_endpoint: false,
-            window_allowlist: Vec::new(),
-            max_coordinate_x: None,
-            max_coordinate_y: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserConfig {
 
     #[serde(default)]
@@ -2711,9 +2667,6 @@ pub struct BrowserConfig {
 
     #[serde(default)]
     pub native_chrome_path: Option<String>,
-
-    #[serde(default)]
-    pub computer_use: BrowserComputerUseConfig,
 }
 
 fn default_browser_backend() -> String {
@@ -2734,7 +2687,6 @@ impl Default for BrowserConfig {
             native_headless: default_true(),
             native_webdriver_url: default_browser_webdriver_url(),
             native_chrome_path: None,
-            computer_use: BrowserComputerUseConfig::default(),
         }
     }
 }
@@ -5045,6 +4997,9 @@ pub struct SandboxConfig {
 
     #[serde(default)]
     pub firejail_args: Vec<String>,
+
+    #[serde(default = "default_true")]
+    pub confine_filesystem: bool,
 }
 
 impl Default for SandboxConfig {
@@ -5053,6 +5008,7 @@ impl Default for SandboxConfig {
             enabled: None,
             backend: SandboxBackend::Auto,
             firejail_args: Vec::new(),
+            confine_filesystem: true,
         }
     }
 }
@@ -6479,12 +6435,6 @@ impl Config {
                 &store,
                 &mut config.microsoft365.client_secret,
                 "config.microsoft365.client_secret",
-            )?;
-
-            decrypt_optional_secret(
-                &store,
-                &mut config.browser.computer_use.api_key,
-                "config.browser.computer_use.api_key",
             )?;
 
             decrypt_optional_secret(
@@ -8131,12 +8081,6 @@ impl Config {
             &store,
             &mut config_to_save.microsoft365.client_secret,
             "config.microsoft365.client_secret",
-        )?;
-
-        encrypt_optional_secret(
-            &store,
-            &mut config_to_save.browser.computer_use.api_key,
-            "config.browser.computer_use.api_key",
         )?;
 
         encrypt_optional_secret(

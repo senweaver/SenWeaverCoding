@@ -24,6 +24,9 @@ pub struct LanConfig {
 
     #[serde(default)]
     pub download_dir: Option<String>,
+
+    #[serde(default)]
+    pub require_trusted_peers: bool,
 }
 
 pub(crate) fn default_lan_service_name() -> String {
@@ -55,6 +58,7 @@ impl Default for LanConfig {
             max_frame_bytes: default_lan_max_frame_bytes(),
             num_streams: default_lan_num_streams(),
             download_dir: None,
+            require_trusted_peers: false,
         }
     }
 }

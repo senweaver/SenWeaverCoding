@@ -6,7 +6,7 @@ import { useState, useRef, useEffect } from 'react'
 import type { CronTask } from '../../types/task'
 import { useTaskStore } from '../../stores/taskStore'
 import { useTranslation } from '../../i18n'
-import { describeCron } from '../../lib/cronDescribe'
+import { describeTrigger } from '../../lib/cronDescribe'
 import { TaskRunsPanel } from './TaskRunsPanel'
 import { NewTaskModal } from './NewTaskModal'
 
@@ -98,7 +98,7 @@ export function TaskRow({ task, showLogs, onToggleLogs }: Props) {
         {}
         <div className="flex items-center gap-3 flex-shrink-0">
           <span className="text-xs text-[var(--color-text-tertiary)]" title={task.cron}>
-            {describeCron(task.cron, t)}
+            {describeTrigger(task, t)}
           </span>
 
           <div className="flex items-center gap-0.5">

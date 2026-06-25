@@ -4,6 +4,7 @@
 
 import { create } from 'zustand'
 import { sessionsApi } from '../api/sessions'
+import { useUIStore } from './uiStore'
 
 const TAB_STORAGE_KEY = 'sen-open-tabs'
 
@@ -68,6 +69,7 @@ export const useTabStore = create<TabStore>((set, get) => ({
   activeTabId: null,
 
   openTab: (sessionId, title, type = 'session') => {
+    useUIStore.getState().dismissChatOverlays()
     const { tabs } = get()
     const existing = tabs.find((t) => t.sessionId === sessionId)
     if (existing) {
@@ -108,6 +110,7 @@ export const useTabStore = create<TabStore>((set, get) => ({
   },
 
   setActiveTab: (sessionId) => {
+    useUIStore.getState().dismissChatOverlays()
     set({ activeTabId: sessionId })
     get().saveTabs()
   },

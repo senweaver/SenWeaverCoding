@@ -62,6 +62,10 @@ import { dockHide, dockSetForegroundSession } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { getBaseUrl, setBaseUrl } from '../../api/client'
 import { wsManager } from '../../api/websocket'
+import { handleCloseRequest, performSafeExit } from '../../lib/appClose'
+import { CloseChoiceModal } from './CloseChoiceModal'
+import { SafeExitOverlay } from './SafeExitOverlay'
+import { ComputerUsePage } from '../../pages/ComputerUse'
 
 export function AppShell() {
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
@@ -72,6 +76,7 @@ export function AppShell() {
   const activeWorkDir = useActiveTabWorkDir()
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
+  const appMode = useUIStore((s) => s.appMode)
   const terminalPanelOpen = useTerminalPanelStore((s) => s.open)
   const activeChatTabId = useTabStore((s) => s.activeTabId)
   const browserPanelVisible = useBrowserPanelStore((s) =>
@@ -332,6 +337,43 @@ export function AppShell() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+    let unlistenClose: (() => void) | undefined
+    let unlistenTrayQuit: (() => void) | undefined
+    void (async () => {
+      try {
+        const [{ getCurrentWindow }, { listen }] = await Promise.all([
+          import('@tauri-apps/api/window'),
+          import('@tauri-apps/api/event'),
+        ])
+        if (cancelled) return
+        const offClose = await getCurrentWindow().onCloseRequested((event) => {
+          event.preventDefault()
+          void handleCloseRequest()
+        })
+        const offTrayQuit = await listen('tray://quit-requested', () => {
+          void performSafeExit()
+        })
+        if (cancelled) {
+          offClose()
+          offTrayQuit()
+        } else {
+          unlistenClose = offClose
+          unlistenTrayQuit = offTrayQuit
+        }
+      } catch (err) {
+        console.warn('[appClose] failed to register close handlers', err)
+      }
+    })()
+    return () => {
+      cancelled = true
+      unlistenClose?.()
+      unlistenTrayQuit?.()
+    }
+  }, [])
+
   useKeyboardShortcuts()
   useTerminalCwdSync()
 
@@ -520,6 +562,7 @@ export function AppShell() {
         className="app-window-frame outline-none ring-0"
       >
       <TitleBar />
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
           data-testid="sidebar-shell"
@@ -577,6 +620,12 @@ export function AppShell() {
         </div>
       </div>
       {terminalPanelOpen && <TerminalPanel />}
+      {appMode === 'computer' && (
+        <div className="absolute inset-0 z-40 flex flex-col bg-[var(--color-background)]">
+          <ComputerUsePage />
+        </div>
+      )}
+      </div>
       <StatusBar />
       <ToastContainer />
       <FileDragGhost />
@@ -591,6 +640,8 @@ export function AppShell() {
           onClose={closeWorkspaceFinder}
         />
       )}
+      <CloseChoiceModal />
+      <SafeExitOverlay />
       </div>
       <ResizeHandles disabled={isMaximized} />
     </>

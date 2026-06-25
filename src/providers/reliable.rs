@@ -487,6 +487,25 @@ pub struct ReliableProvider {
 }
 
 impl ReliableProvider {
+    async fn scope_stream_retry<F>(
+        session: Option<crate::session::SessionContext>,
+        mode: Option<crate::agent::coding_mode::CodingMode>,
+        fut: F,
+    ) where
+        F: std::future::Future<Output = ()>,
+    {
+        let mode_scoped = async move {
+            match mode {
+                Some(m) => crate::agent::coding_mode::scope_coding_mode(m, fut).await,
+                None => fut.await,
+            }
+        };
+        match session {
+            Some(ctx) => crate::session::scope_session_context(ctx, mode_scoped).await,
+            None => mode_scoped.await,
+        }
+    }
+
     pub fn new(
         providers: Vec<(String, Box<dyn Provider>)>,
         max_retries: u32,
@@ -1543,8 +1562,11 @@ impl Provider for ReliableProvider {
                 .max(TRANSIENT_RETRY_FLOOR);
             let base_backoff = self.base_backoff_ms;
             let cancel_token = current_stream_cancel_token();
-            let session_label = crate::session::current_session_context()
-                .map(|ctx| ctx.session_id)
+            let scoped_session = crate::session::current_session_context();
+            let scoped_mode = crate::agent::coding_mode::scoped_coding_mode();
+            let session_label = scoped_session
+                .as_ref()
+                .map(|ctx| ctx.session_id.clone())
                 .unwrap_or_default();
 
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
@@ -1554,7 +1576,7 @@ impl Provider for ReliableProvider {
 
             let _bg = crate::runtime::spawn_supervised(
                 "providers.reliable.stream_chat_retry",
-                async move {
+                Self::scope_stream_retry(scoped_session, scoped_mode, async move {
                     let total_combos = combos.len();
                     let mut last_failure: Option<String> = None;
 
@@ -1847,7 +1869,7 @@ impl Provider for ReliableProvider {
                             || "all streaming providers/models failed".to_string(),
                         ))))
                         .await;
-                },
+                }),
             );
 
             return stream::unfold(rx, |mut rx| async move {

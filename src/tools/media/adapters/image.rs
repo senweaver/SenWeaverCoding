@@ -32,8 +32,10 @@ fn sniff_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
-fn read_job_image(path: &std::path::Path, what: &str) -> anyhow::Result<Vec<u8>> {
-    std::fs::read(path).with_context(|| format!("cannot read {what} file `{}`", path.display()))
+async fn read_job_image(path: &std::path::Path, what: &str) -> anyhow::Result<Vec<u8>> {
+    tokio::fs::read(path)
+        .await
+        .with_context(|| format!("cannot read {what} file `{}`", path.display()))
 }
 
 fn data_uri(bytes: &[u8]) -> String {
@@ -131,7 +133,7 @@ async fn openai_image_edit(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
         .source_image
         .as_deref()
         .ok_or_else(|| anyhow!("source_image required for image edit"))?;
-    let source_bytes = read_job_image(source_path, "source image")?;
+    let source_bytes = read_job_image(source_path, "source image").await?;
     let source_mime = sniff_mime(&source_bytes);
     let model = if job.model.eq_ignore_ascii_case("dall-e-3") {
         "gpt-image-1".to_string()
@@ -159,11 +161,16 @@ async fn openai_image_edit(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
         form = form.text("input_fidelity", fid.to_ascii_lowercase());
     }
     if let Some(mask_path) = job.mask.as_deref() {
-        let mask_bytes = read_job_image(mask_path, "mask")?;
-        let (w, h) = image::load_from_memory(&source_bytes)
-            .context("cannot decode source image")
-            .map(|img| (img.width(), img.height()))?;
-        let converted = openai_mask_rgba(&mask_bytes, w, h)?;
+        let mask_bytes = read_job_image(mask_path, "mask").await?;
+        let source_for_dims = source_bytes.clone();
+        let converted = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+            let (w, h) = image::load_from_memory(&source_for_dims)
+                .context("cannot decode source image")
+                .map(|img| (img.width(), img.height()))?;
+            openai_mask_rgba(&mask_bytes, w, h)
+        })
+        .await
+        .map_err(|e| anyhow!("mask conversion task panicked: {e}"))??;
         form = form.part(
             "mask",
             reqwest::multipart::Part::bytes(converted)
@@ -202,12 +209,12 @@ fn fal_strength(fidelity: Option<&str>) -> f64 {
 async fn fal_image(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
     let key = job.require_key()?;
     let source = match job.source_image.as_deref() {
-        Some(path) => Some(read_job_image(path, "source image")?),
+        Some(path) => Some(read_job_image(path, "source image").await?),
         None => None,
     };
     let (endpoint_model, body) = if let Some(source_bytes) = &source {
         if let Some(mask_path) = job.mask.as_deref() {
-            let mask_bytes = read_job_image(mask_path, "mask")?;
+            let mask_bytes = read_job_image(mask_path, "mask").await?;
             (
                 "fal-ai/flux-pro/v1/fill".to_string(),
                 json!({
@@ -272,7 +279,7 @@ async fn gemini_image(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
     let mut parts: Vec<serde_json::Value> = Vec::new();
     let mut prompt_text = job.prompt.clone();
     if let Some(source_path) = job.source_image.as_deref() {
-        let source_bytes = read_job_image(source_path, "source image")?;
+        let source_bytes = read_job_image(source_path, "source image").await?;
         if job.mask.is_some() {
             prompt_text = format!(
                 "Edit the first image. The second image is a mask: WHITE areas mark the region to \
@@ -295,7 +302,7 @@ async fn gemini_image(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
             }
         }));
         if let Some(mask_path) = job.mask.as_deref() {
-            let mask_bytes = read_job_image(mask_path, "mask")?;
+            let mask_bytes = read_job_image(mask_path, "mask").await?;
             parts.push(json!({
                 "inline_data": {
                     "mime_type": sniff_mime(&mask_bytes),

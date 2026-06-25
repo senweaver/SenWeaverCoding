@@ -135,10 +135,10 @@ export type SettingsTab =
   | 'lsp'
   | 'keyboard'
   | 'credentials'
-  | 'autoDream'
-  | 'computerUse'
 
 type ActiveView = 'code'
+
+export type AppMode = 'code' | 'computer'
 
 export type WorkspaceFinderMode = 'quick-open' | 'search-in-files' | 'workspace-symbol'
 
@@ -157,12 +157,15 @@ type UIStore = {
   rightSidebarWidth: number
   rightSidebarWidthAuto: boolean
   activeView: ActiveView
+  appMode: AppMode
 
   settingsOverlayOpen: boolean
   pendingSettingsTab: SettingsTab | null
   templateLibraryOpen: boolean
   activeModal: string | null
   workspaceFinderMode: WorkspaceFinderMode | null
+  closePromptOpen: boolean
+  safeExiting: boolean
   editorCursor: EditorCursor | null
   editorCloseRequest: { relPath: string; nonce: number } | null
   toasts: Toast[]
@@ -176,6 +179,8 @@ type UIStore = {
   setRightSidebarWidth: (px: number) => void
   setRightSidebarWidthAuto: (auto: boolean) => void
   setActiveView: (view: ActiveView) => void
+  setAppMode: (mode: AppMode) => void
+  toggleAppMode: () => void
   openSettingsOverlay: (tab?: SettingsTab) => void
   closeSettingsOverlay: () => void
   toggleSettingsOverlay: (tab?: SettingsTab) => void
@@ -187,6 +192,9 @@ type UIStore = {
   closeModal: () => void
   openWorkspaceFinder: (mode: WorkspaceFinderMode) => void
   closeWorkspaceFinder: () => void
+  dismissChatOverlays: () => void
+  setClosePromptOpen: (open: boolean) => void
+  setSafeExiting: (active: boolean) => void
   setEditorCursor: (cursor: EditorCursor | null) => void
   requestEditorTabClose: (relPath: string) => void
   clearEditorCloseRequest: () => void
@@ -203,11 +211,14 @@ export const useUIStore = create<UIStore>((set, get) => ({
   rightSidebarWidth: getStoredRightSidebarWidth(),
   rightSidebarWidthAuto: getStoredRightSidebarWidthAuto(),
   activeView: 'code',
+  appMode: 'code',
   settingsOverlayOpen: false,
   pendingSettingsTab: null,
   templateLibraryOpen: false,
   activeModal: null,
   workspaceFinderMode: null,
+  closePromptOpen: false,
+  safeExiting: false,
   editorCursor: null,
   editorCloseRequest: null,
   toasts: [],
@@ -252,6 +263,8 @@ export const useUIStore = create<UIStore>((set, get) => ({
   },
 
   setActiveView: (view) => set({ activeView: view }),
+  setAppMode: (mode) => set({ appMode: mode }),
+  toggleAppMode: () => set((s) => ({ appMode: s.appMode === 'computer' ? 'code' : 'computer' })),
   openSettingsOverlay: (tab) =>
     set((state) => ({
       settingsOverlayOpen: true,
@@ -283,6 +296,36 @@ export const useUIStore = create<UIStore>((set, get) => ({
     set({ workspaceFinderMode: mode, rightSidebarOpen: true })
   },
   closeWorkspaceFinder: () => set({ workspaceFinderMode: null }),
+
+  dismissChatOverlays: () =>
+    set((s) => {
+      if (
+        !s.settingsOverlayOpen &&
+        !s.templateLibraryOpen &&
+        s.workspaceFinderMode === null &&
+        s.activeModal === null
+      ) {
+        return s
+      }
+      const next: Partial<UIStore> = {}
+      if (s.settingsOverlayOpen) {
+        next.settingsOverlayOpen = false
+        next.pendingSettingsTab = null
+      }
+      if (s.templateLibraryOpen) {
+        next.templateLibraryOpen = false
+      }
+      if (s.workspaceFinderMode !== null) {
+        next.workspaceFinderMode = null
+      }
+      if (s.activeModal !== null) {
+        next.activeModal = null
+      }
+      return next
+    }),
+
+  setClosePromptOpen: (open) => set({ closePromptOpen: open }),
+  setSafeExiting: (active) => set({ safeExiting: active }),
 
   setEditorCursor: (cursor) => set({ editorCursor: cursor }),
 

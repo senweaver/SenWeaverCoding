@@ -40,6 +40,10 @@ pub struct PlanStep {
     pub title: String,
     pub status: PlanStepStatus,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub verify: Option<String>,
+    #[serde(default)]
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -234,6 +238,8 @@ fn parse_todos_section(body: &str) -> Vec<PlanStep> {
                 title: String::new(),
                 status: PlanStepStatus::Pending,
                 notes: None,
+                verify: None,
+                expect: None,
             });
         } else if let Some(rest) = trimmed.strip_prefix("content:") {
             if let Some(s) = current.as_mut() {
@@ -247,6 +253,16 @@ fn parse_todos_section(body: &str) -> Vec<PlanStep> {
                     "cancelled" | "skipped" => PlanStepStatus::Skipped,
                     _ => PlanStepStatus::Pending,
                 };
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("verify:") {
+            if let Some(s) = current.as_mut() {
+                let v = rest.trim().trim_matches('"').to_string();
+                s.verify = if v.is_empty() { None } else { Some(v) };
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("expect:") {
+            if let Some(s) = current.as_mut() {
+                let v = rest.trim().trim_matches('"').to_string();
+                s.expect = if v.is_empty() { None } else { Some(v) };
             }
         }
     }
@@ -285,6 +301,8 @@ fn parse_plan_checkbox_list(content: &str) -> Vec<PlanStep> {
             title: title.to_string(),
             status,
             notes: None,
+            verify: None,
+            expect: None,
         });
         step_id += 1;
     }
@@ -372,6 +390,95 @@ fn frontmatter_status(status: &PlanStepStatus) -> &'static str {
     }
 }
 
+fn find_step_index(plan: &[PlanStep], step_id: &str, title_hint: &str) -> Option<usize> {
+    if let Some(i) = plan.iter().position(|s| s.id == step_id) {
+        return Some(i);
+    }
+    let key = normalize_plan_key(step_id);
+    if !key.is_empty() {
+        if let Some(i) = plan.iter().position(|s| normalize_plan_key(&s.id) == key) {
+            return Some(i);
+        }
+    }
+    if !title_hint.is_empty() {
+        let title_key = normalize_plan_key(title_hint);
+        if !title_key.is_empty() {
+            if let Some(i) = plan
+                .iter()
+                .position(|s| normalize_plan_key(&s.title) == title_key)
+            {
+                return Some(i);
+            }
+            return plan.iter().position(|s| {
+                let tk = normalize_plan_key(&s.title);
+                !tk.is_empty() && (tk.contains(&title_key) || title_key.contains(&tk))
+            });
+        }
+    }
+    None
+}
+
+async fn run_acceptance_check(
+    verify_cmd: &str,
+    expect: Option<&str>,
+    cwd: &std::path::Path,
+) -> Result<(), String> {
+    use std::process::Stdio;
+
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut cmd = crate::util::hidden_async_command(shell);
+    cmd.arg(flag).arg(verify_cmd);
+    if !cwd.as_os_str().is_empty() {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn verify command `{verify_cmd}`: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let combined = if stderr.trim().is_empty() {
+            stdout.as_ref()
+        } else {
+            stderr.as_ref()
+        };
+        return Err(format!(
+            "acceptance verify `{verify_cmd}` exited with code {code}: {}",
+            tail_text(combined, 1500)
+        ));
+    }
+
+    if let Some(exp) = expect.map(str::trim).filter(|e| !e.is_empty()) {
+        if !stdout.contains(exp) && !stderr.contains(exp) {
+            return Err(format!(
+                "acceptance verify `{verify_cmd}` succeeded but output did not contain expected text {exp:?}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn tail_text(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.trim().to_string();
+    }
+    let start = total - max_chars;
+    let tail: String = s.chars().skip(start).collect();
+    format!("…{}", tail.trim())
+}
+
 fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_dash = false;
@@ -428,6 +535,12 @@ pub(crate) fn render_plan_frontmatter(name: &str, overview: &str, todos: &[PlanS
                 yaml_escape_quoted(&step.title)
             ));
             md.push_str(&format!("    status: {}\n", frontmatter_status(&step.status)));
+            if let Some(verify) = step.verify.as_deref().filter(|v| !v.trim().is_empty()) {
+                md.push_str(&format!("    verify: \"{}\"\n", yaml_escape_quoted(verify)));
+            }
+            if let Some(expect) = step.expect.as_deref().filter(|v| !v.trim().is_empty()) {
+                md.push_str(&format!("    expect: \"{}\"\n", yaml_escape_quoted(expect)));
+            }
         }
     }
     md.push_str("isProject: false\n");
@@ -561,7 +674,15 @@ will."
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed", "skipped"]
                             },
-                            "notes": { "type": "string" }
+                            "notes": { "type": "string" },
+                            "verify": {
+                                "type": "string",
+                                "description": "Optional shell command that objectively verifies this step is done (e.g. 'cargo check --lib'). When set, the step cannot be marked 'completed' unless this command exits 0."
+                            },
+                            "expect": {
+                                "type": "string",
+                                "description": "Optional substring that must appear in the verify command's output for the step to count as done."
+                            }
                         },
                         "required": ["id", "title"]
                     }
@@ -578,6 +699,14 @@ will."
                 "notes": {
                     "type": "string",
                     "description": "Optional notes to attach to the step"
+                },
+                "verify": {
+                    "type": "string",
+                    "description": "Optional shell command that objectively verifies the step (used with action='update'). The step cannot be marked 'completed' unless this command exits 0."
+                },
+                "expect": {
+                    "type": "string",
+                    "description": "Optional substring required in the verify command's output (used with action='update')."
                 },
                 "plan_name": {
                     "type": "string",
@@ -627,6 +756,35 @@ will."
                     .or_else(|| args.get("content").and_then(|v| v.as_str()))
                     .unwrap_or("");
 
+                let requested_status = args.get("status").and_then(|v| v.as_str());
+                if requested_status == Some("completed") {
+                    let verify_info = {
+                        let plan = self.plan.read();
+                        find_step_index(&plan, step_id, title_hint).and_then(|i| {
+                            plan[i]
+                                .verify
+                                .as_ref()
+                                .filter(|v| !v.trim().is_empty())
+                                .map(|v| (v.clone(), plan[i].expect.clone(), plan[i].title.clone()))
+                        })
+                    };
+                    if let Some((verify_cmd, expect, title)) = verify_info {
+                        let cwd = self.workspace_root.read().clone();
+                        if let Err(err) =
+                            run_acceptance_check(&verify_cmd, expect.as_deref(), &cwd).await
+                        {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "Cannot mark step '{title}' completed: its acceptance check did not pass. {err}\n\
+                                     Fix the underlying issue and retry, or mark the step 'skipped' with a `notes` reason if the check is no longer applicable."
+                                )),
+                            });
+                        }
+                    }
+                }
+
                 let update_outcome: Result<(String, String), String> = {
                     let mut plan = self.plan.write();
 
@@ -668,6 +826,20 @@ will."
                             }
                             if let Some(notes) = args.get("notes").and_then(|v| v.as_str()) {
                                 s.notes = Some(notes.to_string());
+                            }
+                            if let Some(verify) = args.get("verify").and_then(|v| v.as_str()) {
+                                s.verify = if verify.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(verify.to_string())
+                                };
+                            }
+                            if let Some(expect) = args.get("expect").and_then(|v| v.as_str()) {
+                                s.expect = if expect.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(expect.to_string())
+                                };
                             }
                             Ok((s.title.clone(), s.status.to_string()))
                         }

@@ -16,7 +16,6 @@ import { ChatInput } from '../components/chat/ChatInput'
 import { DebugResultCard } from '../components/debug/DebugResultCard'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
-import { QuestionStrip } from '../components/chat/QuestionStrip'
 import { ActivePlanStickyBar } from '../components/chat/ActivePlanStickyBar'
 import { ResourceWaitBanner } from '../components/chat/ResourceWaitBanner'
 const TASK_POLL_INTERVAL_MS = 10_000
@@ -272,12 +271,6 @@ export function ActiveSession() {
       {!isMemberSession && (
         <SectionErrorBoundary label="ActivePlanStickyBar" resetKeys={[activeTabId]}>
           <ActivePlanStickyBar sessionId={activeTabId} />
-        </SectionErrorBoundary>
-      )}
-
-      {!isMemberSession && (
-        <SectionErrorBoundary label="QuestionStrip" resetKeys={[activeTabId]}>
-          <QuestionStrip />
         </SectionErrorBoundary>
       )}
 

@@ -159,6 +159,10 @@ impl PacingGovernor {
     pub fn iteration(&self) -> usize {
         self.iteration
     }
+
+    pub fn remaining_iterations(&self) -> usize {
+        self.max_iterations.saturating_sub(self.iteration)
+    }
 }
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]

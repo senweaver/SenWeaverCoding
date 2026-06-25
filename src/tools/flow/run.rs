@@ -120,7 +120,8 @@ impl Tool for FlowRunTool {
                     language,
                     options,
                     ..CodeEditFlow::default()
-                };
+                }
+                .with_critic(crate::agent::flows::global_critic_context());
                 flow.run(&mut ctx, agent.as_ref()).await
             }
             "research" => {
