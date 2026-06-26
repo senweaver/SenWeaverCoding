@@ -270,12 +270,12 @@ jobs:
             done
           }
           if [ "${{ runner.os }}" = "macOS" ]; then
-            cargo_retry fetch --locked --target aarch64-apple-darwin
-            cargo_retry fetch --locked --target x86_64-apple-darwin
+            cargo_retry fetch --target aarch64-apple-darwin
+            cargo_retry fetch --target x86_64-apple-darwin
           elif [ -n "${{ matrix.cli_target }}" ]; then
-            cargo_retry fetch --locked --target ${{ matrix.cli_target }}
+            cargo_retry fetch --target ${{ matrix.cli_target }}
           fi
-          cargo_retry fetch --locked
+          cargo_retry fetch
 
       - name: Verify feature gates (lib + desktop)
         if: matrix.label == 'linux-x86_64'
