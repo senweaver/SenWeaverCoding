@@ -35,6 +35,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # Lift Node's old-space heap from the default ~2 GB so Vite/tsc can
   # finish bundling the desktop front-end on macOS arm64 runners
   # (which OOM on the default limit).
@@ -224,13 +227,61 @@ jobs:
         working-directory: desktop
         run: bun install --frozen-lockfile
 
+      - name: Prefetch cargo dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_retry() {
+            local attempt=1
+            local max=5
+            local delay=20
+            while true; do
+              if cargo "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::cargo failed after ${max} attempts: cargo $*" >&2
+                return 1
+              fi
+              echo "cargo attempt ${attempt} failed; retrying in ${delay}s..." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay + 15))
+            done
+          }
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo_retry fetch --locked --target aarch64-apple-darwin --bin sen --no-default-features --features channels-lite
+            cargo_retry fetch --locked --target x86_64-apple-darwin --bin sen --no-default-features --features channels-lite
+          elif [ -n "${{ matrix.cli_target }}" ]; then
+            cargo_retry fetch --locked --target ${{ matrix.cli_target }} --bin sen --no-default-features --features channels-lite
+          fi
+          cargo_retry fetch --locked -p sen-desktop
+
       - name: Verify feature gates (lib + desktop)
         if: matrix.label == 'linux-x86_64'
         shell: bash
         run: |
           set -euo pipefail
-          cargo check --lib --no-default-features
-          cargo check -p sen-desktop
+          cargo_retry() {
+            local attempt=1
+            local max=5
+            local delay=20
+            while true; do
+              if cargo "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::cargo failed after ${max} attempts: cargo $*" >&2
+                return 1
+              fi
+              echo "cargo attempt ${attempt} failed; retrying in ${delay}s..." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay + 15))
+            done
+          }
+          cargo_retry check --lib --no-default-features
+          cargo_retry check -p sen-desktop
 
       # Build the `sen` CLI from the Rust workspace and inject it under
       # desktop/src-tauri/binaries/.  The per-platform Tauri config
@@ -243,8 +294,27 @@ jobs:
         if: runner.os != 'macOS'
         shell: bash
         run: |
-          set -euxo pipefail
-          cargo build --release --target ${{ matrix.cli_target }} --bin sen --no-default-features --features channels-lite
+          set -euo pipefail
+          cargo_retry() {
+            local attempt=1
+            local max=5
+            local delay=20
+            while true; do
+              if cargo "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::cargo failed after ${max} attempts: cargo $*" >&2
+                return 1
+              fi
+              echo "cargo attempt ${attempt} failed; retrying in ${delay}s..." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay + 15))
+            done
+          }
+          set -x
+          cargo_retry build --release --target ${{ matrix.cli_target }} --bin sen --no-default-features --features channels-lite
           mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
           cp "${{ matrix.cli_src }}" "${{ matrix.cli_dst }}"
           ls -la "${{ matrix.cli_dst }}"
@@ -257,9 +327,28 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          set -euxo pipefail
-          cargo build --release --target aarch64-apple-darwin --bin sen --no-default-features --features channels-lite
-          cargo build --release --target x86_64-apple-darwin  --bin sen --no-default-features --features channels-lite
+          set -euo pipefail
+          cargo_retry() {
+            local attempt=1
+            local max=5
+            local delay=20
+            while true; do
+              if cargo "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::cargo failed after ${max} attempts: cargo $*" >&2
+                return 1
+              fi
+              echo "cargo attempt ${attempt} failed; retrying in ${delay}s..." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay + 15))
+            done
+          }
+          set -x
+          cargo_retry build --release --target aarch64-apple-darwin --bin sen --no-default-features --features channels-lite
+          cargo_retry build --release --target x86_64-apple-darwin  --bin sen --no-default-features --features channels-lite
           mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
           lipo -create \
             -output "${{ matrix.cli_dst }}" \
