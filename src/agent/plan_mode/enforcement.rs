@@ -47,6 +47,8 @@ pub struct PlanModeNudgeState {
     pub exit_plan_mode_called: bool,
 
     pub nudge_count: usize,
+
+    pub stop_without_exit: usize,
 }
 
 impl PlanModeNudgeState {
@@ -57,6 +59,11 @@ impl PlanModeNudgeState {
 
     pub fn note_exit_plan_mode_success(&mut self) {
         self.exit_plan_mode_called = true;
+    }
+
+    pub fn note_stop_without_exit(&mut self) {
+        self.stop_without_exit = self.stop_without_exit.saturating_add(1);
+        self.nudge_count = self.nudge_count.saturating_add(1);
     }
 }
 
@@ -91,12 +98,13 @@ pub fn evaluate_plan_mode_exit(
         return PlanModeExitDecision::Allow;
     }
 
-    if state.nudge_count >= HARD_PLAN_NUDGE_LIMIT {
+    if state.stop_without_exit >= HARD_PLAN_NUDGE_LIMIT {
         tracing::error!(
             target: "agent.plan_mode",
             nudge_count = state.nudge_count,
-            "Plan mode nudging exceeded hard limit; stopping nudges to avoid a live-lock \
-             (provider/model is not honoring exit_plan_mode)"
+            stop_without_exit = state.stop_without_exit,
+            "Plan mode: model ended its turn without exit_plan_mode past the hard live-lock \
+             limit; stopping nudges (provider/model is not honoring exit_plan_mode)"
         );
         return PlanModeExitDecision::Allow;
     }

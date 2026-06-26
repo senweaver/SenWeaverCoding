@@ -8,7 +8,7 @@ pub const INLINE_PROGRESS_REMINDER_INTERVAL: usize = 6;
 
 pub const MAX_INLINE_PROGRESS_REMINDERS: usize = 12;
 
-pub const MAX_PLAN_EXECUTION_NUDGES_HARD: usize = 4;
+pub const MAX_PLAN_EXECUTION_NUDGES_HARD: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoFinalizeIntent {
@@ -146,6 +146,10 @@ pub struct PlanExecutionNudgeState {
 
     pub nudge_count: usize,
 
+    pub unproductive_nudges: usize,
+
+    pub terminal_at_last_nudge: usize,
+
     pub last_update_iter: Option<usize>,
 
     pub inline_reminder_count: usize,
@@ -196,8 +200,17 @@ impl PlanExecutionNudgeState {
             "set" => {
                 if let Some(steps) = arguments.get("steps").and_then(|v| v.as_array()) {
                     self.total_steps = steps.len();
-
-                    self.terminal_count = 0;
+                    let incoming_terminal = steps
+                        .iter()
+                        .filter(|s| {
+                            matches!(
+                                s.get("status").and_then(|v| v.as_str()),
+                                Some("completed") | Some("skipped")
+                            )
+                        })
+                        .count();
+                    let prior = self.terminal_count.min(self.total_steps);
+                    self.terminal_count = incoming_terminal.max(prior);
                 }
             }
             "update" => {
@@ -246,6 +259,16 @@ impl PlanExecutionNudgeState {
         self.total_steps.saturating_sub(self.terminal_count)
     }
 
+    pub fn note_nudge_issued(&mut self) {
+        if self.terminal_count > self.terminal_at_last_nudge {
+            self.unproductive_nudges = 0;
+        } else {
+            self.unproductive_nudges = self.unproductive_nudges.saturating_add(1);
+        }
+        self.terminal_at_last_nudge = self.terminal_count;
+        self.nudge_count = self.nudge_count.saturating_add(1);
+    }
+
     pub fn inline_progress_reminder_due(&self, current_iter: usize) -> bool {
         if !self.active || self.total_steps == 0 {
             return false;
@@ -286,24 +309,26 @@ pub fn evaluate_plan_execution_exit(
     if state.terminal_count >= state.total_steps {
         return PlanExecutionExitDecision::Allow;
     }
-    if state.nudge_count >= MAX_PLAN_EXECUTION_NUDGES_HARD {
+    if state.unproductive_nudges >= MAX_PLAN_EXECUTION_NUDGES_HARD {
         tracing::warn!(
             target: "agent.plan_execution",
             nudge_count = state.nudge_count,
+            unproductive_nudges = state.unproductive_nudges,
             total_steps = state.total_steps,
             terminal_count = state.terminal_count,
-            "Plan execution: hard nudge cap reached; \
+            "Plan execution: stalled with no progress across the hard nudge cap; \
              allowing exit and auto-finalizing remaining steps"
         );
         return PlanExecutionExitDecision::Allow;
     }
-    if state.nudge_count >= MAX_PLAN_EXECUTION_NUDGES {
+    if state.unproductive_nudges >= MAX_PLAN_EXECUTION_NUDGES {
         tracing::warn!(
             target: "agent.plan_execution",
             nudge_count = state.nudge_count,
+            unproductive_nudges = state.unproductive_nudges,
             total_steps = state.total_steps,
             terminal_count = state.terminal_count,
-            "Plan execution nudging beyond soft cap; \
+            "Plan execution nudging beyond soft cap without progress; \
              check model / prompt conformance"
         );
     }
@@ -326,10 +351,9 @@ pub fn nudge_message(state: &PlanExecutionNudgeState) -> String {
         .as_deref()
         .map(|p| format!(" (plan: `{p}`)"))
         .unwrap_or_default();
-    let next_nudge_n = state.nudge_count + 1;
-    let nudges_left = MAX_PLAN_EXECUTION_NUDGES_HARD.saturating_sub(next_nudge_n);
+    let nudges_left = MAX_PLAN_EXECUTION_NUDGES_HARD.saturating_sub(state.unproductive_nudges);
 
-    if state.nudge_count + 1 >= MAX_PLAN_EXECUTION_NUDGES_HARD {
+    if state.unproductive_nudges >= MAX_PLAN_EXECUTION_NUDGES_HARD {
         format!(
             "[Plan Execution  -  FINAL CHANCE] You stopped at {done}/{total} with {remaining} \
              todo(s) still `pending` or `in_progress`{plan_ref}. After this nudge the runtime \
@@ -353,7 +377,7 @@ pub fn nudge_message(state: &PlanExecutionNudgeState) -> String {
              Do NOT repeat a previous summary. Do NOT ask for confirmation. Do NOT call \
              unrelated tools first. Close the loop on the tracker now."
         )
-    } else if state.nudge_count >= MAX_PLAN_EXECUTION_NUDGES {
+    } else if state.unproductive_nudges >= MAX_PLAN_EXECUTION_NUDGES {
         format!(
             "[Plan Execution  -  CRITICAL] You stopped at {done}/{total} with {remaining} \
              todo(s) still pending or in_progress{plan_ref}. You have {nudges_left} \

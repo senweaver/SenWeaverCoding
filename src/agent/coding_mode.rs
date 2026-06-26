@@ -338,8 +338,10 @@ impl CodingMode {
                    count, binary size, latency, lint count, etc.), make the \
                    `## 验收` block explicit about two distinct commands: \n\
                      - `Verify`  -  the command that *measures the metric* you \
-                       are trying to move (e.g. `cargo test 2>&1 | grep ok | wc -l`, \
-                       `npm run bench`, `cargo clippy --message-format=short | wc -l`). \n\
+                       are trying to move (e.g. `cargo test`, `npm run bench`, \
+                       `cargo clippy --message-format=short`); use platform-native \
+                       commands for the host OS, not Unix-only pipes like \
+                       `| grep`/`| wc -l` on Windows. \n\
                      - `Guard`  -  the command that must *always keep passing* \
                        while the optimization is iterating (e.g. `cargo test`, \
                        `cargo check --lib --no-default-features`). Guard is the \
@@ -1443,13 +1445,11 @@ impl CodingMode {
     pub fn visible() -> &'static [CodingMode] {
         &[
             Self::Agent,
-            Self::Spec,
             Self::Plan,
             Self::Curator,
             Self::Designer,
             Self::Ask,
             Self::Debug,
-            Self::Harness,
         ]
     }
 
@@ -1457,11 +1457,9 @@ impl CodingMode {
         matches!(
             self,
             Self::Agent
-                | Self::Spec
                 | Self::Plan
                 | Self::Ask
                 | Self::Debug
-                | Self::Harness
                 | Self::Curator
                 | Self::Designer
         )

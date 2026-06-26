@@ -390,6 +390,27 @@ fn frontmatter_status(status: &PlanStepStatus) -> &'static str {
     }
 }
 
+fn merge_steps_preserving_progress(existing: &[PlanStep], incoming: Vec<PlanStep>) -> Vec<PlanStep> {
+    incoming
+        .into_iter()
+        .map(|mut step| {
+            if step.status == PlanStepStatus::Pending {
+                if let Some(prev) =
+                    find_step_index(existing, &step.id, &step.title).map(|i| &existing[i])
+                {
+                    if prev.status != PlanStepStatus::Pending {
+                        step.status = prev.status.clone();
+                        if step.notes.is_none() {
+                            step.notes = prev.notes.clone();
+                        }
+                    }
+                }
+            }
+            step
+        })
+        .collect()
+}
+
 fn find_step_index(plan: &[PlanStep], step_id: &str, title_hint: &str) -> Option<usize> {
     if let Some(i) = plan.iter().position(|s| s.id == step_id) {
         return Some(i);
@@ -736,12 +757,28 @@ will."
                 let steps_val = args
                     .get("steps")
                     .ok_or_else(|| anyhow::anyhow!("'set' requires 'steps' array"))?;
-                let steps: Vec<PlanStep> = serde_json::from_value(steps_val.clone())?;
-                let count = steps.len();
-                *self.plan.write() = steps;
+                let incoming: Vec<PlanStep> = serde_json::from_value(steps_val.clone())?;
+                let merged = {
+                    let existing = self.plan.read();
+                    merge_steps_preserving_progress(&existing, incoming)
+                };
+                let count = merged.len();
+                let retained = merged
+                    .iter()
+                    .filter(|s| s.status != PlanStepStatus::Pending)
+                    .count();
+                *self.plan.write() = merged;
+                let output = if retained > 0 {
+                    format!(
+                        "Plan set with {count} steps ({retained} retained prior progress; \
+                         use action=\"update\" from here, do not re-set)"
+                    )
+                } else {
+                    format!("Plan set with {count} steps")
+                };
                 Ok(ToolResult {
                     success: true,
-                    output: format!("Plan set with {count} steps"),
+                    output,
                     error: None,
                 })
             }

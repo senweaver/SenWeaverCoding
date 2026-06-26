@@ -450,12 +450,25 @@ function applyUpdatePlanSetToCard(
     todos.push({ id, content, status })
   }
   if (todos.length === 0) return card
+  const merged = todos.map((todo) => {
+    if (todo.status !== 'pending') return todo
+    const idx = findPlanTodoIdx(card.todos, todo.id, todo.content)
+    if (idx < 0) return todo
+    const prev = card.todos[idx]!
+    if (prev.status === 'pending') return todo
+    const prevNotes = (prev as { notes?: string | null }).notes ?? null
+    return {
+      ...todo,
+      status: prev.status,
+      ...(prevNotes !== null ? { notes: prevNotes } : {}),
+    }
+  })
   const markdown = card.markdown
-    ? rewritePlanMarkdownTodos(card.markdown, todos)
+    ? rewritePlanMarkdownTodos(card.markdown, merged)
     : card.markdown
   return {
     ...card,
-    todos,
+    todos: merged,
     markdown,
     pendingHydration: false,
     wasExecuted: true,

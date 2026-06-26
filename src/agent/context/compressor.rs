@@ -186,6 +186,8 @@ pub struct CompressionProgress {
 
 pub type CompressionProgressFn = dyn Fn(CompressionProgress) + Send + Sync;
 
+pub type PreservedIndexFn = dyn Fn(&[ChatMessage]) -> Vec<usize> + Send + Sync;
+
 pub struct ContextCompressor {
     config: ContextCompressionConfig,
     context_window: usize,
@@ -220,7 +222,9 @@ impl ContextCompressor {
         model: &str,
         preserved_indices: &[usize],
     ) -> Result<CompressionResult> {
-        self.compress_if_needed_with_progress(history, provider, model, preserved_indices, None)
+        let snapshot: Vec<usize> = preserved_indices.to_vec();
+        let preserved_fn: Box<PreservedIndexFn> = Box::new(move |_history| snapshot.clone());
+        self.compress_if_needed_with_progress(history, provider, model, Some(&*preserved_fn), None)
             .await
     }
 
@@ -229,7 +233,7 @@ impl ContextCompressor {
         history: &mut Vec<ChatMessage>,
         provider: &dyn Provider,
         model: &str,
-        preserved_indices: &[usize],
+        preserved_fn: Option<&PreservedIndexFn>,
         progress: Option<&CompressionProgressFn>,
     ) -> Result<CompressionResult> {
         if !self.config.enabled {
@@ -274,8 +278,10 @@ impl ContextCompressor {
                     tokens_target: threshold,
                 });
             }
+            let preserved_indices: Vec<usize> =
+                preserved_fn.map(|f| f(history)).unwrap_or_default();
             let did_compress = self
-                .compress_once_with_preserved(history, provider, model, preserved_indices)
+                .compress_once_with_preserved(history, provider, model, &preserved_indices)
                 .await?;
             if did_compress {
                 passes_used += 1;

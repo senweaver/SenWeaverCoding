@@ -60,6 +60,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let (outbound_tx, mut outbound_rx) =
         tokio::sync::mpsc::channel::<OutboundFrame>(1024);
 
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::channel::<OutboundFrame>(64);
+
     let writer_handle = crate::runtime::spawn_supervised("ws_desktop.writer", async move {
         const COALESCE_WINDOW_MS: u64 = 24;
         const COALESCE_MAX_FRAMES: usize = 64;
@@ -68,9 +71,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         let mut delta_buf = String::new();
         let mut thinking_buf = String::new();
         loop {
-            let frame = match outbound_rx.recv().await {
-                Some(f) => f,
-                None => break,
+            let frame = tokio::select! {
+                biased;
+                Some(ctrl) = control_rx.recv() => {
+                    let control_msg = match ctrl {
+                        OutboundFrame::Text(s) => Message::Text(s.into()),
+                        OutboundFrame::Pong(p) => Message::Pong(p.into()),
+                    };
+                    if sink.send(control_msg).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                main = outbound_rx.recv() => match main {
+                    Some(f) => f,
+                    None => break,
+                },
             };
             let mut frames: Vec<OutboundFrame> = Vec::new();
             frames.push(frame);
@@ -372,7 +388,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let cancelled_atomic = agent.cancel_token();
     let cancel_signal_for_reader = std::sync::Arc::clone(&cancel_signal_handle);
     let cancelled_atomic_for_reader = std::sync::Arc::clone(&cancelled_atomic);
-    let outbound_tx_reader = outbound_tx.clone();
+    let control_tx_reader = control_tx.clone();
     let session_id_for_reader = session_id.clone();
     let connection_id_for_reader = connection_id.clone();
 
@@ -409,15 +425,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         .to_string();
 
                     if msg_type.as_str() == "ping" {
-                        if outbound_tx_reader
-                            .send(OutboundFrame::Text(
-                                r#"{"type":"pong"}"#.to_string(),
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                        let _ = control_tx_reader
+                            .try_send(OutboundFrame::Text(r#"{"type":"pong"}"#.to_string()));
                         continue;
                     }
                     if msg_type.as_str() == "stop_generation" {
@@ -584,13 +593,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     }
                 }
                 Ok(Message::Ping(payload)) => {
-                    if outbound_tx_reader
-                        .send(OutboundFrame::Pong(payload.to_vec()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+                    let _ = control_tx_reader.try_send(OutboundFrame::Pong(payload.to_vec()));
                 }
                 Ok(Message::Close(_)) | Err(_) => break,
                 _ => {}

@@ -67,7 +67,7 @@ export function ExecHeader({
             cancelTool(parentSessionId, toolUseId)
           }
         }}
-        className="shrink-0 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full border border-[var(--color-error)]/40 text-[var(--color-error)] transition-colors hover:bg-[var(--color-error)]/12"
+        className="shrink-0 self-center inline-flex h-[18px] w-[18px] items-center justify-center rounded-full border border-[var(--color-error)]/40 text-[var(--color-error)] transition-colors hover:bg-[var(--color-error)]/12"
       >
         <span className="material-symbols-outlined text-[12px]">stop</span>
       </span>

@@ -3,9 +3,12 @@
 // Licensed under the MIT License.
 
 import { useCLITaskStore } from '../../stores/cliTaskStore'
+import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import type { CLITask } from '../../types/cliTask'
+import { selectActiveExecutingPlan } from '../../utils/activePlanSelector'
+import { selectActiveExecutingCurator } from '../../utils/activeCuratorSelector'
 
 const statusConfig: Record<CLITask['status'], { icon: string; color: string }> = {
   pending: { icon: 'radio_button_unchecked', color: 'var(--color-text-tertiary)' },
@@ -29,10 +32,19 @@ export function SessionTaskBar() {
     sessionId ? s.completedAndDismissedBySession[sessionId] ?? false : false,
   )
   const resetCompletedTasks = useCLITaskStore((s) => s.resetCompletedTasks)
+  const hasActivePlanTracker = useChatStore((s) => {
+    if (!sessionId) return false
+    const session = s.sessions[sessionId]
+    if (!session) return false
+    if (selectActiveExecutingPlan(session.messages, session.chatState)) return true
+    if (selectActiveExecutingCurator(session.messages, session.chatState)) return true
+    return false
+  })
   const t = useTranslation()
 
   if (!sessionId) return null
   if (tasks.length === 0) return null
+  if (hasActivePlanTracker) return null
 
   const allCompleted = tasks.every((tk) => tk.status === 'completed')
   if (allCompleted && completedAndDismissed) return null

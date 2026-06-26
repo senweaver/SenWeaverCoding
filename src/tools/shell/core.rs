@@ -384,23 +384,46 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        concat!(
-            "Execute a shell command in the workspace directory. ",
-            "**For long-running processes** (HTTP servers like `python -m http.server`, `vite`, `next dev`, ",
-            "`cargo watch`, `npm run dev`, `tail -f`, etc.), set `background: true`  - otherwise the default ",
-            "60s timeout will kill the process and any subsequent `browser` navigate to its URL will fail with ",
-            "`ERR_CONNECTION_REFUSED`. Background mode returns a `bg-<id>` handle immediately so you can keep ",
-            "issuing other tool calls (e.g. `browser` open) in parallel."
-        )
+        #[cfg(target_os = "windows")]
+        {
+            concat!(
+                "Execute a shell command in the workspace directory via `cmd.exe /C` (Windows, NOT bash). ",
+                "Unix utilities like `grep`, `head`, `tail`, `wc`, `sed`, `awk`, `cat`, `ls` are NOT available ",
+                "and will error with 'not recognized as an internal or external command'. Use the `content_search` ",
+                "tool to search file contents, the `read_file` tool to read files, and Windows/CMD equivalents ",
+                "(`dir`, `type`, `findstr`, `where`, `more`) or the `powershell` tool for anything else. ",
+                "**For long-running processes** (HTTP servers like `python -m http.server`, `vite`, `next dev`, ",
+                "`cargo watch`, `npm run dev`, etc.), set `background: true`  - otherwise the default ",
+                "60s timeout will kill the process and any subsequent `browser` navigate to its URL will fail with ",
+                "`ERR_CONNECTION_REFUSED`. Background mode returns a `bg-<id>` handle immediately so you can keep ",
+                "issuing other tool calls (e.g. `browser` open) in parallel."
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            concat!(
+                "Execute a shell command in the workspace directory. ",
+                "**For long-running processes** (HTTP servers like `python -m http.server`, `vite`, `next dev`, ",
+                "`cargo watch`, `npm run dev`, `tail -f`, etc.), set `background: true`  - otherwise the default ",
+                "60s timeout will kill the process and any subsequent `browser` navigate to its URL will fail with ",
+                "`ERR_CONNECTION_REFUSED`. Background mode returns a `bg-<id>` handle immediately so you can keep ",
+                "issuing other tool calls (e.g. `browser` open) in parallel."
+            )
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
+        let command_desc = if cfg!(target_os = "windows") {
+            "The shell command to execute (runs via cmd.exe; use Windows syntax, not Unix tools like grep/head/tail)"
+        } else {
+            "The shell command to execute"
+        };
         json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": command_desc
                 },
                 "approved": {
                     "type": "boolean",
@@ -707,9 +730,13 @@ impl Tool for ShellTool {
                         "shell stdout exceeded LLM cap; full content logged at debug",
                     );
                     stdout.truncate(b);
+                    let filter_hint = if cfg!(target_os = "windows") {
+                        "Use `findstr`/`more` or the `content_search` tool to filter if needed"
+                    } else {
+                        "Use `head`/`tail`/`grep` to filter if needed"
+                    };
                     stdout.push_str(&format!(
-                        "\n... [output truncated: showing {b}/{total} bytes. \
-                         Use `head`/`tail`/`grep` to filter if needed]"
+                        "\n... [output truncated: showing {b}/{total} bytes. {filter_hint}]"
                     ));
                 }
                 if stderr.len() > DEFAULT_LLM_OUTPUT_CAP {

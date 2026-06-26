@@ -57,6 +57,10 @@ fn is_payloadless_assistant(msg: &ConversationMessage) -> bool {
     }
 }
 
+pub fn is_interrupted_turn_note(content: &str) -> bool {
+    content == INTERRUPTED_TURN_NOTE
+}
+
 pub fn tail_signals_interrupted_turn(history: &[ConversationMessage]) -> bool {
     match history.last() {
         Some(ConversationMessage::Chat(c)) if c.role == "user" => true,

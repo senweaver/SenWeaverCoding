@@ -544,10 +544,12 @@ class WebSocketManager {
       const c = this.connections.get(sessionId)
       if (!c || c.state !== 'open') return
       if (c.lastPongAt === 0) return
-      const elapsed = Date.now() - c.lastPongAt
-      if (elapsed > PONG_TIMEOUT_MS) {
+      const now = Date.now()
+      const sincePong = now - c.lastPongAt
+      const sinceActivity = now - c.lastActivityAt
+      if (sincePong > PONG_TIMEOUT_MS && sinceActivity > PONG_TIMEOUT_MS) {
         console.warn(
-          `[wsManager] pong timeout (${elapsed}ms) for session=${sessionId}; forcing reconnect`,
+          `[wsManager] connection silent (pong ${sincePong}ms / activity ${sinceActivity}ms) for session=${sessionId}; forcing reconnect`,
         )
         try {
           c.ws.close()

@@ -6,10 +6,11 @@
 
 SenWeaverCoding is a desktop AI code editor that ships the entire agent
 runtime as a single installable application. The back-end is a Rust
-library (`src/`) embedded directly into a Tauri shell; the front-end is
-a React + Vite UI living in `desktop/`. There is no sidecar process,
+library (`src/`) embedded directly into a Tauri 2 shell; the front-end
+is a React + Vite UI living in `desktop/`. There is no sidecar process,
 no remote service to talk to, and no separate CLI install — one
-installer gives you the full IDE.
+installer gives you the full IDE **and** a terminal-callable `sen`
+command.
 
 ---
 
@@ -17,13 +18,14 @@ installer gives you the full IDE.
 
 | Area | What you get |
 | --- | --- |
-| **Desktop-first** | Tauri 2 shell with native menus, multi-tab sessions, in-app terminal, file browser, embedded browser. |
-| **Rust agent runtime** | Same crate that ships in headless deployments, embedded via `crate-type = ["cdylib", "staticlib", "rlib"]`. Zero IPC overhead. |
-| **5 coding modes** | Agent, Plan, Ask, Debug, Harness — switch mid-session; each mode rewires system prompt + tool allowlist + auto-verify policy. Agent is the default and exposes the full tool surface. |
-| **130+ tools** | File ops, shell with PTY mirroring, Git, ripgrep search, glob/multi-edit, web search/fetch, headless browser, memory store/recall, todo write, image gen, MCPs, Skills, Subagents. |
-| **Multi-provider** | OpenAI / Anthropic / DeepSeek / Gemini / Copilot / OpenRouter / any OpenAI-compatible. Provider settings live inside the app. |
-| **Persistent memory** | SQLite + Markdown backends with vector embeddings, per-session work-dir isolation, rewind/restore checkpoints. |
-| **Performance-tuned** | Streaming Markdown downgrade, rAF batched delta flushes, `content-visibility: auto` virtualization, `tokio::task::spawn_blocking` on every IO hot path. See `AGENTS.md` for the hard constraints. |
+| **Desktop-first** | Tauri 2 shell with native menus, multi-tab sessions, in-app PTY terminal, file browser, and an embedded browser dock for live web/UI work. |
+| **Embedded Rust runtime** | The same crate that runs headless is loaded in-process via `crate-type = ["cdylib", "staticlib", "rlib"]`. The UI talks to it over a loopback WebSocket/HTTP gateway — no serialization-heavy IPC, no external daemon. |
+| **Intent-routed coding modes** | `Auto` routes each turn to the best fit; or pin a mode explicitly: **Agent** (default, full autonomy + full tool surface), **Plan** (read-only plan authoring), **Ask** (read-only Q&A with citations), **Debug** (4-stage root-cause + in-app browser QA), **Curator** (research → DOCX / implementation blueprint), **Designer** (ten UI/design surfaces). Each mode rewires the system prompt, tool allowlist, approval policy, and auto-verify behavior. |
+| **130+ tools** | File ops, PTY-mirrored shell, Git, ripgrep/content search, glob/multi-edit/patch-apply, **code intelligence** (tree-sitter outline + symbol graph for callers/implementors/uses + optional Tantivy full-text index), multi-engine web search/fetch, headless & embedded browser, SQLite + vector memory, todo/plan tracking, image generation, office docs (xlsx/pdf/docx), MCP tools, Skills, and Subagent delegation. |
+| **Multi-provider** | OpenAI-compatible (incl. DeepSeek / Gemini-compatible endpoints), Anthropic, OpenRouter, GitHub Copilot, Claude Code, Ollama, Azure OpenAI, AWS Bedrock, Telnyx, and local CLI bridges. Provider keys and per-session model routing are configured in-app. |
+| **Persistent memory & checkpoints** | SQLite + Markdown backends with vector embeddings, per-session work-dir isolation, and rewind/restore checkpoints. Interrupted turns are repaired and resumed against the *most recent* task on "continue". |
+| **Automations & extensibility** | Cron-driven automations, Hooks, user Rules, Skills, MCP servers, multi-channel adapters (Slack / Telegram / Discord / Matrix / Lark / …), and first-party TypeScript & Python SDKs over a `/v1/agents` REST surface. |
+| **Performance-tuned** | Virtualized message list, rAF-coalesced streaming flushes, prioritized WebSocket heartbeats, content-aware context compaction, and `spawn_blocking` on IO hot paths. Hard constraints live in `AGENTS.md`. |
 
 ---
 
@@ -49,11 +51,31 @@ you can verify the CLI with `sen --help`.
 
 ---
 
+## Coding modes
+
+Modes are switchable mid-session from the composer. **Auto** is an
+intent router that picks a fit per turn; the rest can be pinned:
+
+| Mode | Writes? | Purpose |
+| --- | --- | --- |
+| **Auto** | depends | Routes each message to the best-fit mode based on intent (debug / plan / Q&A / general). |
+| **Agent** *(default)* | yes | Fully autonomous orchestrator. Full tool surface, auto-approved tool calls, decomposes the task, executes end-to-end, then self-verifies. |
+| **Plan** | no | Drafts/updates a `.plan.md` under `.senweavercoding/plans/` for later execution. No source edits, no shell. |
+| **Ask** | no | Read-only Q&A with citations. No edits, no shell, no plan writes. |
+| **Debug** | yes | Reproduce → Hypothesize → Isolate → Fix, with in-app browser QA, PII redaction at the LLM boundary, and report/tech-doc output. |
+| **Curator** | docs only | Mines the web + local workspace, authors a professional paper / solution / report with DOCX export, then stops so Agent mode can implement the blueprint. |
+| **Designer** | yes | Design studio across ten surfaces (prototype, dashboard, slide deck, diagram, image, video, etc.) with a discovery → plan → generate → critique pipeline and a live preview panel. |
+
+Agent mode includes the tools and capabilities of every other mode, so
+you never lose functionality by staying in the default.
+
+---
+
 ## Build from source
 
 ### Prerequisites
 
-* Rust ≥ 1.87 (stable) — install via [rustup](https://rustup.rs).
+* Rust ≥ 1.87 (stable, edition 2024) — install via [rustup](https://rustup.rs).
 * [Bun](https://bun.sh) ≥ 1.1 (used for the front-end; npm/pnpm also work).
 * Platform-specific Tauri prerequisites:
   * **Windows**: WebView2 runtime + MSVC build tools.
@@ -95,12 +117,12 @@ This repo ships a single GitHub Actions workflow at
 `gh workflow run release.yml -f tag=v0.1.0` — triggers a clean
 multi-platform build:
 
-1. Each platform job does a fresh `actions/checkout@v4` (no local
-   `node_modules/`, `target/`, `.senweavercoding/`, `dist/` or
-   `.vite/` cache from your dev machine ever leaks in — `.gitignore`
-   already excludes them, and the workflow re-installs from scratch).
+1. Each platform job does a fresh `actions/checkout@v4`, so no local
+   `node_modules/`, `target/`, `.senweavercoding/`, `dist/` or `.vite/`
+   cache from your dev machine ever leaks in (`.gitignore` excludes
+   them and the workflow reinstalls from scratch).
 2. Builds the `sen` CLI into `desktop/src-tauri/binaries/sen[.exe]`.
-3. Runs `tauri-action` which builds the front-end and bundles the
+3. Runs `tauri-action`, which builds the front-end and bundles the
    desktop application + CLI into the platform installers.
 4. Uploads every installer to the same GitHub Release.
 
@@ -109,23 +131,37 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-After a few minutes the Release page lists installers for Windows /
-macOS (one universal `.dmg`) / Linux (deb + AppImage).
+---
+
+## Feature flags
+
+The crate is feature-gated so headless and desktop builds only compile
+what they need.
+
+| Flag group | Examples | Notes |
+| --- | --- | --- |
+| **default** | `observability-prometheus`, `skill-creation`, `fs-watch`, `sandbox`, `lsp-push-diagnostics`, `tool-image`, `tool-utility-misc`, `tool-search-broad`, `tool-workspace-deep`, `tool-curator`, `lan-comms`, `office-docs` | What a normal build ships. |
+| **code-intel** | tree-sitter grammars (rust/js/ts/python/go/java/c/cpp/…) | Enables AST outline + symbol graph; falls back to heuristics when off. |
+| **code-search** | `tantivy` | Adds an incremental full-text code index. |
+| **extras** | `tool-cron`, `tool-sop`, `tool-team`, `tool-reports`, `tool-cloud-ops`, `computer-use`, … | Optional tool families (also what desktop enables). |
+| **channels** | `channel-slack`, `channel-telegram`, `channel-matrix`, `channel-lark`, … | Multi-channel adapters. |
 
 ### Quality gates
-
-The repo enforces two zero-error checks (see `AGENTS.md`):
-
-```bash
-cargo check --lib
-cargo check --lib --no-default-features
-cd desktop && bunx tsc --noEmit
-```
 
 There are deliberately **no test files** in this repository — all
 verification is performed via `cargo check`, `cargo clippy`, and manual
 smoke tests of the desktop app. Benches under `benches/*.rs` are kept
-for performance regression tracking.
+for performance regression tracking. The enforced zero-error checks
+(see `AGENTS.md`):
+
+```bash
+cargo check --lib
+cargo check --lib --no-default-features
+cargo check --bin sen
+cargo check --bin sen --features crdt-coordination
+cargo check --lib --features extras
+cd desktop && bunx tsc --noEmit
+```
 
 ---
 
@@ -134,33 +170,39 @@ for performance regression tracking.
 ```
 SenWeaverCoding/
 ├── src/                     # Rust agent runtime (lib + `sen` bin)
-│   ├── agent/               # Turn loop, tool dispatch, compression
-│   ├── providers/           # OpenAI / Anthropic / DeepSeek / ...
-│   ├── tools/               # 130+ tools (file/shell/git/web/...)
-│   ├── gateway/             # axum HTTP + WebSocket router
-│   ├── channels/            # Slack / Telegram / Discord / ...
-│   ├── memory/              # SQLite + vector index backends
-│   ├── context/             # Symbol graph, outline, RAG
+│   ├── agent/               # Turn loop, tool dispatch, modes, context compaction
+│   ├── providers/           # OpenAI-compat / Anthropic / OpenRouter / Copilot / …
+│   ├── tools/               # 130+ tools (file/shell/git/web/code-intel/…)
+│   ├── code_intel/          # tree-sitter outline, symbol graph, Tantivy search
+│   ├── context/ · rag/      # Context assembly, retrieval, RAG
+│   ├── gateway/             # axum HTTP + WebSocket router (loopback)
+│   ├── memory/              # SQLite + Markdown + vector index backends
+│   ├── channels/            # Slack / Telegram / Discord / Matrix / Lark / …
+│   ├── skills/ · workflows/ # Skills, subagents, multi-step workflows
+│   ├── cron/ · hooks/       # Automations, lifecycle hooks, user rules
 │   ├── apply_model/         # Patch / multi-edit application
-│   └── ...
+│   ├── security/ · guardrails/  # Sandbox, permissions, PII redaction
+│   └── observability/ · evolution/ · lsp/ · …
 │
 ├── desktop/                 # Tauri 2 + React + Vite front-end
-│   ├── src/                 # React app (5 modes, terminal panel,
-│   │                        #   plan card, tool result blocks, …)
-│   ├── src-tauri/           # Tauri shell — embeds `src/` as a Rust
-│   │                        #   library, no sidecar process
+│   ├── src/                 # React app (modes, terminal panel, plan/tool cards,
+│   │                        #   embedded browser dock, settings, …)
+│   ├── src-tauri/           # Tauri shell — embeds `src/` as a Rust library
 │   └── package.json
 │
-├── tool_descriptions/       # Machine-readable tool manifests
+├── sdk/                     # First-party TypeScript & Python SDKs
+├── tool_descriptions/       # Localized tool manifests (en / zh-CN)
 ├── benches/                 # Criterion benchmarks
-└── .github/workflows/       # CI / release pipelines
+└── .github/workflows/       # CI / release pipeline
 ```
 
 The desktop app boots the gateway router in-process and connects the
-React front-end to it via `127.0.0.1` WebSocket / HTTP. Because the
-back-end is loaded as a library (`sen_desktop_lib.{cdylib,staticlib}`)
-there is zero serialization or IPC overhead between the UI and the
-agent runtime.
+React front-end to it via a `127.0.0.1` WebSocket / HTTP loopback.
+Because the back-end is loaded as a library
+(`sen_desktop_lib.{cdylib,staticlib}`) there is no IPC serialization
+overhead between the UI and the agent runtime. The same gateway exposes
+a `/v1/agents` REST surface consumed by the TypeScript and Python SDKs
+under `sdk/`.
 
 ---
 
@@ -168,12 +210,12 @@ agent runtime.
 
 - Code-signed installers for Windows and macOS notarization.
 - Native auto-update channel via Tauri Updater.
-- More provider adapters (Mistral, Qwen, GLM …).
-- VS Code / JetBrains companion extensions for hand-off into the desktop app.
+- More first-class provider adapters.
+- Deeper code-graph driven retrieval across large repositories.
 - Cloud-collaborative workspaces.
 
 ---
 
 ## License
 
-[MIT](./LICENSE) © 2025-2026 senweaver
+[MIT](./LICENSE) © 2025-2026 SenWeaverCoding

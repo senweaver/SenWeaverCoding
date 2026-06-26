@@ -50,13 +50,11 @@ export const DEFAULT_CODING_MODE: CodingModeId = 'agent'
 export const VISIBLE_CODING_MODES: CodingModeId[] = [
   'auto',
   'agent',
-  'spec',
   'plan',
   'curator',
   'designer',
   'ask',
   'debug',
-  'harness',
 ]
 
 export const isVisibleCodingMode = (id: string): id is CodingModeId =>

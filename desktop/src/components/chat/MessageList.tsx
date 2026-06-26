@@ -402,7 +402,7 @@ function ListFooter({ context }: { context?: ListFooterContext }) {
     onLiveThinkingGrow,
   } = context
   return (
-    <div className="mx-auto w-full max-w-[860px] px-4 pb-4">
+    <div className="mx-auto w-full max-w-[860px] flow-root px-4 pb-4">
       {resolvedSessionId && activeThinkingId && (
         <ActiveThinkingBlock
           sessionId={resolvedSessionId}
@@ -422,7 +422,7 @@ function ListFooter({ context }: { context?: ListFooterContext }) {
 
       {resolvedSessionId && <AgentTaskNotifications sessionId={resolvedSessionId} />}
 
-      {showPlanningIndicator && !showRetryBanner && (
+      {        showPlanningIndicator && !showRetryBanner && (
         awaitingWorkers ? (
           <div className="mx-auto w-full max-w-[860px] px-8 py-2">
             <div className="inline-flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-[12px] text-[var(--color-text-secondary)]">
@@ -498,10 +498,13 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const lastScrollTopRef = useRef(0)
   const programmaticScrollRef = useRef(false)
   const scrollRafRef = useRef<number | null>(null)
+  const followRafRef = useRef<number | null>(null)
+  const followForceRef = useRef(false)
   const prevFirstKeyRef = useRef<string | null>(null)
   const prevListLenRef = useRef(0)
   const initialPinPendingRef = useRef(true)
   const initialPinDeadlineRef = useRef(0)
+  const followSettleDeadlineRef = useRef(0)
   const t = useTranslation()
   const [rewindTarget, setRewindTarget] = useState<{
     userMessageIndex: number
@@ -535,19 +538,28 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
   const [firstItemIndex, setFirstItemIndex] = useState(FIRST_ITEM_INDEX_BASE)
 
-  const scrollFollowToBottom = useCallback(() => {
-    if (!followRef.current) return
+  const scrollFollowToBottom = useCallback((force = false) => {
+    if (!force && !followRef.current) return
     if (typeof document !== 'undefined' && document.hidden) return
-    const node = scrollerElRef.current
-    if (!node) return
-    const target = node.scrollHeight - node.clientHeight
-    if (target - node.scrollTop <= 1) return
-    programmaticScrollRef.current = true
-    node.scrollTop = target
-    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
-    scrollRafRef.current = requestAnimationFrame(() => {
-      scrollRafRef.current = null
-      programmaticScrollRef.current = false
+    if (force) followForceRef.current = true
+    if (followRafRef.current != null) return
+    followRafRef.current = requestAnimationFrame(() => {
+      followRafRef.current = null
+      const useForce = followForceRef.current
+      followForceRef.current = false
+      if (typeof document !== 'undefined' && document.hidden) return
+      const node = scrollerElRef.current
+      if (!node) return
+      if (!useForce && !followRef.current) return
+      const target = node.scrollHeight - node.clientHeight
+      if (target - node.scrollTop <= 1) return
+      programmaticScrollRef.current = true
+      node.scrollTop = target
+      if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null
+        programmaticScrollRef.current = false
+      })
     })
   }, [])
 
@@ -586,7 +598,8 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     followRef.current = true
     atBottomRef.current = true
     setShowScrollToBottom(false)
-    scrollFollowToBottom()
+    followSettleDeadlineRef.current = Date.now() + 700
+    scrollFollowToBottom(true)
   }, [scrollFollowToBottom])
 
   useEffect(() => {
@@ -1161,7 +1174,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
             virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
             return
           }
-          if (chatState === 'idle' && !atBottomRef.current) return
+          if (chatState === 'idle' && Date.now() >= followSettleDeadlineRef.current) return
           scrollFollowToBottom()
         }}
         atBottomStateChange={(atBottom) => {
@@ -1169,10 +1182,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           if (atBottom) {
             followRef.current = true
             setShowScrollToBottom(false)
-          } else if (followRef.current) {
-            if (typeof document !== 'undefined' && document.hidden) return
-            scrollFollowToBottom()
-          } else {
+          } else if (!followRef.current) {
             setShowScrollToBottom(true)
           }
         }}
@@ -1181,11 +1191,13 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           if (atTop) maybeLoadOlder()
         }}
         atBottomThreshold={AUTO_SCROLL_BOTTOM_THRESHOLD_PX}
-        increaseViewportBy={{ top: 800, bottom: 400 }}
+        increaseViewportBy={{ top: 800, bottom: 1200 }}
         startReached={maybeLoadOlder}
         components={VIRTUOSO_COMPONENTS}
         itemContent={(_, item) => (
-          <div className="mx-auto w-full max-w-[860px] px-4">{renderListItem(item)}</div>
+          <div className="mx-auto w-full max-w-[860px] flow-root px-4">
+            {renderListItem(item)}
+          </div>
         )}
       />
 

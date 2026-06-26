@@ -414,6 +414,18 @@ impl SqliteMemory {
         Some(backup_dir.join(format!("{stem}-pre-v7-{ts}.db")))
     }
 
+    fn table_columns(conn: &Connection, table: &str) -> std::collections::HashSet<String> {
+        let mut cols = std::collections::HashSet::new();
+        if let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
+                for r in rows.flatten() {
+                    cols.insert(r);
+                }
+            }
+        }
+        cols
+    }
+
     fn apply_composite_identity_migration(conn: &Connection) -> anyhow::Result<()> {
         let already: bool = conn
             .query_row(
@@ -425,6 +437,66 @@ impl SqliteMemory {
         if already {
             return Ok(());
         }
+
+        let cols = Self::table_columns(conn, "memories");
+        if cols.is_empty() {
+            tracing::debug!(
+                "memory v7 migration: no 'memories' table to migrate; skipping rebuild"
+            );
+            return Ok(());
+        }
+
+        let session_sel = if cols.contains("session_id") {
+            "session_id"
+        } else {
+            "NULL"
+        };
+        let session_part = if cols.contains("session_id") {
+            "COALESCE(session_id, '')"
+        } else {
+            "''"
+        };
+        let namespace_sel = if cols.contains("namespace") {
+            "COALESCE(namespace, 'default')"
+        } else {
+            "'default'"
+        };
+        let namespace_part = namespace_sel;
+        let importance_sel = if cols.contains("importance") {
+            "COALESCE(importance, 0.5)"
+        } else {
+            "0.5"
+        };
+        let category_sel = if cols.contains("category") {
+            "COALESCE(category, 'core')"
+        } else {
+            "'core'"
+        };
+        let embedding_sel = if cols.contains("embedding") {
+            "embedding"
+        } else {
+            "NULL"
+        };
+        let embedding_norm_sel = if cols.contains("embedding_norm") {
+            "embedding_norm"
+        } else {
+            "NULL"
+        };
+        let superseded_sel = if cols.contains("superseded_by") {
+            "superseded_by"
+        } else {
+            "NULL"
+        };
+        let created_sel = if cols.contains("created_at") {
+            "created_at"
+        } else {
+            "datetime('now')"
+        };
+        let updated_sel = if cols.contains("updated_at") {
+            "updated_at"
+        } else {
+            "datetime('now')"
+        };
 
         if let Some(backup) = Self::migration_backup_path(conn) {
             if backup.exists() {
@@ -458,28 +530,33 @@ impl SqliteMemory {
                 namespace     TEXT DEFAULT 'default',
                 importance    REAL DEFAULT 0.5,
                 superseded_by TEXT
-            );
-            INSERT INTO memories_v7 (
+            );",
+        )?;
+        let insert_sql = format!(
+            "INSERT INTO memories_v7 (
                 id, key, content, category, embedding, embedding_norm,
                 created_at, updated_at, session_id, namespace, importance, superseded_by
             )
-            SELECT id, key, content, category, embedding, embedding_norm,
-                   created_at, updated_at, session_id,
-                   COALESCE(namespace, 'default'), COALESCE(importance, 0.5), superseded_by
+            SELECT id, key, content, {category_sel}, {embedding_sel}, {embedding_norm_sel},
+                   {created_sel}, {updated_sel}, {session_sel},
+                   {namespace_sel}, {importance_sel}, {superseded_sel}
             FROM memories
             WHERE rowid IN (
                 SELECT rowid FROM (
                     SELECT rowid,
                            ROW_NUMBER() OVER (
                                PARTITION BY key,
-                                            COALESCE(namespace, 'default'),
-                                            COALESCE(session_id, '')
-                               ORDER BY updated_at DESC, rowid DESC
+                                            {namespace_part},
+                                            {session_part}
+                               ORDER BY {updated_sel} DESC, rowid DESC
                            ) AS rn
                     FROM memories
                 ) WHERE rn = 1
-            );
-            DROP TABLE memories;
+            );"
+        );
+        tx.execute_batch(&insert_sql)?;
+        tx.execute_batch(
+            "DROP TABLE memories;
             ALTER TABLE memories_v7 RENAME TO memories;
             CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
             CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key);

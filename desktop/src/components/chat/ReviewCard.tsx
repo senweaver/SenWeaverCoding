@@ -99,10 +99,10 @@ export function ReviewCard() {
               type="button"
               onClick={onStop}
               title={t('chat.stopTitle')}
-              className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] leading-none text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"
             >
-              <span>{t('review.stop')}</span>
-              <kbd className="font-[var(--font-mono)] text-[10px] text-[var(--color-text-tertiary)]">
+              <span className="leading-none">{t('review.stop')}</span>
+              <kbd className="inline-flex items-center leading-none font-[var(--font-mono)] text-[10px] text-[var(--color-text-tertiary)]">
                 {t('review.stopShortcut')}
               </kbd>
             </button>

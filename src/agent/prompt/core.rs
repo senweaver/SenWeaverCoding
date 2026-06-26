@@ -392,6 +392,35 @@ impl PromptSection for ContextReferenceSection {
         }
         out.push('\n');
 
+        let outline = has_tool("code_outline");
+        let graph = has_tool("code_graph_query");
+        let lsp = has_tool("lsp");
+        if outline || graph || lsp {
+            out.push_str(
+                "- To understand code structure precisely instead of loading whole files: ",
+            );
+            let mut parts: Vec<&str> = Vec::new();
+            if outline {
+                parts.push(
+                    "`code_outline` maps a source file's functions/classes/structs/traits with their line numbers",
+                );
+            }
+            if graph {
+                parts.push(
+                    "`code_graph_query` traces callers/implementors and cross-file relationships of a symbol",
+                );
+            }
+            if lsp {
+                parts.push(
+                    "`lsp` resolves go-to-definition / find-references / hover for an exact symbol",
+                );
+            }
+            out.push_str(&parts.join("; "));
+            out.push_str(
+                ". Use these to pinpoint the minimal relevant symbols, then `file_read` only that range (`offset`/`limit`, or `level: \"signatures\"`) rather than the entire file.\n",
+            );
+        }
+
         out.push_str(
             "- Office documents (`.docx`, `.xlsx`, `.pptx`) and `.pdf` are readable: `file_read` extracts their text automatically (use `offset`/`limit`/`level: \"smart\"` for large ones). Content search tools cannot see inside these binary formats, so always use `file_read` for them.\n",
         );
@@ -539,8 +568,21 @@ impl PromptSection for RuntimeSection {
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
         let host =
             hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
+        let shell_policy = if cfg!(target_os = "windows") {
+            "\n\nShell: the `shell` tool runs commands through `cmd.exe /C` (NOT bash). \
+             Unix-only utilities (`grep`, `head`, `tail`, `wc`, `sed`, `awk`, `cat`, `ls`, \
+             `which`, `uname`) are NOT available by default and will fail with \
+             \"not recognized as an internal or external command\". To search file contents use \
+             the `content_search` tool; to read files use the `read_file` tool. If you must use \
+             `shell`, use Windows/CMD equivalents: `dir` (list), `type` (read), `findstr` \
+             (filter), `where` (locate), `more` (page). For richer text processing prefer the \
+             `powershell` tool (`Select-String`, `Get-Content -TotalCount`, `Measure-Object`). \
+             Do not pipe into `grep`/`head`/`tail`/`wc`."
+        } else {
+            ""
+        };
         Ok(format!(
-            "## Runtime\n\nHost: {host} | OS: {} | Model: {}",
+            "## Runtime\n\nHost: {host} | OS: {} | Model: {}{shell_policy}",
             std::env::consts::OS,
             ctx.model_name
         ))

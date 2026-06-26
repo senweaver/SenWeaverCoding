@@ -4,6 +4,8 @@
 
 pub const MAX_CURATOR_NUDGES: usize = 4;
 
+pub const HARD_CURATOR_NUDGE_LIMIT: usize = 12;
+
 pub const CURATOR_MODE_NUDGE_MESSAGE: &str =
     "[Curator-Mode Enforcement] You ended your response without calling \
      `exit_curator_mode`. In Curator mode this is invalid  -  the deliverable \
@@ -32,6 +34,7 @@ pub const CURATOR_MODE_NUDGE_STRONG: &str =
 pub struct CuratorModeNudgeState {
     pub exit_curator_mode_called: bool,
     pub nudge_count: usize,
+    pub stop_without_exit: usize,
 }
 
 impl CuratorModeNudgeState {
@@ -41,6 +44,11 @@ impl CuratorModeNudgeState {
 
     pub fn note_exit_curator_mode_success(&mut self) {
         self.exit_curator_mode_called = true;
+    }
+
+    pub fn note_stop_without_exit(&mut self) {
+        self.stop_without_exit = self.stop_without_exit.saturating_add(1);
+        self.nudge_count = self.nudge_count.saturating_add(1);
     }
 }
 
@@ -72,6 +80,16 @@ pub fn evaluate_curator_mode_exit(
         return CuratorModeExitDecision::Allow;
     }
     if !in_curator_mode || state.exit_curator_mode_called {
+        return CuratorModeExitDecision::Allow;
+    }
+    if state.stop_without_exit >= HARD_CURATOR_NUDGE_LIMIT {
+        tracing::error!(
+            target: "agent.curator_mode",
+            nudge_count = state.nudge_count,
+            stop_without_exit = state.stop_without_exit,
+            "Curator mode: model ended its turn without exit_curator_mode past the hard \
+             live-lock limit; stopping nudges (provider/model is not honoring exit_curator_mode)"
+        );
         return CuratorModeExitDecision::Allow;
     }
     if state.nudge_count >= MAX_CURATOR_NUDGES {

@@ -115,33 +115,36 @@ impl ToolLoopDedup {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PacingGovernor {
-    max_iterations: usize,
+    no_progress_limit: usize,
     step_timeout: Option<Duration>,
     total_timeout: Option<Duration>,
     turn_started: Instant,
     iteration: usize,
+    no_progress_streak: usize,
 }
 
 impl PacingGovernor {
     pub fn new(
-        max_iterations: usize,
+        no_progress_limit: usize,
         step_timeout: Option<Duration>,
         total_timeout: Option<Duration>,
     ) -> Self {
         Self {
-            max_iterations: max_iterations.max(1),
+            no_progress_limit: no_progress_limit.max(1),
             step_timeout,
             total_timeout,
             turn_started: Instant::now(),
             iteration: 0,
+            no_progress_streak: 0,
         }
     }
 
     pub fn tick(&mut self) -> Result<usize, PacingExceeded> {
         self.iteration += 1;
-        if self.iteration > self.max_iterations {
+        self.no_progress_streak += 1;
+        if self.no_progress_streak > self.no_progress_limit {
             return Err(PacingExceeded::IterationBudget {
-                limit: self.max_iterations,
+                limit: self.no_progress_limit,
             });
         }
         if let Some(total) = self.total_timeout {
@@ -150,6 +153,10 @@ impl PacingGovernor {
             }
         }
         Ok(self.iteration)
+    }
+
+    pub fn note_progress(&mut self) {
+        self.no_progress_streak = 0;
     }
 
     pub fn step_deadline(&self) -> Option<Instant> {
@@ -161,13 +168,13 @@ impl PacingGovernor {
     }
 
     pub fn remaining_iterations(&self) -> usize {
-        self.max_iterations.saturating_sub(self.iteration)
+        self.no_progress_limit.saturating_sub(self.no_progress_streak)
     }
 }
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum PacingExceeded {
-    #[error("exceeded iteration budget (limit={limit})")]
+    #[error("no forward progress for {limit} consecutive iterations")]
     IterationBudget { limit: usize },
     #[error("exceeded total turn timeout (limit={limit:?})")]
     TotalTimeout { limit: Duration },

@@ -489,10 +489,13 @@ pub fn plan_execution_reminder() -> &'static str {
          flips at the end of the run. The user's progress UI is fed by every single call; \
          batching freezes the bar at 0/N then jumps to N/N at the end, which is exactly what \
          they DON'T want. \
-     If you loaded the plan from disk and the in-memory tracker is empty, fire \
-     `update_plan(action=\"set\", steps=[…])` ONCE at the very start to seed it, then proceed \
-     step-by-step. Use `skipped` (with a `notes` reason) for steps that turn out unnecessary —\
-     never silently leave them `pending`.\n\n\
+     SEEDING RULE (do this AT MOST ONCE, only at the very start): call `update_plan(action=\"get\")` \
+     first; ONLY if it returns an empty tracker, fire `update_plan(action=\"set\", steps=[…])` ONE \
+     time to seed it. Once ANY step has advanced past `pending` (or you have already seeded/loaded \
+     this turn), NEVER call `set` or `load` again — they would wipe live progress back to 0/N and \
+     restart the run. From that point use ONLY `update` to flip individual steps. Use `skipped` \
+     (with a `notes` reason) for steps that turn out unnecessary — never silently leave them \
+     `pending`.\n\n\
      [Plan Sync — DON'T FORGET THE LAST STEP] The single most common bug in plan execution is \
      finishing the actual work, writing a long Markdown summary like \"all fixes complete\" / \
      \"全部修复完成\", and then exiting WITHOUT firing the final \

@@ -2719,13 +2719,13 @@ pub(crate) async fn run_unified_loop_impl(
 
     let mut turn_tool_results: Vec<(String, bool)> = Vec::new();
 
-    for iteration in 0..max_iterations {
+    for iteration in 0..usize::MAX {
         if let Err(budget_exceeded) = _pacing_gov.tick() {
             tracing::warn!(
                 target: "agent.pacing",
                 turn_id = %turn_id,
                 reason = %budget_exceeded,
-                "agent turn pacing budget exceeded; ending turn gracefully"
+                "agent turn made no forward progress for too long; ending turn gracefully"
             );
             pacing_break_reason = Some(budget_exceeded);
             break;
@@ -3031,12 +3031,32 @@ pub(crate) async fn run_unified_loop_impl(
                     compression_cfg,
                     context_window,
                 );
-                let preserved_user_indices: Vec<usize> = history
-                    .iter()
-                    .rposition(|m| m.role == "user" && m.content.contains("[CURRENT REQUEST"))
-                    .or_else(|| history.iter().rposition(|m| m.role == "user"))
-                    .map(|idx| vec![idx])
-                    .unwrap_or_default();
+                let preserved_fn: Box<crate::agent::context::compressor::PreservedIndexFn> =
+                    Box::new(|h: &[crate::providers::traits::ChatMessage]| {
+                        let current = h
+                            .iter()
+                            .rposition(|m| {
+                                m.role == "user" && m.content.contains("[CURRENT REQUEST")
+                            })
+                            .or_else(|| h.iter().rposition(|m| m.role == "user"));
+                        let mut idxs: Vec<usize> = Vec::new();
+                        if let Some(cur) = current {
+                            idxs.push(cur);
+                            if let Some(note_pos) = h[..cur].iter().rposition(|m| {
+                                m.role == "assistant"
+                                    && crate::agent::dangling_tool_repair::is_interrupted_turn_note(
+                                        &m.content,
+                                    )
+                            }) && let Some(prior_user) =
+                                h[..note_pos].iter().rposition(|m| m.role == "user")
+                            {
+                                idxs.push(prior_user);
+                            }
+                        }
+                        idxs.sort_unstable();
+                        idxs.dedup();
+                        idxs
+                    });
                 if let Some(ref tx) = on_delta {
                     let _ = tx
                         .send(DraftEvent::Progress(
@@ -3063,7 +3083,7 @@ pub(crate) async fn run_unified_loop_impl(
                         history,
                         provider,
                         model,
-                        &preserved_user_indices,
+                        Some(&*preserved_fn),
                         progress_cb.as_deref(),
                     );
                     if let Some(token) = cancellation_token.as_ref() {
@@ -3728,11 +3748,11 @@ pub(crate) async fn run_unified_loop_impl(
                 if !response_text.trim().is_empty() {
                     history.push(ChatMessage::assistant(&response_text));
                 }
+                plan_nudge_state.note_stop_without_exit();
                 let msg = crate::agent::plan_mode::enforcement::nudge_message(
                     &plan_nudge_state,
                 );
                 history.push(ChatMessage::system(msg));
-                plan_nudge_state.nudge_count += 1;
                 continue;
             }
 
@@ -3754,11 +3774,11 @@ pub(crate) async fn run_unified_loop_impl(
                 if !response_text.trim().is_empty() {
                     history.push(ChatMessage::assistant(&response_text));
                 }
+                plan_exec_nudge_state.note_nudge_issued();
                 let msg = crate::agent::plan_mode::execution_enforcement::nudge_message(
                     &plan_exec_nudge_state,
                 );
                 history.push(ChatMessage::system(msg));
-                plan_exec_nudge_state.nudge_count += 1;
                 continue;
             }
 
@@ -3789,11 +3809,11 @@ pub(crate) async fn run_unified_loop_impl(
                     if !response_text.trim().is_empty() {
                         history.push(ChatMessage::assistant(&response_text));
                     }
+                    curator_nudge_state.note_stop_without_exit();
                     let msg = crate::agent::curator_mode_enforcement::nudge_message(
                         &curator_nudge_state,
                     );
                     history.push(ChatMessage::system(msg));
-                    curator_nudge_state.nudge_count += 1;
                     continue;
                 }
             }
@@ -4909,6 +4929,7 @@ pub(crate) async fn run_unified_loop_impl(
         let mut detection_fingerprint_hasher =
             std::collections::hash_map::DefaultHasher::new();
         let mut detection_has_payload = false;
+        let mut batch_had_success = false;
 
         for (result_index, (tool_name, tool_call_id, outcome)) in ordered_results
             .into_iter()
@@ -4986,6 +5007,7 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             turn_tool_results.push((tool_name.clone(), outcome.success));
+            batch_had_success |= outcome.success;
 
             crate::agent::profile::runtime_hooks::publish_tool_event(
                 &tool_name,
@@ -5031,6 +5053,10 @@ pub(crate) async fn run_unified_loop_impl(
                 "<tool_result name=\"{}\">\n{}\n</tool_result>",
                 tool_name, safe_output
             );
+        }
+
+        if batch_had_success {
+            _pacing_gov.note_progress();
         }
 
         if plan_exec_nudge_state.inline_progress_reminder_due(iteration + 1) {
@@ -5308,7 +5334,7 @@ pub(crate) async fn run_unified_loop_impl(
             "agent turn exceeded total time budget"
         }
         Some(crate::agent::executor_core::PacingExceeded::IterationBudget { .. }) | None => {
-            "agent exceeded maximum tool iterations"
+            "agent made no forward progress for too many consecutive iterations"
         }
     };
     runtime_trace::record_event(
@@ -5349,10 +5375,10 @@ pub(crate) async fn run_unified_loop_impl(
             limit.as_secs()
         ),
         Some(crate::agent::executor_core::PacingExceeded::IterationBudget { limit }) => format!(
-            "已达到本轮迭代步数预算（{limit}），为避免无限循环在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+            "连续 {limit} 轮迭代未取得任何进展，为避免空转在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
         ),
         None => format!(
-            "已达到本轮最大迭代步数（{max_iterations}），为避免无限循环在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+            "连续多轮迭代未取得任何进展（无进展上限 {max_iterations}），为避免空转在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
         ),
     };
     _turn_metrics.mark_ok();
