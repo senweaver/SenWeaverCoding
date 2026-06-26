@@ -12,6 +12,16 @@ const SAFE_EXIT_TIMEOUT_MS = 12_000
 
 let exiting = false
 
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== 'function') {
+      setTimeout(resolve, 32)
+      return
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
+
 export function getCloseBehavior(): CloseBehavior {
   try {
     const fromStore = useSettingsStore.getState().closeBehavior
@@ -45,10 +55,11 @@ export async function performSafeExit(): Promise<void> {
   exiting = true
   const ui = useUIStore.getState()
   ui.setClosePromptOpen(false)
+  ui.setSafeExiting(true)
+  await waitForNextPaint()
   try {
     const runningIds = Array.from(useSessionRunStateStore.getState().running)
     if (runningIds.length > 0) {
-      ui.setSafeExiting(true)
       const chat = useChatStore.getState()
       for (const id of runningIds) {
         try {

@@ -39,6 +39,8 @@ const AGENT_WORKER_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 static GATEWAY_CHILD_PID: Mutex<Option<u32>> = Mutex::new(None);
 
+static QUIT_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) fn warn_emit_failure(
     counter: &std::sync::atomic::AtomicU64,
     site: &str,
@@ -788,7 +790,20 @@ fn signal_frontend_ready(
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
-    app.exit(0);
+    if QUIT_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        app.exit(0);
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let shutdown_handle = handle.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            process_lifetime::run_full_shutdown(&shutdown_handle, Duration::from_secs(8));
+            kill_gateway_child();
+        })
+        .await;
+        handle.exit(0);
+    });
 }
 
 #[cfg(target_os = "windows")]
