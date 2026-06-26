@@ -225,7 +225,27 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: desktop
-        run: bun install --frozen-lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          attempt=1
+          max=5
+          delay=20
+          while true; do
+            if bun install --frozen-lockfile; then
+              break
+            fi
+            if [ "$attempt" -ge "$max" ]; then
+              echo "::error::bun install failed after ${max} attempts" >&2
+              exit 1
+            fi
+            echo "bun install attempt ${attempt} failed; clearing cache and retrying in ${delay}s..." >&2
+            bun pm cache rm || true
+            rm -rf node_modules || true
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay + 15))
+          done
 
       - name: Prefetch cargo dependencies
         shell: bash
