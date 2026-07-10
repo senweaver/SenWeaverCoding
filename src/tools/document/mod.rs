@@ -4,6 +4,8 @@
 
 pub mod common;
 pub mod convert;
+pub mod font_discovery;
+pub mod pdf_font;
 pub mod pdf_ops;
 pub mod pdf_render;
 pub mod presentation;

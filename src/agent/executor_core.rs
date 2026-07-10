@@ -113,41 +113,86 @@ impl ToolLoopDedup {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+pub const PACING_GUARD_PREFIXES: [&str; 4] = [
+    "[Progress Guard]",
+    "[Token Budget]",
+    "[Iteration Ceiling]",
+    "[Time Budget]",
+];
+
+pub fn is_pacing_guard_message(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    PACING_GUARD_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+#[derive(Debug, Clone)]
+pub struct PacingBudget {
+    pub no_progress_limit: usize,
+    pub absolute_iteration_limit: usize,
+    pub total_timeout: Option<Duration>,
+    pub token_soft_cap: u64,
+    pub token_hard_cap: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct PacingGovernor {
-    no_progress_limit: usize,
-    step_timeout: Option<Duration>,
-    total_timeout: Option<Duration>,
+    budget: PacingBudget,
     turn_started: Instant,
     iteration: usize,
     no_progress_streak: usize,
+    tokens_since_progress: u64,
+    total_generated_tokens: u64,
+    no_progress_warned: bool,
+    token_soft_warned: bool,
+    absolute_warned: bool,
+    timeout_warned: bool,
 }
 
 impl PacingGovernor {
-    pub fn new(
-        no_progress_limit: usize,
-        step_timeout: Option<Duration>,
-        total_timeout: Option<Duration>,
-    ) -> Self {
+    pub fn new(budget: PacingBudget) -> Self {
+        let budget = PacingBudget {
+            no_progress_limit: budget.no_progress_limit.max(1),
+            absolute_iteration_limit: budget.absolute_iteration_limit.max(1),
+            ..budget
+        };
         Self {
-            no_progress_limit: no_progress_limit.max(1),
-            step_timeout,
-            total_timeout,
+            budget,
             turn_started: Instant::now(),
             iteration: 0,
             no_progress_streak: 0,
+            tokens_since_progress: 0,
+            total_generated_tokens: 0,
+            no_progress_warned: false,
+            token_soft_warned: false,
+            absolute_warned: false,
+            timeout_warned: false,
         }
     }
 
     pub fn tick(&mut self) -> Result<usize, PacingExceeded> {
         self.iteration += 1;
         self.no_progress_streak += 1;
-        if self.no_progress_streak > self.no_progress_limit {
-            return Err(PacingExceeded::IterationBudget {
-                limit: self.no_progress_limit,
+        if self.iteration > self.budget.absolute_iteration_limit {
+            return Err(PacingExceeded::AbsoluteIterations {
+                limit: self.budget.absolute_iteration_limit,
             });
         }
-        if let Some(total) = self.total_timeout {
+        if self.no_progress_streak > self.budget.no_progress_limit {
+            return Err(PacingExceeded::IterationBudget {
+                limit: self.budget.no_progress_limit,
+            });
+        }
+        if self.budget.token_hard_cap > 0
+            && self.tokens_since_progress >= self.budget.token_hard_cap
+        {
+            return Err(PacingExceeded::TokenBudget {
+                used: self.tokens_since_progress,
+                limit: self.budget.token_hard_cap,
+            });
+        }
+        if let Some(total) = self.budget.total_timeout {
             if self.turn_started.elapsed() > total {
                 return Err(PacingExceeded::TotalTimeout { limit: total });
             }
@@ -157,18 +202,95 @@ impl PacingGovernor {
 
     pub fn note_progress(&mut self) {
         self.no_progress_streak = 0;
+        self.tokens_since_progress = 0;
+        self.no_progress_warned = false;
+        self.token_soft_warned = false;
     }
 
-    pub fn step_deadline(&self) -> Option<Instant> {
-        self.step_timeout.map(|d| Instant::now() + d)
+    pub fn record_generated_tokens(&mut self, tokens: u64) {
+        self.tokens_since_progress = self.tokens_since_progress.saturating_add(tokens);
+        self.total_generated_tokens = self.total_generated_tokens.saturating_add(tokens);
+    }
+
+    pub fn drain_warnings(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let nudge_at = (self.budget.no_progress_limit / 2).max(1);
+        if !self.no_progress_warned && self.no_progress_streak >= nudge_at {
+            self.no_progress_warned = true;
+            warnings.push(format!(
+                "[Progress Guard] {} consecutive iterations have passed without a single \
+                 successful tool call; the turn will stop safely after {} consecutive \
+                 no-progress iterations. Step back and change strategy: re-read the recent \
+                 errors, try a different tool or different arguments, break the problem into \
+                 smaller verifiable steps, or ask the user for guidance. Any successful tool \
+                 call resets this counter, so keep working toward the user's task.",
+                self.no_progress_streak, self.budget.no_progress_limit
+            ));
+        }
+        if !self.token_soft_warned
+            && self.budget.token_soft_cap > 0
+            && self.tokens_since_progress >= self.budget.token_soft_cap
+        {
+            self.token_soft_warned = true;
+            warnings.push(format!(
+                "[Token Budget] Roughly {} tokens have been generated since the last \
+                 successful tool call; the turn will stop safely at {}. Stop broad \
+                 exploration, pick the single most promising next action and make it \
+                 succeed, or ask the user for guidance. Any successful tool call resets \
+                 this budget, so keep working toward the user's task.",
+                self.tokens_since_progress, self.budget.token_hard_cap
+            ));
+        }
+        let absolute_nudge_at = self
+            .budget
+            .absolute_iteration_limit
+            .saturating_sub(self.budget.absolute_iteration_limit / 10)
+            .max(1);
+        if !self.absolute_warned && self.iteration >= absolute_nudge_at {
+            self.absolute_warned = true;
+            warnings.push(format!(
+                "[Iteration Ceiling] This turn has used {} of the {} allowed iterations. \
+                 Prioritize finishing the user's task now: complete the most important \
+                 remaining step, then summarize what was done and what still needs doing \
+                 so work can continue seamlessly in the next turn.",
+                self.iteration, self.budget.absolute_iteration_limit
+            ));
+        }
+        if let Some(total) = self.budget.total_timeout {
+            let elapsed = self.turn_started.elapsed();
+            if !self.timeout_warned && elapsed >= total.mul_f32(0.8) {
+                self.timeout_warned = true;
+                warnings.push(format!(
+                    "[Time Budget] This turn has been running for {}s of its {}s limit. \
+                     Prioritize finishing the user's task now: complete the most important \
+                     remaining step, then summarize progress so work can continue in the \
+                     next turn.",
+                    elapsed.as_secs(),
+                    total.as_secs()
+                ));
+            }
+        }
+        warnings
     }
 
     pub fn iteration(&self) -> usize {
         self.iteration
     }
 
+    pub fn total_generated_tokens(&self) -> u64 {
+        self.total_generated_tokens
+    }
+
     pub fn remaining_iterations(&self) -> usize {
-        self.no_progress_limit.saturating_sub(self.no_progress_streak)
+        let no_progress = self
+            .budget
+            .no_progress_limit
+            .saturating_sub(self.no_progress_streak);
+        let absolute = self
+            .budget
+            .absolute_iteration_limit
+            .saturating_sub(self.iteration);
+        no_progress.min(absolute)
     }
 }
 
@@ -176,8 +298,12 @@ impl PacingGovernor {
 pub enum PacingExceeded {
     #[error("no forward progress for {limit} consecutive iterations")]
     IterationBudget { limit: usize },
+    #[error("reached the absolute per-turn iteration ceiling of {limit}")]
+    AbsoluteIterations { limit: usize },
     #[error("exceeded total turn timeout (limit={limit:?})")]
     TotalTimeout { limit: Duration },
+    #[error("generated ~{used} tokens without forward progress (hard cap {limit})")]
+    TokenBudget { used: u64, limit: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +328,19 @@ impl DispatchMode {
             return DispatchMode::Sequential;
         }
         if tool_names.iter().any(|n| needs_approval(n.as_ref())) {
+            return DispatchMode::Sequential;
+        }
+        // Two or more file-mutation tools in one batch must run sequentially:
+        // the per-session file write lock is reentrant within a session, so two
+        // concurrent edits to the same path are NOT serialized by the lock and
+        // could interleave read-modify-write and lose updates. A single mutating
+        // tool alongside reads is fine (reads don't mutate), so only collapse to
+        // sequential when multiple writers are present.
+        let mutation_count = tool_names
+            .iter()
+            .filter(|n| crate::agent::mode::effects::is_file_mutation_tool(n.as_ref()))
+            .count();
+        if mutation_count >= 2 {
             return DispatchMode::Sequential;
         }
         DispatchMode::Parallel {

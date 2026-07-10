@@ -335,7 +335,27 @@ impl Channel for SignalChannel {
             let mut buffer = String::new();
             let mut current_data = String::new();
 
-            while let Some(chunk) = bytes_stream.next().await {
+            const READ_IDLE_TIMEOUT_SECS: u64 = 120;
+
+            loop {
+                let next = match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(READ_IDLE_TIMEOUT_SECS),
+                    bytes_stream.next(),
+                )
+                .await
+                {
+                    Ok(item) => item,
+                    Err(_) => {
+                        tracing::warn!(
+                            "Signal SSE: no data for {READ_IDLE_TIMEOUT_SECS}s; \
+                             treating stream as dead and reconnecting"
+                        );
+                        break;
+                    }
+                };
+                let Some(chunk) = next else {
+                    break;
+                };
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {

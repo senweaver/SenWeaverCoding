@@ -19,7 +19,15 @@ pub struct FileEditNotice {
 
 #[must_use]
 pub fn relativize_for_workspace(path: &Path) -> PathBuf {
-    let workspace = std::env::current_dir().ok().unwrap_or_default();
+    // Prefer the active session's workspace dir (task-local) over the process
+    // CWD: the desktop runs many concurrent sessions in one process, each with a
+    // different workspace, so a process-global CWD would relativize FileEdit
+    // events against the wrong root and mis-attribute them in the diff panel.
+    let workspace = crate::session::current_session_context()
+        .map(|ctx| PathBuf::from(ctx.workspace_dir))
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
     if workspace.as_os_str().is_empty() {
         return path.to_path_buf();
     }

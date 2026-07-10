@@ -69,6 +69,7 @@ const EDIT_TOOLS: &[&str] = &[
     "glob_edit",
     "notebook_edit",
     "patch_apply",
+    "diff_apply",
     "lsp_rename",
     "restore_file",
     "copy_path",

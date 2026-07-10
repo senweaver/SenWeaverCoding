@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
-import type { AttachmentRef } from '../types/chat'
+import type { AttachmentRef, DesignGenerationOptions } from '../types/chat'
 import type { SessionListItem } from '../types/session'
 import { useSessionStore } from './sessionStore'
 import { useSessionRunStateStore } from './sessionRunStateStore'
@@ -34,7 +34,10 @@ export type QueuedItem = {
   workspaceKey: string
   content: string
   attachments?: AttachmentRef[]
-  options?: { displayContent?: string }
+  options?: {
+    displayContent?: string
+    designGeneration?: DesignGenerationOptions
+  }
   queuedAt: number
 }
 
@@ -47,7 +50,10 @@ type WorkspaceQueueStore = {
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
-    options?: { displayContent?: string },
+    options?: {
+      displayContent?: string
+      designGeneration?: DesignGenerationOptions
+    },
   ) => string
   cancel: (itemId: string) => void
   cancelAllForSession: (sessionId: string) => void
@@ -234,6 +240,21 @@ export function useQueueLengthForSession(sessionId: string | null | undefined): 
   })
 }
 
+const lastDrainedBySession = new Map<string, { item: QueuedItem; drainedAt: number }>()
+const DRAIN_REQUEUE_WINDOW_MS = 30_000
+
+export function takeLastDrainedItem(sessionId: string): QueuedItem | null {
+  const entry = lastDrainedBySession.get(sessionId)
+  if (!entry) return null
+  lastDrainedBySession.delete(sessionId)
+  if (Date.now() - entry.drainedAt > DRAIN_REQUEUE_WINDOW_MS) return null
+  return entry.item
+}
+
+export function requeueRejectedItem(item: QueuedItem): void {
+  useWorkspaceQueueStore.getState().unshift(item)
+}
+
 export async function tryDrainWorkspace(workspaceKey: string): Promise<void> {
   const store = useWorkspaceQueueStore.getState()
   const running = useSessionRunStateStore.getState().running
@@ -250,9 +271,10 @@ export async function tryDrainWorkspace(workspaceKey: string): Promise<void> {
     else delete queues[workspaceKey]
     return { queues }
   })
+  lastDrainedBySession.set(head.sessionId, { item: head, drainedAt: Date.now() })
   const { useChatStore } = await import('./chatStore')
   useChatStore.getState().sendMessage(head.sessionId, head.content, head.attachments, {
     ...(head.options ?? {}),
     __internalDrain: true,
-  } as { displayContent?: string; __internalDrain?: boolean })
+  })
 }

@@ -73,6 +73,8 @@ use uuid::Uuid;
 
 pub const MAX_BODY_SIZE: usize = 65_536;
 
+pub const AGENT_MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
+
 static GATEWAY_EVENT_TX: std::sync::OnceLock<
     tokio::sync::broadcast::Sender<serde_json::Value>,
 > = std::sync::OnceLock::new();
@@ -119,11 +121,20 @@ pub fn emit_session_task_update(
 
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+pub const AGENT_REQUEST_TIMEOUT_SECS: u64 = 600;
+
 pub fn gateway_request_timeout_secs() -> u64 {
     std::env::var("SEN_GATEWAY_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(REQUEST_TIMEOUT_SECS)
+}
+
+pub fn gateway_agent_timeout_secs() -> u64 {
+    std::env::var("SEN_GATEWAY_AGENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(AGENT_REQUEST_TIMEOUT_SECS)
 }
 
 use crate::gateway::cors::desktop_cors_layer;
@@ -305,6 +316,7 @@ pub struct AppState {
 
     pub webhook_secret_hash: Option<Arc<str>>,
     pub pairing: Arc<PairingGuard>,
+    pub admin_token: Option<Arc<str>>,
     pub trust_forwarded_headers: bool,
 
     pub exposed: bool,
@@ -1219,7 +1231,17 @@ async fn run_gateway_inner(
         .gmail_push
         .as_ref()
         .filter(|gp| gp.enabled)
-        .map(|gp| Arc::new(GmailPushChannel::new(gp.clone())));
+        .and_then(|gp| match GmailPushChannel::new(gp.clone()) {
+            Ok(channel) => Some(Arc::new(channel)),
+            Err(error) => {
+                tracing::error!(
+                    target: "gateway.gmail_push",
+                    %error,
+                    "Gmail push channel disabled: HTTP client construction failed"
+                );
+                None
+            }
+        });
 
     let session_backend: Option<Arc<dyn SessionBackend>> = if config.gateway.session_persistence {
         let backend_workspace_dir = config.workspace_dir.clone();
@@ -1292,18 +1314,19 @@ async fn run_gateway_inner(
         .as_deref()
         .filter(|p| !p.is_empty());
 
-    let tunnel = match crate::tunnel::create_tunnel(&config.tunnel) {
-        Ok(t) => t,
-        Err(err) => {
-            tracing::warn!(
-                provider = %config.tunnel.provider,
-                error = %err,
-                "gateway startup: tunnel construction failed; continuing in local-only mode \
-                 (the user can fix [tunnel] settings later without a restart-blocking error)"
-            );
-            None
-        }
-    };
+    let tunnel: Option<Arc<Box<dyn crate::tunnel::Tunnel>>> =
+        match crate::tunnel::create_tunnel(&config.tunnel) {
+            Ok(t) => t.map(Arc::new),
+            Err(err) => {
+                tracing::warn!(
+                    provider = %config.tunnel.provider,
+                    error = %err,
+                    "gateway startup: tunnel construction failed; continuing in local-only mode \
+                     (the user can fix [tunnel] settings later without a restart-blocking error)"
+                );
+                None
+            }
+        };
     let mut tunnel_url: Option<String> = None;
 
     if let Some(ref tun) = tunnel {
@@ -1312,6 +1335,7 @@ async fn run_gateway_inner(
             Ok(url) => {
                 println!(" - ? Tunnel active: {url}");
                 tunnel_url = Some(url);
+                spawn_tunnel_watchdog(Arc::clone(tun), host.to_string(), actual_port);
             }
             Err(e) => {
                 println!("\u{274C}  Tunnel failed to start: {e}");
@@ -1451,6 +1475,7 @@ async fn run_gateway_inner(
         auto_save: config.memory.auto_save,
         webhook_secret_hash,
         pairing,
+        admin_token: load_or_create_admin_token(&config),
         trust_forwarded_headers: config.gateway.trust_forwarded_headers,
         exposed: crate::security::pairing::is_public_bind(host) || tunnel_url.is_some(),
         signing_secret: config
@@ -1534,7 +1559,27 @@ async fn run_gateway_inner(
             "/api/computer/vision-models",
             get(computer::handle_vision_models),
         )
-        .route("/api/computer/stop", post(computer::handle_stop));
+        .route("/api/computer/stop", post(computer::handle_stop))
+        .route(
+            "/ws/computer-record/{rec_id}",
+            get(computer::record::handle_ws_record),
+        )
+        .route(
+            "/api/computer/recordings",
+            get(computer::record::handle_list_recordings),
+        )
+        .route(
+            "/api/computer/recordings/{name}",
+            axum::routing::delete(computer::record::handle_delete_recording),
+        )
+        .route(
+            "/api/computer/recordings/{name}/generate",
+            post(computer::record::handle_generate_recording_skill),
+        )
+        .route(
+            "/api/computer/recordings/{name}/rename",
+            post(computer::record::handle_rename_recording),
+        );
 
     #[cfg(feature = "lan-comms")]
     let lan_router: Router<AppState> = Router::new()
@@ -2181,6 +2226,7 @@ async fn run_gateway_inner(
             post(python_env_routes::handle_install_smart),
         )
         .route("/api/python/purge", post(python_env_routes::handle_purge))
+        .route("/api/python/cancel", post(python_env_routes::handle_cancel))
         .route(
             "/api/python/activation",
             get(python_env_routes::handle_activation),
@@ -2336,14 +2382,6 @@ async fn run_gateway_inner(
         .route("/metrics", get(handle_metrics))
         .route("/pair", post(handle_pair))
         .route("/pair/code", get(handle_pair_code))
-        .route("/webhook", post(handle_webhook))
-        .route("/whatsapp", get(handle_whatsapp_verify))
-        .route("/whatsapp", post(handle_whatsapp_message))
-        .route("/linq", post(handle_linq_webhook))
-        .route("/wati", get(handle_wati_verify))
-        .route("/wati", post(handle_wati_webhook))
-        .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
-        .route("/webhook/gmail", post(handle_gmail_push_webhook))
 
         .merge(api_routes);
 
@@ -2376,7 +2414,7 @@ async fn run_gateway_inner(
 
     #[cfg(feature = "plugins-wasm")]
     let inner = inner.route(
-        "/api/plugins",
+        "/api/plugins/wasm",
         get(api::plugins::plugin_routes::list_plugins),
     );
 
@@ -2458,18 +2496,40 @@ async fn run_gateway_inner(
         a2a_router
     };
 
+    let webhook_router = Router::new()
+        .route("/webhook", post(handle_webhook))
+        .route(
+            "/whatsapp",
+            get(handle_whatsapp_verify).post(handle_whatsapp_message),
+        )
+        .route("/linq", post(handle_linq_webhook))
+        .route("/wati", get(handle_wati_verify).post(handle_wati_webhook))
+        .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
+        .route("/webhook/gmail", post(handle_gmail_push_webhook))
+        .with_state(state.clone());
+
+    let long_running_router = Router::new()
+        .merge(agent_turn_router)
+        .merge(webhook_router)
+        .layer(RequestBodyLimitLayer::new(AGENT_MAX_BODY_SIZE))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(gateway_agent_timeout_secs()),
+        ))
+        .layer(desktop_cors_layer());
+
     let inner = inner
         .with_state(state)
 
         .merge(workers_router)
-        .merge(agent_turn_router)
         .merge(a2a_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(gateway_request_timeout_secs()),
         ))
-        .layer(desktop_cors_layer());
+        .layer(desktop_cors_layer())
+        .merge(long_running_router);
 
     #[cfg(feature = "lan-comms")]
     let inner = {
@@ -2628,6 +2688,56 @@ async fn run_gateway_inner(
     drop(_running_guard);
 
     Ok(())
+}
+
+fn spawn_tunnel_watchdog(tunnel: Arc<Box<dyn crate::tunnel::Tunnel>>, host: String, port: u16) {
+    crate::runtime::spawn_supervised("gateway.tunnel_watchdog", async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        let mut consecutive_failures = 0u32;
+        loop {
+            ticker.tick().await;
+            if crate::gateway::lifecycle::is_shutdown_requested() {
+                break;
+            }
+            if tunnel.health_check().await {
+                consecutive_failures = 0;
+                continue;
+            }
+            consecutive_failures += 1;
+            tracing::warn!(
+                tunnel = tunnel.name(),
+                consecutive_failures,
+                "tunnel health check failed"
+            );
+            if consecutive_failures < 2 {
+                continue;
+            }
+            tracing::warn!(tunnel = tunnel.name(), "restarting unhealthy tunnel");
+            if let Err(e) = tunnel.stop().await {
+                tracing::debug!(tunnel = tunnel.name(), error = %e, "tunnel stop before restart failed");
+            }
+            match tunnel.start(&host, port).await {
+                Ok(url) => {
+                    consecutive_failures = 0;
+                    tracing::info!(
+                        tunnel = tunnel.name(),
+                        url = %url,
+                        "tunnel restarted (public URL may have changed)"
+                    );
+                    println!(" - Tunnel restarted: {url}");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        tunnel = tunnel.name(),
+                        error = %e,
+                        "tunnel restart failed; will retry after the next failed health check"
+                    );
+                }
+            }
+        }
+    });
 }
 
 async fn run_gateway_post_shutdown_cleanup() {
@@ -2875,8 +2985,15 @@ async fn run_gateway_chat_with_tools(
     message: &str,
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
+    use futures_util::FutureExt;
     let config = state.config.lock().clone();
-    Box::pin(crate::agent::process_message(config, message, session_id)).await
+    let turn_fut = Box::pin(crate::agent::process_message(config, message, session_id));
+    match std::panic::AssertUnwindSafe(turn_fut).catch_unwind().await {
+        Ok(inner) => inner,
+        Err(_) => Err(anyhow::anyhow!(
+            "gateway turn panicked and was isolated to protect the process"
+        )),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2953,12 +3070,13 @@ async fn handle_webhook(
         }
     };
 
-    if let Some(idempotency_key) = headers
+    let idempotency_key: Option<String> = headers
         .get("X-Idempotency-Key")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
+        .map(str::to_owned);
+    if let Some(ref idempotency_key) = idempotency_key {
         if !state.idempotency_store.record_if_new(idempotency_key) {
             tracing::info!("Webhook duplicate ignored (idempotency key: {idempotency_key})");
             let body = serde_json::json!({
@@ -3074,6 +3192,11 @@ async fn handle_webhook(
                 });
 
             tracing::error!("Webhook provider error: {}", sanitized);
+            // Release the idempotency key so a client retry of this failed request
+            // is processed instead of being swallowed as a duplicate.
+            if let Some(ref idempotency_key) = idempotency_key {
+                state.idempotency_store.forget(idempotency_key);
+            }
             let err = serde_json::json!({"error": "LLM request failed"});
             (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
         }
@@ -3642,11 +3765,115 @@ fn require_localhost(peer: &SocketAddr) -> Result<(), (StatusCode, Json<serde_js
     }
 }
 
+pub const ADMIN_TOKEN_HEADER: &str = "x-sen-admin-token";
+pub const ADMIN_TOKEN_FILE: &str = "gateway-admin.token";
+
+pub fn admin_token_path(config: &Config) -> std::path::PathBuf {
+    crate::auth::state_dir_from_config(config).join(ADMIN_TOKEN_FILE)
+}
+
+pub fn read_admin_token(config: &Config) -> Option<String> {
+    let raw = std::fs::read_to_string(admin_token_path(config)).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn load_or_create_admin_token(config: &Config) -> Option<Arc<str>> {
+    if let Some(existing) = read_admin_token(config) {
+        return Some(Arc::from(existing));
+    }
+    let path = admin_token_path(config);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to create state dir for gateway admin token; admin endpoints fall back \
+                 to pairing-token auth"
+            );
+            return None;
+        }
+    }
+    let mut bytes = [0u8; 32];
+    if let Err(e) = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes) {
+        tracing::warn!(error = ?e, "failed to generate gateway admin token");
+        return None;
+    }
+    let token = hex::encode(bytes);
+    if let Err(e) = std::fs::write(&path, &token) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to persist gateway admin token; admin endpoints fall back to pairing-token \
+             auth"
+        );
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(Arc::from(token))
+}
+
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn require_admin(
+    state: &AppState,
+    peer: &SocketAddr,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    require_localhost(peer)?;
+
+    if let Some(expected) = state.admin_token.as_deref() {
+        let provided = headers
+            .get(ADMIN_TOKEN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !provided.is_empty() && constant_time_str_eq(expected, provided) {
+            return Ok(());
+        }
+    }
+
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !bearer.is_empty() && state.pairing.is_authenticated_strict(bearer) {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "error": "Admin endpoints require the gateway admin token (X-Sen-Admin-Token header, \
+                      stored next to the gateway config) or a paired Bearer token"
+        })),
+    ))
+}
+
 async fn handle_admin_shutdown(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    require_localhost(&peer)?;
+    require_admin(&state, &peer, &headers)?;
     tracing::info!(" - ? Admin shutdown request received  -  initiating graceful shutdown");
 
     let body = AdminResponse {
@@ -3662,8 +3889,9 @@ async fn handle_admin_shutdown(
 async fn handle_admin_paircode(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    require_localhost(&peer)?;
+    require_admin(&state, &peer, &headers)?;
     let code = state.pairing.pairing_code();
 
     let body = if let Some(c) = code {
@@ -3692,8 +3920,9 @@ async fn handle_admin_paircode(
 async fn handle_admin_paircode_new(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    require_localhost(&peer)?;
+    require_admin(&state, &peer, &headers)?;
     match state.pairing.generate_new_pairing_code() {
         Some(code) => {
             tracing::info!(" - ? New pairing code generated via admin endpoint");

@@ -216,10 +216,12 @@ pub struct RunnerSubmitOutcome {
     pub deletions: i32,
     pub validator_issues: Vec<String>,
     pub checkpoint_id: Option<String>,
+    pub edit_batch_id: Option<String>,
 }
 
 pub async fn run_through_runner(
     runner: &crate::inline_edit::InlineEditRunner,
+    workspace_dir: PathBuf,
     path: PathBuf,
     instruction: String,
 ) -> Result<RunnerSubmitOutcome, anyhow::Error> {
@@ -233,6 +235,7 @@ pub async fn run_through_runner(
         }
     };
     let len = source.len();
+    let description = instruction.chars().take(120).collect::<String>();
     let req = crate::inline_edit::InlineEditRequest {
         file_path: path.clone(),
         selection: source.clone(),
@@ -246,6 +249,53 @@ pub async fn run_through_runner(
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let (additions, deletions) = count_diff_lines(&outcome.diff);
+
+    let batch_id = uuid::Uuid::new_v4().to_string();
+    let history = crate::tools::edit_history::EditHistory::new(workspace_dir);
+    let snapshot_recorded = {
+        let history = history.clone();
+        let snap_path = path.clone();
+        let snap_batch = batch_id.clone();
+        tokio::task::spawn_blocking(move || {
+            history.snapshot_before_write_with_batch(
+                &snap_path,
+                "inline_edit",
+                &description,
+                Some(snap_batch),
+            )
+        })
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
+    };
+    if !snapshot_recorded {
+        tracing::warn!(
+            path = %path.display(),
+            "inline-edit: failed to record edit-history snapshot before write"
+        );
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+    // Conflict guard: the LLM ran on `source`; if the file changed underneath us
+    // (e.g. an agent turn edited it), do not blindly overwrite and lose that work.
+    if let Ok(current) = tokio::fs::read_to_string(&path).await {
+        if current != source {
+            return Err(anyhow::anyhow!(
+                "file {} changed on disk during inline edit; aborting to avoid overwriting concurrent changes",
+                path.display()
+            ));
+        }
+    }
+    let write_path = path.clone();
+    let write_bytes = outcome.applied.clone().into_bytes();
+    tokio::task::spawn_blocking(move || crate::util::atomic_write(&write_path, &write_bytes))
+        .await
+        .map_err(|e| anyhow::anyhow!("inline-edit write task join failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+
     Ok(RunnerSubmitOutcome {
         path,
         diff: outcome.diff,
@@ -253,6 +303,7 @@ pub async fn run_through_runner(
         deletions,
         validator_issues: outcome.validator_issues,
         checkpoint_id: outcome.checkpoint_id,
+        edit_batch_id: snapshot_recorded.then_some(batch_id),
     })
 }
 

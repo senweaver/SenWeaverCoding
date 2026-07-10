@@ -21,8 +21,14 @@ use crate::workers::supervisor::global_supervisor;
 
 pub async fn handle_ws_worker(
     Path(worker_id): Path<String>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(reject) =
+        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/worker")
+    {
+        return reject;
+    }
     ws.on_upgrade(move |socket| run_worker_socket(socket, worker_id))
         .into_response()
 }

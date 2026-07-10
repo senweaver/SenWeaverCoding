@@ -164,8 +164,13 @@ impl Tool for CustomTool {
             command.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let mut child = match command.spawn() {
-            Ok(c) => c,
+        let (_job_guard, mut child) = match crate::security::job_object::spawn_in_job(
+            command,
+            crate::security::job_object::JobLimits::unlimited(),
+        )
+        .await
+        {
+            Ok(pair) => pair,
             Err(err) => {
                 return Ok(ToolResult {
                     success: false,
@@ -214,8 +219,8 @@ impl Tool for CustomTool {
                 });
             }
             Err(_) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                crate::util::kill_child_process_tree(&mut child).await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),

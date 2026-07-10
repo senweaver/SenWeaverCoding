@@ -150,8 +150,16 @@ impl EditOp {
         &self,
         workspace_root: &Path,
     ) -> Result<(), PreconditionError> {
+        self.validate_preconditions_with_roots(workspace_root, &[])
+    }
+
+    pub fn validate_preconditions_with_roots(
+        &self,
+        workspace_root: &Path,
+        allowed_roots: &[PathBuf],
+    ) -> Result<(), PreconditionError> {
         for path in self.touched_paths() {
-            ensure_inside(workspace_root, path)?;
+            ensure_inside_any(workspace_root, allowed_roots, path)?;
         }
 
         match self {
@@ -403,12 +411,22 @@ fn ensure_range_in_bounds(
     Ok(())
 }
 
-fn ensure_inside(root: &Path, path: &Path) -> Result<(), PreconditionError> {
+fn ensure_inside_any(
+    root: &Path,
+    allowed_roots: &[PathBuf],
+    path: &Path,
+) -> Result<(), PreconditionError> {
     let normal = normalize(path);
     let root = normalize(root);
 
     if crate::util::path_is_within(&normal, &root) {
         return Ok(());
+    }
+    for extra in allowed_roots {
+        let extra = normalize(extra);
+        if crate::util::path_is_within(&normal, &extra) {
+            return Ok(());
+        }
     }
     Err(PreconditionError::PathEscape { path: normal })
 }

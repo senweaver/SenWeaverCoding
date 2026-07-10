@@ -131,6 +131,26 @@ impl SharedConfig {
     }
 
     pub fn store(&self, new_config: Config, changed_fields: Vec<String>) {
+        let report = crate::config::validator::ConfigValidator::new(&new_config).run();
+        if !report.is_ok() {
+            for section in &report.sections {
+                for error in &section.errors {
+                    tracing::warn!(
+                        target: "config.hot_reload",
+                        section = section.section,
+                        %error,
+                        "live config update failed validation"
+                    );
+                }
+            }
+            tracing::warn!(
+                target: "config.hot_reload",
+                total_errors = report.total_errors(),
+                changed_fields = ?changed_fields,
+                "rejecting invalid live config update; previous snapshot remains active"
+            );
+            return;
+        }
         self.inner.as_ref().store(Arc::new(new_config));
         let _ = self.notify.send(ConfigChangedEvent { changed_fields });
     }
@@ -191,16 +211,6 @@ impl SharedConfig {
         )
     }
 
-    pub fn store_validated(
-        &self,
-        new_config: Config,
-        changed_fields: Vec<String>,
-        validator: impl Fn(&Config) -> Result<(), String>,
-    ) -> Result<(), String> {
-        validator(&new_config)?;
-        self.store(new_config, changed_fields);
-        Ok(())
-    }
 }
 
 impl Clone for SharedConfig {
@@ -218,29 +228,3 @@ impl std::fmt::Debug for SharedConfig {
     }
 }
 
-pub mod validators {
-    use super::Config;
-
-    pub fn validate_temperature(cfg: &Config) -> Result<(), String> {
-        if !(0.0..=2.0).contains(&cfg.default_temperature) {
-            return Err(format!(
-                "default_temperature must be in [0.0, 2.0], got {}",
-                cfg.default_temperature
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn validate_provider_coherence(cfg: &Config) -> Result<(), String> {
-        if cfg.api_url.is_some() && cfg.default_provider.is_none() {
-            return Err("api_url set without default_provider".into());
-        }
-        Ok(())
-    }
-
-    pub fn validate_all(cfg: &Config) -> Result<(), String> {
-        validate_temperature(cfg)?;
-        validate_provider_coherence(cfg)?;
-        Ok(())
-    }
-}

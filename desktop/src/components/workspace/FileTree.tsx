@@ -479,6 +479,8 @@ export function FileTree({ workDir, onSelect }: Props) {
   const handleUploadToGroup = useCallback(
     (node: FileTreeNode) => {
       const abs = joinWorkspaceAbsPath(workDir, node.relPath)
+      useLanShareStore.getState().closePanel()
+      useUIStore.getState().closeTemplateLibrary()
       useLanGroupStore.getState().stageUpload(abs)
     },
     [workDir],
@@ -488,6 +490,8 @@ export function FileTree({ workDir, onSelect }: Props) {
     (node: FileTreeNode) => {
       const abs = joinWorkspaceAbsPath(workDir, node.relPath)
       void useLanShareStore.getState().addShare(abs)
+      useLanGroupStore.getState().closePanel()
+      useUIStore.getState().closeTemplateLibrary()
       useLanShareStore.getState().openPanel()
       addToast({ type: 'success', message: t('lanShare.sharedToast', { name: node.name }) })
     },

@@ -94,7 +94,13 @@ impl EditHistory {
         let state = self.state.read();
         let index_path = self.storage_dir.join(INDEX_FILE);
         if let Ok(json) = serde_json::to_string_pretty(&state.index) {
-            let _ = std::fs::write(&index_path, json);
+            if let Err(e) = crate::util::atomic_write(&index_path, json.as_bytes()) {
+                tracing::warn!(
+                    path = %index_path.display(),
+                    error = %e,
+                    "failed to persist edit-history index"
+                );
+            }
         }
     }
 
@@ -165,7 +171,7 @@ impl EditHistory {
 
         {
             let mut state = self.state.write();
-            let chain = state.index.files.entry(key).or_default();
+            let chain = state.index.files.entry(key.clone()).or_default();
 
             if let Some(last) = chain.last() {
                 if last.sha256 == snapshot.sha256 {
@@ -175,11 +181,27 @@ impl EditHistory {
 
             chain.push(snapshot);
 
+            let mut evicted = 0usize;
             while chain.len() > MAX_SNAPSHOTS_PER_FILE {
                 chain.remove(0);
+                evicted += 1;
             }
 
             let idx = chain.len().saturating_sub(1);
+
+            if evicted > 0 {
+                state.timeline.retain_mut(|ev| {
+                    if ev.path != key {
+                        return true;
+                    }
+                    if ev.snapshot_index < evicted {
+                        return false;
+                    }
+                    ev.snapshot_index -= evicted;
+                    true
+                });
+            }
+
             let mut ev = event;
             ev.snapshot_index = idx;
             state.timeline.push(ev);

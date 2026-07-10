@@ -229,44 +229,40 @@ impl RpcServer {
 
         let sessions = Arc::clone(&self.ctx.state);
         let timeout_secs = self.config.session_timeout_secs;
-        crate::runtime::spawn_supervised("rpc.session_reaper", async move {
-            let mut ticker = interval(Duration::from_secs(60));
-            loop {
-                ticker.tick().await;
-                let state_guard = sessions.read().await;
-                if let Some(ref state) = *state_guard {
-                    let mut sessions = state.sessions.lock().await;
-                    let before = sessions.len();
-                    let deadline = Duration::from_secs(timeout_secs);
-                    sessions.retain(|id, session| {
-                        let expired = session.last_active.elapsed() > deadline;
-                        if expired {
-                            info!("RPC: session {id} expired after inactivity");
+        let reaper_handle =
+            crate::runtime::spawn_supervised("rpc.session_reaper", async move {
+                let mut ticker = interval(Duration::from_secs(60));
+                loop {
+                    ticker.tick().await;
+                    let state_guard = sessions.read().await;
+                    if let Some(ref state) = *state_guard {
+                        let mut sessions = state.sessions.lock().await;
+                        let before = sessions.len();
+                        let deadline = Duration::from_secs(timeout_secs);
+                        sessions.retain(|id, session| {
+                            let expired = session.last_active.elapsed() > deadline;
+                            if expired {
+                                info!("RPC: session {id} expired after inactivity");
+                            }
+                            !expired
+                        });
+                        let reaped = before - sessions.len();
+                        if reaped > 0 {
+                            debug!("RPC: reaped {reaped} expired session(s)");
                         }
-                        !expired
-                    });
-                    let reaped = before - sessions.len();
-                    if reaped > 0 {
-                        debug!("RPC: reaped {reaped} expired session(s)");
                     }
                 }
-            }
-        });
+            });
 
-        match &self.config.transport {
-            RpcTransport::Stdio => {
-                self.run_stdio().await?;
-            }
+        let transport_result = match &self.config.transport {
+            RpcTransport::Stdio => self.run_stdio().await,
             #[cfg(unix)]
-            RpcTransport::UnixSocket { path, mode: _ } => {
-                self.run_unix_socket(path).await?;
-            }
-            RpcTransport::Http { host, port } => {
-                self.run_http(host, *port).await?;
-            }
-        }
+            RpcTransport::UnixSocket { path, mode: _ } => self.run_unix_socket(path).await,
+            RpcTransport::Http { host, port } => self.run_http(host, *port).await,
+        };
 
-        Ok(())
+        reaper_handle.abort();
+        transport_result
     }
 
     async fn run_stdio(&self) -> Result<()> {
@@ -299,7 +295,41 @@ impl RpcServer {
 
                             match serde_json::from_str::<JsonRpcRequest>(trimmed) {
                                 Ok(req) => {
-                                    ctx.handle_request(&req.method, req.params, req.id).await;
+                                    let ctx_req = Arc::clone(&ctx);
+                                    tokio::spawn(async move {
+                                        use futures_util::FutureExt as _;
+                                        let method = req.method.clone();
+                                        let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+                                        let outcome = std::panic::AssertUnwindSafe(
+                                            ctx_req.handle_request(
+                                                &req.method,
+                                                req.params,
+                                                req.id,
+                                            ),
+                                        )
+                                        .catch_unwind()
+                                        .await;
+                                        if let Err(panic_payload) = outcome {
+                                            let description = crate::util::describe_panic(
+                                                panic_payload.as_ref(),
+                                            );
+                                            tracing::error!(
+                                                method = %method,
+                                                panic = %description,
+                                                "RPC request handler panicked"
+                                            );
+                                            ctx_req
+                                                .write_error(
+                                                    id,
+                                                    crate::rpc::codec::RpcError::internal(
+                                                        format!(
+                                                            "request handler panicked: {description}"
+                                                        ),
+                                                    ),
+                                                )
+                                                .await;
+                                        }
+                                    });
                                 }
                                 Err(e) => {
                                     warn!("RPC: failed to parse JSON-RPC request: {e}");
@@ -400,7 +430,7 @@ impl RpcServer {
         let mut lines = BufReader::new(reader).lines();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
         let parse_err_tx = tx.clone();
-        ctx.set_stdout(tx).await;
+        let ctx = ctx.with_output(tx);
 
         let writer_handle =
             crate::runtime::task_manager::spawn_supervised("rpc.uds_writer", async move {
@@ -425,7 +455,36 @@ impl RpcServer {
 
             match serde_json::from_str::<JsonRpcRequest>(trimmed) {
                 Ok(req) => {
-                    ctx.handle_request(&req.method, req.params, req.id).await;
+                    let ctx_req = Arc::clone(&ctx);
+                    crate::runtime::spawn_supervised("rpc.uds_request", async move {
+                        use futures_util::FutureExt as _;
+                        let method = req.method.clone();
+                        let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+                        let outcome = std::panic::AssertUnwindSafe(ctx_req.handle_request(
+                            &req.method,
+                            req.params,
+                            req.id,
+                        ))
+                        .catch_unwind()
+                        .await;
+                        if let Err(panic_payload) = outcome {
+                            let description =
+                                crate::util::describe_panic(panic_payload.as_ref());
+                            tracing::error!(
+                                method = %method,
+                                panic = %description,
+                                "RPC UDS request handler panicked"
+                            );
+                            ctx_req
+                                .write_error(
+                                    id,
+                                    crate::rpc::codec::RpcError::internal(format!(
+                                        "request handler panicked: {description}"
+                                    )),
+                                )
+                                .await;
+                        }
+                    });
                 }
                 Err(e) => {
                     warn!("RPC UDS: failed to parse request: {e}");

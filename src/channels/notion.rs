@@ -63,7 +63,8 @@ impl NotionChannel {
             max_concurrent,
             status_type: Arc::new(RwLock::new("select".to_string())),
             inflight: Arc::new(RwLock::new(HashSet::new())),
-            http: reqwest::Client::new(),
+            http: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("channel.notion", 60, 15),
             recover_stale,
         }
     }

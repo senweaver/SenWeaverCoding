@@ -17,7 +17,7 @@ pub use discover::{
 };
 pub use events::{subscribe_events, PythonEnvEvent};
 pub use manager::{
-    create_venv, install_requirements, install_with_strategy, purge_venv, refresh_status,
-    select_interpreter, status_for, CreateOutcome, CreateTool, PythonEnvState,
+    cancel_workspace_tasks, create_venv, install_requirements, install_with_strategy, purge_venv,
+    refresh_status, select_interpreter, status_for, CreateOutcome, CreateTool, PythonEnvState,
     PythonInterpreterTool,
 };

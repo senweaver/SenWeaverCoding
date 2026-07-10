@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
+import { confirmDialog } from '../../lib/dialogs'
 import { useLanGroupStore } from '../../stores/lanGroupStore'
 import type { LanGroupSnapshot, LanTask, TaskInputPayload } from '../../types/lanGroup'
 import {
@@ -157,7 +158,7 @@ export function GroupBoard({
           onDelete={
             editor.task
               ? async () => {
-                  if (window.confirm(t('lanGroup.deleteTask'))) {
+                  if (await confirmDialog(t('lanGroup.deleteTask'))) {
                     await removeTask(groupId, editor.task!.id)
                     setEditor(null)
                   }

@@ -218,6 +218,27 @@ Examples:
 
         #[arg(long)]
         mode: Option<String>,
+
+        #[arg(long, value_name = "N")]
+        max_turns: Option<u32>,
+
+        #[arg(long, value_name = "FORMAT", value_parser = ["text", "json", "stream-json"])]
+        output_format: Option<String>,
+
+        #[arg(long, value_name = "ID")]
+        session_id: Option<String>,
+
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+
+        #[arg(long = "allowed-tool", value_name = "TOOL")]
+        allowed_tools: Vec<String>,
+
+        #[arg(long = "denied-tool", value_name = "TOOL")]
+        denied_tools: Vec<String>,
+
+        #[arg(long)]
+        remote: bool,
     },
 
     #[command(long_about = "\
@@ -1125,7 +1146,28 @@ enum TokensFiltersCommands {
 
 const AGENT_WORKER_STACK_SIZE: usize = 32 * 1024 * 1024;
 
+fn install_global_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = util::describe_panic(info.payload());
+        tracing::error!(
+            thread = %thread_name,
+            location = %location,
+            panic = %payload,
+            "thread panicked"
+        );
+        default_hook(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    install_global_panic_hook();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(AGENT_WORKER_STACK_SIZE)
@@ -1281,8 +1323,12 @@ async fn async_main() -> Result<()> {
                     .flush()
                     .context("Failed to flush stdout")?;
 
-                let mut answer = String::new();
-                std::io::stdin().read_line(&mut answer)?;
+                let answer = tokio::task::spawn_blocking(|| {
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer).map(|_| answer)
+                })
+                .await
+                .context("stdin read task failed")??;
                 if !answer.trim().eq_ignore_ascii_case("y") {
                     println!("Aborted.");
                     return Ok(());
@@ -1373,6 +1419,13 @@ async fn async_main() -> Result<()> {
         temperature: None,
         peripheral: vec![],
         mode: cli.mode.clone(),
+        max_turns: None,
+        output_format: None,
+        session_id: None,
+        cwd: None,
+        allowed_tools: vec![],
+        denied_tools: vec![],
+        remote: false,
     });
 
     match command {
@@ -1391,6 +1444,13 @@ async fn async_main() -> Result<()> {
             temperature,
             peripheral,
             mode,
+            max_turns,
+            output_format,
+            session_id,
+            cwd,
+            allowed_tools,
+            denied_tools,
+            remote,
         } => {
 
             senweavercoding::bootstrap::init_state(std::env::current_dir().unwrap_or_default());
@@ -1399,10 +1459,10 @@ async fn async_main() -> Result<()> {
                 if let Some(coding_mode) =
                     senweavercoding::agent::coding_mode::CodingMode::from_str_loose(mode_str)
                 {
-                    let _ = std::panic::catch_unwind(|| {
-                        let svc = senweavercoding::services::require_services();
+                    senweavercoding::util::set_runtime_var("SEN_CODING_MODE", mode_str);
+                    if let Some(svc) = senweavercoding::services::try_get_services() {
                         *svc.coding_mode.write() = coding_mode;
-                    });
+                    }
                 } else {
 
                     let available: Vec<&'static str> =
@@ -1418,6 +1478,23 @@ async fn async_main() -> Result<()> {
                 }
             }
 
+            let resume_session_id = if cli.continue_session {
+                let lookup_root = cwd.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| config.workspace_dir.clone())
+                });
+                let found =
+                    senweavercoding::session::persistence::latest_session_id(&lookup_root);
+                if found.is_none() {
+                    eprintln!(
+                        "No previous session found under {}; starting a new session.",
+                        lookup_root.display()
+                    );
+                }
+                found
+            } else {
+                None
+            };
+
             let session_state_file = if cli.continue_session && session_state_file.is_none() {
                 let sessions_dir = config
                     .workspace_dir
@@ -1426,7 +1503,12 @@ async fn async_main() -> Result<()> {
                 if sessions_dir.is_dir() {
                     let mut entries: Vec<_> = std::fs::read_dir(&sessions_dir)?
                         .filter_map(|e| e.ok())
-                        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+                        .filter(|e| {
+                            e.path()
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.ends_with(".state.json"))
+                        })
                         .collect();
                     entries.sort_by_key(|e| {
                         std::cmp::Reverse(
@@ -1445,11 +1527,16 @@ async fn async_main() -> Result<()> {
 
             let message = match message.as_deref() {
                 Some("-") => {
-                    let mut buf = String::new();
                     if std::io::stdin().is_terminal() {
                         eprintln!("Reading from stdin (press Ctrl+D to finish)...");
                     }
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    let buf = tokio::task::spawn_blocking(|| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                            .map(|_| buf)
+                    })
+                    .await
+                    .context("stdin read task failed")??;
                     if buf.trim().is_empty() {
                         None
                     } else {
@@ -1463,9 +1550,61 @@ async fn async_main() -> Result<()> {
             let is_interactive = interactive || message.is_none();
 
             if background {
-
-                let session_id = uuid::Uuid::new_v4().to_string();
                 let workspace = config.workspace_dir.clone();
+                let inherited_session_id = std::env::var("SEN_BG_SESSION_ID")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty());
+
+                if inherited_session_id.is_none() {
+
+                    let session_id = uuid::Uuid::new_v4().to_string();
+                    let sessions_dir = workspace.join(".senweavercoding").join("sessions");
+                    std::fs::create_dir_all(&sessions_dir)?;
+                    let log_path = sessions_dir.join(format!("{session_id}.log"));
+                    let log_file = std::fs::File::create(&log_path)?;
+                    let log_err = log_file.try_clone()?;
+
+                    let exe = std::env::current_exe()?;
+                    let mut cmd = senweavercoding::util::hidden_sync_command(&exe);
+                    cmd.args(std::env::args_os().skip(1))
+                        .env("SEN_BG_SESSION_ID", &session_id)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::from(log_file))
+                        .stderr(std::process::Stdio::from(log_err));
+                    if let Ok(cwd) = std::env::current_dir() {
+                        cmd.current_dir(cwd);
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    let child = cmd.spawn()?;
+
+                    let info = senweavercoding::cli::bg::SessionInfo {
+                        id: session_id.clone(),
+                        pid: Some(child.id()),
+                        started_at: chrono::Utc::now().to_rfc3339(),
+                        status: senweavercoding::cli::bg::SessionStatus::Running,
+                        cwd: std::env::current_dir().unwrap_or_default(),
+                        last_activity: chrono::Utc::now().to_rfc3339(),
+                        pid_start_time: None,
+                        argv0_hash: std::env::args().next().map(|a| {
+                            use sha2::{Digest, Sha256};
+                            let mut h = Sha256::new();
+                            h.update(a.as_bytes());
+                            hex::encode(&h.finalize()[..8])
+                        }),
+                    };
+                    senweavercoding::cli::bg::save_session(&workspace, &info).await?;
+                    println!("Background session started: {session_id}");
+                    println!(
+                        "Use `sen ps` to check status, `sen logs {session_id}` for output."
+                    );
+                    return Ok(());
+                }
+
+                let session_id = inherited_session_id.unwrap_or_default();
                 let info = senweavercoding::cli::bg::SessionInfo {
                     id: session_id.clone(),
                     pid: Some(std::process::id()),
@@ -1482,8 +1621,6 @@ async fn async_main() -> Result<()> {
                     }),
                 };
                 senweavercoding::cli::bg::save_session(&workspace, &info).await?;
-                println!("Background session started: {session_id}");
-                println!("Use `sen ps` to check status, `sen logs {session_id}` for output.");
 
                 let session_file = session_state_file.unwrap_or_else(|| {
                     workspace
@@ -1492,7 +1629,7 @@ async fn async_main() -> Result<()> {
                         .join(format!("{session_id}.state.json"))
                 });
 
-                Box::pin(agent::run(
+                let run_result = Box::pin(agent::run(
                     config,
                     message,
                     provider,
@@ -1504,52 +1641,82 @@ async fn async_main() -> Result<()> {
                     None,
                     None,
                 ))
-                .await
-                .map(|_| ())?;
+                .await;
 
+                let final_status = if run_result.is_ok() {
+                    senweavercoding::cli::bg::SessionStatus::Stopped
+                } else {
+                    senweavercoding::cli::bg::SessionStatus::Crashed
+                };
                 let updated = senweavercoding::cli::bg::SessionInfo {
-                    status: senweavercoding::cli::bg::SessionStatus::Stopped,
+                    status: final_status,
                     last_activity: chrono::Utc::now().to_rfc3339(),
                     ..info
                 };
                 senweavercoding::cli::bg::save_session(&workspace, &updated).await?;
-                Ok(())
-            } else if cli.legacy_mode
-                || std::env::var("SEN_LEGACY_MODE")
-                    .ok()
-                    .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                || !is_interactive
-            {
-
-                Box::pin(agent::run(
-                    config,
-                    message,
-                    provider,
-                    model,
-                    final_temperature,
-                    peripheral,
-                    is_interactive,
-                    session_state_file,
-                    None,
-                    None,
-                ))
-                .await
-                .map(|_| ())
+                run_result.map(|_| ())
             } else {
-
-                use senweavercoding::entrypoints::cli::{CliEntrypoint, CliOptions};
-                let opts = CliOptions {
-                    prompt: message,
-                    model,
-                    provider,
-                    temperature: Some(final_temperature),
-                    peripherals: peripheral,
-                    session_state_file,
-                    legacy_mode: cli.legacy_mode,
-                    ..CliOptions::default()
+                use senweavercoding::entrypoints::cli::{
+                    CliEntrypoint, CliOptions, OutputFormat,
                 };
-                let _ = config;
-                CliEntrypoint::run(opts).await
+                let parsed_output_format = match output_format.as_deref() {
+                    Some("json") => Some(OutputFormat::Json),
+                    Some("stream-json") => Some(OutputFormat::StreamJson),
+                    Some(_) => Some(OutputFormat::Text),
+                    None => None,
+                };
+                let structured_output = matches!(
+                    parsed_output_format,
+                    Some(OutputFormat::Json) | Some(OutputFormat::StreamJson)
+                );
+                let legacy_requested = cli.legacy_mode
+                    || std::env::var("SEN_LEGACY_MODE")
+                        .ok()
+                        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+                if remote
+                    || structured_output
+                    || (!legacy_requested && (is_interactive || max_turns.is_some()))
+                {
+                    let opts = CliOptions {
+                        prompt: message,
+                        resume: resume_session_id,
+                        model,
+                        provider,
+                        temperature: Some(final_temperature),
+                        peripherals: peripheral,
+                        session_state_file,
+                        legacy_mode: cli.legacy_mode,
+                        max_turns,
+                        session_id,
+                        cwd,
+                        allowed_tools,
+                        denied_tools,
+                        remote,
+                        output_format: parsed_output_format.unwrap_or(OutputFormat::Text),
+                        ..CliOptions::default()
+                    };
+                    CliEntrypoint::run_with_config(opts, config).await
+                } else {
+                    Box::pin(agent::run(
+                        config,
+                        message,
+                        provider,
+                        model,
+                        final_temperature,
+                        peripheral,
+                        is_interactive,
+                        session_state_file,
+                        if allowed_tools.is_empty() {
+                            None
+                        } else {
+                            Some(allowed_tools)
+                        },
+                        None,
+                    ))
+                    .await
+                    .map(|_| ())
+                }
             }
         }
 
@@ -1575,7 +1742,7 @@ async fn async_main() -> Result<()> {
                     let addr = format!("{host}:{port}");
                     info!("\u{1F501} Restarting SenWeaverCoding Gateway on {addr}");
 
-                    match shutdown_gateway(&host, port).await {
+                    match shutdown_gateway(&host, port, &config).await {
                         Ok(()) => {
                             info!("   \u{2713} Existing gateway on {addr} shut down gracefully");
 
@@ -1609,7 +1776,7 @@ async fn async_main() -> Result<()> {
                     let port = config.gateway.port;
                     let host = &config.gateway.host;
 
-                    match fetch_paircode(host, port, new).await {
+                    match fetch_paircode(host, port, new, &config).await {
                         Ok(Some(code)) => {
                             println!("\u{1F511} Gateway pairing is enabled.");
                             println!();
@@ -2259,7 +2426,10 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "plugins-wasm")]
         Commands::Plugin { plugin_command } => match plugin_command {
             PluginCommands::List => {
-                let host = senweavercoding::plugins::host::PluginHost::new(&config.workspace_dir)?;
+                let host = senweavercoding::plugins::host::PluginHost::from_plugins_config(
+                    &config.workspace_dir,
+                    &config.plugins,
+                )?;
                 let plugins = host.list_plugins();
                 if plugins.is_empty() {
                     println!("No plugins installed.");
@@ -2277,21 +2447,28 @@ async fn async_main() -> Result<()> {
                 Ok(())
             }
             PluginCommands::Install { source } => {
-                let mut host =
-                    senweavercoding::plugins::host::PluginHost::new(&config.workspace_dir)?;
+                let mut host = senweavercoding::plugins::host::PluginHost::from_plugins_config(
+                    &config.workspace_dir,
+                    &config.plugins,
+                )?;
                 host.install(&source)?;
                 println!("Plugin installed from {source}");
                 Ok(())
             }
             PluginCommands::Remove { name } => {
-                let mut host =
-                    senweavercoding::plugins::host::PluginHost::new(&config.workspace_dir)?;
+                let mut host = senweavercoding::plugins::host::PluginHost::from_plugins_config(
+                    &config.workspace_dir,
+                    &config.plugins,
+                )?;
                 host.remove(&name)?;
                 println!("Plugin '{name}' removed.");
                 Ok(())
             }
             PluginCommands::Info { name } => {
-                let host = senweavercoding::plugins::host::PluginHost::new(&config.workspace_dir)?;
+                let host = senweavercoding::plugins::host::PluginHost::from_plugins_config(
+                    &config.workspace_dir,
+                    &config.plugins,
+                )?;
                 match host.get_plugin(&name) {
                     Some(info) => {
                         println!("Plugin: {} v{}", info.name, info.version);
@@ -2324,9 +2501,12 @@ async fn async_main() -> Result<()> {
         } => {
 
             let instruction = if instruction == "-" {
-                let mut buf = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                buf
+                tokio::task::spawn_blocking(|| {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map(|_| buf)
+                })
+                .await
+                .context("stdin read task failed")??
             } else {
                 instruction
             };
@@ -2509,7 +2689,9 @@ async fn async_main() -> Result<()> {
             Ok(())
         }
 
-        Commands::Tokens { tokens_command } => handle_tokens_command(&config, tokens_command),
+        Commands::Tokens { tokens_command } => {
+            handle_tokens_command(&config, tokens_command).await
+        }
     }
 }
 
@@ -2569,7 +2751,7 @@ fn launch_desktop_gui() -> Result<()> {
     }
 }
 
-fn handle_tokens_command(config: &Config, command: TokensCommands) -> Result<()> {
+async fn handle_tokens_command(config: &Config, command: TokensCommands) -> Result<()> {
     use crate::token_saver::{self, dispatcher, tracking};
 
     let runtime_ctx = config.token_saver.to_runtime_ctx();
@@ -2639,9 +2821,13 @@ fn handle_tokens_command(config: &Config, command: TokensCommands) -> Result<()>
                 };
             }
 
-            use std::io::Read;
-            let mut raw = String::new();
-            std::io::stdin().read_to_string(&mut raw)?;
+            let raw = tokio::task::spawn_blocking(|| {
+                use std::io::Read;
+                let mut raw = String::new();
+                std::io::stdin().read_to_string(&mut raw).map(|_| raw)
+            })
+            .await
+            .context("stdin read task failed")??;
             let result =
                 token_saver::compact_command_output(&cmd_str, &raw, "", 0, &ctx);
             eprintln!(
@@ -2886,16 +3072,25 @@ fn log_gateway_start(host: &str, port: u16) {
     }
 }
 
-async fn shutdown_gateway(host: &str, port: u16) -> Result<()> {
+fn admin_token_header(config: &senweavercoding::config::Config) -> Option<String> {
+    senweavercoding::gateway::read_admin_token(config)
+}
+
+async fn shutdown_gateway(
+    host: &str,
+    port: u16,
+    config: &senweavercoding::config::Config,
+) -> Result<()> {
     let url = format!("http://{host}:{port}/admin/shutdown");
     let client = reqwest::Client::new();
 
-    match client
+    let mut req = client
         .post(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
+        .timeout(std::time::Duration::from_secs(5));
+    if let Some(token) = admin_token_header(config) {
+        req = req.header(senweavercoding::gateway::ADMIN_TOKEN_HEADER, token);
+    }
+    match req.send().await {
         Ok(response) if response.status().is_success() => Ok(()),
         Ok(response) => Err(anyhow::anyhow!(
             "Gateway responded with status: {}",
@@ -2905,25 +3100,35 @@ async fn shutdown_gateway(host: &str, port: u16) -> Result<()> {
     }
 }
 
-async fn fetch_paircode(host: &str, port: u16, new: bool) -> Result<Option<String>> {
+async fn fetch_paircode(
+    host: &str,
+    port: u16,
+    new: bool,
+    config: &senweavercoding::config::Config,
+) -> Result<Option<String>> {
     let client = reqwest::Client::new();
+    let admin_token = admin_token_header(config);
 
     let response = if new {
 
         let url = format!("http://{host}:{port}/admin/paircode/new");
-        client
+        let mut req = client
             .post(&url)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
+            .timeout(std::time::Duration::from_secs(5));
+        if let Some(ref token) = admin_token {
+            req = req.header(senweavercoding::gateway::ADMIN_TOKEN_HEADER, token.clone());
+        }
+        req.send().await
     } else {
 
         let url = format!("http://{host}:{port}/admin/paircode");
-        client
+        let mut req = client
             .get(&url)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
+            .timeout(std::time::Duration::from_secs(5));
+        if let Some(ref token) = admin_token {
+            req = req.header(senweavercoding::gateway::ADMIN_TOKEN_HEADER, token.clone());
+        }
+        req.send().await
     };
 
     let response = response.map_err(|e| anyhow::anyhow!("Failed to connect to gateway: {e}"))?;
@@ -3168,7 +3373,8 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
             if import.is_some() && provider != "openai-codex" {
                 bail!("`auth login --import` currently supports only --provider openai-codex");
             }
-            let client = reqwest::Client::new();
+            let client = senweavercoding::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("auth.oauth", 60, 15);
 
             match provider.as_str() {
                 "gemini" => {
@@ -3393,7 +3599,8 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                         state: pending.state.clone(),
                     };
 
-                    let client = reqwest::Client::new();
+                    let client = senweavercoding::services::proxy::runtime::ProxyRuntime::global()
+                        .build_client_with_timeouts("auth.oauth", 60, 15);
                     let token_set =
                         auth::openai_oauth::exchange_code_for_tokens(&client, &code, &pkce).await?;
                     let account_id = extract_openai_account_id_for_profile(&token_set.access_token);
@@ -3437,7 +3644,8 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                         state: pending.state.clone(),
                     };
 
-                    let client = reqwest::Client::new();
+                    let client = senweavercoding::services::proxy::runtime::ProxyRuntime::global()
+                        .build_client_with_timeouts("auth.oauth", 60, 15);
                     let token_set =
                         auth::gemini_oauth::exchange_code_for_tokens(&client, &code, &pkce).await?;
                     let account_id = token_set
@@ -3935,9 +4143,12 @@ async fn run_inline_complete_command(
     let prefix = match prefix {
         Some(p) => p,
         None => {
-            let mut buf = String::new();
-            std::io::stdin().read_to_string(&mut buf)?;
-            buf
+            tokio::task::spawn_blocking(|| {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf).map(|_| buf)
+            })
+            .await
+            .context("stdin read task failed")??
         }
     };
 
@@ -4081,8 +4292,19 @@ async fn run_inline_edit_command(
         {
             tokio::fs::create_dir_all(parent).await.ok();
         }
-        tokio::fs::write(&file, outcome.applied.as_bytes())
+        if let Ok(current) = tokio::fs::read_to_string(&file).await {
+            if current != source {
+                return Err(anyhow::anyhow!(
+                    "file {} changed on disk during inline edit; aborting to avoid overwriting concurrent changes",
+                    file.display()
+                ));
+            }
+        }
+        let write_path = file.clone();
+        let write_bytes = outcome.applied.clone().into_bytes();
+        tokio::task::spawn_blocking(move || crate::util::atomic_write(&write_path, &write_bytes))
             .await
+            .map_err(|e| anyhow::anyhow!("inline-edit write task join failed: {e}"))?
             .map_err(|e| {
                 anyhow::anyhow!("failed to write {}: {e}", file.display())
             })?;

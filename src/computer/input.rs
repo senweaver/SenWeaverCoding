@@ -7,6 +7,134 @@ use enigo::{
     Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
 };
 
+#[cfg(windows)]
+mod winmouse {
+    use anyhow::{anyhow, Result};
+    use windows_sys::Win32::Foundation::{HWND, POINT};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_VIRTUALDESK,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId,
+        SetWindowLongPtrW, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WS_EX_TRANSPARENT,
+    };
+
+    /// While alive, makes any of the assistant's own top-level windows that cover the given
+    /// screen points transparent to hit-testing, so injected clicks reach the app underneath.
+    /// Restores the original styles on drop. No-op for windows owned by other processes.
+    pub struct OwnTransparency {
+        restore: Vec<(HWND, isize)>,
+    }
+
+    impl OwnTransparency {
+        pub fn for_points(points: &[(i32, i32)]) -> Self {
+            // WS_EX_TRANSPARENT makes a window click-through for injected input, so the click
+            // routes to whatever sits below. Only the assistant's own top-level window at a
+            // target point needs this; the main window is hidden while runs execute.
+            let mut restore: Vec<(HWND, isize)> = Vec::new();
+            let own_pid = unsafe { GetCurrentProcessId() };
+            for &(x, y) in points {
+                unsafe {
+                    let hwnd = WindowFromPoint(POINT { x, y });
+                    if hwnd.is_null() {
+                        continue;
+                    }
+                    let root = GetAncestor(hwnd, GA_ROOT);
+                    let target = if root.is_null() { hwnd } else { root };
+                    let mut pid: u32 = 0;
+                    GetWindowThreadProcessId(target, &mut pid);
+                    if pid != own_pid {
+                        continue;
+                    }
+                    if restore.iter().any(|(h, _)| *h == target) {
+                        continue;
+                    }
+                    let old = GetWindowLongPtrW(target, GWL_EXSTYLE);
+                    let want = old | (WS_EX_TRANSPARENT as isize);
+                    if want != old {
+                        SetWindowLongPtrW(target, GWL_EXSTYLE, want);
+                        restore.push((target, old));
+                    }
+                }
+            }
+            Self { restore }
+        }
+    }
+
+    impl Drop for OwnTransparency {
+        fn drop(&mut self) {
+            for (hwnd, old) in self.restore.drain(..) {
+                unsafe {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, old);
+                }
+            }
+        }
+    }
+
+    fn virtual_bounds() -> (i32, i32, i32, i32) {
+        unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        }
+    }
+
+    pub fn move_absolute(x: i32, y: i32) -> Result<()> {
+        let (vx, vy, vw, vh) = virtual_bounds();
+        if vw <= 1 || vh <= 1 {
+            return Err(anyhow!("virtual screen metrics unavailable"));
+        }
+        let rel_x = (x - vx).clamp(0, vw - 1);
+        let rel_y = (y - vy).clamp(0, vh - 1);
+        let norm_x = (i64::from(rel_x) * 65535 + i64::from(vw - 1) / 2) / i64::from(vw - 1);
+        let norm_y = (i64::from(rel_y) * 65535 + i64::from(vh - 1) / 2) / i64::from(vh - 1);
+
+        let mut input: INPUT = unsafe { std::mem::zeroed() };
+        input.r#type = INPUT_MOUSE;
+        input.Anonymous.mi.dx = norm_x as i32;
+        input.Anonymous.mi.dy = norm_y as i32;
+        input.Anonymous.mi.dwFlags =
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        let sent = unsafe {
+            SendInput(1, &input as *const INPUT, std::mem::size_of::<INPUT>() as i32)
+        };
+        if sent == 1 {
+            Ok(())
+        } else {
+            Err(anyhow!("SendInput move failed"))
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn move_absolute(x: i32, y: i32) -> Result<()> {
+    run_blocking(move || {
+        winmouse::move_absolute(x, y)?;
+        std::thread::sleep(std::time::Duration::from_millis(8));
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(not(windows))]
+async fn move_absolute(_x: i32, _y: i32) -> Result<()> {
+    Err(anyhow!("virtual desktop mouse move is only supported on Windows"))
+}
+
+#[cfg(windows)]
+fn own_transparency(points: &[(i32, i32)]) -> winmouse::OwnTransparency {
+    winmouse::OwnTransparency::for_points(points)
+}
+
+#[cfg(not(windows))]
+fn own_transparency(_points: &[(i32, i32)]) {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClickButton {
     Left,
@@ -48,6 +176,9 @@ pub async fn main_display_size() -> Result<(i32, i32)> {
 }
 
 pub async fn move_to(x: i32, y: i32) -> Result<()> {
+    if move_absolute(x, y).await.is_ok() {
+        return Ok(());
+    }
     run_blocking(move || {
         let mut enigo = new_enigo()?;
         enigo
@@ -58,11 +189,16 @@ pub async fn move_to(x: i32, y: i32) -> Result<()> {
 }
 
 pub async fn click(x: i32, y: i32, button: ClickButton, count: u32) -> Result<()> {
+    let positioned = move_absolute(x, y).await.is_ok();
     run_blocking(move || {
+        let _guard = own_transparency(&[(x, y)]);
         let mut enigo = new_enigo()?;
-        enigo
-            .move_mouse(x, y, Coordinate::Abs)
-            .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        if !positioned {
+            enigo
+                .move_mouse(x, y, Coordinate::Abs)
+                .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
         let btn = button.to_enigo();
         for _ in 0..count.max(1) {
             enigo
@@ -104,11 +240,15 @@ pub async fn key_combo(combo: String) -> Result<()> {
 }
 
 pub async fn scroll(x: i32, y: i32, direction: ScrollDirection, amount: i32) -> Result<()> {
+    let positioned = move_absolute(x, y).await.is_ok();
     run_blocking(move || {
+        let _guard = own_transparency(&[(x, y)]);
         let mut enigo = new_enigo()?;
-        enigo
-            .move_mouse(x, y, Coordinate::Abs)
-            .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        if !positioned {
+            enigo
+                .move_mouse(x, y, Coordinate::Abs)
+                .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        }
         let magnitude = amount.max(1);
         let (axis, length) = match direction {
             ScrollDirection::Down => (Axis::Vertical, magnitude),
@@ -124,25 +264,47 @@ pub async fn scroll(x: i32, y: i32, direction: ScrollDirection, amount: i32) -> 
 }
 
 pub async fn drag(from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> Result<()> {
+    let use_virtual = move_absolute(from_x, from_y).await.is_ok();
     run_blocking(move || {
+        let _guard = own_transparency(&[(from_x, from_y), (to_x, to_y)]);
         let mut enigo = new_enigo()?;
-        enigo
-            .move_mouse(from_x, from_y, Coordinate::Abs)
-            .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        if !use_virtual {
+            enigo
+                .move_mouse(from_x, from_y, Coordinate::Abs)
+                .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        } else {
+            winmouse_move(from_x, from_y)?;
+        }
         std::thread::sleep(std::time::Duration::from_millis(80));
         enigo
             .button(Button::Left, Direction::Press)
             .map_err(|e| anyhow!("button press failed: {e}"))?;
         std::thread::sleep(std::time::Duration::from_millis(80));
-        enigo
-            .move_mouse(to_x, to_y, Coordinate::Abs)
-            .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        if use_virtual {
+            winmouse_move(to_x, to_y)?;
+        } else {
+            enigo
+                .move_mouse(to_x, to_y, Coordinate::Abs)
+                .map_err(|e| anyhow!("move_mouse failed: {e}"))?;
+        }
         std::thread::sleep(std::time::Duration::from_millis(80));
         enigo
             .button(Button::Left, Direction::Release)
             .map_err(|e| anyhow!("button release failed: {e}"))
     })
     .await
+}
+
+#[cfg(windows)]
+fn winmouse_move(x: i32, y: i32) -> Result<()> {
+    winmouse::move_absolute(x, y)?;
+    std::thread::sleep(std::time::Duration::from_millis(8));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn winmouse_move(_x: i32, _y: i32) -> Result<()> {
+    Err(anyhow!("virtual desktop move is only supported on Windows"))
 }
 
 async fn run_blocking<F>(f: F) -> Result<()>

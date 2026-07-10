@@ -58,3 +58,40 @@ pub fn normalized_to_input(x_norm: f64, y_norm: f64, display_w: i32, display_h: 
         (y.round() as i32).clamp(0, h - 1),
     )
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MonitorRect {
+    pub id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl MonitorRect {
+    pub fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x
+            && px < self.x + self.width.max(1)
+            && py >= self.y
+            && py < self.y + self.height.max(1)
+    }
+
+    pub fn normalize(&self, px: i32, py: i32) -> (f64, f64) {
+        let w = f64::from(self.width.max(1));
+        let h = f64::from(self.height.max(1));
+        let xn = ((f64::from(px - self.x)) / w * 1000.0).clamp(0.0, 1000.0);
+        let yn = ((f64::from(py - self.y)) / h * 1000.0).clamp(0.0, 1000.0);
+        (xn, yn)
+    }
+
+    pub fn denormalize(&self, x_norm: f64, y_norm: f64) -> (i32, i32) {
+        let w = self.width.max(1);
+        let h = self.height.max(1);
+        let x = self.x + ((x_norm / 1000.0) * f64::from(w)).round() as i32;
+        let y = self.y + ((y_norm / 1000.0) * f64::from(h)).round() as i32;
+        (
+            x.clamp(self.x, self.x + w - 1),
+            y.clamp(self.y, self.y + h - 1),
+        )
+    }
+}

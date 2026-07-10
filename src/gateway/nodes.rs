@@ -99,6 +99,22 @@ impl NodeRegistry {
         self.nodes.write().remove(node_id);
     }
 
+    /// Unregister only if the stored entry still belongs to this connection.
+    /// Prevents a stale connection's disconnect from evicting a newer connection
+    /// that re-registered under the same node_id.
+    pub fn unregister_if_owner(
+        &self,
+        node_id: &str,
+        invoke_tx: &mpsc::Sender<NodeInvocation>,
+    ) {
+        let mut nodes = self.nodes.write();
+        if let Some(existing) = nodes.get(node_id) {
+            if existing.invoke_tx.same_channel(invoke_tx) {
+                nodes.remove(node_id);
+            }
+        }
+    }
+
     pub fn node_ids(&self) -> Vec<String> {
         self.nodes.read().keys().cloned().collect()
     }
@@ -215,6 +231,9 @@ pub async fn handle_ws_nodes(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/nodes") {
+        return reject;
+    }
 
     let nodes_config = state.config.lock().nodes.clone();
     if let Some(ref expected_token) = nodes_config.auth_token {
@@ -408,7 +427,7 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
     }
 
     if let Some(node_id) = registered_node_id {
-        registry.unregister(&node_id);
+        registry.unregister_if_owner(&node_id, &invoke_tx);
         tracing::info!("Node disconnected and unregistered: {node_id}");
     }
 

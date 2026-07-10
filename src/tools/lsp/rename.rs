@@ -399,16 +399,22 @@ impl LspRenameTool {
 
         let lang = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        let file_uri = format!(
-            "file://{}",
-            file_path.display().to_string().replace('\\', "/")
-        );
+        let path_fwd = file_path.display().to_string().replace('\\', "/");
+        // Windows absolute paths (`D:/x`) need the extra leading slash so the URI is
+        // `file:///D:/x`; POSIX paths already start with `/`.
+        let file_uri = if path_fwd.starts_with('/') {
+            format!("file://{path_fwd}")
+        } else {
+            format!("file:///{path_fwd}")
+        };
 
         let content = tokio::fs::read_to_string(file_path).await?;
         let (line, character) = content
             .lines()
             .enumerate()
-            .find_map(|(i, l)| l.find(symbol_name).map(|col| (i as u32, col as u32)))
+            .find_map(|(i, l)| {
+                find_symbol_column_utf16(l, symbol_name).map(|col| (i as u32, col as u32))
+            })
             .ok_or_else(|| anyhow::anyhow!("Symbol not found in file for LSP rename"))?;
 
         let params = serde_json::json!({
@@ -465,61 +471,188 @@ impl LspRenameTool {
     }
 }
 
+fn find_symbol_column_utf16(line: &str, symbol: &str) -> Option<usize> {
+    if symbol.is_empty() {
+        return None;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut search_from = 0usize;
+    while let Some(rel) = line[search_from..].find(symbol) {
+        let byte_pos = search_from + rel;
+        let before_ok = line[..byte_pos]
+            .chars()
+            .next_back()
+            .map(|c| !is_word(c))
+            .unwrap_or(true);
+        let after_ok = line[byte_pos + symbol.len()..]
+            .chars()
+            .next()
+            .map(|c| !is_word(c))
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            let utf16_col: usize = line[..byte_pos].chars().map(|c| c.len_utf16()).sum();
+            return Some(utf16_col);
+        }
+        search_from = byte_pos + symbol.len();
+        if search_from >= line.len() {
+            break;
+        }
+    }
+    None
+}
+
+fn uri_to_local_path(uri: &str) -> PathBuf {
+    let stripped = uri
+        .trim_start_matches("file:///")
+        .trim_start_matches("file://");
+    let decoded = percent_decode_uri(stripped);
+    if cfg!(windows) {
+        PathBuf::from(decoded.replace('/', std::path::MAIN_SEPARATOR_STR))
+    } else {
+        // On Unix, `file:///home/x` -> we stripped the leading slash; restore it.
+        PathBuf::from(format!("/{decoded}"))
+    }
+}
+
+fn percent_decode_uri(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn lsp_position_to_byte_offset(content: &str, line: usize, character_utf16: usize) -> usize {
+    let bytes = content.as_bytes();
+    let mut idx = 0usize;
+    let mut current_line = 0usize;
+    while current_line < line && idx < bytes.len() {
+        if bytes[idx] == b'\n' {
+            current_line += 1;
+        }
+        idx += 1;
+    }
+    if current_line < line {
+        return content.len();
+    }
+    let mut utf16_count = 0usize;
+    let remaining = &content[idx..];
+    for ch in remaining.chars() {
+        if ch == '\n' {
+            break;
+        }
+        if utf16_count >= character_utf16 {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        idx += ch.len_utf8();
+    }
+    idx
+}
+
+fn apply_edits_to_content(content: &str, edits: &[serde_json::Value]) -> (String, usize, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut resolved_edits: Vec<(usize, usize, String)> = edits
+        .iter()
+        .filter_map(|e| {
+            let sl = e.pointer("/range/start/line")?.as_u64()? as usize;
+            let sc = e.pointer("/range/start/character")?.as_u64()? as usize;
+            let el = e.pointer("/range/end/line")?.as_u64()? as usize;
+            let ec = e.pointer("/range/end/character")?.as_u64()? as usize;
+            let new_text = e.get("newText")?.as_str()?.to_string();
+            let start = lsp_position_to_byte_offset(content, sl, sc);
+            let end = lsp_position_to_byte_offset(content, el, ec);
+            Some((start, end, new_text))
+        })
+        .collect();
+    // Apply from the end backwards so earlier byte offsets stay valid.
+    resolved_edits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let mut out = content.to_string();
+    let mut applied = 0usize;
+    for (start, end, new_text) in resolved_edits {
+        if start > end || end > out.len() {
+            errors.push("skipped out-of-range LSP edit".to_string());
+            continue;
+        }
+        if !out.is_char_boundary(start) || !out.is_char_boundary(end) {
+            errors.push("skipped LSP edit that did not fall on a char boundary".to_string());
+            continue;
+        }
+        out.replace_range(start..end, &new_text);
+        applied += 1;
+    }
+    (out, applied, errors)
+}
+
+fn collect_edit_groups(resp: &serde_json::Value) -> Vec<(String, Vec<serde_json::Value>)> {
+    let mut groups: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
+    // rust-analyzer and most modern servers prefer `documentChanges`.
+    if let Some(doc_changes) = resp.get("documentChanges").and_then(|v| v.as_array()) {
+        for change in doc_changes {
+            let Some(uri) = change.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(edits) = change.get("edits").and_then(|v| v.as_array()) {
+                groups.push((uri.to_string(), edits.clone()));
+            }
+        }
+        if !groups.is_empty() {
+            return groups;
+        }
+    }
+    if let Some(changes) = resp.get("changes").and_then(|v| v.as_object()) {
+        for (uri, edits_val) in changes {
+            if let Some(edits) = edits_val.as_array() {
+                groups.push((uri.clone(), edits.clone()));
+            }
+        }
+    }
+    groups
+}
+
 fn apply_workspace_edit(resp: &serde_json::Value, security: &SecurityPolicy) -> WorkspaceEditOutcome {
     let mut outcome = WorkspaceEditOutcome::default();
-    let changes = resp.get("changes").and_then(|v| v.as_object());
-    if let Some(changes) = changes {
-        for (uri, edits_val) in changes {
-            let file = uri
-                .trim_start_matches("file:///")
-                .trim_start_matches("file://")
-                .replace('/', std::path::MAIN_SEPARATOR_STR);
-            let file_path = PathBuf::from(&file);
-            let resolved = match secure_resolve_target(security, &file_path) {
-                Ok(p) => p,
-                Err(e) => {
-                    outcome.errors.push(e);
-                    continue;
-                }
-            };
-            if let Ok(content) = std::fs::read_to_string(&resolved) {
-                if let Some(edits) = edits_val.as_array() {
-                    let mut lines: Vec<String> = content.lines().map(String::from).collect();
-                    let mut sorted: Vec<_> = edits
-                        .iter()
-                        .filter_map(|e| {
-                            let sl = e.pointer("/range/start/line")?.as_u64()? as usize;
-                            let sc = e.pointer("/range/start/character")?.as_u64()? as usize;
-                            let el = e.pointer("/range/end/line")?.as_u64()? as usize;
-                            let ec = e.pointer("/range/end/character")?.as_u64()? as usize;
-                            let new_text = e.get("newText")?.as_str()?.to_string();
-                            Some((sl, sc, el, ec, new_text))
-                        })
-                        .collect();
-                    sorted.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-                    for (sl, sc, el, ec, new_text) in sorted {
-                        let sl = sl.min(lines.len().saturating_sub(1));
-                        let el = el.min(lines.len().saturating_sub(1));
-                        if sl == el {
-                            if let Some(line) = lines.get_mut(sl) {
-                                let chars: Vec<char> = line.chars().collect();
-                                let sc = sc.min(chars.len());
-                                let ec = ec.min(chars.len());
-                                let before: String = chars[..sc].iter().collect();
-                                let after: String = chars[ec..].iter().collect();
-                                *line = format!("{before}{new_text}{after}");
-                                outcome.applied += 1;
-                            }
-                        }
-                    }
-                    if let Err(e) = crate::util::atomic_write(&resolved, lines.join("\n").as_bytes())
-                    {
-                        outcome
-                            .errors
-                            .push(format!("Failed to write {}: {e}", resolved.display()));
-                    }
-                }
+    for (uri, edits) in collect_edit_groups(resp) {
+        let file_path = uri_to_local_path(&uri);
+        let resolved = match secure_resolve_target(security, &file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                outcome.errors.push(e);
+                continue;
             }
+        };
+        let content = match std::fs::read_to_string(&resolved) {
+            Ok(c) => c,
+            Err(e) => {
+                outcome
+                    .errors
+                    .push(format!("Failed to read {}: {e}", resolved.display()));
+                continue;
+            }
+        };
+        let (new_content, applied, errors) = apply_edits_to_content(&content, &edits);
+        outcome.errors.extend(errors);
+        if new_content == content {
+            continue;
+        }
+        if let Err(e) = crate::util::atomic_write(&resolved, new_content.as_bytes()) {
+            outcome
+                .errors
+                .push(format!("Failed to write {}: {e}", resolved.display()));
+        } else {
+            outcome.applied += applied;
         }
     }
     outcome

@@ -127,6 +127,43 @@ pub fn repair_partial_tool_input_json(raw: &str) -> Option<String> {
     None
 }
 
+pub fn normalize_tool_call_arguments(function_name: &str, arguments: String) -> String {
+    if arguments.trim().is_empty() {
+        return "{}".to_string();
+    }
+    if serde_json::from_str::<Value>(&arguments).is_ok() {
+        return arguments;
+    }
+    if let Some(repaired) = repair_partial_tool_input_json(&arguments) {
+        tracing::warn!(
+            function = %function_name,
+            arguments_len = arguments.len(),
+            repaired_len = repaired.len(),
+            "tool-call arguments were truncated; recovered partial arguments via structural repair"
+        );
+        return repaired;
+    }
+    tracing::error!(
+        function = %function_name,
+        arguments = %arguments,
+        "Invalid JSON in tool-call arguments, using empty object"
+    );
+    crate::observability::runtime_trace::record_event(
+        "tool_args_degraded",
+        None,
+        None,
+        None,
+        None,
+        Some(false),
+        Some("tool-call arguments unparseable; degraded to empty object"),
+        serde_json::json!({
+            "function": function_name,
+            "arguments_len": arguments.len(),
+        }),
+    );
+    "{}".to_string()
+}
+
 #[inline]
 pub fn normalize_tool_call_id(raw: Option<String>) -> String {
     normalize_tool_call_id_for_provider(raw, ProviderKind::Other)

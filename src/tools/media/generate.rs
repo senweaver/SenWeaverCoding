@@ -27,8 +27,8 @@ impl MediaGenTool {
         }
     }
 
-    fn http_client() -> reqwest::Client {
-        crate::services::require_services()
+    fn http_client(services: &crate::services::ServiceContainer) -> reqwest::Client {
+        services
             .proxy_runtime()
             .build_client_with_timeouts("tool.media_generate", 600, 15)
     }
@@ -264,7 +264,17 @@ impl MediaGenTool {
         }
         let prompt = prompt.unwrap().to_string();
 
-        let config = crate::services::require_services().config();
+        let Some(services) = crate::services::try_get_services() else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "media generation blocked: service container unavailable (fail-closed)"
+                        .into(),
+                ),
+            });
+        };
+        let config = services.config();
         let inferred_provider = if provider.is_none() {
             Self::infer_provider(surface, &model)
         } else {
@@ -275,7 +285,7 @@ impl MediaGenTool {
             provider.or(inferred_provider.as_deref()),
             &model,
         );
-        let client = Self::http_client();
+        let client = Self::http_client(services);
 
         let make_job = |p: String| MediaJob {
             client: client.clone(),

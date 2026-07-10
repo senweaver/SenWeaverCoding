@@ -57,7 +57,7 @@ impl OpenAiEmbedding {
     fn http_client(&self) -> reqwest::Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client("memory.embeddings")
+            .build_client_with_timeouts("memory.embeddings", 120, 10)
     }
 
     fn has_explicit_api_path(&self) -> bool {
@@ -195,7 +195,7 @@ impl CohereEmbedding {
     fn http_client(&self) -> reqwest::Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client("memory.embeddings")
+            .build_client_with_timeouts("memory.embeddings", 120, 10)
     }
 
     fn embed_url(&self) -> String {

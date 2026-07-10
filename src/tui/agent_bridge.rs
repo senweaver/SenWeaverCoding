@@ -50,7 +50,9 @@ impl AgentBridge {
         while let Ok(ev) = self.receiver.try_recv() {
             match &ev {
                 AgentEvent::Done | AgentEvent::Error(_) => self.is_busy = false,
-                AgentEvent::Thinking | AgentEvent::ThinkingChunk(_) => self.is_busy = true,
+                AgentEvent::Thinking
+                | AgentEvent::ThinkingChunk(_)
+                | AgentEvent::StreamChunk(_) => self.is_busy = true,
                 _ => {}
             }
             events.push(ev);
@@ -371,7 +373,7 @@ pub fn spawn_agent_task(config: Config) -> AgentBridge {
                     .map(|d| d.as_millis())
                     .unwrap_or(0)
             );
-            let log_root = std::path::PathBuf::from(".sen");
+            let log_root = config.workspace_dir.clone();
             let log = match crate::session::SessionEventLog::open_at(&log_root, &session_id) {
                 Ok(l) => Some(std::sync::Arc::new(l)),
                 Err(e) => {
@@ -387,11 +389,11 @@ pub fn spawn_agent_task(config: Config) -> AgentBridge {
 
                     let _ = slot_for_task.set(actor.clone());
                     let mirror = std::sync::Arc::new(parking_lot::Mutex::new(
-                        Vec::<crate::tui::ChatMessage>::new(),
+                        crate::session::chat_view::NullChatViewSink,
                     ));
                     let handle = crate::session::spawn_hub_subscriber(
                         session_id.clone(),
-                        mirror.clone(),
+                        mirror,
                         crate::session::ChatViewSurface::Tui,
                     );
                     (Some(actor), Some(handle))

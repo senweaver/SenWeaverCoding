@@ -303,7 +303,7 @@ impl SweBenchDockerExecutor {
         Ok(dir)
     }
 
-    fn build_docker_args(&self, image: &str, patch_dir: &Path) -> Vec<String> {
+    fn build_docker_args(&self, image: &str, patch_dir: &Path, container_name: &str) -> Vec<String> {
 
         let mount = format!(
             "{}:/patches",
@@ -312,6 +312,8 @@ impl SweBenchDockerExecutor {
         let mut args: Vec<String> = vec![
             "run".to_string(),
             "--rm".to_string(),
+            "--name".to_string(),
+            container_name.to_string(),
             "-v".to_string(),
             mount,
         ];
@@ -330,22 +332,41 @@ impl SweBenchDockerExecutor {
         let started = std::time::Instant::now();
         let patch_dir = self.stage_patches(inst, model_patch)?;
         let image = self.resolve_image(inst);
-        let args = self.build_docker_args(&image, &patch_dir);
+        let container_name = format!(
+            "swebench-{}-{}",
+            sanitise_for_path(&inst.instance_id),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let args = self.build_docker_args(&image, &patch_dir, &container_name);
 
         let mut cmd = crate::util::hidden_async_command(&self.config.docker_bin);
         cmd.args(&args);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let timeout = self.config.timeout;
         let run_future = cmd.output();
         let output = match tokio::time::timeout(timeout, run_future).await {
             Ok(res) => res?,
             Err(_) => {
+                let mut kill_cmd = crate::util::hidden_async_command(&self.config.docker_bin);
+                kill_cmd.args(["kill", &container_name]);
+                kill_cmd.stdout(std::process::Stdio::null());
+                kill_cmd.stderr(std::process::Stdio::null());
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    kill_cmd.status(),
+                )
+                .await;
                 anyhow::bail!(
-                    "swebench-docker timeout after {}s for instance {}",
+                    "swebench-docker timeout after {}s for instance {}; container {} killed",
                     timeout.as_secs(),
-                    inst.instance_id
+                    inst.instance_id,
+                    container_name
                 );
             }
         };

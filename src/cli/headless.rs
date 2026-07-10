@@ -210,6 +210,15 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
             }
         }
 
+        // If we've used the turn budget, stop now instead of blocking on stdin for
+        // a next message that will never be allowed to run (a tty stdin never
+        // closes, so `sen -p ... --max-turns 1` would otherwise hang forever).
+        if num_turns >= max_turns {
+            exit_reason = ExitReason::MaxTurns;
+            tracing::info!(num_turns, "Max turns reached; not waiting for further input");
+            break;
+        }
+
         match io.recv().await {
             Some(StdinMessage::SdkMessage { action, .. }) if action == "abort" => {
                 exit_reason = ExitReason::UserAbort;

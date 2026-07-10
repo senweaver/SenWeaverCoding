@@ -24,14 +24,36 @@ pub const API_TIMEOUT_MS: u64 = 600_000;
 pub static MODEL_CONTEXT_WINDOWS: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     m.insert("claude-sonnet-4-20250514", 200_000);
+    m.insert("claude-sonnet-4-5", 200_000);
+    m.insert("claude-sonnet-4-5-20250929", 200_000);
     m.insert("claude-opus-4-20250514", 200_000);
+    m.insert("claude-opus-4-1", 200_000);
+    m.insert("claude-opus-4-5", 200_000);
+    m.insert("claude-haiku-4-5", 200_000);
     m.insert("claude-3-5-sonnet-20241022", 200_000);
     m.insert("claude-3-5-haiku-20241022", 200_000);
     m.insert("claude-3-haiku-20240307", 200_000);
     m.insert("gpt-4o", 128_000);
     m.insert("gpt-4o-mini", 128_000);
+    m.insert("gpt-4.1", 1_047_576);
+    m.insert("gpt-4.1-mini", 1_047_576);
+    m.insert("gpt-4.1-nano", 1_047_576);
+    m.insert("gpt-5", 272_000);
+    m.insert("gpt-5-mini", 272_000);
+    m.insert("gpt-5-nano", 272_000);
+    m.insert("gpt-5-codex", 272_000);
+    m.insert("o1", 200_000);
+    m.insert("o3", 200_000);
+    m.insert("o4-mini", 200_000);
+    m.insert("gemini-1.5-pro", 2_000_000);
+    m.insert("gemini-1.5-flash", 1_000_000);
+    m.insert("gemini-2.0-flash", 1_000_000);
+    m.insert("gemini-2.5-pro", 1_000_000);
+    m.insert("gemini-2.5-flash", 1_000_000);
     m.insert("deepseek-chat", 64_000);
     m.insert("deepseek-reasoner", 64_000);
+    m.insert("deepseek-v3", 128_000);
+    m.insert("deepseek-v3.1", 128_000);
     m.insert("moonshot-v1-8k", 8_192);
     m.insert("moonshot-v1-32k", 32_768);
     m.insert("moonshot-v1-128k", 128_000);
@@ -74,6 +96,21 @@ pub fn context_window_for_model(model: &str) -> u32 {
 }
 
 fn infer_context_window_from_id(id: &str) -> Option<u32> {
+    if id.starts_with("gpt-4.1") {
+        return Some(1_047_576);
+    }
+    if id.starts_with("gpt-5") {
+        return Some(272_000);
+    }
+    if id.contains("gemini-1.5-pro") {
+        return Some(2_000_000);
+    }
+    if id.starts_with("gemini-1.5")
+        || id.starts_with("gemini-2.0")
+        || id.starts_with("gemini-2.5")
+    {
+        return Some(1_000_000);
+    }
     if id.contains("moonshot-v1-8k") {
         return Some(8_192);
     }
@@ -124,7 +161,16 @@ fn infer_context_window_from_id(id: &str) -> Option<u32> {
 }
 
 pub fn max_output_for_model(model: &str) -> u32 {
-    if model.contains("opus") || model.contains("sonnet-4") {
+    let id = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+    if id.contains("opus")
+        || id.contains("sonnet-4")
+        || id.contains("sonnet-4-5")
+        || id.contains("haiku-4-5")
+        || id.starts_with("gpt-5")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+    {
         EXTENDED_THINKING_MAX_OUTPUT
     } else {
         DEFAULT_MAX_OUTPUT_TOKENS

@@ -221,6 +221,164 @@ fn code_rag_vector_cache(
     })
 }
 
+static VECTOR_SEED_STARTED: OnceLock<RwLock<std::collections::HashSet<PathBuf>>> =
+    OnceLock::new();
+
+fn vector_seed_started() -> &'static RwLock<std::collections::HashSet<PathBuf>> {
+    VECTOR_SEED_STARTED.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+}
+
+const VECTOR_SEED_CHUNK_LINES: usize = 80;
+const VECTOR_SEED_MAX_FILE_BYTES: u64 = 512 * 1024;
+const VECTOR_SEED_MAX_CHUNKS: usize = 4000;
+const VECTOR_SEED_EMBED_BATCH: usize = 16;
+
+fn is_seedable_source_file(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext,
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "h" | "cpp" | "hpp"
+            | "cc" | "cs" | "rb" | "php" | "swift" | "kt" | "scala" | "sh" | "ps1" | "lua"
+            | "zig" | "dart" | "vue" | "svelte" | "sql" | "toml" | "yaml" | "yml" | "md"
+    )
+}
+
+fn chunk_source_for_vector_index(
+    root: &Path,
+    path: &Path,
+    content: &str,
+) -> Vec<crate::rag::vector_code_index::CodeChunk> {
+    let rel = relativize_to_workspace(path, root);
+    let rel_display = rel.to_string_lossy().replace('\\', "/");
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start < lines.len() {
+        let end = (start + VECTOR_SEED_CHUNK_LINES).min(lines.len());
+        let body = lines[start..end].join("\n");
+        if !body.trim().is_empty() {
+            out.push(crate::rag::vector_code_index::CodeChunk {
+                id: format!("{rel_display}#{}", start + 1),
+                path: path.to_path_buf(),
+                start_line: (start + 1) as u32,
+                end_line: end as u32,
+                content: body,
+            });
+        }
+        start = end;
+    }
+    out
+}
+
+fn collect_vector_seed_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.')
+                    || matches!(
+                        name,
+                        "target" | "node_modules" | "__pycache__" | "dist" | "build" | "vendor"
+                    )
+                {
+                    continue;
+                }
+            }
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(path),
+                Ok(ft) if ft.is_file() => {
+                    if is_seedable_source_file(&path) {
+                        if let Ok(meta) = path.metadata() {
+                            if meta.len() <= VECTOR_SEED_MAX_FILE_BYTES {
+                                files.push(path);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    files
+}
+
+fn spawn_vector_index_seed(root: PathBuf, index: SharedVectorCodeIndex) {
+    {
+        let Ok(mut started) = vector_seed_started().write() else {
+            return;
+        };
+        if !started.insert(root.clone()) {
+            return;
+        }
+    }
+    crate::runtime::spawn_supervised("rag.vector_seed", async move {
+        let walk_root = root.clone();
+        let files = tokio::task::spawn_blocking(move || collect_vector_seed_files(&walk_root))
+            .await
+            .unwrap_or_default();
+        let mut total_chunks = 0usize;
+        let mut batch: Vec<crate::rag::vector_code_index::CodeChunk> = Vec::new();
+        for file in files {
+            if total_chunks >= VECTOR_SEED_MAX_CHUNKS {
+                break;
+            }
+            let read_path = file.clone();
+            let content = match tokio::task::spawn_blocking(move || {
+                std::fs::read_to_string(&read_path)
+            })
+            .await
+            {
+                Ok(Ok(s)) => s,
+                _ => continue,
+            };
+            for chunk in chunk_source_for_vector_index(&root, &file, &content) {
+                if total_chunks >= VECTOR_SEED_MAX_CHUNKS {
+                    break;
+                }
+                batch.push(chunk);
+                total_chunks += 1;
+                if batch.len() >= VECTOR_SEED_EMBED_BATCH {
+                    if let Err(err) = index.upsert_chunks(std::mem::take(&mut batch)).await {
+                        tracing::warn!(
+                            target: "rag.code_index",
+                            error = %err,
+                            "vector index seeding aborted (embedder unavailable)"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        if !batch.is_empty() {
+            if let Err(err) = index.upsert_chunks(batch).await {
+                tracing::warn!(
+                    target: "rag.code_index",
+                    error = %err,
+                    "vector index seeding aborted (embedder unavailable)"
+                );
+                return;
+            }
+        }
+        tracing::info!(
+            target: "rag.code_index",
+            chunks = total_chunks,
+            root = %root.display(),
+            "vector code index seeding complete"
+        );
+    });
+}
+
 fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
     use crate::config::domain::CodeRagEmbedderConfig;
     use crate::rag::embedding::{
@@ -242,10 +400,28 @@ fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
     } = cfg_arc.code_rag.embedder.clone();
     drop(cfg_arc);
 
-    let backend = match backend.to_ascii_lowercase().as_str() {
-        "openai" => CodeEmbedderBackend::OpenAi,
-        "ollama" => CodeEmbedderBackend::Ollama,
-        "local_bge" | "localbge" | "bge" => CodeEmbedderBackend::LocalBge,
+    const GEMINI_OPENAI_COMPAT_EMBEDDINGS_URL: &str =
+        "https://generativelanguage.googleapis.com/v1beta/openai";
+
+    let normalized_backend = backend.to_ascii_lowercase();
+    let (backend, default_endpoint) = match normalized_backend.as_str() {
+        "openai" => (CodeEmbedderBackend::OpenAi, None),
+        "gemini" => (
+            CodeEmbedderBackend::OpenAi,
+            Some(GEMINI_OPENAI_COMPAT_EMBEDDINGS_URL.to_string()),
+        ),
+        "openai_compatible" | "openai-compatible" | "compatible" => {
+            if endpoint.as_deref().map(str::trim).filter(|e| !e.is_empty()).is_none() {
+                tracing::warn!(
+                    target: "rag.code_index",
+                    "code_rag.embedder.backend 'openai_compatible' requires code_rag.embedder.endpoint; dense retrieval disabled"
+                );
+                return None;
+            }
+            (CodeEmbedderBackend::OpenAi, None)
+        }
+        "ollama" => (CodeEmbedderBackend::Ollama, None),
+        "local_bge" | "localbge" | "bge" => (CodeEmbedderBackend::LocalBge, None),
         other => {
             tracing::warn!(
                 target: "rag.code_index",
@@ -264,7 +440,11 @@ fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
         CodeEmbedderBackend::Ollama => CodeEmbedderConfig::ollama(model, dims),
         CodeEmbedderBackend::LocalBge => CodeEmbedderConfig::local_bge(model, dims),
     };
-    if let Some(url) = endpoint {
+    if let Some(url) = endpoint
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .or(default_endpoint)
+    {
         embedder_cfg = embedder_cfg.with_endpoint(url);
     }
     let embedder = build_code_embedder(&embedder_cfg);
@@ -274,6 +454,7 @@ fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
     if let Ok(mut guard) = code_rag_vector_cache().write() {
         guard.insert(root.to_path_buf(), arc.clone());
     }
+    spawn_vector_index_seed(root.to_path_buf(), arc.clone());
     Some(arc)
 }
 
@@ -367,6 +548,9 @@ pub fn invalidate_caches() {
     if let Ok(mut guard) = code_rag_vector_cache().write() {
         guard.clear();
     }
+    if let Ok(mut guard) = vector_seed_started().write() {
+        guard.clear();
+    }
 }
 
 fn collect_dependents(graph: &SymbolGraph, sym: &SymbolId, cap: usize) -> Vec<String> {
@@ -428,5 +612,14 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
     let a_str = a.to_string_lossy().replace('\\', "/");
     let b_str = b.to_string_lossy().replace('\\', "/");
-    a_str == b_str || a_str.ends_with(&b_str) || b_str.ends_with(&a_str)
+    if a_str == b_str {
+        return true;
+    }
+    // Suffix match must align on a path separator so `lib.rs` does not match
+    // `b.rs` (which would attribute one file's symbols to another).
+    let suffix_matches = |long: &str, short: &str| -> bool {
+        long.strip_suffix(short)
+            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+    };
+    suffix_matches(&a_str, &b_str) || suffix_matches(&b_str, &a_str)
 }

@@ -386,6 +386,21 @@ impl ApprovalManager {
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
     }
+
+    pub async fn prompt_cli_async(&self, request: &ApprovalRequest) -> ApprovalResponse {
+        let request = request.clone();
+        match tokio::task::spawn_blocking(move || prompt_cli_interactive(&request)).await {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(
+                    target: "approval",
+                    error = %err,
+                    "CLI approval prompt task failed; denying"
+                );
+                ApprovalResponse::No
+            }
+        }
+    }
 }
 
 fn append_audit_entry_to_disk(

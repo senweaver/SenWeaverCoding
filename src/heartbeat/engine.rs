@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-use crate::config::HeartbeatConfig;
 use crate::observability::{Observer, ObserverEvent};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::time::{self, Duration};
-use tracing::{info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -149,20 +146,14 @@ pub fn compute_adaptive_interval(
 }
 
 pub struct HeartbeatEngine {
-    config: HeartbeatConfig,
     workspace_dir: std::path::PathBuf,
     observer: Arc<dyn Observer>,
     metrics: Arc<ParkingMutex<HeartbeatMetrics>>,
 }
 
 impl HeartbeatEngine {
-    pub fn new(
-        config: HeartbeatConfig,
-        workspace_dir: std::path::PathBuf,
-        observer: Arc<dyn Observer>,
-    ) -> Self {
+    pub fn new(workspace_dir: std::path::PathBuf, observer: Arc<dyn Observer>) -> Self {
         Self {
-            config,
             workspace_dir,
             observer,
             metrics: Arc::new(ParkingMutex::new(HeartbeatMetrics::default())),
@@ -173,40 +164,15 @@ impl HeartbeatEngine {
         Arc::clone(&self.metrics)
     }
 
-    pub async fn run(&self) -> Result<()> {
-        if !self.config.enabled {
-            info!("Heartbeat disabled");
-            return Ok(());
-        }
-
-        let interval_mins = self.config.interval_minutes.max(5);
-        info!("💓 Heartbeat started: every {} minutes", interval_mins);
-
-        let mut interval = time::interval(Duration::from_secs(u64::from(interval_mins) * 60));
-
-        loop {
-            interval.tick().await;
-            self.observer.record_event(&ObserverEvent::HeartbeatTick);
-
-            match self.tick().await {
-                Ok(tasks) => {
-                    if tasks > 0 {
-                        info!("💓 Heartbeat: processed {} tasks", tasks);
-                    }
-                }
-                Err(e) => {
-                    warn!("💓 Heartbeat error: {}", e);
-                    self.observer.record_event(&ObserverEvent::Error {
-                        component: "heartbeat".into(),
-                        message: e.to_string(),
-                    });
-                }
-            }
-        }
+    pub fn record_tick_event(&self) {
+        self.observer.record_event(&ObserverEvent::HeartbeatTick);
     }
 
-    async fn tick(&self) -> Result<usize> {
-        Ok(self.collect_tasks().await?.len())
+    pub fn record_error_event(&self, message: &str) {
+        self.observer.record_event(&ObserverEvent::Error {
+            component: "heartbeat".into(),
+            message: message.to_string(),
+        });
     }
 
     pub async fn collect_tasks(&self) -> Result<Vec<HeartbeatTask>> {

@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::apply_model::edit_op::EditOp;
 use crate::observability::coordination_metrics;
 
+const MAX_HISTORY_ENTRIES: usize = 10_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CrdtUpdate {
@@ -107,6 +109,14 @@ impl Document {
                         self.text.len()
                     )));
                 }
+                if start > end
+                    || !self.text.is_char_boundary(start)
+                    || !self.text.is_char_boundary(end)
+                {
+                    return Err(CrdtError::UnsupportedOp(format!(
+                        "replace range {start}..{end} is not aligned to UTF-8 boundaries"
+                    )));
+                }
                 self.text.replace_range(start..end, new_text);
                 let clock = self.next_clock();
                 self.history.push(CrdtUpdate::Replace {
@@ -125,6 +135,11 @@ impl Document {
                     return Err(CrdtError::UnsupportedOp(format!(
                         "insert at {at} exceeds doc len {}",
                         self.text.len()
+                    )));
+                }
+                if !self.text.is_char_boundary(at) {
+                    return Err(CrdtError::UnsupportedOp(format!(
+                        "insert at {at} is not a UTF-8 character boundary"
                     )));
                 }
                 self.text.insert_str(at, text);
@@ -147,6 +162,14 @@ impl Document {
                         self.text.len()
                     )));
                 }
+                if start > end
+                    || !self.text.is_char_boundary(start)
+                    || !self.text.is_char_boundary(end)
+                {
+                    return Err(CrdtError::UnsupportedOp(format!(
+                        "delete range {start}..{end} is not aligned to UTF-8 boundaries"
+                    )));
+                }
                 self.text.replace_range(start..end, "");
                 let clock = self.next_clock();
                 self.history.push(CrdtUpdate::Delete {
@@ -163,38 +186,81 @@ impl Document {
                 )));
             }
         }
+        self.prune_history();
         coordination_metrics::incr_crdt_local_ops(1);
         Ok(())
     }
 
-    pub fn apply_remote(&mut self, update: &[u8]) -> Result<(), CrdtError> {
-        let parsed: CrdtUpdate = serde_json::from_slice(update)
-            .map_err(|e| CrdtError::Decode(format!("{e}")))?;
-        let clock = parsed.clock();
-        if self.history.iter().any(|u| u.clock() == clock) {
-            return Ok(());
+    fn prune_history(&mut self) {
+        if self.history.len() <= MAX_HISTORY_ENTRIES {
+            return;
         }
+        let mut excess = self.history.len() - MAX_HISTORY_ENTRIES;
+        let exported = self.last_export_clock;
+        self.history.retain(|u| {
+            if excess > 0 && u.clock() <= exported {
+                excess -= 1;
+                false
+            } else {
+                true
+            }
+        });
+        let hard_cap = MAX_HISTORY_ENTRIES.saturating_mul(4);
+        if self.history.len() > hard_cap {
+            let drop = self.history.len() - hard_cap;
+            self.history.drain(..drop);
+        }
+    }
+
+    pub fn apply_remote(&mut self, update: &[u8]) -> Result<(), CrdtError> {
+        let updates: Vec<CrdtUpdate> = match serde_json::from_slice::<Vec<CrdtUpdate>>(update) {
+            Ok(batch) => batch,
+            Err(_) => {
+                let single: CrdtUpdate = serde_json::from_slice(update)
+                    .map_err(|e| CrdtError::Decode(format!("{e}")))?;
+                vec![single]
+            }
+        };
+        for parsed in updates {
+            self.apply_remote_update(parsed);
+        }
+        Ok(())
+    }
+
+    fn apply_remote_update(&mut self, parsed: CrdtUpdate) {
+        if self.history.iter().any(|u| *u == parsed) {
+            return;
+        }
+        let clock = parsed.clock();
         match &parsed {
             CrdtUpdate::Replace { start, end, text, .. } => {
-                if *end <= self.text.len() {
+                if *start <= *end
+                    && *end <= self.text.len()
+                    && self.text.is_char_boundary(*start)
+                    && self.text.is_char_boundary(*end)
+                {
                     self.text.replace_range(*start..*end, text);
                 }
             }
             CrdtUpdate::Insert { at, text, .. } => {
-                if *at <= self.text.len() {
+                if *at <= self.text.len() && self.text.is_char_boundary(*at) {
                     self.text.insert_str(*at, text);
                 }
             }
             CrdtUpdate::Delete { start, end, .. } => {
-                if *end <= self.text.len() {
+                if *start <= *end
+                    && *end <= self.text.len()
+                    && self.text.is_char_boundary(*start)
+                    && self.text.is_char_boundary(*end)
+                {
                     self.text.replace_range(*start..*end, "");
                 }
             }
         }
         self.clock = self.clock.max(clock);
         self.history.push(parsed);
+        self.prune_history();
         coordination_metrics::incr_crdt_remote_updates(1);
-        Ok(())
     }
 
     pub fn encode_update(&mut self) -> Vec<u8> {

@@ -232,19 +232,12 @@ pub fn verify_pid_is_sen_with_start(pid: u32, expected_start_time: Option<u64>) 
     }
     #[cfg(target_os = "windows")]
     {
-        let output = crate::util::hidden_sync_command("wmic")
-            .args([
-                "process",
-                "where",
-                &format!("ProcessId={pid}"),
-                "get",
-                "Name,CreationDate",
-                "/value",
-            ])
+        let output = crate::util::hidden_sync_command("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output();
         let Ok(out) = output else { return false };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let name_ok = text.contains("sen.exe");
+        let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+        let name_ok = text.contains("\"sen.exe\"") || text.starts_with("sen.exe");
         if !name_ok {
             return false;
         }

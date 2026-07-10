@@ -142,4 +142,10 @@ impl IdempotencyStore {
         keys.insert(key.to_owned(), now);
         true
     }
+
+    /// Release a previously-recorded key so a legitimate retry after a failure is
+    /// not rejected as a duplicate.
+    pub(crate) fn forget(&self, key: &str) {
+        self.keys.lock().remove(key);
+    }
 }

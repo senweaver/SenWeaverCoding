@@ -14,6 +14,7 @@ type SessionRuntimeStore = {
   setSelection: (key: string, selection: RuntimeSelection) => void
   clearSelection: (key: string) => void
   moveSelection: (fromKey: string, toKey: string) => void
+  reloadFromStorage: () => void
 }
 
 function loadSelections(): Record<string, RuntimeSelection> {
@@ -59,6 +60,13 @@ if (typeof window !== 'undefined') {
   })
 }
 
+export function flushSessionRuntimeSelections() {
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer)
+    flushSelections()
+  }
+}
+
 export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
   selections: loadSelections(),
 
@@ -92,4 +100,6 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
       persistSelections(selections)
       return { selections }
     }),
+
+  reloadFromStorage: () => set({ selections: loadSelections() }),
 }))

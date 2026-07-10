@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use super::motions::{Motion, resolve_motion};
+use super::motions::{Motion, line_end_at, line_start_at, resolve_motion};
 use super::text_objects::{TextObject, resolve_text_object};
 use super::types::{VimAction, VimMode, VimOperator, VimState};
 
@@ -33,17 +33,53 @@ fn key_to_motion(key: char) -> Option<Motion> {
     match key {
         'h' => Some(Motion::Left),
         'l' => Some(Motion::Right),
+        'j' => Some(Motion::Down),
+        'k' => Some(Motion::Up),
         'w' => Some(Motion::WordForward),
         'b' => Some(Motion::WordBackward),
         'e' => Some(Motion::WordEndForward),
         '^' => Some(Motion::FirstNonBlank),
         'G' => Some(Motion::BufferEnd),
         '$' => Some(Motion::LineEnd),
+        '%' => Some(Motion::MatchBracket),
         _ => None,
     }
 }
 
+fn find_key_to_motion(find_key: char, target: char) -> Option<Motion> {
+    match find_key {
+        'f' => Some(Motion::FindChar(target)),
+        'F' => Some(Motion::FindCharBackward(target)),
+        't' => Some(Motion::TillChar(target)),
+        'T' => Some(Motion::TillCharBackward(target)),
+        _ => None,
+    }
+}
+
+fn resolve_pending_find(
+    state: &mut VimState,
+    find_key: char,
+    target: char,
+    buffer: &str,
+) -> Option<usize> {
+    if target == '\x1b' {
+        state.count = None;
+        return None;
+    }
+    let motion = find_key_to_motion(find_key, target)?;
+    let count = take_count(state);
+    Some(resolve_motion(motion, buffer, state.cursor_pos, count))
+}
+
 fn process_normal_key(state: &mut VimState, key: char, buffer: &str) -> VimAction {
+
+    if let Some(find_key) = state.pending_find.take() {
+        let Some(target_char) = resolve_pending_find(state, find_key, key, buffer) else {
+            return VimAction::NoOp;
+        };
+        state.cursor_pos = target_char;
+        return VimAction::CursorMove(target_char);
+    }
 
     if let Some(op) = state.pending_operator {
         return process_operator_pending(state, op, key, buffer);
@@ -90,7 +126,12 @@ fn process_normal_key(state: &mut VimState, key: char, buffer: &str) -> VimActio
             VimAction::ModeChange(VimMode::Command)
         }
 
-        'h' | 'l' | 'w' | 'b' | 'e' | '^' | 'G' => {
+        'f' | 'F' | 't' | 'T' => {
+            state.pending_find = Some(key);
+            VimAction::NoOp
+        }
+
+        'h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | '^' | 'G' | '$' | '%' => {
             if let Some(motion) = key_to_motion(key) {
                 let count = take_count(state);
                 let target_char = resolve_motion(motion, buffer, state.cursor_pos, count);
@@ -103,12 +144,6 @@ fn process_normal_key(state: &mut VimState, key: char, buffer: &str) -> VimActio
         '0' if state.count.is_none() => {
             state.cursor_pos = 0;
             VimAction::CursorMove(0)
-        }
-        '$' => {
-            let count = take_count(state);
-            let target_char = resolve_motion(Motion::LineEnd, buffer, state.cursor_pos, count);
-            state.cursor_pos = target_char;
-            VimAction::CursorMove(target_char)
         }
 
         'd' => {
@@ -147,6 +182,7 @@ fn process_normal_key(state: &mut VimState, key: char, buffer: &str) -> VimActio
 
         '\x1b' => {
             state.pending_operator = None;
+            state.pending_find = None;
             state.count = None;
             state.command_buffer.clear();
             VimAction::NoOp
@@ -164,8 +200,44 @@ fn process_operator_pending(
 ) -> VimAction {
     if key == '\x1b' {
         state.pending_operator = None;
+        state.pending_find = None;
         state.count = None;
         state.command_buffer.clear();
+        return VimAction::NoOp;
+    }
+
+    if let Some(find_key) = state.pending_find.take() {
+        let cursor_char = state.cursor_pos;
+        let Some(target_char) = resolve_pending_find(state, find_key, key, buffer) else {
+            state.pending_operator = None;
+            return VimAction::NoOp;
+        };
+        state.pending_operator = None;
+        if target_char == cursor_char {
+            return VimAction::NoOp;
+        }
+        let (start, end) = if cursor_char < target_char {
+            (cursor_char, target_char + 1)
+        } else {
+            (target_char, cursor_char)
+        };
+        return match op {
+            VimOperator::Delete => {
+                state.cursor_pos = start;
+                VimAction::DeleteRange(start, end)
+            }
+            VimOperator::Change => {
+                state.mode = VimMode::Insert;
+                state.cursor_pos = start;
+                VimAction::DeleteRange(start, end)
+            }
+            VimOperator::Yank => VimAction::YankRange(start, end),
+            _ => VimAction::NoOp,
+        };
+    }
+
+    if matches!(key, 'f' | 'F' | 't' | 'T') {
+        state.pending_find = Some(key);
         return VimAction::NoOp;
     }
 
@@ -178,13 +250,22 @@ fn process_operator_pending(
     );
 
     if doubled {
-        let char_len = buffer.chars().count();
+        let chars: Vec<char> = buffer.chars().collect();
+        let start = line_start_at(&chars, state.cursor_pos);
+        let mut end = line_end_at(&chars, state.cursor_pos);
+        if end < chars.len() {
+            end += 1;
+        }
         return match op {
-            VimOperator::Yank => VimAction::YankRange(0, char_len),
-            VimOperator::Delete => VimAction::DeleteRange(0, char_len),
+            VimOperator::Yank => VimAction::YankRange(start, end),
+            VimOperator::Delete => {
+                state.cursor_pos = start;
+                VimAction::DeleteRange(start, end)
+            }
             VimOperator::Change => {
                 state.mode = VimMode::Insert;
-                VimAction::DeleteRange(0, char_len)
+                state.cursor_pos = start;
+                VimAction::DeleteRange(start, end)
             }
             _ => VimAction::NoOp,
         };
@@ -294,20 +375,53 @@ fn process_insert_key(state: &mut VimState, key: char, modifiers: &[&str]) -> Vi
         state.mode = VimMode::Normal;
         return VimAction::ModeChange(VimMode::Normal);
     }
+    if key == '\x7f' || key == '\x08' {
+        return VimAction::Backspace;
+    }
     VimAction::InsertChar(key)
 }
 
 fn process_visual_key(state: &mut VimState, key: char, buffer: &str) -> VimAction {
+    if let Some(find_key) = state.pending_find.take() {
+        let Some(target_char) = resolve_pending_find(state, find_key, key, buffer) else {
+            return VimAction::NoOp;
+        };
+        state.cursor_pos = target_char;
+        return VimAction::CursorMove(target_char);
+    }
+
+    let linewise = state.mode == VimMode::VisualLine;
+    let selection_range = |state: &VimState| -> (usize, usize) {
+        let anchor = state.selection_start.unwrap_or(state.cursor_pos);
+        let cursor = state.cursor_pos;
+        if linewise {
+            let chars: Vec<char> = buffer.chars().collect();
+            let start = line_start_at(&chars, anchor.min(cursor));
+            let mut end = line_end_at(&chars, anchor.max(cursor));
+            if end < chars.len() {
+                end += 1;
+            }
+            (start, end)
+        } else {
+            (anchor.min(cursor), anchor.max(cursor) + 1)
+        }
+    };
+
     match key {
         '\x1b' => {
             state.mode = VimMode::Normal;
             state.selection_start = None;
             state.pending_operator = None;
+            state.pending_find = None;
             state.count = None;
             state.command_buffer.clear();
             VimAction::ModeChange(VimMode::Normal)
         }
-        'h' | 'l' | 'w' | 'b' | 'e' => {
+        'f' | 'F' | 't' | 'T' => {
+            state.pending_find = Some(key);
+            VimAction::NoOp
+        }
+        'h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | '^' | 'G' | '$' | '%' => {
             if let Some(motion) = key_to_motion(key) {
                 let target_char = resolve_motion(motion, buffer, state.cursor_pos, 1);
                 state.cursor_pos = target_char;
@@ -316,26 +430,31 @@ fn process_visual_key(state: &mut VimState, key: char, buffer: &str) -> VimActio
                 VimAction::NoOp
             }
         }
+        '0' => {
+            let chars: Vec<char> = buffer.chars().collect();
+            let target = line_start_at(&chars, state.cursor_pos);
+            state.cursor_pos = target;
+            VimAction::CursorMove(target)
+        }
         'd' | 'x' => {
-            let start = state.selection_start.unwrap_or(state.cursor_pos);
-            let end = state.cursor_pos;
+            let (start, end) = selection_range(state);
             state.mode = VimMode::Normal;
             state.selection_start = None;
-            VimAction::DeleteRange(start.min(end), start.max(end) + 1)
+            state.cursor_pos = start;
+            VimAction::DeleteRange(start, end)
         }
         'y' => {
-            let start = state.selection_start.unwrap_or(state.cursor_pos);
-            let end = state.cursor_pos;
+            let (start, end) = selection_range(state);
             state.mode = VimMode::Normal;
             state.selection_start = None;
-            VimAction::YankRange(start.min(end), start.max(end) + 1)
+            VimAction::YankRange(start, end)
         }
         'c' => {
-            let start = state.selection_start.unwrap_or(state.cursor_pos);
-            let end = state.cursor_pos;
+            let (start, end) = selection_range(state);
             state.mode = VimMode::Insert;
             state.selection_start = None;
-            VimAction::DeleteRange(start.min(end), start.max(end) + 1)
+            state.cursor_pos = start;
+            VimAction::DeleteRange(start, end)
         }
         _ => VimAction::NoOp,
     }
@@ -349,12 +468,16 @@ fn process_command_key(state: &mut VimState, key: char) -> VimAction {
             VimAction::ModeChange(VimMode::Normal)
         }
         '\n' | '\r' => {
-            let cmd = state.command_buffer.clone();
+            let cmd = state.command_buffer.trim().to_string();
             state.mode = VimMode::Normal;
             state.command_buffer.clear();
             match cmd.as_str() {
-                "q" => VimAction::Cancel,
-                _ => VimAction::Submit,
+                "q" | "q!" => VimAction::Cancel,
+                "w" | "wq" | "x" | "send" => VimAction::Submit,
+                "" => VimAction::NoOp,
+                other => VimAction::Notice(format!(
+                    "vim: unknown command ':{other}' (use :w / :wq / :send to submit, :q to cancel)"
+                )),
             }
         }
         '\x7f' | '\x08' => {
@@ -375,5 +498,8 @@ fn process_replace_key(state: &mut VimState, key: char) -> VimAction {
         state.mode = VimMode::Normal;
         return VimAction::ModeChange(VimMode::Normal);
     }
-    VimAction::InsertChar(key)
+    if key == '\x7f' || key == '\x08' {
+        return VimAction::Backspace;
+    }
+    VimAction::ReplaceChar(key)
 }

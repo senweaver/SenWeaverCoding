@@ -11,6 +11,7 @@ use axum::{
     routing::post,
     Router,
 };
+use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -36,13 +37,22 @@ async fn agent_turn_handler(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     tracing::debug!(message = %payload.message, "agent_turn_handler received request");
     let config = state.config.lock().clone();
-    match Box::pin(crate::agent::process_message(
+    let turn_fut = Box::pin(crate::agent::process_message(
         config,
         &payload.message,
         payload.session_id.as_deref(),
-    ))
-    .await
-    {
+    ));
+    let caught = std::panic::AssertUnwindSafe(turn_fut)
+        .catch_unwind()
+        .await;
+    let result = match caught {
+        Ok(inner) => inner,
+        Err(_) => {
+            tracing::error!("agent_turn_handler: turn panicked and was isolated");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    match result {
         Ok(response) => Ok(Json(json!({
             "response": response,
             "session_id": payload.session_id,

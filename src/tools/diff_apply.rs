@@ -3,20 +3,54 @@
 // Licensed under the MIT License.
 
 use super::traits::{Tool, ToolResult};
+use crate::apply_model::OpsApplier;
 use crate::diff_session::DiffSession;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct DiffApplyTool {
     security: Arc<SecurityPolicy>,
+    ops_applier: Option<Arc<OpsApplier>>,
 }
 
 impl DiffApplyTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        Self {
+            security,
+            ops_applier: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_ops_applier(mut self, ops_applier: Arc<OpsApplier>) -> Self {
+        self.ops_applier = Some(ops_applier);
+        self
+    }
+
+    async fn verify_no_symlink(&self, path: &Path) -> anyhow::Result<()> {
+        if let Ok(meta) = tokio::fs::symlink_metadata(path).await {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!("Refusing to apply diff through symlink: {}", path.display());
+            }
+        }
+
+        let mut current = path.to_path_buf();
+        while let Some(parent) = current.parent() {
+            if let Ok(meta) = tokio::fs::symlink_metadata(parent).await {
+                if meta.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "Refusing to apply diff through symlinked parent directory: {}",
+                        parent.display()
+                    );
+                }
+            }
+            current = parent.to_path_buf();
+        }
+
+        Ok(())
     }
 }
 
@@ -60,6 +94,22 @@ impl Tool for DiffApplyTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if !self.security.can_act() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: autonomy is read-only".into()),
+            });
+        }
+
+        if self.security.is_rate_limited() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+            });
+        }
+
         let files = match args.get("files").and_then(|v| v.as_array()) {
             Some(f) if !f.is_empty() => f.clone(),
             _ => {
@@ -72,7 +122,11 @@ impl Tool for DiffApplyTool {
         };
 
         let root = self.security.workspace_dir();
-        let mut session = DiffSession::new(root);
+        let mut session = DiffSession::new(root)
+            .with_allowed_roots(self.security.allowed_roots.clone());
+        if let Some(ops) = self.ops_applier.clone() {
+            session = session.with_ops_applier(ops);
+        }
         let mut resolved_paths: Vec<PathBuf> = Vec::with_capacity(files.len());
 
         for entry in &files {
@@ -92,6 +146,24 @@ impl Tool for DiffApplyTool {
                     error: Some(format!("Path not allowed by security policy: {path}")),
                 });
             }
+            let resolved = self.security.resolve_tool_path(path);
+            if self.security.is_runtime_config_path(&resolved) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Refusing to modify runtime config/state file: {}",
+                        self.security.runtime_config_violation_message(&resolved)
+                    )),
+                });
+            }
+            if let Err(e) = self.verify_no_symlink(&resolved).await {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Security check failed: {e}")),
+                });
+            }
             if let Err(e) = session.stage(path, diff) {
                 return Ok(ToolResult {
                     success: false,
@@ -99,7 +171,41 @@ impl Tool for DiffApplyTool {
                     error: Some(format!("failed to stage diff for {path}: {e}")),
                 });
             }
-            resolved_paths.push(self.security.resolve_tool_path(path));
+            resolved_paths.push(resolved);
+        }
+
+        if !self.security.record_action() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Rate limit exceeded: action budget exhausted".into()),
+            });
+        }
+
+        let _resource_guards = match crate::session::acquire_many_file_writes_for_current_session(
+            resolved_paths.clone(),
+        )
+        .await
+        {
+            Some(Ok(g)) => Some(g),
+            Some(Err(e)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+            None => None,
+        };
+
+        for p in &resolved_paths {
+            if crate::session::is_stale_for_current_session(p) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(crate::session::stale_file_error_message(p)),
+                });
+            }
         }
 
         let pre_contents: Vec<Option<Vec<u8>>> = {

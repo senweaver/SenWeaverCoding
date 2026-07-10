@@ -29,7 +29,7 @@ pub async fn run_mqtt_sop_listener(
     );
     mqtt_options.set_keep_alive(std::time::Duration::from_secs(config.keep_alive_secs));
 
-    if let (Some(ref user), Some(ref pass)) = (&config.username, &config.password) {
+    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
         mqtt_options.set_credentials(user, pass);
     }
 
@@ -53,9 +53,14 @@ pub async fn run_mqtt_sop_listener(
 
     crate::health::mark_component_ok("mqtt");
 
+    const ERROR_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+    const ERROR_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut error_backoff = ERROR_BACKOFF_MIN;
+
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::Publish(msg))) => {
+                error_backoff = ERROR_BACKOFF_MIN;
                 let topic = msg.topic.clone();
                 let payload = String::from_utf8_lossy(&msg.payload).to_string();
 
@@ -67,19 +72,36 @@ pub async fn run_mqtt_sop_listener(
                 };
 
                 let results = dispatch_sop_event(&engine, &audit, event).await;
-                process_headless_results(&results).await;
+                process_headless_results(&results);
             }
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                error_backoff = ERROR_BACKOFF_MIN;
                 crate::health::mark_component_ok("mqtt");
                 info!("MQTT SOP listener: connected to broker");
+                for topic in &config.topics {
+                    match client.subscribe(topic, qos).await {
+                        Ok(()) => {
+                            info!("MQTT SOP listener: re-subscribed to '{topic}'");
+                        }
+                        Err(e) => {
+                            warn!(
+                                "MQTT SOP listener: failed to re-subscribe to '{topic}': {e}"
+                            );
+                        }
+                    }
+                }
             }
             Ok(_) => {
-
+                error_backoff = ERROR_BACKOFF_MIN;
             }
             Err(e) => {
                 crate::health::mark_component_error("mqtt", e.to_string());
-                warn!("MQTT SOP listener: connection error: {e}");
-
+                warn!(
+                    "MQTT SOP listener: connection error: {e}; retrying in {}s",
+                    error_backoff.as_secs()
+                );
+                tokio::time::sleep(error_backoff).await;
+                error_backoff = (error_backoff * 2).min(ERROR_BACKOFF_MAX);
             }
         }
     }

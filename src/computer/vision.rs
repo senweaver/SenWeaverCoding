@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::{Config, ModelProviderConfig, MultimodalConfig};
@@ -17,40 +17,51 @@ pub struct VisionClient {
 
 impl VisionClient {
     pub fn from_config(config: &Config, provider_id: &str, model: &str) -> Result<Self> {
-        let profile = config
+        let canonical_key = config
             .model_providers
-            .get(provider_id)
+            .get_key_value(provider_id)
+            .map(|(k, _)| k.clone())
             .or_else(|| {
                 config
                     .model_providers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(provider_id))
-                    .map(|(_, v)| v)
-            })
-            .ok_or_else(|| anyhow!("provider '{provider_id}' not found in configuration"))?;
+                    .keys()
+                    .find(|k| k.eq_ignore_ascii_case(provider_id))
+                    .cloned()
+            });
+        let profile = canonical_key
+            .as_deref()
+            .and_then(|key| config.model_providers.get(key));
 
         let mut options = crate::providers::provider_runtime_options_from_config(config);
-        if let Some(base) = profile.base_url.clone() {
-            options.provider_api_url = Some(base);
-        }
-        if let Some(path) = profile.api_path.clone() {
-            options.api_path = Some(path);
-        }
-        if let Some(max_tokens) = profile.max_tokens {
-            options.provider_max_tokens = Some(max_tokens);
-        }
-        for (name, value) in crate::config::build_custom_headers_map(&profile.custom_headers) {
-            options.extra_headers.insert(name, value);
-        }
-        if !profile.model_context_windows.is_empty() {
-            options.model_context_windows = profile.model_context_windows.clone();
+        if let Some(profile) = profile {
+            if let Some(base) = profile.base_url.clone() {
+                options.provider_api_url = Some(base);
+            }
+            if let Some(path) = profile.api_path.clone() {
+                options.api_path = Some(path);
+            }
+            if let Some(max_tokens) = profile.max_tokens {
+                options.provider_max_tokens = Some(max_tokens);
+            }
+            for (name, value) in crate::config::build_custom_headers_map(&profile.custom_headers)
+            {
+                options.extra_headers.insert(name, value);
+            }
+            if !profile.model_context_windows.is_empty() {
+                options.model_context_windows = profile.model_context_windows.clone();
+            }
         }
 
+        let runtime_name = crate::providers::resolve_runtime_provider_name(
+            canonical_key.as_deref().unwrap_or(provider_id),
+            config,
+        );
+
         let provider = crate::providers::create_provider_for_model(
-            provider_id,
+            &runtime_name,
             model,
-            profile.api_key.as_deref(),
-            profile.base_url.as_deref(),
+            profile.and_then(|p| p.api_key.as_deref()),
+            profile.and_then(|p| p.base_url.as_deref()),
             &options,
         )?;
 
@@ -60,6 +71,51 @@ impl VisionClient {
             multimodal: config.multimodal.clone(),
             temperature: 0.2,
         })
+    }
+
+    pub async fn complete_text(&self, system_prompt: &str, user_text: &str) -> Result<String> {
+        let messages = vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(user_text),
+        ];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let response = self
+            .provider
+            .chat(request, &self.model, self.temperature)
+            .await?;
+        Ok(response.text.unwrap_or_default())
+    }
+
+    pub async fn complete_with_images(
+        &self,
+        system_prompt: &str,
+        user_text: &str,
+        image_data_uris: &[&str],
+    ) -> Result<String> {
+        let mut user_content = user_text.to_string();
+        for uri in image_data_uris {
+            user_content.push_str("\n\n[IMAGE:");
+            user_content.push_str(uri);
+            user_content.push(']');
+        }
+        let messages = vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(user_content),
+        ];
+        let prepared =
+            crate::multimodal::prepare_messages_for_provider(&messages, &self.multimodal).await?;
+        let request = ChatRequest {
+            messages: &prepared.messages,
+            tools: None,
+        };
+        let response = self
+            .provider
+            .chat(request, &self.model, self.temperature)
+            .await?;
+        Ok(response.text.unwrap_or_default())
     }
 
     pub async fn complete_with_image(

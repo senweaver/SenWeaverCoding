@@ -239,7 +239,10 @@ impl ServiceContainer {
         };
 
         Self {
-            analytics: AnalyticsService::new(true),
+            analytics: AnalyticsService::new_with_persistence(
+                true,
+                Some(cfg.data_dir.join("analytics")),
+            ),
             compact: CompactService,
             lsp: LspService::new(),
             mcp: McpManager::new(),
@@ -259,7 +262,12 @@ impl ServiceContainer {
             tool_use_summary: Arc::new(parking_lot::Mutex::new(ToolUseSummaryService::new())),
 
             command_registry,
-            coding_mode: crate::agent::coding_mode::new_coding_mode_handle(),
+            coding_mode: crate::agent::coding_mode::coding_mode_handle_with(
+                crate::util::get_runtime_var("SEN_CODING_MODE")
+                    .as_deref()
+                    .and_then(CodingMode::from_str_loose)
+                    .unwrap_or_default(),
+            ),
             session_coding_modes: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
@@ -559,7 +567,9 @@ pub fn init_services(cfg: ServiceContainerConfig) -> &'static ServiceContainer {
         );
         return GLOBAL_SERVICES.get().expect("just checked is_some");
     }
-    GLOBAL_SERVICES.get_or_init(|| ServiceContainer::new(cfg))
+    let services = GLOBAL_SERVICES.get_or_init(|| ServiceContainer::new(cfg));
+    services.analytics.start_persistence_loop();
+    services
 }
 
 pub fn get_services() -> Option<&'static ServiceContainer> {
@@ -567,9 +577,18 @@ pub fn get_services() -> Option<&'static ServiceContainer> {
 }
 
 pub fn require_services() -> &'static ServiceContainer {
-    GLOBAL_SERVICES
-        .get()
-        .expect("ServiceContainer not initialized - call init_services() first")
+    if let Some(services) = GLOBAL_SERVICES.get() {
+        return services;
+    }
+    tracing::warn!(
+        "require_services called before init_services; initializing a default ServiceContainer \
+         (call init_services() during startup to control its configuration)"
+    );
+    let services = GLOBAL_SERVICES.get_or_init(|| {
+        ServiceContainer::new(ServiceContainerConfig::default())
+    });
+    services.analytics.start_persistence_loop();
+    services
 }
 
 pub fn try_get_services() -> Option<&'static ServiceContainer> {

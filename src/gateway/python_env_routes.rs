@@ -294,6 +294,21 @@ pub async fn handle_install_smart(
     Json(json!({"accepted": true})).into_response()
 }
 
+pub async fn handle_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceBody>,
+) -> axum::response::Response {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
+        return forbid_workspace();
+    };
+    let cancelled = python_env::cancel_workspace_tasks(&workspace);
+    Json(json!({"cancelled": cancelled})).into_response()
+}
+
 pub async fn handle_purge(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -305,11 +320,18 @@ pub async fn handle_purge(
     let Some(workspace) = resolve_workspace(&state, &body.workspace).await else {
         return forbid_workspace();
     };
-    match python_env::manager::purge_venv(&workspace) {
-        Ok(_) => Json(json!({"success": true})).into_response(),
-        Err(err) => (
+    let purge_result =
+        tokio::task::spawn_blocking(move || python_env::manager::purge_venv(&workspace)).await;
+    match purge_result {
+        Ok(Ok(_)) => Json(json!({"success": true})).into_response(),
+        Ok(Err(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": err})),
+        )
+            .into_response(),
+        Err(join_err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("purge task failed: {join_err}")})),
         )
             .into_response(),
     }

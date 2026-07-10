@@ -298,7 +298,21 @@ async fn build_context(
 ) -> String {
     let mut context = String::new();
 
-    if let Ok(mut entries) = mem.recall(user_msg, 5, session_id, None, None).await {
+    let recall_result = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        mem.recall(user_msg, 5, session_id, None, None),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                "memory recall timed out after 20s; continuing without memory context"
+            );
+            Err(anyhow::anyhow!("memory recall timed out"))
+        }
+    };
+    if let Ok(mut entries) = recall_result {
 
         decay::apply_time_decay(&mut entries, decay::DEFAULT_HALF_LIFE_DAYS);
 
@@ -518,6 +532,43 @@ pub(crate) async fn execute_tool_panic_safe(
                 "Tool '{tool_name}' crashed internally ({detail}). The underlying file/state was \
                  left unchanged."
             ))
+        }
+    }
+}
+
+fn append_turn_records_to_history(
+    history: &mut Vec<ChatMessage>,
+    assistant_history_content: &str,
+    native_tool_calls: &[ToolCall],
+    individual_results: &[(Option<String>, String)],
+    use_native_tools: bool,
+    tool_results: &str,
+) {
+    history.push(ChatMessage::assistant(assistant_history_content));
+    if native_tool_calls.is_empty() {
+        let all_results_have_ids = use_native_tools
+            && !individual_results.is_empty()
+            && individual_results
+                .iter()
+                .all(|(tool_call_id, _)| tool_call_id.is_some());
+        if all_results_have_ids {
+            for (tool_call_id, result) in individual_results {
+                let tool_msg = serde_json::json!({
+                    "tool_call_id": tool_call_id,
+                    "content": result,
+                });
+                history.push(ChatMessage::tool(tool_msg.to_string()));
+            }
+        } else {
+            history.push(ChatMessage::user(format!("[Tool results]\n{tool_results}")));
+        }
+    } else {
+        for (native_call, (_, result)) in native_tool_calls.iter().zip(individual_results.iter()) {
+            let tool_msg = serde_json::json!({
+                "tool_call_id": native_call.id,
+                "content": result,
+            });
+            history.push(ChatMessage::tool(tool_msg.to_string()));
         }
     }
 }
@@ -792,6 +843,34 @@ async fn emit_plan_progress_completion_card(
         .await;
 }
 
+fn current_turn_preserved_indices(
+    h: &[crate::providers::traits::ChatMessage],
+) -> Vec<usize> {
+    let current = h
+        .iter()
+        .rposition(|m| m.role == "user" && m.content.contains("[CURRENT REQUEST"))
+        .or_else(|| h.iter().rposition(|m| m.role == "user"));
+    let mut idxs: Vec<usize> = Vec::new();
+    if let Some(cur) = current {
+        idxs.push(cur);
+        if let Some(note_pos) = h[..cur].iter().rposition(|m| {
+            m.role == "assistant"
+                && crate::agent::dangling_tool_repair::is_turn_close_note(&m.content)
+        }) && let Some(prior_user) = h[..note_pos].iter().rposition(|m| m.role == "user")
+        {
+            const MAX_PINNED_TURN_MSGS: usize = 40;
+            idxs.push(prior_user);
+            let tail_start = note_pos.saturating_sub(MAX_PINNED_TURN_MSGS).max(prior_user);
+            for idx in tail_start..note_pos {
+                idxs.push(idx);
+            }
+        }
+    }
+    idxs.sort_unstable();
+    idxs.dedup();
+    idxs
+}
+
 fn build_intent_text_window(
     recent_assistant_text: &str,
     history: &[ChatMessage],
@@ -911,6 +990,18 @@ fn first_completion_quote(text: &str) -> Option<String> {
 }
 
 pub fn canonicalize_json_for_tool_signature(value: &serde_json::Value) -> serde_json::Value {
+    canonicalize_json_for_tool_signature_depth(value, 0)
+}
+
+const MAX_TOOL_SIGNATURE_DEPTH: usize = 96;
+
+fn canonicalize_json_for_tool_signature_depth(
+    value: &serde_json::Value,
+    depth: usize,
+) -> serde_json::Value {
+    if depth >= MAX_TOOL_SIGNATURE_DEPTH {
+        return serde_json::Value::String("__sen_depth_capped__".to_string());
+    }
     match value {
         serde_json::Value::Object(map) => {
             let mut keys: Vec<String> = map.keys().cloned().collect();
@@ -918,7 +1009,10 @@ pub fn canonicalize_json_for_tool_signature(value: &serde_json::Value) -> serde_
             let mut ordered = serde_json::Map::new();
             for key in keys {
                 if let Some(child) = map.get(&key) {
-                    ordered.insert(key, canonicalize_json_for_tool_signature(child));
+                    ordered.insert(
+                        key,
+                        canonicalize_json_for_tool_signature_depth(child, depth + 1),
+                    );
                 }
             }
             serde_json::Value::Object(ordered)
@@ -926,7 +1020,7 @@ pub fn canonicalize_json_for_tool_signature(value: &serde_json::Value) -> serde_
         serde_json::Value::Array(items) => serde_json::Value::Array(
             items
                 .iter()
-                .map(canonicalize_json_for_tool_signature)
+                .map(|v| canonicalize_json_for_tool_signature_depth(v, depth + 1))
                 .collect(),
         ),
         _ => value.clone(),
@@ -1068,6 +1162,11 @@ fn retry_friendly_message(notice: &crate::providers::traits::RetryNotice) -> Str
 const LLM_RESILIENCE_MAX_RETRIES: u32 = 600;
 const LLM_RESILIENCE_BACKOFF_BASE_MS: u64 = 1_000;
 const LLM_RESILIENCE_BACKOFF_CAP_MS: u64 = 15_000;
+// Total wall-clock cap on a single turn's resilient retries, so an unattended
+// daemon/cron turn cannot silently hang for hours on a persistently failing
+// provider (600 * 15s would be ~2.5h). 10 minutes is generous for transient
+// outages while bounding the worst case.
+const LLM_RESILIENCE_MAX_TOTAL: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn llm_resilience_backoff_ms(attempt: u32) -> u64 {
     let shift = attempt.saturating_sub(1).min(20);
@@ -1736,7 +1835,7 @@ async fn execute_one_tool(
                             if mgr.is_non_interactive() {
                                 false
                             } else {
-                                let decision = mgr.prompt_cli(&request);
+                                let decision = mgr.prompt_cli_async(&request).await;
                                 mgr.record_decision(
                                     call_name,
                                     &call_arguments,
@@ -1959,26 +2058,40 @@ async fn execute_one_tool(
                 success: normalized.success,
             });
             if normalized.success {
-                let scrubbed = scrub_credentials(&normalized.output);
+                let scrubbed: std::sync::Arc<str> =
+                    scrub_credentials(&normalized.output).into();
                 let compressed = {
                     let call_name_owned = call_name.to_string();
-                    tokio::task::spawn_blocking(move || {
+                    let scrubbed_for_task = std::sync::Arc::clone(&scrubbed);
+                    match tokio::task::spawn_blocking(move || {
                         crate::agent::token::optimizer::compress_output(
                             &call_name_owned,
-                            &scrubbed,
+                            &scrubbed_for_task,
                         )
                     })
                     .await
-                    .unwrap_or_else(|_| String::new())
+                    {
+                        Ok(output) => output,
+                        Err(err) => {
+                            tracing::warn!(
+                                tool = call_name,
+                                error = %err,
+                                "tool output compression task failed; using uncompressed output"
+                            );
+                            scrubbed.to_string()
+                        }
+                    }
                 };
 
                 if let Some(fp) = cache_fp.as_ref() {
-                    crate::agent::turn_engine::cache_bind::write_tool_cache(
-                        call_name,
-                        fp,
-                        compressed.clone(),
-                        tool.cache_ttl_secs(),
-                    );
+                    if !compressed.trim().is_empty() {
+                        crate::agent::turn_engine::cache_bind::write_tool_cache(
+                            call_name,
+                            fp,
+                            compressed.clone(),
+                            tool.cache_ttl_secs(),
+                        );
+                    }
                 }
                 Ok(ToolExecutionOutcome {
                     output: compressed,
@@ -2270,7 +2383,7 @@ async fn execute_tools_sequential(
             Ok(outcome) => outcomes.push(outcome),
             Err(e) => {
                 if cancellation_token.is_some_and(|t| t.is_cancelled()) {
-                    return Err(e);
+                    return Err(tool_loop_cancelled());
                 }
                 tracing::warn!(
                     target: "agent.tool",
@@ -2635,13 +2748,32 @@ pub(crate) async fn run_unified_loop_impl(
 
     let mut _turn_metrics = crate::agent::executor_core::TurnMetricsGuard::start();
 
+    let (token_soft_cap, token_hard_cap) = crate::services::try_get_services()
+        .map(|svc| {
+            let rt = &svc.config().agent_runtime;
+            (
+                rt.per_turn_token_soft_cap as u64,
+                rt.per_turn_token_hard_cap as u64,
+            )
+        })
+        .unwrap_or_else(|| {
+            let rt = crate::config::domain::AgentRuntimeExtras::default();
+            (
+                rt.per_turn_token_soft_cap as u64,
+                rt.per_turn_token_hard_cap as u64,
+            )
+        });
     let mut _pacing_gov = crate::agent::executor_core::PacingGovernor::new(
-        max_iterations,
-        None,
-        pacing
-            .total_turn_timeout_secs
-            .filter(|s| *s > 0)
-            .map(std::time::Duration::from_secs),
+        crate::agent::executor_core::PacingBudget {
+            no_progress_limit: pacing.no_progress_iteration_limit.max(1),
+            absolute_iteration_limit: max_iterations,
+            total_timeout: pacing
+                .total_turn_timeout_secs
+                .filter(|s| *s > 0)
+                .map(std::time::Duration::from_secs),
+            token_soft_cap,
+            token_hard_cap,
+        },
     );
 
     let mut plan_nudge_state =
@@ -2719,16 +2851,31 @@ pub(crate) async fn run_unified_loop_impl(
 
     let mut turn_tool_results: Vec<(String, bool)> = Vec::new();
 
+    history.retain(|m| {
+        !(m.role == "system"
+            && crate::agent::executor_core::is_pacing_guard_message(&m.content))
+    });
+
     for iteration in 0..usize::MAX {
         if let Err(budget_exceeded) = _pacing_gov.tick() {
             tracing::warn!(
                 target: "agent.pacing",
                 turn_id = %turn_id,
                 reason = %budget_exceeded,
-                "agent turn made no forward progress for too long; ending turn gracefully"
+                "agent turn exceeded a pacing budget; ending turn gracefully"
             );
             pacing_break_reason = Some(budget_exceeded);
             break;
+        }
+        for warning in _pacing_gov.drain_warnings() {
+            tracing::warn!(
+                target: "agent.pacing",
+                turn_id = %turn_id,
+                iteration = iteration + 1,
+                %warning,
+                "pacing guard nudging the model to recover"
+            );
+            history.push(ChatMessage::system(warning));
         }
 
         tracing::debug!(
@@ -2762,16 +2909,24 @@ pub(crate) async fn run_unified_loop_impl(
                 );
                 return Err(tool_loop_cancelled());
             }
-            tracing::info!(
-                target: "agent.loop",
-                turn_id = %turn_id,
-                "event receiver dropped without user cancellation; ending turn to avoid orphaned background execution"
-            );
-            return Err(anyhow::Error::new(
-                crate::error::AgentError::StreamInterrupted(
-                    "event consumer disconnected before the turn completed".to_string(),
-                ),
-            ));
+            if cancellation_token.is_some() {
+                tracing::info!(
+                    target: "agent.loop",
+                    turn_id = %turn_id,
+                    "event consumer disconnected (transport/UI); keeping turn alive under cancellation guard so reasoning is preserved for reconnect/resume"
+                );
+            } else {
+                tracing::info!(
+                    target: "agent.loop",
+                    turn_id = %turn_id,
+                    "event receiver dropped without user cancellation and no cancellation guard; ending turn to avoid orphaned background execution"
+                );
+                return Err(anyhow::Error::new(
+                    crate::error::AgentError::StreamInterrupted(
+                        "event consumer disconnected before the turn completed".to_string(),
+                    ),
+                ));
+            }
         }
 
         if let Some(hook) = &iteration_context_budget_hook {
@@ -3032,31 +3187,7 @@ pub(crate) async fn run_unified_loop_impl(
                     context_window,
                 );
                 let preserved_fn: Box<crate::agent::context::compressor::PreservedIndexFn> =
-                    Box::new(|h: &[crate::providers::traits::ChatMessage]| {
-                        let current = h
-                            .iter()
-                            .rposition(|m| {
-                                m.role == "user" && m.content.contains("[CURRENT REQUEST")
-                            })
-                            .or_else(|| h.iter().rposition(|m| m.role == "user"));
-                        let mut idxs: Vec<usize> = Vec::new();
-                        if let Some(cur) = current {
-                            idxs.push(cur);
-                            if let Some(note_pos) = h[..cur].iter().rposition(|m| {
-                                m.role == "assistant"
-                                    && crate::agent::dangling_tool_repair::is_interrupted_turn_note(
-                                        &m.content,
-                                    )
-                            }) && let Some(prior_user) =
-                                h[..note_pos].iter().rposition(|m| m.role == "user")
-                            {
-                                idxs.push(prior_user);
-                            }
-                        }
-                        idxs.sort_unstable();
-                        idxs.dedup();
-                        idxs
-                    });
+                    Box::new(current_turn_preserved_indices);
                 if let Some(ref tx) = on_delta {
                     let _ = tx
                         .send(DraftEvent::Progress(
@@ -3274,6 +3405,9 @@ pub(crate) async fn run_unified_loop_impl(
         let mut streamed_live_deltas = false;
 
         let mut llm_resilience_attempt: u32 = 0;
+        let llm_resilience_started_at = std::time::Instant::now();
+        let mut emergency_compress_attempts: u32 = 0;
+        const MAX_EMERGENCY_COMPRESS_ATTEMPTS: u32 = 4;
         let chat_result = 'llm_attempt: loop {
         let attempt_result = if should_consume_provider_stream {
             let stream_idle_timeout = pacing
@@ -3344,6 +3478,9 @@ pub(crate) async fn run_unified_loop_impl(
                         .is_some_and(|t| t.is_cancelled())
                     {
                         return Err(tool_loop_cancelled());
+                    }
+                    if stream_err.to_string().contains("exceeded max response size") {
+                        return Err(stream_err);
                     }
                     if stream_err.to_string().contains("stream idle timeout")
                         && llm_resilience_attempt < LLM_RESILIENCE_MAX_RETRIES
@@ -3448,10 +3585,76 @@ pub(crate) async fn run_unified_loop_impl(
                         break 'llm_attempt Err(tool_loop_cancelled());
                     }
                     if llm_error_is_terminal(&e) {
+                        if crate::providers::reliable::is_context_window_exceeded(&e)
+                            && emergency_compress_attempts < MAX_EMERGENCY_COMPRESS_ATTEMPTS
+                        {
+                            if let Some(svc) = crate::services::try_get_services() {
+                                let compression_cfg =
+                                    svc.config().agent.context_compression.clone();
+                                if compression_cfg.enabled {
+                                    let budget_window =
+                                        crate::agent::token::optimizer::global_optimizer()
+                                            .map(|opt| opt.budget().context_window())
+                                            .unwrap_or(128_000);
+                                    let context_window = budget_window.max(32_000);
+                                    let mut emergency_compressor =
+                                        crate::agent::context::compressor::ContextCompressor::new(
+                                            compression_cfg,
+                                            context_window,
+                                        );
+                                    if let Some(ref tx) = on_delta {
+                                        let _ = tx
+                                            .send(DraftEvent::Progress(
+                                                "模型反馈上下文超限，正在紧急压缩历史后重试…"
+                                                    .to_string(),
+                                            ))
+                                            .await;
+                                    }
+                                    let emergency_preserved: Box<
+                                        crate::agent::context::compressor::PreservedIndexFn,
+                                    > = Box::new(current_turn_preserved_indices);
+                                    let compressed = emergency_compressor
+                                        .compress_on_error(
+                                            history,
+                                            provider,
+                                            model,
+                                            &e.to_string(),
+                                            Some(&*emergency_preserved),
+                                        )
+                                        .await
+                                        .unwrap_or(false);
+                                    if compressed {
+                                        emergency_compress_attempts += 1;
+                                        prepared_messages =
+                                            multimodal::prepare_messages_for_provider(
+                                                history,
+                                                multimodal_config,
+                                            )
+                                            .await?;
+                                        let _ = apply_outgoing_pii_sanitization(
+                                            Some(active_mode),
+                                            &mut prepared_messages.messages,
+                                        );
+                                        if let Some(ref tx) = on_delta {
+                                            let _ = tx.send(DraftEvent::Clear).await;
+                                        }
+                                        tracing::info!(
+                                            target: "agent.context.compress",
+                                            turn_id = %turn_id,
+                                            attempt = emergency_compress_attempts,
+                                            "context-window error recovered via emergency compression; retrying turn"
+                                        );
+                                        continue 'llm_attempt;
+                                    }
+                                }
+                            }
+                        }
                         break 'llm_attempt Err(e);
                     }
                     llm_resilience_attempt += 1;
-                    if llm_resilience_attempt > LLM_RESILIENCE_MAX_RETRIES {
+                    if llm_resilience_attempt > LLM_RESILIENCE_MAX_RETRIES
+                        || llm_resilience_started_at.elapsed() >= LLM_RESILIENCE_MAX_TOTAL
+                    {
                         break 'llm_attempt Err(e);
                     }
                     let backoff_ms = llm_resilience_backoff_ms(llm_resilience_attempt);
@@ -3567,6 +3770,34 @@ pub(crate) async fn run_unified_loop_impl(
                         }
                     }
                 }
+
+                let generated_tokens = resp
+                    .usage
+                    .as_ref()
+                    .and_then(|u| u.output_tokens)
+                    .filter(|t| *t > 0)
+                    .unwrap_or_else(|| {
+                        let text_tokens = crate::services::token_estimation::estimate_tokens(
+                            resp.text_or_empty(),
+                        );
+                        let reasoning_tokens = resp
+                            .reasoning_content
+                            .as_deref()
+                            .map(crate::services::token_estimation::estimate_tokens)
+                            .unwrap_or(0);
+                        let tool_call_tokens: u64 = resp
+                            .tool_calls
+                            .iter()
+                            .map(|c| {
+                                crate::services::token_estimation::estimate_tokens(&c.name)
+                                    + crate::services::token_estimation::estimate_tokens(
+                                        &c.arguments,
+                                    )
+                            })
+                            .sum();
+                        text_tokens + reasoning_tokens + tool_call_tokens
+                    });
+                _pacing_gov.record_generated_tokens(generated_tokens);
 
                 let response_text = resp.text_or_empty().to_string();
 
@@ -3999,17 +4230,18 @@ pub(crate) async fn run_unified_loop_impl(
                 }
                 if delivery_interrupted {
                     let total_chars = display_text.len();
+                    history.push(ChatMessage::assistant(response_text.clone()));
                     tracing::error!(
                         target: "agent.loop",
                         turn_id = %turn_id,
                         delivered_chars,
                         total_chars,
-                        "event consumer disconnected during final chunked delivery; marking turn interrupted instead of recording undelivered content as a successful turn"
+                        "event consumer disconnected during final chunked delivery; assistant response preserved in history for reconnect/resume, turn marked interrupted"
                     );
                     _turn_metrics.mark_status("interrupted");
                     return Err(anyhow::Error::new(
                         crate::error::AgentError::StreamInterrupted(format!(
-                            "final response delivery interrupted after {delivered_chars}/{total_chars} chars; turn not recorded as delivered"
+                            "final response delivery interrupted after {delivered_chars}/{total_chars} chars; response preserved in history but not confirmed delivered"
                         )),
                     ));
                 }
@@ -4236,7 +4468,7 @@ pub(crate) async fn run_unified_loop_impl(
                                              granted ({reason})"
                                         ))
                                     } else {
-                                        let decision = mgr.prompt_cli(&request);
+                                        let decision = mgr.prompt_cli_async(&request).await;
                                         mgr.record_decision(
                                             &call.name,
                                             &call.arguments,
@@ -4524,7 +4756,7 @@ pub(crate) async fn run_unified_loop_impl(
                             if mgr.is_non_interactive() {
                                 ApprovalResponse::No
                             } else {
-                                mgr.prompt_cli(&request)
+                                mgr.prompt_cli_async(&request).await
                             }
                         }
                     };
@@ -5067,35 +5299,19 @@ pub(crate) async fn run_unified_loop_impl(
             deferred_system_after_tool_batch.push(msg);
         }
 
-        if !plan_finalized_this_iter
-            && crate::agent::plan_mode::enforcement::detect_plan_mode_active(
-                plan_mode_flag,
-            )
-            && !awaiting_user_input
-        {
-            plan_nudge_state.nudge_count += 1;
-            let msg = crate::agent::plan_mode::enforcement::nudge_message(
-                &plan_nudge_state,
-            );
-            deferred_system_after_tool_batch.push(msg.to_string());
-        }
+        // NOTE: plan-mode enforcement is applied only when the model ends a turn
+        // WITHOUT calling exit_plan_mode (see the `evaluate_plan_mode_exit` path
+        // above). We intentionally do NOT nudge after every tool batch here: plan
+        // mode explicitly permits read-only exploration, and per-batch nudging
+        // escalated to the CRITICAL warning within a few tool calls and forced the
+        // model to produce a plan before it had gathered enough context.
 
-        #[cfg(feature = "tool-curator")]
-        if !curator_finalized_this_iter && !awaiting_user_input {
-            let curator_flag_opt = crate::services::try_get_services()
-                .map(|svc| svc.curator_mode_flag.clone());
-            let in_curator_mode =
-                crate::agent::curator_mode_enforcement::detect_curator_mode_active(
-                    curator_flag_opt.as_ref(),
-                );
-            if in_curator_mode {
-                curator_nudge_state.nudge_count += 1;
-                let msg = crate::agent::curator_mode_enforcement::nudge_message(
-                    &curator_nudge_state,
-                );
-                deferred_system_after_tool_batch.push(msg.to_string());
-            }
-        }
+        // NOTE: like plan-mode, Curator enforcement is applied only when the model
+        // ends a turn WITHOUT calling exit_curator_mode (see evaluate_curator_mode_exit
+        // above). We intentionally do NOT nudge after every tool batch: Curator's own
+        // quality gate requires 5+ web_search + 8+ web_fetch calls, so per-batch nudging
+        // would escalate to the CRITICAL "exit now" warning mid-research and force the
+        // model to finalize a shallow document.
 
         if plan_finalized_this_iter {
             tracing::info!(
@@ -5103,10 +5319,19 @@ pub(crate) async fn run_unified_loop_impl(
                 turn_id = %turn_id,
                 "Halting turn: exit_plan_mode succeeded; waiting for user's Build  - Switch click"
             );
+            append_turn_records_to_history(
+                history,
+                &assistant_history_content,
+                &native_tool_calls,
+                &individual_results,
+                use_native_tools,
+                &tool_results,
+            );
             let halt_text = "_Plan finalised. Waiting for the user to click \
                 **Build** in the plan card to switch to Agent mode and start \
                 executing._"
                 .to_string();
+            history.push(ChatMessage::assistant(&halt_text));
             _turn_metrics.mark_ok();
             if let Some(ref tx) = on_delta {
                 let _ = tx.send(DraftEvent::Clear).await;
@@ -5136,10 +5361,19 @@ pub(crate) async fn run_unified_loop_impl(
                 turn_id = %turn_id,
                 "Halting turn: exit_curator_mode succeeded; waiting for user's Build click"
             );
+            append_turn_records_to_history(
+                history,
+                &assistant_history_content,
+                &native_tool_calls,
+                &individual_results,
+                use_native_tools,
+                &tool_results,
+            );
             let halt_text = "_Curator deliverable saved. Waiting for the user to click \
                 **Build** in the curator card to switch to Agent mode and execute \
                 `impl_blueprint.md` verbatim._"
                 .to_string();
+            history.push(ChatMessage::assistant(&halt_text));
             _turn_metrics.mark_ok();
             if let Some(ref tx) = on_delta {
                 let _ = tx.send(DraftEvent::Clear).await;
@@ -5168,10 +5402,19 @@ pub(crate) async fn run_unified_loop_impl(
                 turn_id = %turn_id,
                 "Pausing turn: ask_question is awaiting user reply (plan nudge suppressed)"
             );
+            append_turn_records_to_history(
+                history,
+                &assistant_history_content,
+                &native_tool_calls,
+                &individual_results,
+                use_native_tools,
+                &tool_results,
+            );
             let pause_text =
                 "_Waiting for the user's reply to the clarifying question(s) above._"
                     .to_string();
 
+            history.push(ChatMessage::assistant(&pause_text));
             _turn_metrics.mark_ok();
             if let Some(ref tx) = on_delta {
                 let _ = tx.send(DraftEvent::Clear).await;
@@ -5235,35 +5478,14 @@ pub(crate) async fn run_unified_loop_impl(
             }
         }
 
-        history.push(ChatMessage::assistant(assistant_history_content));
-        if native_tool_calls.is_empty() {
-            let all_results_have_ids = use_native_tools
-                && !individual_results.is_empty()
-                && individual_results
-                    .iter()
-                    .all(|(tool_call_id, _)| tool_call_id.is_some());
-            if all_results_have_ids {
-                for (tool_call_id, result) in &individual_results {
-                    let tool_msg = serde_json::json!({
-                        "tool_call_id": tool_call_id,
-                        "content": result,
-                    });
-                    history.push(ChatMessage::tool(tool_msg.to_string()));
-                }
-            } else {
-                history.push(ChatMessage::user(format!("[Tool results]\n{tool_results}")));
-            }
-        } else {
-            for (native_call, (_, result)) in
-                native_tool_calls.iter().zip(individual_results.iter())
-            {
-                let tool_msg = serde_json::json!({
-                    "tool_call_id": native_call.id,
-                    "content": result,
-                });
-                history.push(ChatMessage::tool(tool_msg.to_string()));
-            }
-        }
+        append_turn_records_to_history(
+            history,
+            &assistant_history_content,
+            &native_tool_calls,
+            &individual_results,
+            use_native_tools,
+            &tool_results,
+        );
 
         for body in deferred_system_after_tool_batch {
             history.push(ChatMessage::system(body));
@@ -5333,6 +5555,12 @@ pub(crate) async fn run_unified_loop_impl(
         Some(crate::agent::executor_core::PacingExceeded::TotalTimeout { .. }) => {
             "agent turn exceeded total time budget"
         }
+        Some(crate::agent::executor_core::PacingExceeded::AbsoluteIterations { .. }) => {
+            "agent turn reached the absolute per-turn iteration ceiling"
+        }
+        Some(crate::agent::executor_core::PacingExceeded::TokenBudget { .. }) => {
+            "agent burned the no-progress token budget without a successful tool call"
+        }
         Some(crate::agent::executor_core::PacingExceeded::IterationBudget { .. }) | None => {
             "agent made no forward progress for too many consecutive iterations"
         }
@@ -5347,6 +5575,9 @@ pub(crate) async fn run_unified_loop_impl(
         Some(exhausted_reason),
         serde_json::json!({
             "max_iterations": max_iterations,
+            "no_progress_limit": pacing.no_progress_iteration_limit,
+            "iterations_used": _pacing_gov.iteration(),
+            "generated_tokens": _pacing_gov.total_generated_tokens(),
         }),
     );
     if crate::agent::plan_mode::execution_enforcement::should_auto_finalize_on_exit(
@@ -5373,6 +5604,12 @@ pub(crate) async fn run_unified_loop_impl(
         Some(crate::agent::executor_core::PacingExceeded::TotalTimeout { limit }) => format!(
             "本轮执行已超过总时长上限（{}秒），为避免长时间占用在此安全停止。已完成的工作已保留，可基于当前进展继续对话。",
             limit.as_secs()
+        ),
+        Some(crate::agent::executor_core::PacingExceeded::AbsoluteIterations { limit }) => format!(
+            "本轮迭代次数已达到单轮绝对上限（{limit} 次），在此安全停止。已完成的工作已保留，发送任意消息即可基于当前进展继续。"
+        ),
+        Some(crate::agent::executor_core::PacingExceeded::TokenBudget { used, limit }) => format!(
+            "自上次取得进展以来已消耗约 {used} tokens（无进展 token 硬上限 {limit}）仍未有任何工具成功，为控制成本在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
         ),
         Some(crate::agent::executor_core::PacingExceeded::IterationBudget { limit }) => format!(
             "连续 {limit} 轮迭代未取得任何进展，为避免空转在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
@@ -5569,7 +5806,14 @@ pub async fn run(
             .map(|p| p.join("event_audit.jsonl")),
     );
 
-    let mem: Arc<dyn Memory> = crate::agent::cli_runtime::build_memory(&config)?;
+    let mem: Arc<dyn Memory> = {
+        let memory_config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::agent::cli_runtime::build_memory(&memory_config)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("memory initialization task failed: {e}"))??
+    };
     tracing::info!(backend = mem.name(), "Memory initialized");
 
     if !peripheral_overrides.is_empty() {
@@ -5902,12 +6146,6 @@ pub async fn run(
     });
 
     crate::agent::profile::runtime_hooks::publish_lifecycle_event("started");
-
-    let mut query_engine =
-        crate::query::QueryEngine::new(config.agent.max_context_tokens as u32, 4096);
-    for hook in crate::query::standard_stop_hooks(0.9) {
-        query_engine.add_stop_hook(hook);
-    }
 
     if crate::agent::multi_agent_runtime::global_runtime().is_none() {
         let _ = crate::agent::multi_agent_runtime::init_global_runtime();
@@ -6745,13 +6983,38 @@ pub async fn run(
                 }
             };
 
-            consumer_handle.abort();
+            // Drop our retained sender so the consumer's `delta_rx.recv()` sees the
+            // channel close and drains any buffered tail events (final content /
+            // tool results) before exiting, instead of aborting mid-flush and
+            // truncating the terminal output.
+            drop(delta_tx);
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                consumer_handle.into_inner(),
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::debug!(
+                        "interactive CLI delta consumer did not drain within 5s; continuing"
+                    );
+                }
+            }
 
             if !response.is_empty() {
                 if !content_was_streamed.load(std::sync::atomic::Ordering::Relaxed) {
                     println!("{response}");
                 }
-                history.push(ChatMessage::assistant(&response));
+                // The unified loop already appended the final assistant message to
+                // `history`; only push here if it did not (avoid duplicating every
+                // reply in the interactive session history).
+                let already_in_history = history
+                    .last()
+                    .is_some_and(|m| m.role == "assistant" && m.content == response);
+                if !already_in_history {
+                    history.push(ChatMessage::assistant(&response));
+                }
             }
 
             if let Some(path) = session_state_file.as_deref() {

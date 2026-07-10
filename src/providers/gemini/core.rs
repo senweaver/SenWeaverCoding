@@ -27,7 +27,15 @@ pub struct GeminiProvider {
     auth_profile_override: Option<String>,
 
     extra_headers: std::collections::HashMap<String, String>,
+
+    timeout_secs: u64,
+
+    max_output_tokens: u32,
 }
+
+const GEMINI_DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 
 struct OAuthTokenState {
     access_token: String,
@@ -418,7 +426,10 @@ fn refresh_gemini_cli_token(
         .unwrap_or_else(|_| "<failed to read response body>".to_string());
 
     if !status.is_success() {
-        anyhow::bail!("Gemini CLI OAuth refresh failed (HTTP {status}): {body}");
+        anyhow::bail!(
+            "Gemini CLI OAuth refresh failed (HTTP {status}): {}",
+            crate::providers::sanitize_api_error(&body)
+        );
     }
 
     #[derive(Deserialize)]
@@ -534,6 +545,8 @@ impl GeminiProvider {
             auth_service: None,
             auth_profile_override: None,
             extra_headers: std::collections::HashMap::new(),
+            timeout_secs: GEMINI_DEFAULT_TIMEOUT_SECS,
+            max_output_tokens: GEMINI_DEFAULT_MAX_OUTPUT_TOKENS,
         }
     }
 
@@ -542,6 +555,18 @@ impl GeminiProvider {
         headers: std::collections::HashMap<String, String>,
     ) -> Self {
         self.extra_headers = headers;
+        self
+    }
+
+    #[must_use]
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = max_output_tokens.max(1);
         self
     }
 
@@ -582,6 +607,8 @@ impl GeminiProvider {
             },
             auth_profile_override: profile_override,
             extra_headers: std::collections::HashMap::new(),
+            timeout_secs: GEMINI_DEFAULT_TIMEOUT_SECS,
+            max_output_tokens: GEMINI_DEFAULT_MAX_OUTPUT_TOKENS,
         }
     }
 
@@ -864,13 +891,7 @@ impl GeminiProvider {
             }
             _ => {
                 let model_name = Self::format_model_name(model);
-                let base_url = format!("{PUBLIC_API_ENDPOINT}/{model_name}:generateContent");
-
-                if auth.is_api_key() {
-                    format!("{base_url}?key={}", auth.api_key_credential())
-                } else {
-                    base_url
-                }
+                format!("{PUBLIC_API_ENDPOINT}/{model_name}:generateContent")
             }
         }
     }
@@ -880,7 +901,7 @@ impl GeminiProvider {
             .proxy_runtime()
             .build_client_with_timeouts_and_headers(
                 "provider.gemini",
-                120,
+                self.timeout_secs,
                 10,
                 &self.extra_headers,
             )
@@ -924,7 +945,10 @@ impl GeminiProvider {
                 );
                 return Ok(seed);
             }
-            anyhow::bail!("loadCodeAssist failed (HTTP {status}): {body}");
+            anyhow::bail!(
+                "loadCodeAssist failed (HTTP {status}): {}",
+                crate::providers::sanitize_api_error(&body)
+            );
         }
 
         #[derive(Deserialize)]
@@ -984,6 +1008,9 @@ impl GeminiProvider {
                     .json(&internal_request)
                     .bearer_auth(token)
             }
+            _ if auth.is_api_key() => {
+                req.header("x-goog-api-key", auth.api_key_credential())
+            }
             _ => req,
         }
     }
@@ -1024,7 +1051,7 @@ impl GeminiProvider {
             model,
             GenerationConfig {
                 temperature,
-                max_output_tokens: 8192,
+                max_output_tokens: self.max_output_tokens,
                 response_mime_type: None,
                 response_schema: None,
             },
@@ -1183,7 +1210,10 @@ impl GeminiProvider {
                         .send()
                         .await?;
                 } else {
-                    anyhow::bail!("Gemini API error ({status}): {error_text}");
+                    anyhow::bail!(
+                        "Gemini API error ({status}): {}",
+                        crate::providers::sanitize_api_error(&error_text)
+                    );
                 }
             } else if auth.is_oauth()
                 && Self::should_retry_oauth_without_generation_config(status, &error_text)
@@ -1204,7 +1234,10 @@ impl GeminiProvider {
                     .send()
                     .await?;
             } else {
-                anyhow::bail!("Gemini API error ({status}): {error_text}");
+                anyhow::bail!(
+                    "Gemini API error ({status}): {}",
+                    crate::providers::sanitize_api_error(&error_text)
+                );
             }
         }
 
@@ -1230,23 +1263,35 @@ impl GeminiProvider {
                     .send()
                     .await?;
             } else {
-                anyhow::bail!("Gemini API error ({status}): {error_text}");
+                anyhow::bail!(
+                    "Gemini API error ({status}): {}",
+                    crate::providers::sanitize_api_error(&error_text)
+                );
             }
         }
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Gemini API error ({status}): {error_text}");
+            anyhow::bail!(
+                "Gemini API error ({status}): {}",
+                crate::providers::sanitize_api_error(&error_text)
+            );
         }
 
         let result: GenerateContentResponse = response.json().await?;
         if let Some(err) = &result.error {
-            anyhow::bail!("Gemini API error: {}", err.message);
+            anyhow::bail!(
+                "Gemini API error: {}",
+                crate::providers::sanitize_api_error(&err.message)
+            );
         }
         let result = result.into_effective_response();
         if let Some(err) = result.error {
-            anyhow::bail!("Gemini API error: {}", err.message);
+            anyhow::bail!(
+                "Gemini API error: {}",
+                crate::providers::sanitize_api_error(&err.message)
+            );
         }
 
         Ok(result)
@@ -1571,7 +1616,7 @@ impl Provider for GeminiProvider {
 
         let generation_config = GenerationConfig {
             temperature,
-            max_output_tokens: 8192,
+            max_output_tokens: self.max_output_tokens,
             response_mime_type: Some("application/json".to_string()),
             response_schema: Some(schema.clone()),
         };
@@ -1669,7 +1714,7 @@ impl Provider for GeminiProvider {
             system_instruction,
             generation_config: GenerationConfig {
                 temperature,
-                max_output_tokens: 8192,
+                max_output_tokens: self.max_output_tokens,
                 response_mime_type: None,
                 response_schema: None,
             },
@@ -1726,7 +1771,7 @@ impl Provider for GeminiProvider {
             system_instruction,
             generation_config: GenerationConfig {
                 temperature,
-                max_output_tokens: 8192,
+                max_output_tokens: self.max_output_tokens,
                 response_mime_type: None,
                 response_schema: None,
             },
@@ -1772,20 +1817,12 @@ impl Provider for GeminiProvider {
                 }
                 _ => {
 
-                    let url = if auth.is_api_key() {
-                        format!(
-                            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
-                            auth.api_key_credential()
-                        )
-                    } else {
-                        "https://generativelanguage.googleapis.com/v1beta/models".to_string()
-                    };
-
-                    self.http_client()
-                        .get(&url)
-                        .send()
-                        .await?
-                        .error_for_status()?;
+                    let url = "https://generativelanguage.googleapis.com/v1beta/models";
+                    let mut req = self.http_client().get(url);
+                    if auth.is_api_key() {
+                        req = req.header("x-goog-api-key", auth.api_key_credential());
+                    }
+                    req.send().await?.error_for_status()?;
                 }
             }
         }

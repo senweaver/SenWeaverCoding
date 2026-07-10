@@ -228,9 +228,22 @@ impl ScriptHookRunner {
         }
     }
 
-    pub fn load_default(workspace_dir: PathBuf) -> Self {
+    pub fn load_default(workspace_dir: PathBuf, allow_workspace_hooks: bool) -> Self {
         let mut runner = Self::new(workspace_dir.clone());
         for (path, precedence) in default_lookup_paths(&workspace_dir) {
+            let is_workspace_source = precedence == WORKSPACE_HOOKS_PRECEDENCE;
+            if is_workspace_source && !allow_workspace_hooks {
+                if path.is_file() {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "workspace hooks.json found but blocked by security policy; \
+                         set `hooks.allow_workspace_hooks = true` in your config to run \
+                         hooks defined inside the workspace (they execute arbitrary shell \
+                         commands, so only enable this for workspaces you trust)"
+                    );
+                }
+                continue;
+            }
             if let Some(src) = load_one(&path, precedence) {
                 runner.sources.push(src);
             }
@@ -348,13 +361,16 @@ impl ScriptHookRunner {
             }
         };
 
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(payload).await;
-            let _ = stdin.shutdown().await;
-        }
-
-        let output_future = child.wait_with_output();
+        let stdin = child.stdin.take();
+        let payload_owned = payload.to_vec();
+        let output_future = async move {
+            if let Some(mut stdin) = stdin {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&payload_owned).await;
+                let _ = stdin.shutdown().await;
+            }
+            child.wait_with_output().await
+        };
         let output = match tokio::time::timeout(timeout, output_future).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
@@ -501,16 +517,22 @@ fn truncate_for_payload(s: &str, max: usize) -> String {
 }
 
 fn build_shell_command(line: &str) -> tokio::process::Command {
-    if cfg!(target_os = "windows") {
-        let mut c = crate::util::hidden_async_command("cmd");
-        c.arg("/C").arg(line);
-        c
-    } else {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = crate::util::hidden_sync_command("cmd.exe");
+        c.arg("/C").raw_arg(line);
+        tokio::process::Command::from(c)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
         let mut c = crate::util::hidden_async_command("sh");
         c.arg("-c").arg(line);
         c
     }
 }
+
+const WORKSPACE_HOOKS_PRECEDENCE: u8 = 1;
 
 fn default_lookup_paths(workspace_dir: &Path) -> Vec<(PathBuf, u8)> {
     let mut out = Vec::new();
@@ -518,8 +540,14 @@ fn default_lookup_paths(workspace_dir: &Path) -> Vec<(PathBuf, u8)> {
         out.push((home.join(".cursor").join("hooks.json"), 0));
         out.push((home.join(".sen").join("hooks.json"), 0));
     }
-    out.push((workspace_dir.join(".cursor").join("hooks.json"), 1));
-    out.push((workspace_dir.join(".sen").join("hooks.json"), 1));
+    out.push((
+        workspace_dir.join(".cursor").join("hooks.json"),
+        WORKSPACE_HOOKS_PRECEDENCE,
+    ));
+    out.push((
+        workspace_dir.join(".sen").join("hooks.json"),
+        WORKSPACE_HOOKS_PRECEDENCE,
+    ));
     out
 }
 
@@ -572,7 +600,8 @@ pub fn event_for_tool_post(tool: &str) -> Option<HookEvent> {
     let lower = tool.to_ascii_lowercase();
     match lower.as_str() {
         "file_write" | "write_file" | "fs_write" | "apply_diff" | "inline_edit"
-        | "edit_file" | "search_replace" | "multi_edit" => Some(HookEvent::AfterFileEdit),
+        | "edit_file" | "search_replace" | "multi_edit" | "file_edit" | "patch_apply"
+        | "diff_apply" | "glob_edit" | "notebook_edit" => Some(HookEvent::AfterFileEdit),
         _ => None,
     }
 }

@@ -18,6 +18,7 @@ pub mod rpc;
 
 pub mod resource_lock;
 pub mod run_state;
+pub mod turn_feed;
 pub mod workspace_run;
 pub mod write_lock;
 
@@ -34,6 +35,9 @@ pub use resource_lock::{
     stale_file_error_message,
 };
 pub use run_state::{SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry};
+pub use turn_feed::{
+    SessionTurnFeed, TurnFeedGuard, deregister_turn_feed, get_turn_feed, register_turn_feed,
+};
 pub use workspace_run::{normalize_workspace_key, workspace_key_from_path};
 pub use chat_view::{
     ChatEntry, ChatEntryKind, ChatViewSink, ChatViewSurface, SessionChatState,
@@ -182,6 +186,7 @@ impl AgentSession {
         let bridge_task =
             crate::runtime::spawn_supervised("agent_session.event_bridge", async move {
                 let mut saw_first_token = false;
+                let mut tool_id_pairer = FallbackToolIdPairer::default();
                 while let Some(turn_event) = rx.recv().await {
                     if !saw_first_token && is_first_token_trigger(&turn_event) {
                         saw_first_token = true;
@@ -204,7 +209,9 @@ impl AgentSession {
                             );
                         }
                     }
-                    if let Some(sess_event) = turn_event_to_session_event(turn_event) {
+                    if let Some(sess_event) =
+                        turn_event_to_session_event(turn_event, &mut tool_id_pairer)
+                    {
                         if let Some(state) = &state_for_bridge {
                             state.apply(&sess_event);
                         }
@@ -333,7 +340,37 @@ fn fallback_tool_call_id(name: &str) -> String {
     format!("{name}_{}", uuid::Uuid::new_v4())
 }
 
-pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
+/// Pairs a `ToolCall` with its `ToolResult` when the provider did not supply a
+/// `tool_call_id`. Without this, each side would independently mint a random id
+/// and the pairing would be permanently broken, producing orphaned tool
+/// records that trip API 400s on replay/wire conversion.
+#[derive(Default)]
+pub struct FallbackToolIdPairer {
+    by_name: std::collections::HashMap<String, std::collections::VecDeque<String>>,
+}
+
+impl FallbackToolIdPairer {
+    fn on_call(&mut self, name: &str) -> String {
+        let id = fallback_tool_call_id(name);
+        self.by_name
+            .entry(name.to_string())
+            .or_default()
+            .push_back(id.clone());
+        id
+    }
+
+    fn on_result(&mut self, name: &str) -> String {
+        self.by_name
+            .get_mut(name)
+            .and_then(|q| q.pop_front())
+            .unwrap_or_else(|| fallback_tool_call_id(name))
+    }
+}
+
+pub fn turn_event_to_session_event(
+    event: TurnEvent,
+    pairer: &mut FallbackToolIdPairer,
+) -> Option<SessionEvent> {
     let kind = match event {
         TurnEvent::Chunk { delta } => SessionEventKind::Delta { text: delta },
         TurnEvent::Thinking { delta } => SessionEventKind::Delta {
@@ -347,7 +384,7 @@ pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
             tool_name: name.clone(),
             tool_call_id: tool_call_id
                 .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| fallback_tool_call_id(&name)),
+                .unwrap_or_else(|| pairer.on_call(&name)),
             arguments: args,
         },
         TurnEvent::ToolResult {
@@ -361,7 +398,7 @@ pub fn turn_event_to_session_event(event: TurnEvent) -> Option<SessionEvent> {
             SessionEventKind::ToolResult {
                 tool_call_id: tool_call_id
                     .filter(|id| !id.is_empty())
-                    .unwrap_or_else(|| fallback_tool_call_id(&name)),
+                    .unwrap_or_else(|| pairer.on_result(&name)),
                 output,
                 is_error,
             }

@@ -23,6 +23,10 @@ impl Companion {
         self.mood
     }
 
+    pub fn set_config(&mut self, config: BuddyConfig) {
+        self.config = config;
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
     }

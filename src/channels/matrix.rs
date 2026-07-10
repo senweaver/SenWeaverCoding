@@ -29,6 +29,50 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, OnceCell, RwLock, mpsc};
 
+const MAX_MEDIA_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+
+async fn download_media_to_file(
+    url: &str,
+    access_token: &str,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let client = crate::services::proxy::runtime::ProxyRuntime::global()
+        .build_client("channel.matrix.media");
+    let mut resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {}", resp.status());
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_MEDIA_DOWNLOAD_BYTES {
+            anyhow::bail!(
+                "media size {len} bytes exceeds the {MAX_MEDIA_DOWNLOAD_BYTES} byte limit"
+            );
+        }
+    }
+
+    let mut file = tokio::fs::File::create(dest).await?;
+    let mut written: u64 = 0;
+    while let Some(chunk) = resp.chunk().await? {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > MAX_MEDIA_DOWNLOAD_BYTES {
+            drop(file);
+            let _ = tokio::fs::remove_file(dest).await;
+            anyhow::bail!(
+                "media exceeds the {MAX_MEDIA_DOWNLOAD_BYTES} byte limit; partial file removed"
+            );
+        }
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct MatrixChannel {
     homeserver: String,
@@ -240,7 +284,8 @@ impl MatrixChannel {
             sen_dir,
             resolved_room_id_cache: Arc::new(RwLock::new(None)),
             sdk_client: Arc::new(OnceCell::new()),
-            http_client: Client::new(),
+            http_client: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client("channel.matrix"),
             reaction_events: Arc::new(RwLock::new(HashMap::new())),
             voice_mode: Arc::new(AtomicBool::new(false)),
             otk_conflict_detected: Arc::new(AtomicBool::new(false)),
@@ -1054,34 +1099,28 @@ impl Channel for MatrixChannel {
                 let body = if let Some((url, filename)) = media_download {
                     let workspace = std::path::PathBuf::from(
                         shellexpand::tilde(
-                            &std::env::var("SEN_WORKSPACE")
-                                .unwrap_or_else(|_| "/tmp/sen-uploads".to_string()),
+                            &crate::util::get_runtime_var("SEN_WORKSPACE")
+                                .filter(|v| !v.trim().is_empty())
+                                .unwrap_or_else(|| "/tmp/sen-uploads".to_string()),
                         )
                         .as_ref(),
                     );
                     let _ = tokio::fs::create_dir_all(&workspace).await;
-                    let dest = workspace.join(&filename);
-                    let client = reqwest::Client::new();
-                    match client
-                        .get(&url)
-                        .header("Authorization", format!("Bearer {}", access_token))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                            Ok(bytes) => match tokio::fs::write(&dest, &bytes).await {
-                                Ok(()) => {
-                                    if body.starts_with("[IMAGE:") {
-                                        format!("[IMAGE:{}]", dest.display())
-                                    } else {
-                                        format!("{}  -  saved to {}", body, dest.display())
-                                    }
-                                }
-                                Err(_) => format!("{}  -  failed to write to disk", body),
-                            },
-                            Err(_) => format!("{}  -  download failed", body),
-                        },
-                        _ => format!("{}  -  download failed (auth error?)", body),
+                    let safe_name = std::path::Path::new(&filename)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .filter(|n| !n.is_empty() && n != "." && n != "..")
+                        .unwrap_or_else(|| "matrix-download.bin".to_string());
+                    let dest = workspace.join(&safe_name);
+                    match download_media_to_file(&url, &access_token, &dest).await {
+                        Ok(()) => {
+                            if body.starts_with("[IMAGE:") {
+                                format!("[IMAGE:{}]", dest.display())
+                            } else {
+                                format!("{}  -  saved to {}", body, dest.display())
+                            }
+                        }
+                        Err(e) => format!("{}  -  download failed: {e}", body),
                     }
                 } else {
                     body

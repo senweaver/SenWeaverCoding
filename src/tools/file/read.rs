@@ -26,7 +26,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents with line numbers. Supports partial reading via offset and limit. Extracts text from office documents (Word .docx, Excel .xlsx, PowerPoint .pptx) and PDF; other binary files are read with lossy UTF-8 conversion."
+        "Read file contents with line numbers. Supports partial reading via offset and limit. The trailing summary line includes the file's mtime_ms, which can be passed as expected_mtime_ms to file_write/file_edit/multi_edit for conflict detection. Extracts text from office documents (Word .docx, Excel .xlsx, PowerPoint .pptx) and PDF; other binary files are read with lossy UTF-8 conversion."
     }
 
     fn mcp_safe(&self) -> bool {
@@ -116,7 +116,7 @@ impl Tool for FileReadTool {
 
         crate::session::record_read_for_current_session(&resolved_path);
 
-        match tokio::fs::metadata(&resolved_path).await {
+        let mtime_ms: Option<u64> = match tokio::fs::metadata(&resolved_path).await {
             Ok(meta) => {
                 if meta.len() > MAX_FILE_SIZE_BYTES {
                     return Ok(ToolResult {
@@ -128,6 +128,10 @@ impl Tool for FileReadTool {
                         )),
                     });
                 }
+                meta.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
             }
             Err(e) => {
                 return Ok(ToolResult {
@@ -136,7 +140,10 @@ impl Tool for FileReadTool {
                     error: Some(format!("Failed to read file metadata: {e}")),
                 });
             }
-        }
+        };
+        let mtime_suffix = mtime_ms
+            .map(|m| format!(", mtime_ms: {m}"))
+            .unwrap_or_default();
 
         let explicit_level = args.get("level").and_then(|v| v.as_str()).is_some();
         let mut level = args
@@ -280,9 +287,9 @@ impl Tool for FileReadTool {
 
         let partial = start > 0 || end < total;
         let summary = if partial {
-            format!("\n[Lines {}-{} of {total}]", start + 1, end)
+            format!("\n[Lines {}-{} of {total}{mtime_suffix}]", start + 1, end)
         } else {
-            format!("\n[{total} lines total]")
+            format!("\n[{total} lines total{mtime_suffix}]")
         };
 
         Ok(ToolResult {

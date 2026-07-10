@@ -205,12 +205,29 @@ export function XtermView(props: XtermViewProps) {
           pendingPayloads.push(payload)
           if (pendingPayloads.length > PENDING_RING_MAX) pendingPayloads.shift()
         })
+        if (cancelled) {
+          try {
+            outputUnlisten()
+          } catch {
+            /* ignore */
+          }
+          return
+        }
         const exitUnlisten = await terminalApi.onExit((payload) => {
           if (payload.session_id !== sessionIdRef.current) return
           terminal.writeln(`\r\n[process exited: ${payload.code}]`)
           sessionIdRef.current = null
           onExitedRef.current?.({ code: payload.code })
         })
+        if (cancelled) {
+          try {
+            outputUnlisten()
+            exitUnlisten()
+          } catch {
+            /* ignore */
+          }
+          return
+        }
         unlistenRef.current = [outputUnlisten, exitUnlisten]
 
         terminal.onData((data) => {

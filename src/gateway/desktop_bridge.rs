@@ -177,10 +177,16 @@ pub fn install_remote_controllers() {
 pub async fn handle_bridge_ws(
     State(_state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     if !bridge_mode() {
         return (axum::http::StatusCode::NOT_FOUND, "bridge mode disabled").into_response();
+    }
+    if let Some(reject) =
+        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/desktop-bridge")
+    {
+        return reject;
     }
     let expected = std::env::var(BRIDGE_TOKEN_ENV).unwrap_or_default();
     if !expected.is_empty() {
@@ -242,9 +248,25 @@ async fn handle_bridge_socket(socket: WebSocket) {
         }
     }
 
-    {
+    let was_current = {
         let mut guard = hub().outbound.lock();
-        *guard = None;
+        if guard
+            .as_ref()
+            .is_some_and(|current| current.same_channel(&tx))
+        {
+            *guard = None;
+            true
+        } else {
+            false
+        }
+    };
+    writer.abort();
+    if !was_current {
+        tracing::info!(
+            target: "gateway.desktop_bridge",
+            "stale desktop bridge connection closed; a newer connection is already active"
+        );
+        return;
     }
     let disconnect_epoch = hub().connection_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     crate::runtime::spawn_supervised("gateway.desktop_bridge.grace", async move {
@@ -255,7 +277,6 @@ async fn handle_bridge_socket(socket: WebSocket) {
             hub().fail_all_pending("desktop bridge disconnected");
         }
     });
-    writer.abort();
     tracing::info!(
         target: "gateway.desktop_bridge",
         grace_secs = RECONNECT_GRACE.as_secs(),

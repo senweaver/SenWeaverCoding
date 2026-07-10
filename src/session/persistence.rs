@@ -21,6 +21,7 @@ const SNAPSHOT_MIN_INTERVAL_MS: u64 = 5_000;
 
 const EVENTS_FILE: &str = "events.jsonl";
 const SNAPSHOT_FILE: &str = "snapshot.json";
+const ABSORBED_FILE: &str = "events.absorbed";
 const WRITE_LOCK_FILE: &str = "session.write.lock";
 
 const WRITE_QUEUE_CAPACITY: usize = 16384;
@@ -62,6 +63,41 @@ fn monotonic_ms() -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+pub fn latest_session_id(workspace_root: &Path) -> Option<String> {
+    let sessions_root = workspace_root.join(".sen").join("sessions");
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(&sessions_root).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let mut newest: Option<std::time::SystemTime> = None;
+        let mut consider = |p: PathBuf| {
+            if let Ok(modified) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+                if newest.is_none_or(|current| modified > current) {
+                    newest = Some(modified);
+                }
+            }
+        };
+        consider(path.join(EVENTS_FILE));
+        consider(path.join(SNAPSHOT_FILE));
+        for rotated in rotated_event_logs(&path) {
+            consider(rotated);
+        }
+        let Some(modified) = newest else { continue };
+        if best
+            .as_ref()
+            .is_none_or(|(current, _)| modified > *current)
+        {
+            best = Some((modified, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
 impl SessionEventLog {
 
     pub fn open_at<P: AsRef<Path>>(root: P, id: &str) -> std::io::Result<Self> {
@@ -79,9 +115,23 @@ impl SessionEventLog {
             .unwrap_or(0);
         let mut start_seq = 0_u64;
         if existing > 0 {
-
-            let reader = BufReader::new(File::open(&events_path)?);
-            start_seq = reader.lines().map_while(Result::ok).count() as u64;
+            let mut reader = BufReader::with_capacity(256 * 1024, File::open(&events_path)?);
+            let mut count: u64 = 0;
+            let mut last_byte: u8 = b'\n';
+            loop {
+                let buf = reader.fill_buf()?;
+                if buf.is_empty() {
+                    break;
+                }
+                count += buf.iter().filter(|&&b| b == b'\n').count() as u64;
+                last_byte = buf[buf.len() - 1];
+                let consumed = buf.len();
+                reader.consume(consumed);
+            }
+            if last_byte != b'\n' {
+                count += 1;
+            }
+            start_seq = count;
         }
 
         let lock_path = dir.join(WRITE_LOCK_FILE);
@@ -310,7 +360,16 @@ impl SessionEventLog {
         }
 
         if events_path.exists() {
-            apply_event_file(&events_path, id, &mut working)?;
+            // Skip the leading active-log lines the snapshot already absorbed
+            // (set when a crash happened between snapshot write and log rotation);
+            // 0 in the normal case. When the snapshot was corrupt we rebuilt from
+            // rotated logs above, so the whole active log must be replayed.
+            let skip = if snapshot_corrupt {
+                0
+            } else {
+                read_absorbed_marker(&self.root)
+            };
+            apply_event_file_skipping(&events_path, id, &mut working, skip)?;
             recovered_any = true;
         }
 
@@ -324,11 +383,25 @@ fn apply_event_file(
     id: &str,
     state: &mut SessionState,
 ) -> std::io::Result<bool> {
+    apply_event_file_skipping(path, id, state, 0)
+}
+
+fn apply_event_file_skipping(
+    path: &Path,
+    id: &str,
+    state: &mut SessionState,
+    skip_nonempty: u64,
+) -> std::io::Result<bool> {
     let reader = BufReader::new(File::open(path)?);
     let mut applied = false;
+    let mut skipped = 0u64;
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
+            continue;
+        }
+        if skipped < skip_nonempty {
+            skipped += 1;
             continue;
         }
         match serde_json::from_str::<SessionEvent>(&line) {
@@ -502,21 +575,69 @@ fn flush_with_retry(writer: &mut BufWriter<File>, write_failures: &AtomicU64) ->
     }
 }
 
+fn count_nonempty_lines(path: &Path) -> u64 {
+    let Ok(file) = File::open(path) else {
+        return 0;
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .count() as u64
+}
+
+fn write_absorbed_marker(root: &Path, count: u64) {
+    let path = root.join(ABSORBED_FILE);
+    if count == 0 {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let _ = crate::util::atomic_write(&path, count.to_string().as_bytes());
+}
+
+fn read_absorbed_marker(root: &Path) -> u64 {
+    std::fs::read_to_string(root.join(ABSORBED_FILE))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn write_snapshot_to_disk(
     root: &Path,
     writer: &mut BufWriter<File>,
     state: &SessionState,
 ) -> std::io::Result<()> {
+    let active = root.join(EVENTS_FILE);
+    // Flush pending events first so the on-disk active log matches what the
+    // snapshot is about to absorb.
+    writer.flush()?;
+    // Record how many active-log lines this snapshot already reflects. If we
+    // crash after writing the snapshot but before rotating the active log, replay
+    // uses this marker to skip the already-absorbed prefix and avoid re-applying
+    // (which would duplicate turns/tool calls, since apply() is append-style).
+    let absorbed = count_nonempty_lines(&active);
+
     let snap_path = root.join(SNAPSHOT_FILE);
     let tmp_path = root.join(format!("{SNAPSHOT_FILE}.tmp"));
     let json = serde_json::to_vec(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    std::fs::write(&tmp_path, &json)?;
+    {
+        use std::io::Write as _;
+        let mut tmp = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        tmp.write_all(&json)?;
+        // fsync before rename so a crash cannot leave an empty/half-written
+        // snapshot that would discard most of the session history on replay.
+        tmp.sync_all()?;
+    }
     std::fs::rename(&tmp_path, &snap_path)?;
+    // Snapshot is now durable and reflects `absorbed` leading active-log lines.
+    write_absorbed_marker(root, absorbed);
 
     let rotated = root.join(format!("events.{}.jsonl", state.version));
-    let active = root.join(EVENTS_FILE);
-    writer.flush()?;
     let mut rotation_failed = false;
     if active.exists() {
         if let Err(e) = std::fs::rename(&active, &rotated) {
@@ -542,6 +663,9 @@ fn write_snapshot_to_disk(
             .open(&active)?
     };
     *writer = BufWriter::new(new_file);
+    // Active log is now fresh (rotated away or truncated), so nothing in it is
+    // already absorbed by the snapshot.
+    write_absorbed_marker(root, 0);
     prune_rotated(root, 3);
     Ok(())
 }

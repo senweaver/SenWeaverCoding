@@ -24,7 +24,8 @@ impl NotionTool {
     pub fn new(api_key: String, security: Arc<SecurityPolicy>) -> Self {
         Self {
             api_key,
-            http: reqwest::Client::new(),
+            http: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("tool.notion", 60, 15),
             security,
         }
     }

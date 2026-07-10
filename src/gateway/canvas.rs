@@ -155,6 +155,11 @@ pub async fn handle_ws_canvas(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(reject) =
+        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/canvas")
+    {
+        return reject;
+    }
 
     if state.pairing.require_pairing() {
         let token = headers

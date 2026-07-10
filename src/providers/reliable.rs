@@ -11,7 +11,6 @@ use futures_util::{StreamExt, stream};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -69,11 +68,9 @@ pub fn is_non_retryable(err: &anyhow::Error) -> bool {
     }
 
     let msg = err.to_string();
-    for word in msg.split(|c: char| !c.is_ascii_digit()) {
-        if let Ok(code) = word.parse::<u16>() {
-            if (400..500).contains(&code) {
-                return code != 429 && code != 408;
-            }
+    if let Some(code) = extract_http_status_code(&msg) {
+        if (400..500).contains(&code) {
+            return code != 429 && code != 408;
         }
     }
 
@@ -105,6 +102,93 @@ pub fn is_non_retryable(err: &anyhow::Error) -> bool {
             || msg_lower.contains("unsupported")
             || msg_lower.contains("does not exist")
             || msg_lower.contains("invalid"))
+}
+
+pub(crate) fn extract_http_status_code(msg: &str) -> Option<u16> {
+    let bytes = msg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start == 3 {
+                if let Ok(code) = msg[start..i].parse::<u16>() {
+                    if (100..=599).contains(&code)
+                        && (has_status_context_before(msg, start)
+                            || has_reason_phrase_after(msg, i))
+                    {
+                        return Some(code);
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn preceding_word(msg: &str, mut end: usize) -> (Option<String>, usize) {
+    let bytes = msg.as_bytes();
+    while end > 0 && !bytes[end - 1].is_ascii_alphanumeric() {
+        end -= 1;
+    }
+    let word_end = end;
+    while end > 0 && bytes[end - 1].is_ascii_alphabetic() {
+        end -= 1;
+    }
+    if end == word_end {
+        return (None, end);
+    }
+    (Some(msg[end..word_end].to_ascii_lowercase()), end)
+}
+
+fn has_status_context_before(msg: &str, digit_start: usize) -> bool {
+    let (word, word_start) = preceding_word(msg, digit_start);
+    let Some(word) = word else { return false };
+    match word.as_str() {
+        "http" | "status" | "code" | "statuscode" => true,
+        "error" => {
+            let (prev, _) = preceding_word(msg, word_start);
+            prev.as_deref() != Some("os")
+        }
+        _ => false,
+    }
+}
+
+fn has_reason_phrase_after(msg: &str, digit_end: usize) -> bool {
+    let rest = msg[digit_end..]
+        .trim_start_matches([' ', '-', ':', '(', ')', '.', ','])
+        .to_ascii_lowercase();
+    const REASON_PHRASES: &[&str] = &[
+        "bad request",
+        "unauthorized",
+        "payment required",
+        "forbidden",
+        "not found",
+        "method not allowed",
+        "not acceptable",
+        "proxy authentication required",
+        "request timeout",
+        "conflict",
+        "gone",
+        "length required",
+        "precondition failed",
+        "payload too large",
+        "request entity too large",
+        "uri too long",
+        "unsupported media type",
+        "unprocessable entity",
+        "too many requests",
+        "unavailable for legal reasons",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+    ];
+    REASON_PHRASES.iter().any(|phrase| rest.starts_with(phrase))
 }
 
 pub fn is_tool_schema_error(err: &anyhow::Error) -> bool {
@@ -468,9 +552,6 @@ pub struct ReliableProvider {
     max_retries: u32,
     base_backoff_ms: u64,
 
-    api_keys: Vec<String>,
-    key_index: AtomicUsize,
-
     model_fallbacks: HashMap<String, Vec<String>>,
 
     counter: std::sync::Arc<crate::providers::core::retry::ReliabilityCounter>,
@@ -520,8 +601,6 @@ impl ReliableProvider {
             providers,
             max_retries,
             base_backoff_ms: base_backoff_ms.max(50),
-            api_keys: Vec::new(),
-            key_index: AtomicUsize::new(0),
             model_fallbacks: HashMap::new(),
             counter: std::sync::Arc::new(crate::providers::core::retry::ReliabilityCounter::new()),
             rate_limiters: std::sync::Arc::new(
@@ -606,11 +685,6 @@ impl ReliableProvider {
         });
     }
 
-    pub fn with_api_keys(mut self, keys: Vec<String>) -> Self {
-        self.api_keys = keys;
-        self
-    }
-
     pub fn with_model_fallbacks(mut self, fallbacks: HashMap<String, Vec<String>>) -> Self {
         self.model_fallbacks = fallbacks;
         self
@@ -622,14 +696,6 @@ impl ReliableProvider {
             chain.extend(fallbacks.iter().map(|s| s.as_str()));
         }
         chain
-    }
-
-    fn rotate_key(&self) -> Option<&str> {
-        if self.api_keys.is_empty() {
-            return None;
-        }
-        let idx = self.key_index.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
-        Some(&self.api_keys[idx])
     }
 
     fn compute_backoff_for_class(
@@ -739,19 +805,6 @@ impl ReliableProvider {
             reason,
             &error_detail,
         );
-
-        if rate_limited && !is_non_retryable_rate_limit(err) {
-            if let Some(new_key) = self.rotate_key() {
-                tracing::warn!(
-                    provider = provider_name,
-                    error = %error_detail,
-                    "Rate limited; key rotation selected key ending ...{} \
-                     but cannot apply (Provider trait has no set_api_key). \
-                     Retrying with original key.",
-                    &new_key[new_key.len().saturating_sub(4)..]
-                );
-            }
-        }
 
         match class {
             FailureClass::NonRetryable => {
@@ -1014,6 +1067,8 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Per provider×model retry budget (see the `chat` path for rationale).
+                state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     match provider
@@ -1128,6 +1183,8 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Per provider×model retry budget (see the `chat` path for rationale).
+                state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     match provider
@@ -1267,6 +1324,8 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Per provider×model retry budget (see the `chat` path for rationale).
+                state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     match provider
@@ -1392,6 +1451,10 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Reset the retry budget per provider×model so a fallback provider
+                // is not judged "class exhausted" just because the primary already
+                // burned the shared budget (matches the streaming path's behavior).
+                state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     let req = ChatRequest {

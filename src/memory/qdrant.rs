@@ -61,7 +61,7 @@ impl QdrantMemory {
         let base_url = url.trim().trim_end_matches('/').to_string();
         let client = crate::services::require_services()
             .proxy_runtime()
-            .build_client("memory.qdrant");
+            .build_client_with_timeouts("memory.qdrant", 60, 10);
 
         Ok(Self {
             client,

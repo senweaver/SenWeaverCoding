@@ -50,9 +50,13 @@ impl RuntimeAdapter for NativeRuntime {
 
         #[cfg(target_os = "windows")]
         {
-            let mut process = crate::util::hidden_async_command("cmd.exe");
-            process.arg("/C").arg(command).current_dir(workspace_dir);
-            Ok(process)
+            use std::os::windows::process::CommandExt;
+            let mut std_cmd = crate::util::hidden_sync_command("cmd.exe");
+            std_cmd
+                .arg("/C")
+                .raw_arg(command)
+                .current_dir(workspace_dir);
+            Ok(tokio::process::Command::from(std_cmd))
         }
     }
 }

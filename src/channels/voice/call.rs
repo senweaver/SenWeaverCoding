@@ -156,7 +156,8 @@ impl VoiceCallChannel {
         Self {
             config,
             active_calls: Arc::new(Mutex::new(HashMap::new())),
-            client: reqwest::Client::new(),
+            client: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("channel.voice_call", 60, 15),
         }
     }
 

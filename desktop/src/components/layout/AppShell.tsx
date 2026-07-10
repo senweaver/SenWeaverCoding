@@ -34,11 +34,11 @@ import { ResizeHandleRight } from './ResizeHandleRight'
 import { ResizeHandleBrowser } from './ResizeHandleBrowser'
 import { ResizeHandles } from './ResizeHandles'
 import { StatusBar } from './StatusBar'
-import { useTabStore } from '../../stores/tabStore'
+import { useTabStore, SCHEDULED_TAB_ID } from '../../stores/tabStore'
 import { focusSession } from '../../lib/focusSession'
 import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
 import { useLspStore } from '../../stores/lspStore'
-import { useTranslation } from '../../i18n'
+import { translate, useTranslation } from '../../i18n'
 import { RightSidebar } from '../workspace/RightSidebar'
 import { WorkspaceFinder } from '../workspace/WorkspaceFinder'
 import { FileDragGhost } from '../workspace/FileDragGhost'
@@ -48,6 +48,12 @@ const Settings = lazy(() =>
 )
 const TemplateLibrary = lazy(() =>
   import('../../pages/TemplateLibrary').then((m) => ({ default: m.TemplateLibrary })),
+)
+const GroupsPanel = lazy(() =>
+  import('../lanGroup/GroupsPanel').then((m) => ({ default: m.GroupsPanel })),
+)
+const SharePanel = lazy(() =>
+  import('../lanShare/SharePanel').then((m) => ({ default: m.SharePanel })),
 )
 import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
 import { DesignerCanvasPanel } from '../designer/DesignerCanvasPanel'
@@ -63,6 +69,37 @@ import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { getBaseUrl, setBaseUrl } from '../../api/client'
 import { wsManager } from '../../api/websocket'
 import { handleCloseRequest, performSafeExit } from '../../lib/appClose'
+import {
+  MINIMAL_EVENT_ACTIVE_SESSION,
+  MINIMAL_EVENT_COMPUTER_EXIT,
+  MINIMAL_EVENT_COMPUTER_PROGRESS,
+  MINIMAL_EVENT_COMPUTER_REPLAY,
+  MINIMAL_EVENT_COMPUTER_REPLY,
+  MINIMAL_EVENT_COMPUTER_START,
+  MINIMAL_EVENT_COMPUTER_STOP,
+  MINIMAL_EVENT_COMPUTER_SYNC,
+  MINIMAL_EVENT_RECORDER_CONTROL,
+  MINIMAL_EVENT_RECORDER_PROGRESS,
+  MINIMAL_EVENT_RECORDER_SYNC,
+  MINIMAL_EVENT_OPEN_SETTINGS,
+  MINIMAL_EVENT_STOP,
+  MINIMAL_EVENT_SUBMIT,
+} from '../../lib/minimalMode'
+import type {
+  MinimalComputerProgress,
+  MinimalComputerReplay,
+  MinimalComputerReply,
+  MinimalComputerStart,
+  MinimalRecorderControl,
+  MinimalRecorderProgress,
+  MinimalSubmitPayload,
+} from '../../lib/minimalMode'
+import { useChatStore } from '../../stores/chatStore'
+import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
+import { useComputerUseStore } from '../../stores/computerUseStore'
+import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
+import { useLanGroupStore } from '../../stores/lanGroupStore'
+import { useLanShareStore } from '../../stores/lanShareStore'
 import { CloseChoiceModal } from './CloseChoiceModal'
 import { SafeExitOverlay } from './SafeExitOverlay'
 import { ComputerUsePage } from '../../pages/ComputerUse'
@@ -76,9 +113,17 @@ export function AppShell() {
   const activeWorkDir = useActiveTabWorkDir()
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
+  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
+  const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
   const appMode = useUIStore((s) => s.appMode)
   const terminalPanelOpen = useTerminalPanelStore((s) => s.open)
   const activeChatTabId = useTabStore((s) => s.activeTabId)
+  const activeChatTitle = useTabStore((s) =>
+    s.activeTabId ? s.tabs.find((tab) => tab.sessionId === s.activeTabId)?.title ?? null : null,
+  )
+  const activeChatTabType = useTabStore((s) =>
+    s.activeTabId ? s.tabs.find((tab) => tab.sessionId === s.activeTabId)?.type ?? null : null,
+  )
   const browserPanelVisible = useBrowserPanelStore((s) =>
     activeChatTabId ? s.panels[activeChatTabId]?.visible ?? false : false,
   )
@@ -108,15 +153,23 @@ export function AppShell() {
         if (snap) setBootStatus(snap)
       })()
     }, DESKTOP_RUNTIME_TUNABLES.STATUS_FALLBACK_POLL_MS)
+    let disposed = false
     let unlistenStatus: (() => void) | null = null
     void (async () => {
       const snap = await getServerStatusSnapshot()
+      if (disposed) return
       if (snap) setBootStatus(snap)
-      unlistenStatus = await subscribeServerStatus((payload) => {
+      const unlisten = await subscribeServerStatus((payload) => {
         setBootStatus(payload)
       })
+      if (disposed) {
+        unlisten()
+        return
+      }
+      unlistenStatus = unlisten
     })()
     return () => {
+      disposed = true
       window.clearInterval(interval)
       window.clearInterval(statusPoll)
       if (unlistenStatus) unlistenStatus()
@@ -230,6 +283,9 @@ export function AppShell() {
         if (cancelled) return
         try {
           await invoke('signal_frontend_ready')
+          void import('../../stores/settingsStore').then(({ syncTrayLabels, useSettingsStore }) =>
+            syncTrayLabels(useSettingsStore.getState().locale),
+          )
         } catch {
           const win = getCurrentWindow()
           try {
@@ -371,6 +427,254 @@ export function AppShell() {
       cancelled = true
       unlistenClose?.()
       unlistenTrayQuit?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event')
+      const off = await listen(MINIMAL_EVENT_OPEN_SETTINGS, () => {
+        useUIStore.getState().openSettingsOverlay()
+      })
+      if (disposed) off()
+      else unlisten = off
+    })()
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    const forwardable =
+      !!activeChatTabId &&
+      activeChatTabId !== SCHEDULED_TAB_ID &&
+      (activeChatTabType === null || activeChatTabType === 'session')
+    void (async () => {
+      try {
+        const { emit } = await import('@tauri-apps/api/event')
+        await emit(
+          MINIMAL_EVENT_ACTIVE_SESSION,
+          forwardable ? { id: activeChatTabId, title: activeChatTitle } : null,
+        )
+      } catch {
+
+      }
+    })()
+  }, [activeChatTabId, activeChatTitle, activeChatTabType])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    const offs: Array<() => void> = []
+    const register = (off: () => void) => {
+      if (disposed) off()
+      else offs.push(off)
+    }
+    void (async () => {
+      const { listen, emit } = await import('@tauri-apps/api/event')
+      register(
+        await listen<MinimalSubmitPayload>(MINIMAL_EVENT_SUBMIT, (event) => {
+          const payload = event.payload
+          if (!payload?.sessionId || typeof payload.content !== 'string') return
+          useSessionRuntimeStore.getState().reloadFromStorage()
+          useChatStore
+            .getState()
+            .sendMessage(payload.sessionId, payload.content, payload.attachments, payload.options)
+        }),
+      )
+      register(
+        await listen<string>(MINIMAL_EVENT_STOP, (event) => {
+          const sessionId = event.payload
+          if (!sessionId) return
+          useChatStore.getState().stopGeneration(sessionId)
+        }),
+      )
+
+      let lastProgressKey = ''
+      const emitComputerProgress = async (force = false) => {
+        const s = useComputerUseStore.getState()
+        const last = s.steps.length > 0 ? s.steps[s.steps.length - 1] : null
+        const payload: MinimalComputerProgress = {
+          status: s.status,
+          statusMessage: s.statusMessage,
+          error: s.error,
+          lastThought: last?.thought ? last.thought : null,
+          lastAction: last ? last.elementDescription || last.actionType || null : null,
+          stepCount: s.steps.length,
+        }
+        const key = JSON.stringify(payload)
+        if (!force && key === lastProgressKey) return
+        lastProgressKey = key
+        try {
+          await emit(MINIMAL_EVENT_COMPUTER_PROGRESS, payload)
+        } catch {
+
+        }
+      }
+      register(
+        await listen<MinimalComputerStart>(MINIMAL_EVENT_COMPUTER_START, (event) => {
+          const p = event.payload
+          if (!p?.task?.trim()) return
+          const rec = useComputerRecorderStore.getState()
+          if (rec.status === 'recording') return
+          const cu = useComputerUseStore.getState()
+          if (p.provider && p.model) cu.setSelection(p.provider, p.model)
+          cu.setTask(p.task)
+          cu.start()
+        }),
+      )
+      register(
+        await listen(MINIMAL_EVENT_COMPUTER_STOP, () => {
+          useComputerUseStore.getState().stop()
+        }),
+      )
+      register(
+        await listen<MinimalComputerReply>(MINIMAL_EVENT_COMPUTER_REPLY, (event) => {
+          const text = event.payload?.text
+          if (!text?.trim()) return
+          useComputerUseStore.getState().sendReply(text)
+        }),
+      )
+      register(
+        await listen(MINIMAL_EVENT_COMPUTER_EXIT, () => {
+          const cu = useComputerUseStore.getState()
+          if (
+            cu.status === 'running' ||
+            cu.status === 'thinking' ||
+            cu.status === 'connecting' ||
+            cu.status === 'call_user'
+          ) {
+            cu.stop()
+          }
+          const rec = useComputerRecorderStore.getState()
+          if (rec.status === 'recording') {
+            rec.stopRecording()
+          }
+          useUIStore.getState().setAppMode('code')
+        }),
+      )
+      register(
+        await listen(MINIMAL_EVENT_COMPUTER_SYNC, () => {
+          void emitComputerProgress(true)
+        }),
+      )
+      register(useComputerUseStore.subscribe(() => void emitComputerProgress()))
+
+      let lastRecorderKey = ''
+      const emitRecorderProgress = async (force = false) => {
+        const s = useComputerRecorderStore.getState()
+        const last = s.steps.length > 0 ? s.steps[s.steps.length - 1] : null
+        const payload: MinimalRecorderProgress = {
+          status: s.status,
+          error: s.error,
+          statusMessage: s.statusMessage,
+          stepCount: s.steps.length,
+          lastActionType: last?.actionType ?? null,
+          lastActionValue: last ? last.value || last.elementDescription || null : null,
+          savedRecordingName: s.savedRecordingName,
+          savedSkillName: s.savedSkillName,
+          startedAt: s.startedAt,
+        }
+        const key = JSON.stringify(payload)
+        if (!force && key === lastRecorderKey) return
+        lastRecorderKey = key
+        try {
+          await emit(MINIMAL_EVENT_RECORDER_PROGRESS, payload)
+        } catch {
+
+        }
+      }
+      register(
+        await listen<MinimalRecorderControl>(MINIMAL_EVENT_RECORDER_CONTROL, (event) => {
+          const p = event.payload
+          if (!p?.action) return
+          const rec = useComputerRecorderStore.getState()
+          switch (p.action) {
+            case 'start': {
+              const cu = useComputerUseStore.getState()
+              if (
+                cu.status === 'running' ||
+                cu.status === 'thinking' ||
+                cu.status === 'connecting' ||
+                cu.status === 'call_user'
+              ) {
+                break
+              }
+              rec.setTask(p.task ?? '')
+              rec.startRecording()
+              break
+            }
+            case 'stop':
+              rec.stopRecording()
+              break
+            case 'discard':
+              rec.discardRecording()
+              break
+            case 'generate':
+              rec.generateSkill()
+              break
+            case 'reset':
+              rec.reset()
+              break
+          }
+        }),
+      )
+      register(
+        await listen<MinimalComputerReplay>(MINIMAL_EVENT_COMPUTER_REPLAY, (event) => {
+          const p = event.payload
+          if (!p?.name?.trim() || (p.mode !== 'smart' && p.mode !== 'exact')) return
+          const cu = useComputerUseStore.getState()
+          if (
+            cu.status === 'running' ||
+            cu.status === 'thinking' ||
+            cu.status === 'connecting' ||
+            cu.status === 'call_user'
+          ) {
+            return
+          }
+          const rec = useComputerRecorderStore.getState()
+          if (rec.status === 'recording') {
+            return
+          }
+          if (p.mode === 'exact') {
+            cu.start({ replayRecording: p.name })
+            return
+          }
+          if (p.provider && p.model) cu.setSelection(p.provider, p.model)
+          const { provider, model } = useComputerUseStore.getState()
+          if (p.useSkill) {
+            if (!provider || !model) return
+            cu.start({ skill: p.name, taskOverride: p.inputs ?? '' })
+            return
+          }
+          if (!provider || !model) {
+            cu.start({ replayRecording: p.name })
+            useComputerUseStore.setState({
+              error: translate(
+                useSettingsStore.getState().locale,
+                'computerUse.replay.smartFallback',
+              ),
+            })
+            return
+          }
+          cu.start({ replayRecording: p.name, smart: true })
+        }),
+      )
+      register(
+        await listen(MINIMAL_EVENT_RECORDER_SYNC, () => {
+          void emitRecorderProgress(true)
+        }),
+      )
+      register(useComputerRecorderStore.subscribe(() => void emitRecorderProgress()))
+    })()
+    return () => {
+      disposed = true
+      for (const off of offs) off()
     }
   }, [])
 
@@ -595,6 +899,20 @@ export function AppShell() {
               <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
                 <Suspense fallback={null}>
                   <TemplateLibrary />
+                </Suspense>
+              </div>
+            )}
+            {lanGroupPanelOpen && (
+              <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
+                <Suspense fallback={null}>
+                  <GroupsPanel />
+                </Suspense>
+              </div>
+            )}
+            {lanSharePanelOpen && (
+              <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
+                <Suspense fallback={null}>
+                  <SharePanel />
                 </Suspense>
               </div>
             )}

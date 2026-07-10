@@ -241,7 +241,7 @@ async fn spawn_background(
                     );
                 }
                 _ = &mut kill_rx => {
-                    let _ = child.kill().await;
+                    crate::util::kill_child_process_tree(&mut child).await;
                     let status = child.wait().await.ok();
                     break status;
                 }
@@ -252,7 +252,7 @@ async fn spawn_background(
                         max_secs = max_lifetime_secs.unwrap_or(0),
                         "background shell exceeded configured max lifetime; terminating"
                     );
-                    let _ = child.kill().await;
+                    crate::util::kill_child_process_tree(&mut child).await;
                     let status = child.wait().await.ok();
                     break status;
                 }
@@ -668,8 +668,15 @@ impl Tool for ShellTool {
                 super::foreground::ForegroundOutcome::Timeout(stdout, stderr) => {
                     Err((stdout, stderr))
                 }
-                super::foreground::ForegroundOutcome::Cancelled(..) => {
-                    unreachable!("cancelled outcome returned earlier")
+                super::foreground::ForegroundOutcome::Cancelled(part_stdout, part_stderr) => {
+                    return Ok(ToolResult {
+                        success: true,
+                        output: super::foreground::build_cancelled_output(
+                            &part_stdout,
+                            &part_stderr,
+                        ),
+                        error: None,
+                    });
                 }
             };
 

@@ -256,7 +256,7 @@ impl EmailChannel {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            let messages = session.uid_fetch(&uid_set, "RFC822").await?;
+            let messages = session.uid_fetch(&uid_set, "BODY.PEEK[]").await?;
             let messages: Vec<Fetch> = messages.try_collect().await?;
 
             for msg in messages {
@@ -298,7 +298,7 @@ impl EmailChannel {
                             });
 
                         results.push(ParsedEmail {
-                            _uid: uid,
+                            uid,
                             msg_id,
                             sender,
                             content,
@@ -307,15 +307,23 @@ impl EmailChannel {
                     }
                 }
             }
-
-            let _ = session
-                .uid_store(&uid_set, "+FLAGS (\\Seen)")
-                .await?
-                .try_collect::<Vec<_>>()
-                .await;
         }
 
         Ok(results)
+    }
+
+    async fn mark_seen(&self, session: &mut ImapSession, uid: u32) {
+        if uid == 0 {
+            return;
+        }
+        match session.uid_store(uid.to_string(), "+FLAGS (\\Seen)").await {
+            Ok(stream) => {
+                let _ = stream.try_collect::<Vec<_>>().await;
+            }
+            Err(e) => {
+                warn!("Failed to mark email uid {uid} as seen: {e}");
+            }
+        }
     }
 
     async fn wait_for_changes(
@@ -430,17 +438,21 @@ impl EmailChannel {
 
             if !self.is_sender_allowed(&email.sender) {
                 warn!("Blocked email from {}", email.sender);
+                self.mark_seen(session, email.uid).await;
                 continue;
             }
 
             {
                 let seen = self.seen_messages.lock().await;
                 if seen.contains(&email.msg_id) {
+                    drop(seen);
+                    self.mark_seen(session, email.uid).await;
                     continue;
                 }
             }
 
             let msg_id = email.msg_id.clone();
+            let uid = email.uid;
             let msg = ChannelMessage {
                 id: email.msg_id,
                 reply_target: email.sender.clone(),
@@ -455,8 +467,11 @@ impl EmailChannel {
 
             match crate::channels::forward_channel_message("email", &tx, msg) {
                 crate::channels::ForwardOutcome::Delivered => {
-                    let mut seen = self.seen_messages.lock().await;
-                    seen.insert(msg_id);
+                    {
+                        let mut seen = self.seen_messages.lock().await;
+                        seen.insert(msg_id);
+                    }
+                    self.mark_seen(session, uid).await;
                 }
                 crate::channels::ForwardOutcome::Dropped => {
                     break;
@@ -488,7 +503,7 @@ impl EmailChannel {
 }
 
 struct ParsedEmail {
-    _uid: u32,
+    uid: u32,
     msg_id: String,
     sender: String,
     content: String,
@@ -529,7 +544,9 @@ impl Channel for EmailChannel {
             .singlepart(SinglePart::plain(body.to_string()))?;
 
         let transport = self.create_smtp_transport()?;
-        transport.send(&email)?;
+        tokio::task::spawn_blocking(move || transport.send(&email))
+            .await
+            .map_err(|e| anyhow::anyhow!("SMTP send task failed: {e}"))??;
         info!("Email sent to {}", message.recipient);
         Ok(())
     }

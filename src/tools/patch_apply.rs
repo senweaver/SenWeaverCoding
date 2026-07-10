@@ -11,6 +11,37 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+fn canonicalize_allowing_missing_tail(parent: &Path) -> anyhow::Result<PathBuf> {
+    match std::fs::canonicalize(parent) {
+        Ok(p) => Ok(p),
+        Err(_) => {
+            let mut existing = parent.to_path_buf();
+            let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+            loop {
+                match std::fs::canonicalize(&existing) {
+                    Ok(canon) => {
+                        let mut out = canon;
+                        for part in suffix.iter().rev() {
+                            out.push(part);
+                        }
+                        return Ok(out);
+                    }
+                    Err(_) => match (existing.parent(), existing.file_name()) {
+                        (Some(p), Some(name)) => {
+                            suffix.push(name.to_os_string());
+                            existing = p.to_path_buf();
+                        }
+                        _ => anyhow::bail!(
+                            "Failed to resolve parent directory: {}",
+                            parent.display()
+                        ),
+                    },
+                }
+            }
+        }
+    }
+}
+
 fn resolve_and_validate_path_sync_with(
     security: &SecurityPolicy,
     path: &str,
@@ -21,7 +52,7 @@ fn resolve_and_validate_path_sync_with(
         .parent()
         .context("Invalid path: missing parent directory")?;
 
-    let resolved_parent = std::fs::canonicalize(parent)?;
+    let resolved_parent = canonicalize_allowing_missing_tail(parent)?;
     if !security.is_resolved_path_allowed(&resolved_parent) {
         anyhow::bail!(
             "Path escapes workspace boundary: {}",
@@ -51,8 +82,10 @@ pub struct PatchApplyTool {
 
 impl PatchApplyTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        let ops_applier =
-            Arc::new(OpsApplier::default_for_shared_workspace(security.workspace_root_handle()));
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
         Self {
             security,
             ops_applier,
@@ -100,79 +133,183 @@ impl PatchApplyTool {
 
 }
 
+fn git_path_from_marker(raw: &str) -> Option<String> {
+    // Markers look like `a/foo.rs`, `b/foo.rs`, `foo.rs`, or `/dev/null`, and may
+    // carry a trailing tab-separated timestamp.
+    let t = raw.split('\t').next().unwrap_or(raw).trim();
+    if t == "/dev/null" || t.is_empty() {
+        return None;
+    }
+    let stripped = t
+        .strip_prefix("a/")
+        .or_else(|| t.strip_prefix("b/"))
+        .unwrap_or(t);
+    Some(stripped.to_string())
+}
+
+fn parse_diff_git_target(line: &str) -> Option<String> {
+    // `diff --git a/path b/path` -> prefer the `b/` (destination) token.
+    let rest = line.strip_prefix("diff --git ")?;
+    let b_token = rest.rsplit(' ').next()?;
+    git_path_from_marker(b_token)
+}
+
+fn is_dev_null_marker(rest: &str) -> bool {
+    rest.split('\t').next().unwrap_or(rest).trim() == "/dev/null"
+}
+
+fn extract_new_file_contents(diff_lines: &[String]) -> String {
+    let mut out = String::new();
+    let mut in_hunk = false;
+    let mut trailing_newline = true;
+    for line in diff_lines {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        if let Some(added) = line.strip_prefix('+') {
+            out.push_str(added);
+            out.push('\n');
+            trailing_newline = true;
+        } else if line.starts_with('\\') {
+            // "\ No newline at end of file"
+            trailing_newline = false;
+        }
+    }
+    if !trailing_newline && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn parse_patch_with(
     security: &SecurityPolicy,
     patch_content: &str,
 ) -> anyhow::Result<Vec<PatchFile>> {
+    struct PendingFile {
+        lines: Vec<String>,
+        hunk_starts: Vec<u32>,
+        path_hint: Option<String>,
+        from_hint: Option<String>,
+        to_hint: Option<String>,
+        from_dev_null: bool,
+        to_dev_null: bool,
+    }
+
     let mut files: Vec<PatchFile> = Vec::new();
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut hunks_in_current: usize = 0;
-    let mut current_hunk_starts: Vec<u32> = Vec::new();
+    let mut pending: Option<PendingFile> = None;
 
-    let iter = patch_content.lines().peekable();
-    for line in iter {
-        if line.starts_with("--- ") || line.starts_with("diff ") {
-            if let Some(path) = current_path.take() {
-                files.push(PatchFile {
-                    path,
-                    diff_text: current_lines.join("\n"),
-                    hunks: current_hunk_starts
-                        .iter()
-                        .map(|s| PatchHunk { old_start: *s })
-                        .collect(),
-                });
-            }
-            current_lines.clear();
-            current_hunk_starts.clear();
-            hunks_in_current = 0;
-
-            let file_path = if let Some(rest) = line.strip_prefix("--- ") {
-                rest.trim_start_matches("a/")
-            } else if let Some(rest) = line.strip_prefix("diff ") {
-                rest.trim_start_matches("--- ")
+    let finalize = |pending: PendingFile,
+                    files: &mut Vec<PatchFile>|
+     -> anyhow::Result<()> {
+        // Prefer the destination path (`+++ b/...`); for a deletion (`+++
+        // /dev/null`) fall back to the source; then the `diff --git` hint.
+        let chosen = pending
+            .to_hint
+            .clone()
+            .or_else(|| pending.from_hint.clone())
+            .or_else(|| pending.path_hint.clone());
+        if let Some(path_str) = chosen {
+            let path = resolve_and_validate_path_sync_with(security, &path_str)?;
+            let action = if pending.from_dev_null && !pending.to_dev_null {
+                PatchFileAction::Create {
+                    contents: extract_new_file_contents(&pending.lines),
+                }
+            } else if pending.to_dev_null && !pending.from_dev_null {
+                PatchFileAction::Delete
             } else {
-                continue;
+                PatchFileAction::Modify
             };
+            files.push(PatchFile {
+                path,
+                diff_text: pending.lines.join("\n"),
+                hunks: pending
+                    .hunk_starts
+                    .iter()
+                    .map(|s| PatchHunk { old_start: *s })
+                    .collect(),
+                action,
+            });
+        }
+        Ok(())
+    };
 
-            current_path = Some(resolve_and_validate_path_sync_with(security, file_path)?);
-            current_lines.push(line.to_string());
+    for line in patch_content.lines() {
+        let is_git_header = line.starts_with("diff --git ");
+        // A `--- ` line starts a new file only when we are not already inside one
+        // (plain unified diff without a `diff --git` header).
+        let is_plain_old_marker = line.starts_with("--- ")
+            && pending
+                .as_ref()
+                .map(|p| p.path_hint.is_some() || p.from_hint.is_some() || !p.hunk_starts.is_empty())
+                .unwrap_or(true);
+
+        if is_git_header || is_plain_old_marker {
+            if let Some(prev) = pending.take() {
+                finalize(prev, &mut files)?;
+            }
+            let mut fresh = PendingFile {
+                lines: Vec::new(),
+                hunk_starts: Vec::new(),
+                path_hint: None,
+                from_hint: None,
+                to_hint: None,
+                from_dev_null: false,
+                to_dev_null: false,
+            };
+            if is_git_header {
+                fresh.path_hint = parse_diff_git_target(line);
+            } else if let Some(rest) = line.strip_prefix("--- ") {
+                fresh.from_hint = git_path_from_marker(rest);
+                fresh.from_dev_null = is_dev_null_marker(rest);
+            }
+            fresh.lines.push(line.to_string());
+            pending = Some(fresh);
             continue;
         }
 
-        if current_path.is_some() {
-            if let Some(rest) = line.strip_prefix("@@ ") {
-                if let Some(end) = rest.find(" @@") {
-                    let parts: Vec<&str> = rest[..end].split_whitespace().collect();
-                    if let Some(old_token) = parts.first() {
-                        let old_start = old_token
-                            .trim_start_matches(['+', '-'])
-                            .split(',')
-                            .next()
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(1);
-                        current_hunk_starts.push(old_start);
-                        hunks_in_current += 1;
-                    }
+        let Some(cur) = pending.as_mut() else {
+            continue;
+        };
+
+        if let Some(rest) = line.strip_prefix("--- ") {
+            cur.from_hint = git_path_from_marker(rest);
+            cur.from_dev_null = is_dev_null_marker(rest);
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            cur.to_hint = git_path_from_marker(rest);
+            cur.to_dev_null = is_dev_null_marker(rest);
+        } else if let Some(rest) = line.strip_prefix("@@ ") {
+            if let Some(end) = rest.find(" @@") {
+                let parts: Vec<&str> = rest[..end].split_whitespace().collect();
+                if let Some(old_token) = parts.first() {
+                    let old_start = old_token
+                        .trim_start_matches(['+', '-'])
+                        .split(',')
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(1);
+                    cur.hunk_starts.push(old_start);
                 }
             }
-            current_lines.push(line.to_string());
         }
+        cur.lines.push(line.to_string());
     }
 
-    if let Some(path) = current_path.take() {
-        files.push(PatchFile {
-            path,
-            diff_text: current_lines.join("\n"),
-            hunks: current_hunk_starts
-                .iter()
-                .map(|s| PatchHunk { old_start: *s })
-                .collect(),
-        });
+    if let Some(prev) = pending.take() {
+        finalize(prev, &mut files)?;
     }
-    let _ = hunks_in_current;
 
     Ok(files)
+}
+
+#[derive(Debug, Clone)]
+enum PatchFileAction {
+    Modify,
+    Create { contents: String },
+    Delete,
 }
 
 #[derive(Debug)]
@@ -182,6 +319,8 @@ struct PatchFile {
     diff_text: String,
 
     hunks: Vec<PatchHunk>,
+
+    action: PatchFileAction,
 }
 
 #[derive(Debug)]
@@ -197,11 +336,12 @@ impl Tool for PatchApplyTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a unified diff patch to files. Supports viewing patch statistics, \
-         dry-run mode, and applying patches. By default the entire patch is \
-         applied atomically: any hunk failure rolls back the rest. Pass \
-         atomic=false to keep partial successes (the result will be marked \
-         degraded=true)."
+        "Apply a unified diff patch to files, including creating new files \
+         (`--- /dev/null`) and deleting files (`+++ /dev/null`). Supports \
+         viewing patch statistics, dry-run mode, and applying patches. By \
+         default the entire patch is applied atomically: any hunk failure \
+         rolls back the rest. Pass atomic=false to keep partial successes \
+         (the result will be marked degraded=true)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -224,6 +364,10 @@ impl Tool for PatchApplyTool {
                 "atomic": {
                     "type": "boolean",
                     "description": "If true (default), the whole patch succeeds or rolls back. If false, hunks that succeed remain on disk and the result is marked degraded."
+                },
+                "fuzz": {
+                    "type": "integer",
+                    "description": "Maximum fuzz (line drift) allowed when locating hunks (0-5, default 3). Use 0 to require exact context matches."
                 }
             },
             "required": ["patch", "action"]
@@ -257,6 +401,12 @@ impl Tool for PatchApplyTool {
             .get("atomic")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+
+        let fuzz = args
+            .get("fuzz")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(5) as u8)
+            .unwrap_or(3);
 
         let patch_content = args
             .get("patch")
@@ -300,9 +450,15 @@ impl Tool for PatchApplyTool {
             "stats" => {
                 let mut stats = vec![format!("Patch contains {} file(s):\n", patch_files.len())];
                 for file in &patch_files {
+                    let label = match &file.action {
+                        PatchFileAction::Create { .. } => " [new file]",
+                        PatchFileAction::Delete => " [deleted]",
+                        PatchFileAction::Modify => "",
+                    };
                     stats.push(format!(
-                        "  {} ({} hunk(s))",
+                        "  {}{} ({} hunk(s))",
                         file.path.display(),
+                        label,
                         file.hunks.len()
                     ));
                 }
@@ -384,12 +540,29 @@ impl Tool for PatchApplyTool {
 
                 let mut batch = EditBatch::new(EditOrigin::PatchTool).with_atomic(atomic);
                 for file in &patch_files {
-                    batch.push(EditOp::ApplyHunk {
-                        path: file.path.clone(),
-                        diff: file.diff_text.clone(),
-                        fuzz: 3,
-                        scope_anchor: None,
-                    });
+                    match &file.action {
+                        PatchFileAction::Create { contents } => {
+                            batch.push(EditOp::CreateFile {
+                                path: file.path.clone(),
+                                contents: contents.clone(),
+                                overwrite: false,
+                            });
+                        }
+                        PatchFileAction::Delete => {
+                            batch.push(EditOp::DeleteFile {
+                                path: file.path.clone(),
+                                missing_ok: false,
+                            });
+                        }
+                        PatchFileAction::Modify => {
+                            batch.push(EditOp::ApplyHunk {
+                                path: file.path.clone(),
+                                diff: file.diff_text.clone(),
+                                fuzz,
+                                scope_anchor: None,
+                            });
+                        }
+                    }
                 }
 
                 let total_hunks: usize = patch_files.iter().map(|f| f.hunks.len()).sum();

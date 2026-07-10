@@ -55,9 +55,28 @@ impl HlcClock {
 
     pub fn observe(&self, remote: Hlc) {
         let mut last = self.last.lock();
+        let now = now_ms_u64();
         let phys = Hlc {
-            millis: now_ms_u64(),
+            millis: now,
             counter: 0,
+        };
+        // Clamp a remote timestamp that is implausibly far in the future so a
+        // (malicious or badly-skewed) peer cannot poison the local clock and win
+        // every subsequent LWW conflict forever.
+        const MAX_DRIFT_MS: u64 = 5 * 60 * 1000;
+        let remote = if remote.millis > now.saturating_add(MAX_DRIFT_MS) {
+            tracing::warn!(
+                target: "lan.group",
+                remote_ms = remote.millis,
+                now_ms = now,
+                "clamping remote HLC timestamp beyond max drift"
+            );
+            Hlc {
+                millis: now.saturating_add(MAX_DRIFT_MS),
+                counter: remote.counter,
+            }
+        } else {
+            remote
         };
         let merged = (*last).max(remote).max(phys);
         *last = merged;

@@ -108,25 +108,6 @@ impl EditBatchRegistry {
         self.entries.iter().rev()
     }
 
-    pub fn recent_edits_for_nep(
-        &self,
-        limit: usize,
-    ) -> Vec<crate::inline_completion::nep::RecentEdit> {
-        let mut out = Vec::with_capacity(limit.min(self.entries.len()));
-        for (idx, entry) in self.entries.iter().rev().take(limit).enumerate() {
-            let Some(diff) = entry.diff.as_ref() else {
-                continue;
-            };
-            out.push(crate::inline_completion::nep::RecentEdit {
-                file_path: std::path::PathBuf::from(&entry.path),
-                diff: diff.clone(),
-                instruction: None,
-                since_start_ms: idx as u64,
-            });
-        }
-        out
-    }
-
     pub fn entries(&self) -> &VecDeque<PendingEdit> {
         &self.entries
     }

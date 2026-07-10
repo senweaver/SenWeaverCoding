@@ -167,6 +167,14 @@ async fn launch_ngrok(
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("Failed to capture ngrok stdout"))?;
+    if let Some(stderr) = child.stderr.take() {
+        crate::runtime::spawn_supervised("tunnel.ngrok.stderr_drain", async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "tunnel.ngrok", "{line}");
+            }
+        });
+    }
 
     let mut reader = tokio::io::BufReader::new(stdout).lines();
     let mut public_url = String::new();
@@ -200,6 +208,12 @@ async fn launch_ngrok(
         child.kill().await.ok();
         bail!("ngrok did not produce a public URL within 15s. Is the auth token valid?");
     }
+
+    crate::runtime::spawn_supervised("tunnel.ngrok.stdout_drain", async move {
+        while let Ok(Some(line)) = reader.next_line().await {
+            tracing::debug!(target: "tunnel.ngrok", "{line}");
+        }
+    });
 
     Ok(TunnelProcess { child, public_url })
 }

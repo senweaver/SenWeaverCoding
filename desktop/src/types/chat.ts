@@ -8,7 +8,12 @@ import type { RuntimeSelection } from './runtime'
 
 export type ClientMessage =
   | { type: 'prewarm_session' }
-  | { type: 'user_message'; content: string; attachments?: AttachmentRef[] }
+  | {
+      type: 'user_message'
+      content: string
+      attachments?: AttachmentRef[]
+      displayContent?: string
+    }
   | {
       type: 'permission_response'
       requestId: string
@@ -34,6 +39,7 @@ export type ClientMessage =
       submode: string
       params: Record<string, unknown>
       brief: string
+      attachments?: AttachmentRef[]
       refArtifact?: string
       refArtifactName?: string
       refElement?: string
@@ -54,9 +60,19 @@ export type AttachmentRef = {
   mimeType?: string
 }
 
+export type DesignGenerationOptions = {
+  submode: string
+  params: Record<string, unknown>
+  refArtifact?: string
+  refArtifactName?: string
+  refElement?: string
+  refElementLabel?: string
+}
+
 export type UIAttachment = {
   type: 'file' | 'image'
   name: string
+  path?: string
   data?: string
   mimeType?: string
 }
@@ -120,6 +136,11 @@ export type ServerMessage =
       type: 'debug_pii_stats'
       total?: number
       counts?: Record<string, number>
+    }
+  | {
+      type: 'debug_submode_set'
+      submode?: string
+      params?: Record<string, unknown>
     }
   | { type: 'pong' }
   | { type: 'context_compressed'; tokens_before?: number; tokens_after?: number }

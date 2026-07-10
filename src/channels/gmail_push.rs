@@ -189,17 +189,18 @@ pub struct GmailPushChannel {
 }
 
 impl GmailPushChannel {
-    pub fn new(config: GmailPushConfig) -> Self {
+    pub fn new(config: GmailPushConfig) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(15))
             .build()
-            .expect("failed to build HTTP client");
-        Self {
+            .map_err(|error| anyhow!("failed to build Gmail push HTTP client: {error}"))?;
+        Ok(Self {
             config,
             http,
             last_history_id: Arc::new(Mutex::new(0)),
             tx: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     pub fn resolve_webhook_secret(&self) -> String {

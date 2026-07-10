@@ -303,7 +303,9 @@ pub use screenshot::ScreenshotTool;
 #[cfg(feature = "tool-cloud-ops")]
 pub use security_ops::SecurityOpsTool;
 pub use send_message::SendMessageTool;
-pub use sessions::{SessionsHistoryTool, SessionsListTool, SessionsSearchTool, SessionsSendTool};
+pub use sessions::{
+    SessionsHistoryTool, SessionsListTool, SessionsOutlineTool, SessionsSearchTool, SessionsSendTool,
+};
 pub use setup_agent::SetupAgentTool;
 pub use shell::ShellTool;
 pub use skill::http::SkillHttpTool;
@@ -446,6 +448,7 @@ pub fn default_tools_with_runtime(
         crate::apply_model::OpsApplier::default_for_shared_workspace(
             security.workspace_root_handle(),
         )
+        .with_allowed_roots(security.allowed_roots.clone())
         .with_lock_provider(lock_provider),
     );
 
@@ -464,9 +467,9 @@ pub fn default_tools_with_runtime(
         Box::new(LspRenameTool::new(security.clone())),
         Box::new(lsp::format::LspFormatTool::new(security.clone())),
         Box::new(
-            PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops),
+            PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
-        Box::new(DiffApplyTool::new(security.clone())),
+        Box::new(DiffApplyTool::new(security.clone()).with_ops_applier(shared_ops)),
         Box::new(WritePlanTool::new()),
         Box::new(ContentSearchTool::new(security)),
     ]
@@ -643,6 +646,7 @@ pub fn all_tools_with_runtime(
         crate::apply_model::OpsApplier::default_for_shared_workspace(
             security.workspace_root_handle(),
         )
+        .with_allowed_roots(security.allowed_roots.clone())
         .with_lock_provider(lock_provider),
     );
 
@@ -917,7 +921,9 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(
         PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
     ));
-    tool_arcs.push(Arc::new(DiffApplyTool::new(security.clone())));
+    tool_arcs.push(Arc::new(
+        DiffApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+    ));
     tool_arcs.push(Arc::new(WritePlanTool::new()));
 
     #[cfg(target_os = "windows")]
@@ -1274,6 +1280,10 @@ pub fn all_tools_with_runtime(
             backend.clone(),
             security.clone(),
         )));
+        tool_arcs.push(Arc::new(SessionsOutlineTool::new(
+            backend.clone(),
+            security.clone(),
+        )));
         tool_arcs.push(Arc::new(SessionsSearchTool::new(
             backend.clone(),
             security.clone(),
@@ -1322,9 +1332,12 @@ pub fn all_tools_with_runtime(
 
     #[cfg(feature = "tool-sop")]
     if root_config.sop.sops_dir.is_some() {
-        let sop_engine = Arc::new(parking_lot::Mutex::new(crate::sop::SopEngine::new(
-            root_config.sop.clone(),
-        )));
+        let sop_engine = crate::sop::engine::global_sop_engine(&root_config.sop);
+        crate::sop::dispatch::ensure_sop_maintenance(
+            Arc::clone(&sop_engine),
+            None,
+            workspace_dir.to_path_buf(),
+        );
         tool_arcs.push(Arc::new(SopListTool::new(Arc::clone(&sop_engine))));
         tool_arcs.push(Arc::new(SopExecuteTool::new(Arc::clone(&sop_engine))));
         tool_arcs.push(Arc::new(SopAdvanceTool::new(Arc::clone(&sop_engine))));
@@ -1542,9 +1555,10 @@ pub fn all_tools_with_runtime(
             std::path::PathBuf::from(&plugin_dir)
         };
 
-        if plugin_path.exists() && config.plugins.enabled {
-            match crate::plugins::host::PluginHost::new(
+        if plugin_path.exists() && config.plugins.enabled && config.plugins.auto_discover {
+            match crate::plugins::host::PluginHost::from_plugins_config(
                 plugin_path.parent().unwrap_or(&plugin_path),
+                &config.plugins,
             ) {
                 Ok(host) => {
                     let tool_specs = host.tool_plugin_specs();

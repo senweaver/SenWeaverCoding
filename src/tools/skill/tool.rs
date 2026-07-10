@@ -132,11 +132,15 @@ impl Tool for SkillShellTool {
             });
         }
 
-        let mut cmd = if cfg!(windows) {
-            let mut c = crate::util::hidden_async_command("cmd");
-            c.arg("/C").arg(&command);
-            c
-        } else {
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            let mut c = crate::util::hidden_sync_command("cmd.exe");
+            c.arg("/C").raw_arg(&command);
+            tokio::process::Command::from(c)
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
             let mut c = crate::util::hidden_async_command("sh");
             c.arg("-c").arg(&command);
             c
@@ -174,8 +178,13 @@ impl Tool for SkillShellTool {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        let (_job_guard, mut child) = match crate::security::job_object::spawn_in_job(
+            cmd,
+            crate::security::job_object::JobLimits::unlimited(),
+        )
+        .await
+        {
+            Ok(pair) => pair,
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
@@ -217,8 +226,8 @@ impl Tool for SkillShellTool {
                 });
             }
             Err(_) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                crate::util::kill_child_process_tree(&mut child).await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),

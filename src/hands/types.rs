@@ -86,6 +86,9 @@ pub struct HandContext {
 
     #[serde(default)]
     pub total_runs: u64,
+
+    #[serde(default)]
+    pub consecutive_failures: u32,
 }
 
 impl HandContext {
@@ -97,13 +100,19 @@ impl HandContext {
             learned_facts: Vec::new(),
             last_run: None,
             total_runs: 0,
+            consecutive_failures: 0,
         }
     }
 
     pub fn record_run(&mut self, run: HandRun, max_history: usize) {
-        if run.status == (HandRunStatus::Completed) {
-            self.total_runs += 1;
-            self.last_run = run.finished_at;
+        self.total_runs += 1;
+        self.last_run = run.finished_at.or(Some(run.started_at));
+        match run.status {
+            HandRunStatus::Completed => self.consecutive_failures = 0,
+            HandRunStatus::Failed { .. } => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            }
+            HandRunStatus::Running => {}
         }
 
         for fact in &run.knowledge_added {

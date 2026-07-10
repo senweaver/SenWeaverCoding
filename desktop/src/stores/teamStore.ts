@@ -11,7 +11,6 @@ import { useChatStore, mapHistoryMessagesToUiMessages } from './chatStore'
 import { useTabStore } from './tabStore'
 
 const MEMBER_POLL_INTERVAL_MS = 1500
-const MEMBER_TRANSCRIPT_MATCH_WINDOW_MS = 120_000
 
 const memberSessionId = (agentId: string) => `team-member:${agentId}`
 
@@ -37,7 +36,6 @@ function createMemberSessionState() {
     statusVerb: '',
     slashCommands: [],
     agentTaskNotifications: {},
-    elapsedTimer: null,
     pendingRewind: null,
     pendingSendAfterRewind: null,
     pendingEdits: [],
@@ -78,15 +76,39 @@ function isPendingMemberMessage(message: UIMessage): message is Extract<UIMessag
   return message.type === 'user_text' && message.pending === true
 }
 
+function memberMessageContentKey(m: UIMessage): string {
+  const anyM = m as unknown as Record<string, unknown>
+  const raw = anyM.content ?? anyM.delta ?? anyM.text ?? ''
+  const text = typeof raw === 'string' ? raw : JSON.stringify(raw)
+  const superseded = anyM.superseded ? '1' : '0'
+  const pending = (anyM.pending ? '1' : '0')
+  return `${m.type}|${superseded}|${pending}|${text}`
+}
+
+// Compares two message lists by their stable content, ignoring the (churning)
+// synthetic ids that `mapHistoryMessagesToUiMessages` assigns to sub-blocks. Used
+// to reuse the previous array reference when a poll returns identical content, so
+// the transcript is not fully remounted every 1.5s.
+function sameMemberMessages(a: UIMessage[], b: UIMessage[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (memberMessageContentKey(a[i]!) !== memberMessageContentKey(b[i]!)) return false
+  }
+  return true
+}
+
+const MEMBER_PENDING_MESSAGE_MAX_AGE_MS = 5 * 60_000
+
 function transcriptAlreadyContainsMessage(
   transcriptMessages: UIMessage[],
   pendingMessage: Extract<UIMessage, { type: 'user_text' }> & { pending: true },
 ): boolean {
+  const pendingContent = pendingMessage.content.trim()
   return transcriptMessages.some((message) => (
     message.type === 'user_text' &&
     message.pending !== true &&
-    message.content === pendingMessage.content &&
-    Math.abs(message.timestamp - pendingMessage.timestamp) <= MEMBER_TRANSCRIPT_MATCH_WINDOW_MS
+    (message.content === pendingMessage.content ||
+      (pendingContent.length > 0 && message.content.includes(pendingContent)))
   ))
 }
 
@@ -94,9 +116,15 @@ function mergeMemberTranscriptMessages(
   existingMessages: UIMessage[],
   transcriptMessages: UIMessage[],
 ): UIMessage[] {
-  const pendingMessages = existingMessages.filter(isPendingMemberMessage).filter(
-    (message) => !transcriptAlreadyContainsMessage(transcriptMessages, message),
-  )
+  const now = Date.now()
+  const pendingMessages = existingMessages
+    .filter(isPendingMemberMessage)
+    .filter(
+      (message) => now - message.timestamp <= MEMBER_PENDING_MESSAGE_MAX_AGE_MS,
+    )
+    .filter(
+      (message) => !transcriptAlreadyContainsMessage(transcriptMessages, message),
+    )
 
   return pendingMessages.length > 0
     ? [...transcriptMessages, ...pendingMessages]
@@ -109,8 +137,20 @@ function syncMemberSessionMessages(
   messages: UIMessage[],
 ) {
   const hasPendingMessages = messages.some(isPendingMemberMessage)
+  const nextChatState =
+    memberStatus === 'running' || hasPendingMessages ? 'thinking' : 'idle'
   useChatStore.setState((state) => {
     const existing = state.sessions[sessionId]
+    // Nothing changed since the last poll: skip the update so subscribers don't
+    // re-render on every 1.5s tick.
+    if (
+      existing &&
+      existing.messages === messages &&
+      existing.chatState === nextChatState &&
+      existing.connectionState === 'connected'
+    ) {
+      return {}
+    }
     const nextState = existing ?? createMemberSessionState()
     return {
       sessions: {
@@ -119,10 +159,7 @@ function syncMemberSessionMessages(
           ...nextState,
           messages,
           connectionState: 'connected',
-          chatState:
-            memberStatus === 'running' || hasPendingMessages
-              ? 'thinking'
-              : 'idle',
+          chatState: nextChatState,
         },
       },
     }
@@ -222,7 +259,12 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
         existingMessages,
         transcriptMessages,
       )
-      syncMemberSessionMessages(sessionId, member.status, mergedMessages)
+      // If the poll produced identical content, keep the previous array (and its
+      // stable object references) so React does not remount the whole transcript.
+      const finalMessages = sameMemberMessages(existingMessages, mergedMessages)
+        ? existingMessages
+        : mergedMessages
+      syncMemberSessionMessages(sessionId, member.status, finalMessages)
     } catch {
       const existingMessages = useChatStore.getState().sessions[sessionId]?.messages ?? []
       syncMemberSessionMessages(sessionId, member.status, existingMessages)

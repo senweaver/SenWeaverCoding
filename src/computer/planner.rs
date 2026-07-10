@@ -25,6 +25,10 @@ Available actions:\n\
 - finished: the task is complete (explain the result in thought)\n\
 - call_user: you are blocked and need the human to intervene or provide info (explain in thought)\n\n\
 Element descriptions must be concrete and visually unambiguous (text label, icon, position).\n\n\
+A small floating status card belonging to this assistant may be visible on the screen (usually \
+near a corner, showing a round orb, a brand name and a status line). It is not part of the task: \
+ignore it completely, never click or drag it, and never treat it as a target or as an obstruction \
+to clear.\n\n\
 If — and only if — you can confidently pinpoint the exact location yourself, you may add \
 \"start_box\": [x, y] with coordinates normalized to 0-1000 (origin top-left); for drag also add \
 \"end_box\": [x, y]. When you provide coordinates they are used directly; otherwise the \
@@ -32,6 +36,8 @@ element_description is used to locate the target. Prefer element_description unl
 Respond with raw JSON only, no markdown, in this exact shape:\n\
 {\"thought\": \"...\", \"action\": \"click\", \"element_description\": \"...\", \"value\": \"...\", \"amount\": 0, \"to_element_description\": \"...\", \"start_box\": [x, y], \"end_box\": [x, y]}\n\
 Omit fields that do not apply.";
+
+const MAX_HISTORY_ENTRIES: usize = 40;
 
 pub async fn plan_next(
     client: &VisionClient,
@@ -43,8 +49,15 @@ pub async fn plan_next(
     if history.is_empty() {
         user.push_str("No actions have been taken yet. This is the first step.\n\n");
     } else {
-        user.push_str("Actions taken so far:\n");
-        for (idx, entry) in history.iter().enumerate() {
+        let skipped = history.len().saturating_sub(MAX_HISTORY_ENTRIES);
+        if skipped > 0 {
+            user.push_str(&format!(
+                "Actions taken so far ({skipped} earlier actions omitted):\n"
+            ));
+        } else {
+            user.push_str("Actions taken so far:\n");
+        }
+        for (idx, entry) in history.iter().enumerate().skip(skipped) {
             user.push_str(&format!("{}. {entry}\n", idx + 1));
         }
         user.push('\n');

@@ -82,7 +82,8 @@ struct Choice {
 
 #[derive(Debug, Deserialize)]
 struct ResponseMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +102,15 @@ struct NativeChatRequest {
     stream: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptionsField>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptionsField {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -547,10 +556,16 @@ impl OpenRouterProvider {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tc| ProviderToolCall {
-                id: crate::providers::sanitize::normalize_tool_call_id(tc.id),
-                name: tc.function.name,
-                arguments: tc.function.arguments,
+            .map(|tc| {
+                let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                    &tc.function.name,
+                    tc.function.arguments,
+                );
+                ProviderToolCall {
+                    id: crate::providers::sanitize::normalize_tool_call_id(tc.id),
+                    name: tc.function.name,
+                    arguments,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -744,7 +759,7 @@ impl Provider for OpenRouterProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))
     }
 
@@ -825,7 +840,7 @@ impl Provider for OpenRouterProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))
     }
 
@@ -883,6 +898,7 @@ impl Provider for OpenRouterProvider {
             tools,
             max_tokens: self.max_tokens,
             stream: None,
+            stream_options: None,
             reasoning: self.reasoning_param_for_model(model),
         };
 
@@ -1029,6 +1045,7 @@ impl Provider for OpenRouterProvider {
             tools: native_tools,
             max_tokens: self.max_tokens,
             stream: None,
+            stream_options: None,
             reasoning: self.reasoning_param_for_model(model),
         };
 
@@ -1174,7 +1191,7 @@ impl Provider for OpenRouterProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))?;
 
         let parsed = serde_json::from_str::<serde_json::Value>(&raw_text)
@@ -1233,6 +1250,7 @@ impl Provider for OpenRouterProvider {
             tools,
             max_tokens: self.max_tokens,
             stream: Some(true),
+            stream_options: Some(StreamOptionsField { include_usage: true }),
             reasoning: self.reasoning_param_for_model(model),
         };
 

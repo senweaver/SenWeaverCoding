@@ -126,37 +126,89 @@ fn bracket_balance_validate(s: &str) -> ValidationReport {
     let mut brace_line = 0u32;
     let mut bracket_line = 0u32;
     let mut line = 1u32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for c in s.chars() {
+
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    let n = chars.len();
+    while i < n {
+        let c = chars[i];
         if c == '\n' {
             line += 1;
+            i += 1;
             continue;
         }
-        if escaped {
-            escaped = false;
+        // Line comments: `//` and `#` (covers C/Rust/JS/TS and shell/Python).
+        if c == '#' || (c == '/' && i + 1 < n && chars[i + 1] == '/') {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comments: `/* ... */`.
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                if chars[i] == '\n' {
+                    line += 1;
+                }
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        // Double-quoted string (with escapes); brackets inside are ignored.
+        if c == '"' {
+            i += 1;
+            while i < n {
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                if chars[i] == '\n' {
+                    line += 1;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Char literal `'x'` / `'\n'`. A bare `'` (Rust lifetime, apostrophe) that
+        // is not a valid char literal is ignored rather than toggling string state.
+        if c == '\'' {
+            let is_char_lit = if i + 1 < n && chars[i + 1] == '\\' {
+                i + 3 < n && chars[i + 3] == '\''
+            } else {
+                i + 2 < n && chars[i + 2] == '\''
+            };
+            if is_char_lit {
+                i += if i + 1 < n && chars[i + 1] == '\\' { 4 } else { 3 };
+                continue;
+            }
+            i += 1;
             continue;
         }
         match c {
-            '\\' if in_string => escaped = true,
-            '"' => in_string = !in_string,
-            '(' if !in_string => {
+            '(' => {
                 parens += 1;
                 paren_line = line;
             }
-            ')' if !in_string => parens -= 1,
-            '{' if !in_string => {
+            ')' => parens -= 1,
+            '{' => {
                 braces += 1;
                 brace_line = line;
             }
-            '}' if !in_string => braces -= 1,
-            '[' if !in_string => {
+            '}' => braces -= 1,
+            '[' => {
                 brackets += 1;
                 bracket_line = line;
             }
-            ']' if !in_string => brackets -= 1,
+            ']' => brackets -= 1,
             _ => {}
         }
+        i += 1;
     }
     if parens != 0 {
         issues.push(ValidationIssue {

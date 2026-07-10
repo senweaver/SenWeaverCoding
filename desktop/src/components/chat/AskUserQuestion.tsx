@@ -184,10 +184,26 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
     if (submitted || isCrossSession || !pendingRequest) return
     const onSubmit = () => submit(false)
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        submit(true)
+      if (e.key !== 'Escape') return
+      // Escape presses that were already consumed elsewhere (closing a modal,
+      // cancelling IME composition, dismissing a menu) must not silently skip
+      // the pending question.
+      if (e.defaultPrevented || e.isComposing) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName
+        if (
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          target.isContentEditable ||
+          target.closest('[role="dialog"], [data-modal-root]')
+        ) {
+          return
+        }
       }
+      if (document.querySelector('[role="dialog"]')) return
+      e.preventDefault()
+      submit(true)
     }
     window.addEventListener('plan:question:submit', onSubmit as EventListener)
     window.addEventListener('keydown', onKey)

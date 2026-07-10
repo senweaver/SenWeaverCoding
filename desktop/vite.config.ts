@@ -14,7 +14,14 @@ export default defineConfig({
   },
  
   optimizeDeps: {
-    include: ['monaco-editor', '@monaco-editor/react'],
+    include: [
+      'monaco-editor',
+      '@monaco-editor/react',
+      '@tauri-apps/api/core',
+      '@tauri-apps/api/event',
+      '@tauri-apps/api/window',
+      '@tauri-apps/api/webviewWindow',
+    ],
   },
   worker: {
     format: 'es',

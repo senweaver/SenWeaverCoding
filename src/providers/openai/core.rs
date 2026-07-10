@@ -30,6 +30,8 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptionsField>,
@@ -85,6 +87,8 @@ struct NativeChatRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -229,6 +233,32 @@ impl OpenAiProvider {
     ) -> Self {
         self.extra_headers = headers;
         self
+    }
+
+    // OpenAI reasoning-family models (o1/o3/o4/gpt-5*) reject `max_tokens` and
+    // require `max_completion_tokens` instead.
+    fn uses_max_completion_tokens(model: &str) -> bool {
+        let id = model.rsplit('/').next().unwrap_or(model);
+        id.starts_with("o1")
+            || id.starts_with("o3")
+            || id.starts_with("o4")
+            || id.starts_with("gpt-5")
+    }
+
+    fn max_tokens_field(max: Option<u32>, model: &str) -> Option<u32> {
+        if Self::uses_max_completion_tokens(model) {
+            None
+        } else {
+            max
+        }
+    }
+
+    fn max_completion_tokens_field(max: Option<u32>, model: &str) -> Option<u32> {
+        if Self::uses_max_completion_tokens(model) {
+            max
+        } else {
+            None
+        }
     }
 
     fn adjust_temperature_for_model(model: &str, requested_temperature: f64) -> f64 {
@@ -502,13 +532,19 @@ impl OpenAiProvider {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tc| ProviderToolCall {
-                id: crate::providers::sanitize::normalize_tool_call_id_for_provider(
-                    tc.id,
-                    crate::providers::sanitize::ProviderKind::OpenAi,
-                ),
-                name: tc.function.name,
-                arguments: tc.function.arguments,
+            .map(|tc| {
+                let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                    &tc.function.name,
+                    tc.function.arguments,
+                );
+                ProviderToolCall {
+                    id: crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                        tc.id,
+                        crate::providers::sanitize::ProviderKind::OpenAi,
+                    ),
+                    name: tc.function.name,
+                    arguments,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -577,7 +613,8 @@ impl OpenAiProvider {
             model: model.to_string(),
             messages,
             temperature: Self::adjust_temperature_for_model(model, temperature),
-            max_tokens: self.max_tokens,
+            max_tokens: Self::max_tokens_field(self.max_tokens, model),
+            max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
             stream: Some(options.enabled),
             stream_options: options
                 .enabled
@@ -668,7 +705,8 @@ impl Provider for OpenAiProvider {
             model: model.to_string(),
             messages,
             temperature: adjusted_temperature,
-            max_tokens: self.max_tokens,
+            max_tokens: Self::max_tokens_field(self.max_tokens, model),
+            max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
             stream: None,
             stream_options: None,
         };
@@ -722,7 +760,8 @@ impl Provider for OpenAiProvider {
             temperature: adjusted_temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
-            max_tokens: self.max_tokens,
+            max_tokens: Self::max_tokens_field(self.max_tokens, model),
+            max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
             stream: None,
             stream_options: None,
         };
@@ -805,7 +844,8 @@ impl Provider for OpenAiProvider {
             temperature: adjusted_temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
-            max_tokens: self.max_tokens,
+            max_tokens: Self::max_tokens_field(self.max_tokens, model),
+            max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
             stream: None,
             stream_options: None,
         };
@@ -960,7 +1000,8 @@ impl Provider for OpenAiProvider {
             temperature: adjusted_temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
-            max_tokens: self.max_tokens,
+            max_tokens: Self::max_tokens_field(self.max_tokens, model),
+            max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
             stream: Some(options.enabled),
             stream_options: options
                 .enabled
@@ -1047,7 +1088,8 @@ impl Provider for OpenAiProvider {
         temperature: f64,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        let api_messages: Vec<Message> = messages
+        let sanitized = super::super::traits::flatten_messages_for_text_only_wire(messages);
+        let api_messages: Vec<Message> = sanitized
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),

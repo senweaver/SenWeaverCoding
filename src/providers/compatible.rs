@@ -237,6 +237,39 @@ impl OpenAiCompatibleProvider {
         crate::constants::api_limits::context_window_for_model(model) as usize
     }
 
+    fn normalize_system_for_strict_wire(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let leading_system_end = messages
+            .iter()
+            .position(|m| m.role != "system")
+            .unwrap_or(messages.len());
+        let has_trailing_system = messages
+            .iter()
+            .skip(leading_system_end)
+            .any(|m| m.role == "system");
+        if leading_system_end <= 1 && !has_trailing_system {
+            return messages.to_vec();
+        }
+        let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+        if leading_system_end == 1 {
+            out.push(messages[0].clone());
+        } else if leading_system_end > 1 {
+            let merged = messages[..leading_system_end]
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            out.push(ChatMessage::system(merged));
+        }
+        for m in &messages[leading_system_end..] {
+            if m.role == "system" {
+                out.push(ChatMessage::user(format!("[System note]\n{}", m.content)));
+            } else {
+                out.push(m.clone());
+            }
+        }
+        out
+    }
+
     fn flatten_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         let system_content: String = messages
             .iter()
@@ -444,29 +477,7 @@ impl OpenAiCompatibleProvider {
             return false;
         }
         let lower = error.to_lowercase();
-        let mentions_thinking = lower.contains("thinking") || lower.contains("reasoning");
-        if !mentions_thinking {
-            return false;
-        }
-        [
-            "unknown parameter",
-            "unsupported parameter",
-            "unrecognized field",
-            "unrecognized parameter",
-            "unknown field",
-            "invalid parameter",
-            "invalid field",
-            "not supported",
-            "does not support",
-            "extra field",
-            "extra fields not permitted",
-            "unexpected field",
-            "unexpected parameter",
-            "additional properties",
-            "no additional properties",
-        ]
-        .iter()
-        .any(|hint| lower.contains(hint))
+        lower.contains("thinking") || lower.contains("reasoning")
     }
 
     fn reserved_output_tokens(&self, model: &str) -> usize {
@@ -1475,16 +1486,7 @@ impl OpenAiCompatibleProvider {
                 let name = tc.function_name()?;
                 let arguments = tc.function_arguments().unwrap_or_else(|| "{}".to_string());
                 let normalized_arguments =
-                    if serde_json::from_str::<serde_json::Value>(&arguments).is_ok() {
-                        arguments
-                    } else {
-                        tracing::warn!(
-                            function = %name,
-                            arguments = %arguments,
-                            "Invalid JSON in native tool-call arguments, using empty object"
-                        );
-                        "{}".to_string()
-                    };
+                    crate::providers::sanitize::normalize_tool_call_arguments(&name, arguments);
                 Some(ProviderToolCall {
                     id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     name,
@@ -1751,7 +1753,7 @@ impl Provider for OpenAiCompatibleProvider {
         let effective_messages = if self.merge_system_into_user {
             Self::flatten_system_messages(&budgeted_input)
         } else {
-            budgeted_input
+            Self::normalize_system_for_strict_wire(&budgeted_input)
         };
         let api_messages: Vec<Message> = effective_messages
             .iter()
@@ -1895,7 +1897,7 @@ impl Provider for OpenAiCompatibleProvider {
         let pre_budget = if self.merge_system_into_user {
             Self::flatten_system_messages(messages)
         } else {
-            messages.to_vec()
+            Self::normalize_system_for_strict_wire(messages)
         };
         let effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
@@ -2020,31 +2022,9 @@ impl Provider for OpenAiCompatibleProvider {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))?;
 
-        let text = choice.message.effective_content_optional();
-        let reasoning_content = choice.message.reasoning_content;
-        let tool_calls = choice
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|tc| {
-                let function = tc.function?;
-                let name = function.name?;
-                let arguments = function.arguments.unwrap_or_else(|| "{}".to_string());
-                Some(ProviderToolCall {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name,
-                    arguments,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        Ok(ProviderChatResponse {
-            text,
-            tool_calls,
-            usage,
-            reasoning_content,
-        })
+        let mut result = Self::parse_native_response(choice.message);
+        result.usage = usage;
+        Ok(result)
     }
 
     async fn chat(
@@ -2091,7 +2071,7 @@ impl Provider for OpenAiCompatibleProvider {
         let pre_budget = if self.merge_system_into_user {
             Self::flatten_system_messages(request.messages)
         } else {
-            request.messages.to_vec()
+            Self::normalize_system_for_strict_wire(request.messages)
         };
         let effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
@@ -2279,7 +2259,7 @@ impl Provider for OpenAiCompatibleProvider {
         let mut effective_messages: Vec<ChatMessage> = if self.merge_system_into_user {
             Self::flatten_system_messages(&raw_messages_owned)
         } else {
-            raw_messages_owned.as_ref().clone()
+            Self::normalize_system_for_strict_wire(&raw_messages_owned)
         };
 
         if !model_supports_native && has_tools {
@@ -2364,9 +2344,12 @@ impl Provider for OpenAiCompatibleProvider {
                 model: model.to_string(),
                 messages,
                 temperature: Self::adjust_temperature_for_model(model, temperature),
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.reasoning_effort_for_model(model),
                 thinking: self.thinking_param_for_model(model),
-                tool_stream: if options.enabled { Some(true) } else { None },
+                // No tools on this branch, so tool_stream should never be forced
+                // on. Only vendors that require it (z.ai) opt in via
+                // tool_stream_for_tools, and even then only with tools present.
+                tool_stream: None,
                 stream: Some(options.enabled),
                 stream_options: if options.enabled {
                     Some(StreamOptionsField { include_usage: true })
@@ -2703,7 +2686,7 @@ impl Provider for OpenAiCompatibleProvider {
         let effective_messages = if self.merge_system_into_user {
             Self::flatten_system_messages(&budgeted_input)
         } else {
-            budgeted_input
+            Self::normalize_system_for_strict_wire(&budgeted_input)
         };
         let api_messages: Vec<Message> = effective_messages
             .iter()

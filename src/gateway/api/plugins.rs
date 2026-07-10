@@ -10,7 +10,7 @@ pub mod plugin_routes {
         response::{IntoResponse, Json},
     };
 
-    use super::super::AppState;
+    use crate::gateway::AppState;
 
     pub async fn list_plugins(
         State(state): State<AppState>,
@@ -31,6 +31,7 @@ pub mod plugin_routes {
         let config = state.config.lock();
         let plugins_enabled = config.plugins.enabled;
         let plugins_dir = config.plugins.plugins_dir.clone();
+        let plugins_config = config.plugins.clone();
         drop(config);
 
         let plugins: Vec<serde_json::Value> = if plugins_enabled {
@@ -43,8 +44,9 @@ pub mod plugin_routes {
             };
 
             if plugin_path.exists() {
-                match crate::plugins::host::PluginHost::new(
+                match crate::plugins::host::PluginHost::from_plugins_config(
                     plugin_path.parent().unwrap_or(&plugin_path),
+                    &plugins_config,
                 ) {
                     Ok(host) => host
                         .list_plugins()

@@ -2,8 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { useLanStore } from '../../stores/lanStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
@@ -25,7 +24,6 @@ function formatBytes(bytes: number): string {
 
 export function SharePanel() {
   const t = useTranslation()
-  const panelOpen = useLanShareStore((s) => s.panelOpen)
   const closePanel = useLanShareStore((s) => s.closePanel)
   const myShares = useLanShareStore((s) => s.myShares)
   const peerShares = useLanShareStore((s) => s.peerShares)
@@ -38,32 +36,18 @@ export function SharePanel() {
   const setDiscovery = useLanStore((s) => s.setDiscovery)
   const saveReceivedFile = useLanStore((s) => s.saveReceivedFile)
 
-  const panelRef = useRef<HTMLDivElement>(null)
   const [view, setView] = useState<'mine' | 'network'>('network')
   const [busy, setBusy] = useState(false)
   const [downloading, setDownloading] = useState<Record<string, boolean>>({})
   const [saveState, setSaveState] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
 
   useEffect(() => {
-    if (!panelOpen) return
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as HTMLElement | null
-      if (!target) return
-      if (panelRef.current?.contains(target)) return
-      if (target.closest('[data-lan-share-toggle]')) return
-      if (target.closest('[data-app-titlebar]')) return
-      closePanel()
-    }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closePanel()
     }
-    document.addEventListener('pointerdown', handlePointerDown, true)
     document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown, true)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [panelOpen, closePanel])
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [closePanel])
 
   const grouped = useMemo(() => {
     const map = new Map<string, { nickname: string; items: LanPeerShare[] }>()
@@ -74,8 +58,6 @@ export function SharePanel() {
     }
     return Array.from(map.entries()).map(([ownerId, value]) => ({ ownerId, ...value }))
   }, [peerShares])
-
-  if (!panelOpen) return null
 
   async function pickAndShare(directory: boolean) {
     let path: string | null = null
@@ -140,23 +122,14 @@ export function SharePanel() {
     }
   }
 
-  return createPortal(
-    <div
-      ref={panelRef}
-      onMouseDown={(e) => e.stopPropagation()}
-      className="fixed left-3 z-50 flex w-[460px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-dropdown)]"
-      style={{
-        top: 'calc(var(--titlebar-height) + 52px)',
-        height: '78vh',
-        maxHeight: 'calc(100vh - var(--titlebar-height) - 64px)',
-      }}
-    >
-      <div className="flex items-center gap-2 border-b border-[var(--color-border)] p-3">
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[var(--color-surface)]">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
         <span className="material-symbols-outlined text-[20px] text-[var(--color-brand)]">
           share
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+          <div className="truncate text-[15px] font-semibold text-[var(--color-text-primary)]">
             {t('lanShare.title')}
           </div>
           <div className="truncate text-[11px] text-[var(--color-text-tertiary)]">
@@ -167,12 +140,13 @@ export function SharePanel() {
           type="button"
           title={t('common.close')}
           onClick={closePanel}
-          className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
         >
           <span className="material-symbols-outlined text-[18px]">close</span>
         </button>
       </div>
 
+      <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
       {!lanRunning && (
         <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-hover)] px-3 py-2">
           <span className="text-xs text-[var(--color-text-secondary)]">
@@ -370,7 +344,7 @@ export function SharePanel() {
           )}
         </div>
       )}
-    </div>,
-    document.body,
+      </div>
+    </div>
   )
 }

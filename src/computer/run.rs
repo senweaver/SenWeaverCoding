@@ -17,6 +17,7 @@ use crate::config::Config;
 
 const MAX_CONSECUTIVE_ERRORS: u32 = 3;
 const DEFAULT_WAIT_MS: u64 = 800;
+const MAX_WAIT_MS: u64 = 15_000;
 const DEFAULT_SCROLL_AMOUNT: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -38,6 +39,7 @@ pub struct ComputerStepEvent {
     pub element_description: Option<String>,
     pub value: Option<String>,
     pub screenshot_base64: String,
+    pub screenshot_mime: &'static str,
     pub target_x_norm: Option<f64>,
     pub target_y_norm: Option<f64>,
     pub to_x_norm: Option<f64>,
@@ -52,6 +54,8 @@ pub enum ComputerEvent {
         status: RunStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     Step {
         #[serde(flatten)]
@@ -65,7 +69,41 @@ pub enum ComputerEvent {
     },
     Error {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
+}
+
+impl ComputerEvent {
+    pub fn status(status: RunStatus, message: Option<String>) -> Self {
+        ComputerEvent::Status {
+            status,
+            message,
+            code: None,
+        }
+    }
+
+    pub fn status_code(status: RunStatus, code: &str, message: impl Into<String>) -> Self {
+        ComputerEvent::Status {
+            status,
+            message: Some(message.into()),
+            code: Some(code.to_string()),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        ComputerEvent::Error {
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    pub fn error_code(code: &str, message: impl Into<String>) -> Self {
+        ComputerEvent::Error {
+            message: message.into(),
+            code: Some(code.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,29 +127,29 @@ pub async fn run_loop(
         let _ = event_tx.send(event);
     };
 
-    let client = match VisionClient::from_config(&config, &params.provider, &params.model) {
-        Ok(client) => client,
-        Err(err) => {
-            emit(ComputerEvent::Error {
-                message: format!("failed to initialize model '{}': {err}", params.model),
-            });
-            emit(ComputerEvent::Status {
-                status: RunStatus::Error,
-                message: None,
-            });
+    let _input_lease = match super::input_lock::try_acquire(super::input_lock::InputActivity::Agent)
+    {
+        Ok(lease) => lease,
+        Err(message) => {
+            emit(ComputerEvent::error_code("busy", message));
+            emit(ComputerEvent::status(RunStatus::Error, None));
             return;
         }
     };
 
-    emit(ComputerEvent::Status {
-        status: RunStatus::Running,
-        message: None,
-    });
-
-    let (display_w, display_h) = match input::main_display_size().await {
-        Ok((w, h)) if w > 0 && h > 0 => (w, h),
-        _ => (0, 0),
+    let client = match VisionClient::from_config(&config, &params.provider, &params.model) {
+        Ok(client) => client,
+        Err(err) => {
+            emit(ComputerEvent::error_code(
+                "model_init_failed",
+                format!("failed to initialize model '{}': {err}", params.model),
+            ));
+            emit(ComputerEvent::status(RunStatus::Error, None));
+            return;
+        }
     };
+
+    emit(ComputerEvent::status(RunStatus::Running, None));
 
     let mut history: Vec<String> = Vec::new();
     let mut consecutive_errors = 0u32;
@@ -120,25 +158,24 @@ pub async fn run_loop(
 
     while step < params.max_steps {
         if cancel.is_cancelled() {
-            emit(ComputerEvent::Status {
-                status: RunStatus::Stopped,
-                message: None,
-            });
+            emit(ComputerEvent::status(RunStatus::Stopped, None));
             return;
         }
 
         let screen = match capture::capture_primary().await {
             Ok(screen) => screen,
             Err(err) => {
-                emit(ComputerEvent::Error {
-                    message: format!("screen capture failed: {err}"),
-                });
+                emit(ComputerEvent::error_code(
+                    "capture_failed",
+                    format!("screen capture failed: {err}"),
+                ));
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    emit(ComputerEvent::Status {
-                        status: RunStatus::Error,
-                        message: Some("aborted after repeated capture failures".into()),
-                    });
+                    emit(ComputerEvent::status_code(
+                        RunStatus::Error,
+                        "capture_failed_repeated",
+                        "aborted after repeated capture failures",
+                    ));
                     return;
                 }
                 sleep_or_cancel(&cancel, 1000).await;
@@ -146,24 +183,30 @@ pub async fn run_loop(
             }
         };
 
-        emit(ComputerEvent::Status {
-            status: RunStatus::Thinking,
-            message: None,
-        });
+        emit(ComputerEvent::status(RunStatus::Thinking, None));
 
         let data_uri = screen.data_uri();
-        let planned = match planner::plan_next(&client, &data_uri, &params.task, &history).await {
+        let plan_result = tokio::select! {
+            () = cancel.cancelled() => {
+                emit(ComputerEvent::status(RunStatus::Stopped, None));
+                return;
+            }
+            result = planner::plan_next(&client, &data_uri, &params.task, &history) => result,
+        };
+        let planned = match plan_result {
             Ok(planned) => planned,
             Err(err) => {
-                emit(ComputerEvent::Error {
-                    message: format!("planning failed: {err}"),
-                });
+                emit(ComputerEvent::error_code(
+                    "planning_failed",
+                    format!("planning failed: {err}"),
+                ));
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    emit(ComputerEvent::Status {
-                        status: RunStatus::Error,
-                        message: Some("aborted after repeated planning failures".into()),
-                    });
+                    emit(ComputerEvent::status_code(
+                        RunStatus::Error,
+                        "planning_failed_repeated",
+                        "aborted after repeated planning failures",
+                    ));
                     return;
                 }
                 sleep_or_cancel(&cancel, 800).await;
@@ -172,53 +215,58 @@ pub async fn run_loop(
         };
         consecutive_errors = 0;
 
-        let display_w = if display_w > 0 {
-            display_w
-        } else {
-            i32::try_from(screen.width).unwrap_or(1)
-        };
-        let display_h = if display_h > 0 {
-            display_h
-        } else {
-            i32::try_from(screen.height).unwrap_or(1)
-        };
+        let monitor = screen.monitor;
 
         let mut primary_target: Option<ResolvedTarget> = None;
         let mut secondary_target: Option<ResolvedTarget> = None;
 
         if planned.action.needs_target() {
-            match resolve_target(
-                &client,
-                &data_uri,
-                planned.start_box.as_deref(),
-                planned.element_description.as_deref(),
-                display_w,
-                display_h,
-            )
-            .await
-            {
-                Ok(target) => primary_target = Some(target),
-                Err(err) => emit(ComputerEvent::Error {
-                    message: format!("could not locate target: {err}"),
-                }),
-            }
-            if matches!(planned.action, ActionType::Drag) {
+            let resolve_all = async {
+                let mut primary: Option<ResolvedTarget> = None;
+                let mut secondary: Option<ResolvedTarget> = None;
                 match resolve_target(
                     &client,
                     &data_uri,
-                    planned.end_box.as_deref(),
-                    planned.to_element_description.as_deref(),
-                    display_w,
-                    display_h,
+                    planned.start_box.as_deref(),
+                    planned.element_description.as_deref(),
+                    monitor,
                 )
                 .await
                 {
-                    Ok(target) => secondary_target = Some(target),
-                    Err(err) => emit(ComputerEvent::Error {
-                        message: format!("could not locate drag destination: {err}"),
-                    }),
+                    Ok(target) => primary = Some(target),
+                    Err(err) => emit(ComputerEvent::error_code(
+                        "target_not_located",
+                        format!("could not locate target: {err}"),
+                    )),
                 }
-            }
+                if matches!(planned.action, ActionType::Drag) {
+                    match resolve_target(
+                        &client,
+                        &data_uri,
+                        planned.end_box.as_deref(),
+                        planned.to_element_description.as_deref(),
+                        monitor,
+                    )
+                    .await
+                    {
+                        Ok(target) => secondary = Some(target),
+                        Err(err) => emit(ComputerEvent::error_code(
+                            "drag_target_not_located",
+                            format!("could not locate drag destination: {err}"),
+                        )),
+                    }
+                }
+                (primary, secondary)
+            };
+            let resolved = tokio::select! {
+                () = cancel.cancelled() => {
+                    emit(ComputerEvent::status(RunStatus::Stopped, None));
+                    return;
+                }
+                resolved = resolve_all => resolved,
+            };
+            primary_target = resolved.0;
+            secondary_target = resolved.1;
         }
 
         emit(ComputerEvent::Step {
@@ -229,6 +277,7 @@ pub async fn run_loop(
                 element_description: planned.element_description.clone(),
                 value: planned.value.clone(),
                 screenshot_base64: screen.png_base64.clone(),
+                screenshot_mime: "image/png",
                 target_x_norm: primary_target.as_ref().map(|t| t.x_norm),
                 target_y_norm: primary_target.as_ref().map(|t| t.y_norm),
                 to_x_norm: secondary_target.as_ref().map(|t| t.x_norm),
@@ -239,31 +288,31 @@ pub async fn run_loop(
 
         match planned.action {
             ActionType::Finished => {
-                emit(ComputerEvent::Status {
-                    status: RunStatus::Finished,
-                    message: Some(planned.thought.clone()),
-                });
+                emit(ComputerEvent::status(
+                    RunStatus::Finished,
+                    Some(planned.thought.clone()),
+                ));
                 return;
             }
             ActionType::CallUser => {
-                emit(ComputerEvent::Status {
-                    status: RunStatus::CallUser,
-                    message: Some(planned.thought.clone()),
-                });
+                emit(ComputerEvent::status(
+                    RunStatus::CallUser,
+                    Some(planned.thought.clone()),
+                ));
                 tokio::select! {
                     () = cancel.cancelled() => {
-                        emit(ComputerEvent::Status { status: RunStatus::Stopped, message: None });
+                        emit(ComputerEvent::status(RunStatus::Stopped, None));
                         return;
                     }
                     reply = reply_rx.recv() => {
                         match reply {
                             Some(text) => {
                                 history.push(format!("Asked the user for help; they replied: {text}"));
-                                emit(ComputerEvent::Status { status: RunStatus::Running, message: None });
+                                emit(ComputerEvent::status(RunStatus::Running, None));
                                 continue;
                             }
                             None => {
-                                emit(ComputerEvent::Status { status: RunStatus::Stopped, message: None });
+                                emit(ComputerEvent::status(RunStatus::Stopped, None));
                                 return;
                             }
                         }
@@ -274,19 +323,18 @@ pub async fn run_loop(
         }
 
         if cancel.is_cancelled() {
-            emit(ComputerEvent::Status {
-                status: RunStatus::Stopped,
-                message: None,
-            });
+            emit(ComputerEvent::status(RunStatus::Stopped, None));
             return;
         }
 
+        emit(ComputerEvent::status(RunStatus::Running, None));
+
         let outcome = execute_action(
             &planned,
-            display_w,
-            display_h,
+            monitor,
             primary_target,
             secondary_target,
+            &cancel,
         )
         .await;
         match outcome {
@@ -311,13 +359,11 @@ pub async fn run_loop(
                     planned.action.as_str()
                 ));
                 if consecutive_action_failures >= MAX_CONSECUTIVE_ERRORS {
-                    emit(ComputerEvent::Status {
-                        status: RunStatus::Error,
-                        message: Some(
-                            "aborted after repeated action failures; the agent could not make progress"
-                                .into(),
-                        ),
-                    });
+                    emit(ComputerEvent::status_code(
+                        RunStatus::Error,
+                        "action_failed_repeated",
+                        "aborted after repeated action failures; the agent could not make progress",
+                    ));
                     return;
                 }
             }
@@ -327,10 +373,11 @@ pub async fn run_loop(
         sleep_or_cancel(&cancel, params.step_delay_ms).await;
     }
 
-    emit(ComputerEvent::Status {
-        status: RunStatus::Finished,
-        message: Some(format!("reached the step limit ({})", params.max_steps)),
-    });
+    emit(ComputerEvent::status_code(
+        RunStatus::Finished,
+        "step_limit_reached",
+        format!("reached the step limit ({})", params.max_steps),
+    ));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -347,14 +394,11 @@ async fn resolve_target(
     data_uri: &str,
     coords: Option<&[f64]>,
     description: Option<&str>,
-    display_w: i32,
-    display_h: i32,
+    monitor: coordinates::MonitorRect,
 ) -> anyhow::Result<ResolvedTarget> {
     if let Some(values) = coords {
         if let Some((x_norm, y_norm)) = coordinates::coords_to_center_norm(values) {
-            return Ok(ResolvedTarget::from_norm(
-                x_norm, y_norm, 100.0, display_w, display_h,
-            ));
+            return Ok(ResolvedTarget::from_norm(x_norm, y_norm, 100.0, monitor));
         }
     }
     let desc = description
@@ -364,8 +408,7 @@ async fn resolve_target(
         result.x_norm,
         result.y_norm,
         result.confidence,
-        display_w,
-        display_h,
+        monitor,
     ))
 }
 
@@ -374,11 +417,9 @@ impl ResolvedTarget {
         x_norm: f64,
         y_norm: f64,
         confidence: f64,
-        display_w: i32,
-        display_h: i32,
+        monitor: coordinates::MonitorRect,
     ) -> Self {
-        let (input_x, input_y) =
-            coordinates::normalized_to_input(x_norm, y_norm, display_w, display_h);
+        let (input_x, input_y) = monitor.denormalize(x_norm, y_norm);
         Self {
             x_norm,
             y_norm,
@@ -391,10 +432,10 @@ impl ResolvedTarget {
 
 async fn execute_action(
     planned: &PlannedAction,
-    display_w: i32,
-    display_h: i32,
+    monitor: coordinates::MonitorRect,
     primary: Option<ResolvedTarget>,
     secondary: Option<ResolvedTarget>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<String> {
     match planned.action {
         ActionType::Click => {
@@ -451,7 +492,10 @@ async fn execute_action(
         ActionType::Scroll => {
             let (x, y) = match primary {
                 Some(target) => (target.input_x, target.input_y),
-                None => (display_w / 2, display_h / 2),
+                None => (
+                    monitor.x + monitor.width.max(1) / 2,
+                    monitor.y + monitor.height.max(1) / 2,
+                ),
             };
             let direction = parse_scroll_direction(planned.value.as_deref());
             let amount = planned.amount.unwrap_or(DEFAULT_SCROLL_AMOUNT);
@@ -467,9 +511,9 @@ async fn execute_action(
         ActionType::Wait => {
             let ms = planned
                 .amount
-                .map(|n| n.max(0) as u64)
+                .map(|n| (n.max(0) as u64).min(MAX_WAIT_MS))
                 .unwrap_or(DEFAULT_WAIT_MS);
-            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            sleep_or_cancel(cancel, ms).await;
             Ok(format!("Waited {ms}ms"))
         }
         ActionType::Finished | ActionType::CallUser => Ok(String::new()),

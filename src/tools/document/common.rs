@@ -93,6 +93,53 @@ pub fn resolve_read_source(security: &SecurityPolicy, path: &str) -> Result<Path
     Ok(resolved)
 }
 
+pub fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.matches('|').count() >= 2
+}
+
+pub fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    if !is_table_row(t) {
+        return false;
+    }
+    let inner = t.trim_matches('|');
+    inner
+        .split('|')
+        .map(|c| c.trim())
+        .all(|cell| !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':' || c == ' '))
+}
+
+pub fn split_table_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    let mut cells: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut escaped = false;
+    for ch in t.chars() {
+        if escaped {
+            if ch != '|' && ch != '\\' {
+                cur.push('\\');
+            }
+            cur.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '|' {
+            cells.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    if escaped {
+        cur.push('\\');
+    }
+    cells.push(cur.trim().to_string());
+    cells
+}
+
 pub fn parse_page_ranges(spec: &str, total: usize) -> Result<Vec<u32>, String> {
     let mut out: Vec<u32> = Vec::new();
     let mut seen = std::collections::HashSet::new();

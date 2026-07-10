@@ -182,17 +182,36 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
     let mut dropped_messages: usize = 0;
     while estimate_tokens(messages) > config.max_tokens {
         let protected = protected_indices(messages, config.keep_recent);
-        if let Some(idx) = protected
+        let Some(idx) = protected
             .iter()
             .enumerate()
             .find(|(_, p)| !**p)
             .map(|(i, _)| i)
-        {
-            messages.remove(idx);
-            dropped_messages += 1;
-        } else {
+        else {
             break;
+        };
+
+        // Drop whole tool_call/tool_result groups together so we never leave an
+        // orphan `tool` message (no preceding assistant tool_calls) or a dangling
+        // assistant(tool_calls) with its results removed — either shape is a hard
+        // 400 on the OpenAI wire. If the drop candidate is a `tool` result whose
+        // parent assistant is protected, skip past the whole group instead.
+        let mut end = idx + 1;
+        if messages[idx].role == "assistant" {
+            while end < messages.len() && messages[end].role == "tool" && !protected[end] {
+                end += 1;
+            }
+        } else if messages[idx].role == "tool" {
+            // Orphan tool without a droppable parent assistant: extend across the
+            // contiguous tool run so we don't split a pair.
+            while end < messages.len() && messages[end].role == "tool" && !protected[end] {
+                end += 1;
+            }
         }
+
+        let removed = end - idx;
+        messages.drain(idx..end);
+        dropped_messages += removed;
     }
 
     PruneStats {

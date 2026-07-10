@@ -23,7 +23,12 @@ fn plain_code_lines<'a>(code: &str) -> Vec<Line<'a>> {
         .collect()
 }
 
+const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
+
 pub fn highlight_code<'a>(code: &str, language: &str) -> Vec<Line<'a>> {
+    if code.len() > MAX_HIGHLIGHT_BYTES {
+        return plain_code_lines(code);
+    }
     let syntax = SYNTAX_SET
         .find_syntax_by_token(language)
         .or_else(|| SYNTAX_SET.find_syntax_by_extension(language))

@@ -138,6 +138,10 @@ pub fn apply_unified_diff_with_ctx(
     let parsed: Vec<ParsedHunk> = hunks.into_iter().map(parse_hunk_lines).collect();
 
     let source_lines: Vec<&str> = source.split_inclusive('\n').collect();
+    // Match the file's existing newline style for inserted lines so we never turn
+    // a CRLF file into a mixed LF/CRLF file.
+    let newline: &str = if source.contains("\r\n") { "\r\n" } else { "\n" };
+    let source_had_trailing_newline = source.ends_with('\n');
     let mut cursor = 0usize;
     let mut output: Vec<String> = Vec::with_capacity(source_lines.len());
     let mut hunks_exact = 0usize;
@@ -202,7 +206,7 @@ pub fn apply_unified_diff_with_ctx(
                     output.push((*line).to_string());
                 }
                 for new_line in &hunk.new_lines {
-                    output.push(ensure_trailing_newline(new_line));
+                    output.push(with_newline(new_line, newline));
                 }
                 cursor = pos + hunk.old_lines.len();
                 if drift == 0 {
@@ -231,7 +235,15 @@ pub fn apply_unified_diff_with_ctx(
         });
     }
 
-    let applied: String = output.concat();
+    let mut applied: String = output.concat();
+    // Respect the original file's lack of a trailing newline instead of forcing one.
+    if !source_had_trailing_newline {
+        if applied.ends_with("\r\n") {
+            applied.truncate(applied.len() - 2);
+        } else if applied.ends_with('\n') {
+            applied.truncate(applied.len() - 1);
+        }
+    }
 
     if opts.validate {
         let report = validate_bytes(&applied);
@@ -336,7 +348,8 @@ fn locate_hunk(
     max_fuzz: usize,
 ) -> Option<(usize, usize)> {
     if old_lines.is_empty() {
-
+        // Pure-insertion hunk: there is no old context to verify against, so the
+        // placement is purely positional (by line number).
         let pos = ideal.min(source_lines.len()).max(cursor);
         return Some((pos, pos.abs_diff(ideal)));
     }
@@ -362,10 +375,30 @@ fn locate_hunk(
         }
     }
 
-    for p in cursor..=source_lines.len().saturating_sub(old_lines.len()) {
-        if matches_at(source_lines, p, old_lines) {
-            let drift = p.abs_diff(ideal);
-            return Some((p, drift));
+    const FALLBACK_SCAN_WINDOW: usize = 5_000;
+    let scan_end = source_lines.len().saturating_sub(old_lines.len());
+    let win_start = cursor.max(ideal.saturating_sub(FALLBACK_SCAN_WINDOW));
+    let win_end = scan_end.min(ideal.saturating_add(FALLBACK_SCAN_WINDOW));
+    if win_start <= win_end {
+        // Scan outward from the ideal position so short/ambiguous context
+        // (for example a lone `}` line) resolves to the closest candidate
+        // instead of silently landing on the first match in the window.
+        let anchor = ideal.clamp(win_start, win_end);
+        if matches_at(source_lines, anchor, old_lines) {
+            return Some((anchor, anchor.abs_diff(ideal)));
+        }
+        let span = win_end - win_start;
+        for delta in 1..=span {
+            if let Some(p) = anchor.checked_sub(delta).filter(|p| *p >= win_start) {
+                if matches_at(source_lines, p, old_lines) {
+                    return Some((p, p.abs_diff(ideal)));
+                }
+            }
+            if let Some(p) = anchor.checked_add(delta).filter(|p| *p <= win_end) {
+                if matches_at(source_lines, p, old_lines) {
+                    return Some((p, p.abs_diff(ideal)));
+                }
+            }
         }
     }
     None
@@ -484,10 +517,8 @@ pub fn locate_hunk_with_ctx(
     }
 }
 
-fn ensure_trailing_newline(line: &str) -> String {
-    if line.ends_with('\n') {
-        line.to_string()
-    } else {
-        format!("{line}\n")
-    }
+fn with_newline(line: &str, newline: &str) -> String {
+    let core = line.strip_suffix('\n').unwrap_or(line);
+    let core = core.strip_suffix('\r').unwrap_or(core);
+    format!("{core}{newline}")
 }

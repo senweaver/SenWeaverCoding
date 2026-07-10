@@ -21,6 +21,33 @@ pub struct StreamChunkResponse {
 
     #[serde(default)]
     pub usage: Option<StreamUsageInfo>,
+
+    #[serde(default)]
+    pub error: Option<serde_json::Value>,
+}
+
+pub fn stream_error_text(chunk: &StreamChunkResponse) -> Option<String> {
+    let err = chunk.error.as_ref()?;
+    if err.is_null() {
+        return None;
+    }
+    if let Some(text) = err.as_str() {
+        return Some(format!("provider stream error: {text}"));
+    }
+    let message = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| err.to_string());
+    let code = err.get("code").and_then(|v| {
+        v.as_str()
+            .map(str::to_string)
+            .or_else(|| v.as_i64().map(|n| n.to_string()))
+    });
+    Some(match code {
+        Some(code) => format!("provider stream error (code {code}): {message}"),
+        None => format!("provider stream error: {message}"),
+    })
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -238,45 +265,8 @@ impl StreamToolCallAccumulator {
 
     pub fn into_provider_tool_call(self) -> Option<ProviderToolCall> {
         let name = self.name?;
-        let arguments = if self.arguments.trim().is_empty() {
-            "{}".to_string()
-        } else {
-            self.arguments
-        };
-        let normalized_arguments = if serde_json::from_str::<serde_json::Value>(&arguments).is_ok()
-        {
-            arguments
-        } else if let Some(repaired) =
-            crate::providers::sanitize::repair_partial_tool_input_json(&arguments)
-        {
-            tracing::warn!(
-                function = %name,
-                arguments_len = arguments.len(),
-                repaired_len = repaired.len(),
-                "streamed native tool-call arguments were truncated; recovered partial arguments via structural repair"
-            );
-            repaired
-        } else {
-            tracing::error!(
-                function = %name,
-                arguments = %arguments,
-                "Invalid JSON in streamed native tool-call arguments, using empty object"
-            );
-            crate::observability::runtime_trace::record_event(
-                "tool_args_degraded",
-                None,
-                None,
-                None,
-                None,
-                Some(false),
-                Some("streamed tool-call arguments unparseable; degraded to empty object"),
-                serde_json::json!({
-                    "function": name,
-                    "arguments_len": arguments.len(),
-                }),
-            );
-            "{}".to_string()
-        };
+        let normalized_arguments =
+            crate::providers::sanitize::normalize_tool_call_arguments(&name, self.arguments);
 
         Some(ProviderToolCall {
             id: crate::providers::sanitize::normalize_tool_call_id(self.id),
@@ -383,6 +373,8 @@ pub fn sse_bytes_to_chunks(
         "providers.core.openai_sse.sse_bytes_to_chunks",
         async move {
             let mut sse = super::sse::SseParser::new();
+            let mut saw_terminator = false;
+            let mut made_progress = false;
 
             match response.error_for_status_ref() {
                 Ok(_) => {}
@@ -393,10 +385,10 @@ pub fn sse_bytes_to_chunks(
             }
 
             let mut bytes_stream = response.bytes_stream();
-
-            while let Some(item) = bytes_stream.next().await {
-                match item {
-                    Ok(bytes) => {
+            let mut stream_ended = false;
+            while !stream_ended {
+                match bytes_stream.next().await {
+                    Some(Ok(bytes)) => {
                         sse.push(&bytes);
                         if sse.overflowed() {
                             let _ = tx
@@ -406,45 +398,63 @@ pub fn sse_bytes_to_chunks(
                                 .await;
                             return;
                         }
-                        while let Some(ev) = sse.next_event() {
-                            if ev.is_done() || ev.data.is_empty() {
-                                continue;
-                            }
-                            let line = format!("data: {}", ev.data);
-                            if let Some(chunk) = parse_sse_line_tolerant(&line) {
-                                let chunk = if count_tokens {
-                                    chunk.with_token_estimate()
-                                } else {
-                                    chunk
-                                };
-                                if tx.send(Ok(chunk)).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         let _ = tx.send(Err(StreamError::Http(e))).await;
                         return;
                     }
-                }
-            }
-            sse.finish();
-            while let Some(ev) = sse.next_event() {
-                if ev.is_done() || ev.data.is_empty() {
-                    continue;
-                }
-                let line = format!("data: {}", ev.data);
-                if let Some(chunk) = parse_sse_line_tolerant(&line) {
-                    let chunk = if count_tokens {
-                        chunk.with_token_estimate()
-                    } else {
-                        chunk
-                    };
-                    if tx.send(Ok(chunk)).await.is_err() {
-                        return;
+                    None => {
+                        sse.finish();
+                        stream_ended = true;
                     }
                 }
+
+                while let Some(ev) = sse.next_event() {
+                    if ev.is_done() {
+                        saw_terminator = true;
+                        continue;
+                    }
+                    if ev.data.is_empty() {
+                        continue;
+                    }
+                    let line = format!("data: {}", ev.data);
+                    let Some(parsed) = parse_sse_chunk_tolerant(&line) else {
+                        continue;
+                    };
+                    if let Some(err_text) = stream_error_text(&parsed) {
+                        let _ = tx.send(Err(StreamError::Provider(err_text))).await;
+                        return;
+                    }
+                    if parsed.choices.iter().any(|c| c.finish_reason.is_some()) {
+                        saw_terminator = true;
+                    }
+                    if let Some(chunk) = chunk_text_from_response(&parsed) {
+                        made_progress = true;
+                        let chunk = if count_tokens {
+                            chunk.with_token_estimate()
+                        } else {
+                            chunk
+                        };
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if !made_progress && !saw_terminator {
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "upstream stream closed before completion (no [DONE]/finish_reason); connection closed mid-response".to_string(),
+                    )))
+                    .await;
+                return;
+            }
+            if made_progress && !saw_terminator {
+                tracing::warn!(
+                    target: "provider.stream",
+                    "upstream stream closed without [DONE]/finish_reason after partial output; finishing gracefully with the partial response instead of failing the turn"
+                );
             }
 
             let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
@@ -531,6 +541,16 @@ pub fn sse_bytes_to_events(
                                 None => continue,
                             };
 
+                            if let Some(err_text) = stream_error_text(&chunk) {
+                                tracing::warn!(
+                                    target: "provider.stream",
+                                    error = %err_text,
+                                    "upstream emitted in-stream error event; failing the turn instead of masking it as a complete response"
+                                );
+                                let _ = tx.send(Err(StreamError::Provider(err_text))).await;
+                                return;
+                            }
+
                             if let Some(usage_info) = chunk.usage.clone() {
                                 if let Some(usage) = usage_info.into_token_usage() {
                                     made_progress = true;
@@ -582,7 +602,35 @@ pub fn sse_bytes_to_events(
 
                                 if let Some(deltas) = choice.delta.tool_calls.as_ref() {
                                     for delta in deltas {
-                                        let index = delta.index.unwrap_or(tool_calls.len());
+                                        let index = match delta.index {
+                                            Some(i) => i,
+                                            None => {
+                                                // Some OpenAI-compatible gateways omit `index`
+                                                // and stream each tool_call as a self-contained
+                                                // object. Treat a delta that carries a fresh id
+                                                // or function name as the start of a NEW slot
+                                                // instead of clobbering the previous one; a
+                                                // bare arguments continuation appends to the
+                                                // current (last) slot.
+                                                let starts_new_call = delta
+                                                    .id
+                                                    .as_deref()
+                                                    .is_some_and(|v| !v.is_empty())
+                                                    || delta
+                                                        .function
+                                                        .as_ref()
+                                                        .and_then(|f| f.name.as_deref())
+                                                        .or(delta.name.as_deref())
+                                                        .is_some_and(|v| !v.is_empty());
+                                                if tool_calls.is_empty() {
+                                                    0
+                                                } else if starts_new_call {
+                                                    tool_calls.len()
+                                                } else {
+                                                    tool_calls.len() - 1
+                                                }
+                                            }
+                                        };
                                         if index >= MAX_STREAM_TOOL_CALLS {
                                             tracing::warn!(
                                                 index,
@@ -677,12 +725,10 @@ pub fn sse_bytes_to_events(
                 && (saw_reasoning_content || tool_calls_fully_received);
 
             if made_progress && !saw_terminator && !clean_non_text_finish {
-                let _ = tx
-                    .send(Err(StreamError::Provider(
-                        "upstream stream closed without [DONE]/finish_reason after partial output; connection closed mid-response (truncated)".to_string(),
-                    )))
-                    .await;
-                return;
+                tracing::warn!(
+                    target: "provider.stream",
+                    "upstream stream closed without [DONE]/finish_reason after partial output; finishing gracefully with the partial response instead of failing the turn"
+                );
             }
 
             let _ = tx.send(Ok(StreamEvent::Final)).await;
@@ -695,40 +741,18 @@ pub fn sse_bytes_to_events(
     .boxed()
 }
 
-fn parse_sse_line(line: &str) -> StreamResult<Option<StreamChunk>> {
-    let chunk = match parse_sse_chunk(line)? {
-        Some(c) => c,
-        None => return Ok(None),
-    };
-
-    if let Some(choice) = chunk.choices.first() {
-        if let Some(content) = &choice.delta.content {
-            if !content.is_empty() {
-                return Ok(Some(StreamChunk::delta(content.clone())));
-            }
-        }
-        if let Some(reasoning) = &choice.delta.reasoning_content {
-            if !reasoning.is_empty() {
-                return Ok(Some(StreamChunk::reasoning(reasoning.clone())));
-            }
+fn chunk_text_from_response(chunk: &StreamChunkResponse) -> Option<StreamChunk> {
+    let choice = chunk.choices.first()?;
+    if let Some(content) = &choice.delta.content {
+        if !content.is_empty() {
+            return Some(StreamChunk::delta(content.clone()));
         }
     }
-
-    Ok(None)
-}
-
-fn parse_sse_line_tolerant(line: &str) -> Option<StreamChunk> {
-    match parse_sse_line(line) {
-        Ok(value) => value,
-        Err(err) => {
-            let preview: String = line.chars().take(160).collect();
-            tracing::warn!(
-                target: "providers.core.openai_sse",
-                error = %err,
-                line_preview = %preview,
-                "skipped malformed SSE chunk line; continuing"
-            );
-            None
+    if let Some(reasoning) = &choice.delta.reasoning_content {
+        if !reasoning.is_empty() {
+            return Some(StreamChunk::reasoning(reasoning.clone()));
         }
     }
+    None
 }
+

@@ -128,6 +128,22 @@ impl Tunnel for PinggyTunnel {
             );
         }
 
+        crate::runtime::spawn_supervised("tunnel.pinggy.output_drain", async move {
+            loop {
+                tokio::select! {
+                    l = stdout_lines.next_line(), if !stdout_done => match l {
+                        Ok(Some(line)) => tracing::debug!(target: "tunnel.pinggy", "{line}"),
+                        _ => stdout_done = true,
+                    },
+                    l = stderr_lines.next_line(), if !stderr_done => match l {
+                        Ok(Some(line)) => tracing::debug!(target: "tunnel.pinggy", "{line}"),
+                        _ => stderr_done = true,
+                    },
+                    else => break,
+                }
+            }
+        });
+
         let mut guard = self.proc.lock().await;
         *guard = Some(TunnelProcess {
             child,

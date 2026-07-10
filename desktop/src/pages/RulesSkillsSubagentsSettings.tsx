@@ -86,12 +86,15 @@ function SkillsTab() {
           setPromptMode(mode)
         }
       } catch {
-
+        addToast({
+          type: 'error',
+          message: t('settings.skills.loadFailedToast'),
+        })
       } finally {
         setHasLoadedDisabled(true)
       }
     })()
-  }, [hasLoadedDisabled])
+  }, [hasLoadedDisabled, addToast, t])
 
   async function handleChangePromptMode(next: 'full' | 'compact') {
     if (next === promptMode) return

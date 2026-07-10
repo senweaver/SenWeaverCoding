@@ -141,15 +141,13 @@ impl LearningHooks {
                 .map(|bs| bs.read(|s| s.session_id.0.clone()))
                 .unwrap_or_else(|| "unknown".to_string());
             let turn_index = {
-                match FEEDBACK_TURN_INDEX.lock() {
-                    Ok(mut map) => {
-                        let entry = map.entry(session_id.clone()).or_insert(0);
-                        let idx = *entry;
-                        *entry += 1;
-                        idx
-                    }
-                    Err(_) => 0,
-                }
+                let mut map = FEEDBACK_TURN_INDEX
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entry = map.entry(session_id.clone()).or_insert(0);
+                let idx = *entry;
+                *entry += 1;
+                idx
             };
             let model = crate::services::try_get_services()
                 .and_then(|svc| svc.config().default_model.clone())

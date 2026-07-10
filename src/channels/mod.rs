@@ -22,6 +22,8 @@ pub mod matrix;
 pub mod mattermost;
 pub mod pipeline;
 pub mod mochat;
+#[cfg(feature = "sop-mqtt")]
+pub mod mqtt;
 pub mod nextcloud_talk;
 #[cfg(feature = "channel-nostr")]
 pub mod nostr;
@@ -195,11 +197,15 @@ fn effective_channel_message_timeout_secs(configured: u64) -> u64 {
 fn channel_message_timeout_budget_secs(
     message_timeout_secs: u64,
     max_tool_iterations: usize,
+    scale_cap_override: Option<u64>,
 ) -> u64 {
+    let scale_cap = scale_cap_override
+        .filter(|cap| *cap >= 1)
+        .unwrap_or(CHANNEL_MESSAGE_TIMEOUT_SCALE_CAP);
     channel_message_timeout_budget_secs_with_cap(
         message_timeout_secs,
         max_tool_iterations,
-        CHANNEL_MESSAGE_TIMEOUT_SCALE_CAP,
+        scale_cap,
     )
 }
 
@@ -467,10 +473,33 @@ impl InFlightTaskCompletion {
     }
 
     async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if self.done.load(Ordering::Acquire) {
             return;
         }
-        self.notify.notified().await;
+        notified.await;
+    }
+}
+
+struct InFlightTaskGuard {
+    in_flight: Arc<Mutex<HashMap<String, InFlightSenderTaskState>>>,
+    sender_key: String,
+    task_id: u64,
+    completion: Arc<InFlightTaskCompletion>,
+}
+
+impl Drop for InFlightTaskGuard {
+    fn drop(&mut self) {
+        self.completion.mark_done();
+        let mut map = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if map.get(&self.sender_key).map(|s| s.task_id) == Some(self.task_id) {
+            map.remove(&self.sender_key);
+        }
     }
 }
 
@@ -1770,15 +1799,25 @@ pub fn build_system_prompt_with_mode_and_autonomy(
 pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     let workspace_dir = config.workspace_dir.clone();
 
+    if crate::services::get_services().is_none() {
+        let svc_data_dir = config
+            .config_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| workspace_dir.join(".senweavercoding"));
+        let _ = crate::services::init_services(crate::services::ServiceContainerConfig {
+            data_dir: svc_data_dir,
+            shared_config: None,
+            team_sync_enabled: config.teams.sync_enabled,
+            ..Default::default()
+        });
+    }
+
     let security = Arc::new(SecurityPolicy::from_config(&config.autonomy, &workspace_dir));
 
     let rt_adapter: Arc<dyn runtime::RuntimeAdapter> =
         Arc::new(runtime::NativeRuntime::new());
     let skills_for_tools = crate::skills::load_skills_with_config(&workspace_dir, &config);
-    let mut tools_vec =
-        tools::default_tools_with_runtime(Arc::clone(&security), Arc::clone(&rt_adapter));
-    tools::register_skill_tools(&mut tools_vec, &skills_for_tools, Arc::clone(&security));
-    let tools_registry: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools_vec);
 
     let mem = memory::create_memory_with_storage_and_routes_async(
         config.memory.clone(),
@@ -1790,6 +1829,74 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     .await
     .context("Failed to initialise memory backend")?;
     let mem_arc: Arc<dyn Memory> = Arc::from(mem);
+
+    let composio_key = if config.composio.enabled {
+        config.composio.api_key.as_deref()
+    } else {
+        None
+    };
+    let composio_entity_id = if config.composio.enabled {
+        Some(config.composio.entity_id.as_str())
+    } else {
+        None
+    };
+    let (mut tools_vec, delegate_handle, ..) = tools::all_tools_with_runtime(
+        Arc::new(config.clone()),
+        &security,
+        Arc::clone(&rt_adapter),
+        Arc::clone(&mem_arc),
+        composio_key,
+        composio_entity_id,
+        &config.browser,
+        &config.http_request,
+        &config.web_fetch,
+        &workspace_dir,
+        &config.agents,
+        config.api_key.as_deref(),
+        &config,
+        None,
+    );
+    tools::register_skill_tools(&mut tools_vec, &skills_for_tools, Arc::clone(&security));
+
+    let mut channel_activated_tools: Option<
+        Arc<parking_lot::Mutex<tools::ActivatedToolSet>>,
+    > = None;
+    if config.mcp.enabled && !config.mcp.servers.is_empty() {
+        let (_builtin_deferred_enabled, mcp_deferred_enabled) =
+            crate::tools::deferred_loading_effective(&config);
+        match tools::McpRegistry::connect_all(&config.mcp.servers).await {
+            Ok(registry) => {
+                let registry = Arc::new(registry);
+                if mcp_deferred_enabled {
+                    let deferred_set =
+                        tools::DeferredMcpToolSet::from_registry(Arc::clone(&registry)).await;
+                    let activated =
+                        Arc::new(parking_lot::Mutex::new(tools::ActivatedToolSet::new()));
+                    channel_activated_tools = Some(Arc::clone(&activated));
+                    tools_vec.push(Box::new(tools::ToolSearchTool::new(deferred_set, activated)));
+                } else {
+                    let names = registry.tool_names();
+                    for name in names {
+                        if let Some(def) = registry.get_tool_def(&name).await {
+                            let wrapper: Arc<dyn tools::Tool> = Arc::new(
+                                tools::McpToolWrapper::new(name, def, Arc::clone(&registry)),
+                            );
+                            if let Some(ref handle) = delegate_handle {
+                                handle.write().push(Arc::clone(&wrapper));
+                            }
+                            tools_vec.push(Box::new(tools::ArcToolRef(wrapper)));
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                target: "channels",
+                error = %e,
+                "MCP registry connect failed; channels will run with built-in tools only"
+            ),
+        }
+    }
+    let tools_registry: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools_vec);
 
     let observer = observability::create_observer(&config.observability);
     let observer: Arc<dyn Observer> = Arc::from(observer);
@@ -2036,8 +2143,19 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     }
     #[cfg(feature = "channel-email")]
     if let Some(ref cfg) = config.channels_config.gmail_push {
-        let ch = Arc::new(GmailPushChannel::new(cfg.clone()));
-        channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+        match GmailPushChannel::new(cfg.clone()) {
+            Ok(channel) => {
+                let ch = Arc::new(channel);
+                channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "channels.gmail_push",
+                    %error,
+                    "Gmail push channel disabled: HTTP client construction failed"
+                );
+            }
+        }
     }
     if let Some(ref cfg) = config.channels_config.nextcloud_talk {
         let ch = Arc::new(NextcloudTalkChannel::new(
@@ -2105,8 +2223,85 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         );
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
     }
+    if config.notion.enabled {
+        let n = &config.notion;
+        let ch = Arc::new(NotionChannel::new(
+            n.api_key.clone(),
+            n.database_id.clone(),
+            n.poll_interval_secs,
+            n.status_property.clone(),
+            n.input_property.clone(),
+            n.result_property.clone(),
+            n.max_concurrent,
+            n.recover_stale,
+        ));
+        channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+    }
+    if let Some(ref cfg) = config.channels_config.voice_call {
+        let ch = Arc::new(VoiceCallChannel::new(cfg.clone()));
+        channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+    }
+    #[cfg(feature = "voice-wake")]
+    if let Some(ref cfg) = config.channels_config.voice_wake {
+        let ch = Arc::new(VoiceWakeChannel::new(
+            cfg.clone(),
+            config.transcription.clone(),
+        ));
+        channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+    }
+
+    #[cfg_attr(not(feature = "sop-mqtt"), allow(unused_mut))]
+    let mut background_listeners_started = false;
+
+    #[cfg(feature = "sop-mqtt")]
+    if let Some(ref mqtt_cfg) = config.sop.mqtt {
+        if mqtt_cfg.enabled {
+            match mqtt_cfg.validate() {
+                Ok(()) => {
+                    let engine = crate::sop::engine::global_sop_engine(&config.sop);
+                    let audit = Arc::new(crate::sop::audit::SopAuditLogger::new(Arc::clone(
+                        &mem_arc,
+                    )));
+                    crate::sop::dispatch::ensure_sop_maintenance(
+                        Arc::clone(&engine),
+                        Some(Arc::clone(&audit)),
+                        workspace_dir.clone(),
+                    );
+                    let mqtt_cfg_owned = mqtt_cfg.clone();
+                    crate::runtime::spawn_supervised("channels.mqtt_sop_listener", async move {
+                        if let Err(e) =
+                            mqtt::run_mqtt_sop_listener(&mqtt_cfg_owned, engine, audit).await
+                        {
+                            tracing::warn!(
+                                target: "channels",
+                                error = %e,
+                                "MQTT SOP listener exited with error"
+                            );
+                        }
+                    });
+                    background_listeners_started = true;
+                    tracing::info!(
+                        target: "channels",
+                        broker = %mqtt_cfg.broker_url,
+                        "MQTT SOP listener started"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    target: "channels",
+                    error = %e,
+                    "MQTT SOP listener config invalid; skipping"
+                ),
+            }
+        }
+    }
 
     if channels_map.is_empty() {
+        if background_listeners_started {
+            tracing::info!(
+                "No interactive channels configured; keeping process alive for background listeners"
+            );
+            std::future::pending::<()>().await;
+        }
         tracing::warn!("No channels configured; start_channels exiting immediately");
         return Ok(());
     }
@@ -2169,7 +2364,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         show_tool_calls: config.channels_config.show_tool_calls,
         session_store,
         approval_manager,
-        activated_tools: None,
+        activated_tools: channel_activated_tools,
         cost_tracking: None,
         pacing: config.pacing.clone(),
         debouncer,
@@ -2276,11 +2471,22 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
             };
             if let Some((cancel, completion)) = prior {
                 cancel.cancel();
-                completion.wait().await;
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    completion.wait(),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        "prior in-flight channel turn for {sender_key} did not settle within 60s \
+                         after cancellation; dispatching new message anyway"
+                    );
+                }
             }
         }
 
-        let (cancel_token, completion) = {
+        let (cancel_token, completion, guard_task_id) = {
             let mut map = in_flight
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -2298,21 +2504,18 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                     completion: Arc::clone(&completion),
                 },
             );
-            (cancel, completion)
+            (cancel, completion, next_id)
         };
 
         let sender_key_clone = sender_key.clone();
         runtime::spawn_supervised(
             format!("channel-turn-{sender_key}"),
             async move {
-                let finish = |in_flight: &Arc<Mutex<HashMap<String, InFlightSenderTaskState>>>,
-                              sender_key: &str,
-                              completion: &Arc<InFlightTaskCompletion>| {
-                    completion.mark_done();
-                    in_flight
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(sender_key);
+                let _finish_guard = InFlightTaskGuard {
+                    in_flight: in_flight_clone,
+                    sender_key: sender_key_clone.clone(),
+                    task_id: guard_task_id,
+                    completion,
                 };
 
                 let channel = ctx_clone.channels_by_name.get(&msg_clone.channel).cloned();
@@ -2329,7 +2532,6 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::error!("Failed to get provider for channel turn: {e}");
-                        finish(&in_flight_clone, &sender_key_clone, &completion);
                         return;
                     }
                 };
@@ -2406,6 +2608,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                 let timeout_budget = channel_message_timeout_budget_secs(
                     ctx_clone.message_timeout_secs,
                     ctx_clone.max_tool_iterations,
+                    ctx_clone.pacing.message_timeout_scale_max,
                 );
 
                 let mut overflow_retried = false;
@@ -2505,7 +2708,6 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                                 }
                             }
 
-                            finish(&in_flight_clone, &sender_key_clone, &completion);
                             break;
                         }
                         Ok(Err(e)) => {
@@ -2538,7 +2740,6 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                                 )
                                 .await;
                             }
-                            finish(&in_flight_clone, &sender_key_clone, &completion);
                             break;
                         }
                         Err(_) => {
@@ -2555,7 +2756,6 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                                 )
                                 .await;
                             }
-                            finish(&in_flight_clone, &sender_key_clone, &completion);
                             break;
                         }
                     }
@@ -2916,7 +3116,14 @@ fn channel_list(config: &Config) -> anyhow::Result<()> {
     macro_rules! report_channel {
         ($label:expr, $opt:expr) => {
             if let Some(_) = $opt {
-                println!("  ✅  {}", $label);
+                match channel_missing_feature($label) {
+                    Some(feature) => println!(
+                        "  ⚠️  {} (configured but not compiled into this build; requires \
+                         feature '{}')",
+                        $label, feature
+                    ),
+                    None => println!("  ✅  {}", $label),
+                }
                 any = true;
             }
         };
@@ -2967,11 +3174,43 @@ fn channel_list(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn channel_missing_feature(channel_type: &str) -> Option<&'static str> {
+    #[allow(clippy::match_single_binding)]
+    match channel_type {
+        #[cfg(not(feature = "channel-telegram"))]
+        "telegram" => Some("channel-telegram"),
+        #[cfg(not(feature = "channel-slack"))]
+        "slack" => Some("channel-slack"),
+        #[cfg(not(feature = "channel-discord"))]
+        "discord" | "discord_history" => Some("channel-discord"),
+        #[cfg(not(feature = "channel-dingtalk"))]
+        "dingtalk" => Some("channel-dingtalk"),
+        #[cfg(not(feature = "channel-wechat"))]
+        "wecom" => Some("channel-wechat"),
+        #[cfg(not(feature = "channel-email"))]
+        "email" | "gmail_push" => Some("channel-email"),
+        #[cfg(not(feature = "channel-matrix"))]
+        "matrix" => Some("channel-matrix"),
+        #[cfg(not(feature = "channel-lark"))]
+        "lark" | "feishu" => Some("channel-lark"),
+        #[cfg(not(feature = "channel-nostr"))]
+        "nostr" => Some("channel-nostr"),
+        _ => None,
+    }
+}
+
 async fn channel_add(
     config: &Config,
     channel_type: &str,
     cfg_json: &str,
 ) -> anyhow::Result<()> {
+    if let Some(feature) = channel_missing_feature(channel_type) {
+        anyhow::bail!(
+            "Channel type '{channel_type}' is not compiled into this build. \
+             Rebuild with `cargo build --features {feature}` (or a bundle like \
+             `--features channels`) to use it."
+        );
+    }
     let config_path = &config.config_path;
 
     let raw = if config_path.exists() {
@@ -3076,6 +3315,12 @@ async fn channel_remove(config: &Config, name: &str) -> anyhow::Result<()> {
 }
 
 async fn channel_bind_telegram(config: &Config, identity: &str) -> anyhow::Result<()> {
+    if let Some(feature) = channel_missing_feature("telegram") {
+        anyhow::bail!(
+            "Telegram support is not compiled into this build. Rebuild with \
+             `cargo build --features {feature}` to use it."
+        );
+    }
     let config_path = &config.config_path;
 
     let raw = tokio::fs::read_to_string(config_path)
@@ -3335,6 +3580,14 @@ async fn channel_send(
             ))
         }
         other => {
+            if let Some(feature) = channel_missing_feature(other) {
+                anyhow::bail!(
+                    "Channel '{}' is not compiled into this build. Rebuild with \
+                     `cargo build --features {}` to use it.",
+                    other,
+                    feature
+                );
+            }
             anyhow::bail!(
                 "Unknown channel-id '{}'. Valid values: telegram, slack, discord, \
                  mattermost, webhook, signal, whatsapp, email, qq, dingtalk, wecom, \

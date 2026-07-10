@@ -19,6 +19,8 @@ pub struct AzureOpenAiProvider {
     deployment_name: String,
     api_version: String,
     base_url: String,
+    timeout_secs: u64,
+    extra_headers: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,13 +76,32 @@ struct NativeChatRequest {
 struct NativeMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "crate::providers::sanitize::skip_serializing_tool_calls")]
     tool_calls: Option<Vec<NativeToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+}
+
+fn user_content_value(text: &str) -> serde_json::Value {
+    let (cleaned_text, image_refs) = crate::multimodal::parse_image_markers(text);
+    if image_refs.is_empty() {
+        return serde_json::Value::String(text.to_string());
+    }
+    let mut parts: Vec<serde_json::Value> = Vec::with_capacity(image_refs.len() + 1);
+    let trimmed = cleaned_text.trim();
+    if !trimmed.is_empty() {
+        parts.push(serde_json::json!({ "type": "text", "text": trimmed }));
+    }
+    for image_ref in image_refs {
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": image_ref },
+        }));
+    }
+    serde_json::Value::Array(parts)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,7 +204,31 @@ impl AzureOpenAiProvider {
             deployment_name: deployment_name.to_string(),
             api_version: version.to_string(),
             base_url,
+            timeout_secs: 120,
+            extra_headers: std::collections::HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    fn apply_extra_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in &self.extra_headers {
+            request = request.header(name, value);
+        }
+        request
     }
 
     fn chat_completions_url(&self) -> String {
@@ -235,7 +280,7 @@ impl AzureOpenAiProvider {
                                 let content = value
                                     .get("content")
                                     .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
+                                    .map(|s| serde_json::Value::String(s.to_string()));
                                 let reasoning_content = value
                                     .get("reasoning_content")
                                     .and_then(serde_json::Value::as_str)
@@ -261,7 +306,7 @@ impl AzureOpenAiProvider {
                         let content = value
                             .get("content")
                             .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
+                            .map(|s| serde_json::Value::String(s.to_string()));
                         return NativeMessage {
                             role: "tool".to_string(),
                             content,
@@ -272,9 +317,14 @@ impl AzureOpenAiProvider {
                     }
                 }
 
+                let content = if m.role == "user" {
+                    user_content_value(&m.content)
+                } else {
+                    serde_json::Value::String(m.content.clone())
+                };
                 NativeMessage {
                     role: m.role.clone(),
-                    content: Some(m.content.clone()),
+                    content: Some(content),
                     tool_call_id: None,
                     tool_calls: None,
                     reasoning_content: None,
@@ -290,10 +340,16 @@ impl AzureOpenAiProvider {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tc| ProviderToolCall {
-                id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                name: tc.function.name,
-                arguments: tc.function.arguments,
+            .map(|tc| {
+                let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                    &tc.function.name,
+                    tc.function.arguments,
+                );
+                ProviderToolCall {
+                    id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    name: tc.function.name,
+                    arguments,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -308,7 +364,7 @@ impl AzureOpenAiProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts("provider.azure_openai", 120, 10)
+            .build_client_with_timeouts("provider.azure_openai", self.timeout_secs, 10)
     }
 }
 
@@ -381,13 +437,12 @@ impl Provider for AzureOpenAiProvider {
             temperature,
         };
 
-        let response = self
+        let http_request = self
             .http_client()
             .post(self.chat_completions_url())
             .header("api-key", credential.as_str())
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
             return Err(super::api_error("Azure OpenAI", response).await);
@@ -430,13 +485,12 @@ impl Provider for AzureOpenAiProvider {
             tools,
         };
 
-        let response = self
+        let http_request = self
             .http_client()
             .post(self.chat_completions_url())
             .header("api-key", credential.as_str())
-            .json(&native_request)
-            .send()
-            .await?;
+            .json(&native_request);
+        let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
             return Err(super::api_error("Azure OpenAI", response).await);
@@ -499,13 +553,12 @@ impl Provider for AzureOpenAiProvider {
             tools: native_tools,
         };
 
-        let response = self
+        let http_request = self
             .http_client()
             .post(self.chat_completions_url())
             .header("api-key", credential.as_str())
-            .json(&native_request)
-            .send()
-            .await?;
+            .json(&native_request);
+        let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
             return Err(super::api_error("Azure OpenAI", response).await);

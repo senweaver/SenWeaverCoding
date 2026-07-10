@@ -302,13 +302,24 @@ async fn normalize_remote_image(
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| MultimodalError::RemoteFetchFailed {
-            input: source.to_string(),
-            reason: error.to_string(),
-        })?;
+    let mut response = response;
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|error| MultimodalError::RemoteFetchFailed {
+                input: source.to_string(),
+                reason: error.to_string(),
+            })?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            validate_size(source, bytes.len().saturating_add(chunk.len()), max_bytes)?;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
 
     validate_size(source, bytes.len(), max_bytes)?;
 

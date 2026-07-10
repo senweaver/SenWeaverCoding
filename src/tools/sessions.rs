@@ -56,6 +56,18 @@ fn snippet(content: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
+fn effective_session_id(args: &serde_json::Value) -> Option<String> {
+    if let Some(explicit) = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(explicit.to_string());
+    }
+    crate::session::current_session_context().map(|c| c.session_id)
+}
+
 fn validate_session_id(session_id: &str) -> Result<(), ToolResult> {
     let trimmed = session_id.trim();
     if trimmed.is_empty() || !trimmed.chars().any(|c| c.is_alphanumeric()) {
@@ -160,7 +172,7 @@ impl Tool for SessionsHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read the message history of a specific session by its session ID. Returns the last N messages by default, or a bounded slice when 'offset' is provided. Use this together with sessions_search to pull a small contiguous window of context from a referenced session instead of loading the whole conversation."
+        "Read the message history of a conversation session. When 'session_id' is omitted it defaults to the CURRENT conversation, so you can pull earlier parts of this same chat that are beyond the recent context window. Returns the last N messages by default, or a bounded slice when 'offset' is provided. Use this together with sessions_search to pull a small contiguous window of context instead of loading the whole conversation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -169,7 +181,7 @@ impl Tool for SessionsHistoryTool {
             "properties": {
                 "session_id": {
                     "type": "string",
-                    "description": "The session ID to read history from (a bare UUID for a desktop chat, or e.g. telegram__user123 for a channel session)"
+                    "description": "The session ID to read history from. Omit to default to the current conversation. A bare UUID for a desktop chat, or e.g. telegram__user123 for a channel session."
                 },
                 "limit": {
                     "type": "integer",
@@ -179,8 +191,7 @@ impl Tool for SessionsHistoryTool {
                     "type": "integer",
                     "description": "Zero-based start index into the session's message list. When omitted, the most recent 'limit' messages are returned."
                 }
-            },
-            "required": ["session_id"]
+            }
         })
     }
 
@@ -196,10 +207,16 @@ impl Tool for SessionsHistoryTool {
             });
         }
 
-        let session_id = args
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'session_id' parameter"))?;
+        let Some(session_id_string) = effective_session_id(&args) else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "Missing 'session_id' and no current conversation is in scope.".into(),
+                ),
+            });
+        };
+        let session_id = session_id_string.as_str();
 
         if let Err(result) = validate_session_id(session_id) {
             return Ok(result);
@@ -266,6 +283,157 @@ impl Tool for SessionsHistoryTool {
     }
 }
 
+fn is_session_turn_start(m: &ChatMessage) -> bool {
+    if m.role != "user" {
+        return false;
+    }
+    let trimmed = m.content.trim_start();
+    !trimmed.starts_with("[Tool results]") && !trimmed.starts_with("[Recovered")
+}
+
+fn clean_user_request(content: &str) -> &str {
+    if let Some(pos) = content.find("[CURRENT REQUEST") {
+        let rest = &content[pos..];
+        if let Some(nl) = rest.find("]\n") {
+            return rest[nl + 2..].trim_start();
+        }
+        if let Some(nl) = rest.find('\n') {
+            return rest[nl + 1..].trim_start();
+        }
+    }
+    content.trim_start()
+}
+
+pub struct SessionsOutlineTool {
+    backend: Arc<dyn SessionBackend>,
+    security: Arc<SecurityPolicy>,
+}
+
+impl SessionsOutlineTool {
+    pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<SecurityPolicy>) -> Self {
+        Self { backend, security }
+    }
+}
+
+#[async_trait]
+impl Tool for SessionsOutlineTool {
+    fn name(&self) -> &str {
+        "sessions_outline"
+    }
+
+    fn description(&self) -> &str {
+        "Show a compact, turn-by-turn map of a conversation session: one line per user turn with its starting message index and a short excerpt of the request. When 'session_id' is omitted it defaults to the CURRENT conversation, letting you see what earlier parts of this same chat were about (beyond the recent context window). Then read any turn in full with sessions_history using offset set to the printed index. Use this to navigate to relevant earlier turns instead of guessing or bulk-loading the whole conversation."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The session ID to outline. Omit to default to the current conversation. A bare UUID for a desktop chat, or e.g. telegram__user123 for a channel session."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of most-recent turns to list (default: 300)."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if let Err(error) = self
+            .security
+            .enforce_tool_operation(ToolOperation::Read, "sessions_outline")
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(error),
+            });
+        }
+
+        let Some(session_id_string) = effective_session_id(&args) else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "Missing 'session_id' and no current conversation is in scope.".into(),
+                ),
+            });
+        };
+        let session_id = session_id_string.as_str();
+
+        if let Err(result) = validate_session_id(session_id) {
+            return Ok(result);
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let limit = args
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(300, |v| v as usize)
+            .max(1);
+
+        let backend = self.backend.clone();
+        let session_id_owned = session_id.to_string();
+        let (resolved_key, messages) =
+            tokio::task::spawn_blocking(move || resolve_session_messages(backend, &session_id_owned))
+                .await
+                .unwrap_or_else(|_| (session_id.to_string(), Vec::new()));
+
+        if messages.is_empty() {
+            return Ok(ToolResult {
+                success: true,
+                output: format!("No messages found for session '{session_id}'."),
+                error: None,
+            });
+        }
+
+        let starts: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| is_session_turn_start(m))
+            .map(|(i, _)| i)
+            .collect();
+        let total_turns = starts.len();
+        let total_messages = messages.len();
+
+        if starts.is_empty() {
+            return Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "Session '{session_id}' ({resolved_key}): {total_messages} messages, no \
+                     distinct user turns detected. Use sessions_history offset/limit to read it."
+                ),
+                error: None,
+            });
+        }
+
+        let shown_start_turn = total_turns.saturating_sub(limit);
+        let mut output = format!(
+            "Session '{}' ({}): {} turns / {} messages. Read any turn in full with sessions_history offset set to its #index.\n",
+            session_id, resolved_key, total_turns, total_messages
+        );
+        if shown_start_turn > 0 {
+            let _ = writeln!(
+                output,
+                "(showing the most recent {limit} turns; increase 'limit' to see earlier ones)"
+            );
+        }
+        for (turn_no, &idx) in starts.iter().enumerate().skip(shown_start_turn) {
+            let request = clean_user_request(&messages[idx].content);
+            let _ = writeln!(output, "#{} turn {} [user] {}", idx, turn_no + 1, snippet(request, 160));
+        }
+
+        Ok(ToolResult {
+            success: true,
+            output,
+            error: None,
+        })
+    }
+}
+
 pub struct SessionsSearchTool {
     backend: Arc<dyn SessionBackend>,
     security: Arc<SecurityPolicy>,
@@ -284,7 +452,7 @@ impl Tool for SessionsSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the message history of a specific session for a keyword and return matching message snippets (role + index + text). Use this to actively locate relevant context inside a referenced past session instead of loading the entire conversation; then optionally read a small window around a match with sessions_history (offset/limit)."
+        "Search the message history of a conversation session for a keyword and return matching message snippets (role + index + text). When 'session_id' is omitted it defaults to the CURRENT conversation, so you can locate relevant earlier context in this same chat beyond the recent window; then optionally read a small window around a match with sessions_history (offset/limit)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -293,7 +461,7 @@ impl Tool for SessionsSearchTool {
             "properties": {
                 "session_id": {
                     "type": "string",
-                    "description": "The session ID to search (a bare UUID for a desktop chat, or e.g. telegram__user123 for a channel session)"
+                    "description": "The session ID to search. Omit to default to the current conversation. A bare UUID for a desktop chat, or e.g. telegram__user123 for a channel session."
                 },
                 "keyword": {
                     "type": "string",
@@ -304,7 +472,7 @@ impl Tool for SessionsSearchTool {
                     "description": "Max matching snippets to return (default: 20)"
                 }
             },
-            "required": ["session_id", "keyword"]
+            "required": ["keyword"]
         })
     }
 
@@ -320,10 +488,16 @@ impl Tool for SessionsSearchTool {
             });
         }
 
-        let session_id = args
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'session_id' parameter"))?;
+        let Some(session_id_string) = effective_session_id(&args) else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "Missing 'session_id' and no current conversation is in scope.".into(),
+                ),
+            });
+        };
+        let session_id = session_id_string.as_str();
 
         if let Err(result) = validate_session_id(session_id) {
             return Ok(result);

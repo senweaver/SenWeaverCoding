@@ -303,7 +303,6 @@ pub struct TelegramChannel {
     bot_token: String,
     allowed_users: Arc<RwLock<Vec<String>>>,
     pairing: Option<PairingGuard>,
-    client: reqwest::Client,
     typing_handle: Mutex<Option<crate::runtime::TaskHandle>>,
     stream_mode: StreamMode,
     draft_update_interval_ms: u64,
@@ -349,7 +348,6 @@ impl TelegramChannel {
             bot_token,
             allowed_users: Arc::new(RwLock::new(normalized_allowed)),
             pairing,
-            client: reqwest::Client::new(),
             stream_mode: StreamMode::Off,
             draft_update_interval_ms: 1000,
             last_draft_edit: Mutex::new(std::collections::HashMap::new()),
@@ -2225,7 +2223,7 @@ impl Channel for TelegramChannel {
         }
 
         let resp = self
-            .client
+            .http_client()
             .post(self.api_url("sendMessage"))
             .json(&body)
             .send()
@@ -2301,7 +2299,7 @@ impl Channel for TelegramChannel {
         });
 
         let resp = self
-            .client
+            .http_client()
             .post(self.api_url("editMessageText"))
             .json(&body)
             .send()
@@ -2345,7 +2343,7 @@ impl Channel for TelegramChannel {
 
             if let Some(id) = msg_id {
                 let _ = self
-                    .client
+                    .http_client()
                     .post(self.api_url("deleteMessage"))
                     .json(&serde_json::json!({
                         "chat_id": chat_id,
@@ -2371,7 +2369,7 @@ impl Channel for TelegramChannel {
         if text.len() > TELEGRAM_MAX_MESSAGE_LENGTH {
             if let Some(id) = msg_id {
                 let _ = self
-                    .client
+                    .http_client()
                     .post(self.api_url("deleteMessage"))
                     .json(&serde_json::json!({
                         "chat_id": chat_id,
@@ -2400,7 +2398,7 @@ impl Channel for TelegramChannel {
         });
 
         let resp = self
-            .client
+            .http_client()
             .post(self.api_url("editMessageText"))
             .json(&body)
             .send()
@@ -2423,7 +2421,7 @@ impl Channel for TelegramChannel {
         });
 
         let resp = self
-            .client
+            .http_client()
             .post(self.api_url("editMessageText"))
             .json(&plain_body)
             .send()
@@ -2440,7 +2438,7 @@ impl Channel for TelegramChannel {
         }
 
         let delete_resp = self
-            .client
+            .http_client()
             .post(self.api_url("deleteMessage"))
             .json(&serde_json::json!({
                 "chat_id": chat_id,
@@ -2483,7 +2481,7 @@ impl Channel for TelegramChannel {
         };
 
         let response = self
-            .client
+            .http_client()
             .post(self.api_url("deleteMessage"))
             .json(&serde_json::json!({
                 "chat_id": chat_id,

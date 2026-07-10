@@ -61,20 +61,29 @@ pub(crate) fn canonicalise_args_string(value: &serde_json::Value) -> String {
     serde_json::to_string(&canonicalise(value)).unwrap_or_default()
 }
 
+const MAX_CANON_DEPTH: usize = 96;
+
 fn canonicalise(value: &serde_json::Value) -> serde_json::Value {
+    canonicalise_depth(value, 0)
+}
+
+fn canonicalise_depth(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth >= MAX_CANON_DEPTH {
+        return serde_json::Value::String("__sen_depth_capped__".to_string());
+    }
     match value {
         serde_json::Value::Object(map) => {
             let mut sorted: Vec<(&String, &serde_json::Value)> = map.iter().collect();
             sorted.sort_by_key(|(k, _)| *k);
             let new_map: serde_json::Map<String, serde_json::Value> = sorted
                 .into_iter()
-                .map(|(k, v)| (k.clone(), canonicalise(v)))
+                .map(|(k, v)| (k.clone(), canonicalise_depth(v, depth + 1)))
                 .collect();
             serde_json::Value::Object(new_map)
         }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(canonicalise).collect())
-        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter().map(|v| canonicalise_depth(v, depth + 1)).collect(),
+        ),
         other => other.clone(),
     }
 }

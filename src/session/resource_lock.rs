@@ -334,55 +334,54 @@ impl WorkspaceResourceManager {
     }
 
     pub fn release_all_for_session(self: &Arc<Self>, session_id: &str) {
-        let mut to_promote: Vec<((String, ResourceKind), Pending)> = Vec::new();
-        {
-            let mut inner = self.inner.lock();
-            let mut released_keys: Vec<(String, ResourceKind)> = Vec::new();
-            for (key, holder) in inner.holders.iter() {
-                if holder.session_id == session_id {
-                    released_keys.push(key.clone());
-                }
+        let mut inner = self.inner.lock();
+        let mut released_keys: Vec<(String, ResourceKind)> = Vec::new();
+        for (key, holder) in inner.holders.iter() {
+            if holder.session_id == session_id {
+                released_keys.push(key.clone());
             }
-            for key in released_keys {
-                inner.holders.remove(&key);
-                let mut chosen: Option<Pending> = None;
-                let mut queue_empty = false;
-                if let Some(queue) = inner.waiters.get_mut(&key) {
-                    while let Some(next) = queue.pop_front() {
-                        if next.waker.is_closed() {
-                            continue;
-                        }
-                        chosen = Some(next);
+        }
+        for key in released_keys {
+            inner.holders.remove(&key);
+            // Promote the next waiter, but only install a Holder once the waker
+            // signal is actually accepted by a still-waiting acquirer. Sending
+            // inside the lock (oneshot send is non-blocking) avoids leaving a
+            // phantom Holder for a waiter that timed out concurrently.
+            let mut promoted_holder: Option<(String, String)> = None;
+            let mut queue_empty = false;
+            if let Some(queue) = inner.waiters.get_mut(&key) {
+                while let Some(next) = queue.pop_front() {
+                    if next.waker.is_closed() {
+                        continue;
+                    }
+                    let session = next.session_id.clone();
+                    let title = next.title.clone();
+                    if next.waker.send(()).is_ok() {
+                        promoted_holder = Some((session, title));
                         break;
                     }
-                    queue_empty = queue.is_empty();
                 }
-                if let Some(pending) = chosen {
-                    inner.holders.insert(
-                        key.clone(),
-                        Holder {
-                            session_id: pending.session_id.clone(),
-                            title: pending.title.clone(),
-                            ref_count: 1,
-                        },
-                    );
-                    to_promote.push((key.clone(), pending));
-                }
-                if queue_empty {
-                    inner.waiters.remove(&key);
-                }
+                queue_empty = queue.is_empty();
             }
+            if let Some((session, title)) = promoted_holder {
+                inner.holders.insert(
+                    key.clone(),
+                    Holder {
+                        session_id: session,
+                        title,
+                        ref_count: 1,
+                    },
+                );
+            }
+            if queue_empty {
+                inner.waiters.remove(&key);
+            }
+        }
 
-            inner
-                .waiters
-                .retain(|_, q| {
-                    q.retain(|p| p.session_id != session_id);
-                    !q.is_empty()
-                });
-        }
-        for (_, pending) in to_promote {
-            let _ = pending.waker.send(());
-        }
+        inner.waiters.retain(|_, q| {
+            q.retain(|p| p.session_id != session_id);
+            !q.is_empty()
+        });
     }
 
     fn cancel_waiter(&self, workspace_key: &str, kind: &ResourceKind, session_id: &str) {
@@ -398,52 +397,54 @@ impl WorkspaceResourceManager {
 
     fn release(self: &Arc<Self>, workspace_key: &str, kind: &ResourceKind, session_id: &str) {
         let key = (workspace_key.to_string(), kind.clone());
-        let next_pending = {
-            let mut inner = self.inner.lock();
-            let should_remove = match inner.holders.get_mut(&key) {
-                Some(h) if h.session_id == session_id => {
-                    if h.ref_count > 1 {
-                        h.ref_count -= 1;
-                        return;
-                    }
-                    true
+        let mut inner = self.inner.lock();
+        let should_remove = match inner.holders.get_mut(&key) {
+            Some(h) if h.session_id == session_id => {
+                if h.ref_count > 1 {
+                    h.ref_count -= 1;
+                    return;
                 }
-                _ => false,
-            };
-            if !should_remove {
-                return;
+                true
             }
-            inner.holders.remove(&key);
+            _ => false,
+        };
+        if !should_remove {
+            return;
+        }
+        inner.holders.remove(&key);
 
-            let mut promoted: Option<Pending> = None;
-            let mut queue_empty = false;
-            if let Some(queue) = inner.waiters.get_mut(&key) {
-                while let Some(next) = queue.pop_front() {
-                    if next.waker.is_closed() {
-                        continue;
-                    }
-                    promoted = Some(next);
+        // Promote the next waiter, but only install a Holder for it once its waker
+        // signal is actually accepted by the still-waiting acquirer. Otherwise a
+        // waiter that timed out concurrently would leave behind a Holder with no
+        // matching ResourceGuard, wedging the resource until the session ends.
+        let mut promoted_holder: Option<(String, String)> = None;
+        let mut queue_empty = false;
+        if let Some(queue) = inner.waiters.get_mut(&key) {
+            while let Some(next) = queue.pop_front() {
+                if next.waker.is_closed() {
+                    continue;
+                }
+                let session = next.session_id.clone();
+                let title = next.title.clone();
+                if next.waker.send(()).is_ok() {
+                    promoted_holder = Some((session, title));
                     break;
                 }
-                queue_empty = queue.is_empty();
             }
-            if let Some(ref pending) = promoted {
-                inner.holders.insert(
-                    key.clone(),
-                    Holder {
-                        session_id: pending.session_id.clone(),
-                        title: pending.title.clone(),
-                        ref_count: 1,
-                    },
-                );
-            }
-            if queue_empty {
-                inner.waiters.remove(&key);
-            }
-            promoted
-        };
-        if let Some(pending) = next_pending {
-            let _ = pending.waker.send(());
+            queue_empty = queue.is_empty();
+        }
+        if let Some((session, title)) = promoted_holder {
+            inner.holders.insert(
+                key.clone(),
+                Holder {
+                    session_id: session,
+                    title,
+                    ref_count: 1,
+                },
+            );
+        }
+        if queue_empty {
+            inner.waiters.remove(&key);
         }
     }
 

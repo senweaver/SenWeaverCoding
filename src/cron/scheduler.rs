@@ -20,7 +20,6 @@ use crate::cron::{
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures_util::{StreamExt, stream};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -28,8 +27,31 @@ use tokio::time::{self, Duration};
 
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
+const AGENT_JOB_DEFAULT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const SCHEDULER_COMPONENT: &str = "scheduler";
 const STALE_RUNNING_MIN_SECS: u64 = 30 * 60;
+
+static JOBS_IN_FLIGHT: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+struct InFlightJobClaim(String);
+
+impl InFlightJobClaim {
+    fn try_claim(job_id: &str) -> Option<Self> {
+        if JOBS_IN_FLIGHT.lock().insert(job_id.to_string()) {
+            Some(Self(job_id.to_string()))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for InFlightJobClaim {
+    fn drop(&mut self) {
+        JOBS_IN_FLIGHT.lock().remove(&self.0);
+    }
+}
 
 fn stale_running_threshold(config: &Config) -> chrono::Duration {
     let attempts = u64::from(config.reliability.scheduler_retries).saturating_add(1);
@@ -46,7 +68,15 @@ fn apply_cron_permission_mode(autonomy: &mut AutonomyConfig, permission_mode: Op
         "bypassPermissions" => autonomy.level = AutonomyLevel::Full,
         "acceptEdits" => {
             autonomy.level = AutonomyLevel::Supervised;
-            for t in ["file_write", "file_edit", "multi_edit", "glob_edit", "notebook_edit"] {
+            for t in [
+                "file_write",
+                "file_edit",
+                "multi_edit",
+                "glob_edit",
+                "notebook_edit",
+                "patch_apply",
+                "diff_apply",
+            ] {
                 let s = (*t).to_string();
                 if !autonomy.auto_approve.iter().any(|x| x == &s) {
                     autonomy.auto_approve.push(s);
@@ -142,8 +172,12 @@ pub async fn run(config: Config) -> Result<()> {
         Err(e) => tracing::warn!("Scheduler startup: failed to reset stale running cron runs: {e}"),
     }
 
+    let job_slots = Arc::new(tokio::sync::Semaphore::new(
+        config.scheduler.max_concurrent.max(1),
+    ));
+
     if config.cron.catch_up_on_startup {
-        catch_up_overdue_jobs(&config, &security).await;
+        catch_up_overdue_jobs(&config, &security, &job_slots);
     } else {
         tracing::info!("Scheduler startup: catch-up disabled by config");
     }
@@ -186,9 +220,9 @@ pub async fn run(config: Config) -> Result<()> {
             }
         };
 
-        process_due_jobs(&config, &security, jobs, SCHEDULER_COMPONENT).await;
+        process_due_jobs(&config, &security, jobs, SCHEDULER_COMPONENT, &job_slots);
 
-        was_active = process_activity_jobs(&config, &security, was_active, now).await;
+        was_active = process_activity_jobs(&config, &security, was_active, now, &job_slots);
     }
 }
 
@@ -200,11 +234,12 @@ fn priority_rank(priority: Option<&str>) -> u8 {
     }
 }
 
-async fn process_activity_jobs(
+fn process_activity_jobs(
     config: &Config,
     security: &Arc<SecurityPolicy>,
     was_active: bool,
     now: DateTime<Utc>,
+    job_slots: &Arc<tokio::sync::Semaphore>,
 ) -> bool {
     let currently_active = crate::agent::activity::active_turns() > 0;
 
@@ -240,32 +275,16 @@ async fn process_activity_jobs(
 
     ready.sort_by_key(|job| priority_rank(job.priority.as_deref()));
 
-    let max_concurrent = config.scheduler.max_concurrent.max(1);
-    let mut in_flight = stream::iter(ready.into_iter().map(|job| {
-        let config = config.clone();
-        let security = Arc::clone(security);
-        async move {
-            Box::pin(execute_and_persist_job(
-                &config,
-                security.as_ref(),
-                &job,
-                SCHEDULER_COMPONENT,
-            ))
-            .await
-        }
-    }))
-    .buffer_unordered(max_concurrent);
-
-    while let Some((job_id, success, output)) = in_flight.next().await {
-        if !success {
-            tracing::warn!("Scheduler activity job '{job_id}' failed: {output}");
-        }
-    }
+    dispatch_claimed_jobs(config, security, ready, SCHEDULER_COMPONENT, job_slots);
 
     currently_active
 }
 
-async fn catch_up_overdue_jobs(config: &Config, security: &Arc<SecurityPolicy>) {
+fn catch_up_overdue_jobs(
+    config: &Config,
+    security: &Arc<SecurityPolicy>,
+    job_slots: &Arc<tokio::sync::Semaphore>,
+) {
     let now = Utc::now();
     let jobs = match all_overdue_jobs(config, now) {
         Ok(jobs) => jobs,
@@ -285,9 +304,9 @@ async fn catch_up_overdue_jobs(config: &Config, security: &Arc<SecurityPolicy>) 
         "Scheduler startup: catching up overdue jobs"
     );
 
-    process_due_jobs(config, security, jobs, SCHEDULER_COMPONENT).await;
+    process_due_jobs(config, security, jobs, SCHEDULER_COMPONENT, job_slots);
 
-    tracing::info!("Scheduler startup: catch-up complete");
+    tracing::info!("Scheduler startup: overdue jobs dispatched");
 }
 
 pub async fn execute_job_now(config: &Config, job: &CronJob) -> (bool, String) {
@@ -358,11 +377,50 @@ async fn execute_job_with_retry(
     (false, last_output)
 }
 
-async fn process_due_jobs(
+fn dispatch_claimed_jobs(
+    config: &Config,
+    security: &Arc<SecurityPolicy>,
+    claimed_jobs: Vec<CronJob>,
+    component: &str,
+    job_slots: &Arc<tokio::sync::Semaphore>,
+) {
+    for job in claimed_jobs {
+        let Some(in_flight_claim) = InFlightJobClaim::try_claim(&job.id) else {
+            tracing::debug!(
+                job_id = %job.id,
+                "cron job is still executing from a previous dispatch; skipping re-entry"
+            );
+            continue;
+        };
+        let config = config.clone();
+        let security = Arc::clone(security);
+        let component = component.to_owned();
+        let slots = Arc::clone(job_slots);
+        crate::runtime::spawn_supervised("cron.job", async move {
+            let _in_flight_claim = in_flight_claim;
+            let Ok(_permit) = slots.acquire_owned().await else {
+                return;
+            };
+            let (job_id, success, output) = Box::pin(execute_and_persist_job(
+                &config,
+                security.as_ref(),
+                &job,
+                &component,
+            ))
+            .await;
+            if !success {
+                tracing::warn!("Scheduler job '{job_id}' failed: {output}");
+            }
+        });
+    }
+}
+
+fn process_due_jobs(
     config: &Config,
     security: &Arc<SecurityPolicy>,
     jobs: Vec<CronJob>,
     component: &str,
+    job_slots: &Arc<tokio::sync::Semaphore>,
 ) {
 
     crate::health::mark_component_ok(component);
@@ -387,28 +445,7 @@ async fn process_due_jobs(
         return;
     }
 
-    let max_concurrent = config.scheduler.max_concurrent.max(1);
-    let mut in_flight = stream::iter(claimed_jobs.into_iter().map(|job| {
-        let config = config.clone();
-        let security = Arc::clone(security);
-        let component = component.to_owned();
-        async move {
-            Box::pin(execute_and_persist_job(
-                &config,
-                security.as_ref(),
-                &job,
-                &component,
-            ))
-            .await
-        }
-    }))
-    .buffer_unordered(max_concurrent);
-
-    while let Some((job_id, success, output)) = in_flight.next().await {
-        if !success {
-            tracing::warn!("Scheduler job '{job_id}' failed: {output}");
-        }
-    }
+    dispatch_claimed_jobs(config, security, claimed_jobs, component, job_slots);
 }
 
 async fn execute_and_persist_job(
@@ -497,20 +534,20 @@ async fn run_agent_job(
         coding_override,
     );
 
-    let run_result = match job.max_duration_ms {
-        Some(ms) if ms > 0 => {
-            match time::timeout(Duration::from_millis(ms), Box::pin(run_future)).await {
-                Ok(result) => result,
-                Err(_) => {
-                    return (
-                        false,
-                        format!("agent job timed out after {ms}ms (max_duration_ms)"),
-                    );
-                }
-            }
-        }
-        _ => Box::pin(run_future).await,
+    let timeout_ms = match job.max_duration_ms {
+        Some(ms) if ms > 0 => ms,
+        _ => AGENT_JOB_DEFAULT_TIMEOUT_MS,
     };
+    let run_result =
+        match time::timeout(Duration::from_millis(timeout_ms), Box::pin(run_future)).await {
+            Ok(result) => result,
+            Err(_) => {
+                return (
+                    false,
+                    format!("agent job timed out after {timeout_ms}ms"),
+                );
+            }
+        };
 
     match run_result {
         Ok(response) => (
@@ -1031,10 +1068,20 @@ fn build_cron_shell_command(
     command: &str,
     workspace_dir: &std::path::Path,
 ) -> anyhow::Result<tokio::process::Command> {
-    let mut cmd = crate::util::hidden_async_command("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(workspace_dir)
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut std_cmd = crate::util::hidden_sync_command("cmd.exe");
+        std_cmd.arg("/C").raw_arg(command);
+        tokio::process::Command::from(std_cmd)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = crate::util::hidden_async_command("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    cmd.current_dir(workspace_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

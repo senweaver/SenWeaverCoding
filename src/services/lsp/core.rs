@@ -15,6 +15,36 @@ use tokio::sync::Mutex;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
+const INCOMING_CHANNEL_CAPACITY: usize = 256;
+
+fn clamp_doc_version(version: i64) -> Option<i32> {
+    if version > 0 && version <= i64::from(i32::MAX) {
+        Some(version as i32)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug)]
+enum LspRequestFailure {
+    Timeout { method: String },
+    Protocol { method: String, code: i64, message: String },
+}
+
+impl std::fmt::Display for LspRequestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { method } => write!(f, "LSP request `{method}` timed out"),
+            Self::Protocol {
+                method,
+                code,
+                message,
+            } => write!(f, "LSP error for `{method}` ({code}): {message}"),
+        }
+    }
+}
+
+impl std::error::Error for LspRequestFailure {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspRange {
@@ -67,6 +97,27 @@ pub trait DiagnosticsListener: Send + Sync {
     fn on_diagnostics(&self, uri: &str, diagnostics: &[serde_json::Value]);
 }
 
+#[cfg(feature = "lsp-push-diagnostics")]
+struct PushDiagnosticsCache {
+    store: Arc<std::sync::RwLock<HashMap<PathBuf, Vec<LspDiagnostic>>>>,
+}
+
+#[cfg(feature = "lsp-push-diagnostics")]
+impl DiagnosticsListener for PushDiagnosticsCache {
+    fn on_diagnostics(&self, uri: &str, diagnostics: &[serde_json::Value]) {
+        let path = PathBuf::from(uri_to_path_string(uri));
+        let wrapped = json!({ "diagnostics": diagnostics });
+        let parsed = parse_lsp_diagnostics(&wrapped);
+        if let Ok(mut guard) = self.store.write() {
+            if parsed.is_empty() {
+                guard.remove(&path);
+            } else {
+                guard.insert(path, parsed);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ServerKey {
     pub language_id: String,
@@ -93,18 +144,64 @@ pub struct ServerInfo {
 struct LspServerHandle {
     _process: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    incoming: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    reader_task: tokio::task::JoinHandle<()>,
     next_id: u64,
     initialized: bool,
     opened_files: HashSet<String>,
+    doc_versions: HashMap<String, i32>,
 
     #[cfg(feature = "lsp-push-diagnostics")]
     notification_listeners: Arc<std::sync::RwLock<Vec<Arc<dyn DiagnosticsListener>>>>,
 }
 
+impl Drop for LspServerHandle {
+    fn drop(&mut self) {
+        self.reader_task.abort();
+    }
+}
+
+impl LspServerHandle {
+    fn next_doc_version(&mut self, uri: &str) -> i32 {
+        let counter = self.doc_versions.entry(uri.to_string()).or_insert(1);
+        *counter = counter.saturating_add(1);
+        *counter
+    }
+}
+
+fn spawn_stdout_reader(
+    stdout: ChildStdout,
+) -> (
+    tokio::sync::mpsc::Receiver<serde_json::Value>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(INCOMING_CHANNEL_CAPACITY);
+    let task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let msg = match read_message(&mut reader).await {
+                Ok(msg) => msg,
+                Err(_) => break,
+            };
+            if msg.get("id").is_some() {
+                if tx.send(msg).await.is_err() {
+                    break;
+                }
+            } else if msg.get("method").and_then(|m| m.as_str())
+                == Some("textDocument/publishDiagnostics")
+            {
+                let _ = tx.try_send(msg);
+            }
+        }
+    });
+    (rx, task)
+}
+
 struct LspServiceInner {
 
-    servers: HashMap<ServerKey, LspServerHandle>,
+    servers: HashMap<ServerKey, Arc<Mutex<LspServerHandle>>>,
+
+    starting: HashMap<ServerKey, Arc<Mutex<()>>>,
 
     server_configs: HashMap<ServerKey, LspServerConfig>,
 
@@ -112,6 +209,9 @@ struct LspServiceInner {
 
     #[cfg(feature = "lsp-push-diagnostics")]
     diagnostics_listeners: Arc<std::sync::RwLock<Vec<Arc<dyn DiagnosticsListener>>>>,
+
+    #[cfg(feature = "lsp-push-diagnostics")]
+    push_diagnostics: Arc<std::sync::RwLock<HashMap<PathBuf, Vec<LspDiagnostic>>>>,
 }
 
 #[derive(Clone)]
@@ -121,13 +221,23 @@ pub struct LspService {
 
 impl LspService {
     pub fn new() -> Self {
+        #[cfg(feature = "lsp-push-diagnostics")]
+        let push_store: Arc<std::sync::RwLock<HashMap<PathBuf, Vec<LspDiagnostic>>>> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        #[cfg(feature = "lsp-push-diagnostics")]
+        let builtin_listener: Arc<dyn DiagnosticsListener> = Arc::new(PushDiagnosticsCache {
+            store: Arc::clone(&push_store),
+        });
         Self {
             inner: Arc::new(Mutex::new(LspServiceInner {
                 servers: HashMap::new(),
+                starting: HashMap::new(),
                 server_configs: HashMap::new(),
                 diagnostics: HashMap::new(),
                 #[cfg(feature = "lsp-push-diagnostics")]
-                diagnostics_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
+                diagnostics_listeners: Arc::new(std::sync::RwLock::new(vec![builtin_listener])),
+                #[cfg(feature = "lsp-push-diagnostics")]
+                push_diagnostics: push_store,
             })),
         }
     }
@@ -141,6 +251,79 @@ impl LspService {
         inner.server_configs.insert(key, config);
     }
 
+    async fn existing_handle(&self, key: &ServerKey) -> Option<Arc<Mutex<LspServerHandle>>> {
+        let inner = self.inner.lock().await;
+        inner.servers.get(key).map(Arc::clone)
+    }
+
+    async fn server_handle(
+        &self,
+        key: &ServerKey,
+        workspace_root: &Path,
+    ) -> Result<Arc<Mutex<LspServerHandle>>> {
+        if let Some(handle) = self.existing_handle(key).await {
+            return Ok(handle);
+        }
+
+        let start_lock = {
+            let mut inner = self.inner.lock().await;
+            if let Some(handle) = inner.servers.get(key) {
+                return Ok(Arc::clone(handle));
+            }
+            Arc::clone(
+                inner
+                    .starting
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+
+        let _start_guard = start_lock.lock().await;
+
+        if let Some(handle) = self.existing_handle(key).await {
+            return Ok(handle);
+        }
+
+        let config = {
+            let inner = self.inner.lock().await;
+            inner.server_configs.get(key).cloned()
+        };
+
+        let start_result = if let Some(config) = config {
+            LspServerHandle::start_with_config(config).await
+        } else {
+            LspServerHandle::start(&key.language_id, workspace_root).await
+        };
+        #[cfg_attr(not(feature = "lsp-push-diagnostics"), allow(unused_mut))]
+        let mut handle = match start_result {
+            Ok(h) => h,
+            Err(e) => {
+                let mut inner = self.inner.lock().await;
+                inner.starting.remove(key);
+                return Err(e);
+            }
+        };
+
+        #[cfg(feature = "lsp-push-diagnostics")]
+        {
+            let inner = self.inner.lock().await;
+            handle.notification_listeners = Arc::clone(&inner.diagnostics_listeners);
+        }
+
+        let arc = Arc::new(Mutex::new(handle));
+        {
+            let mut inner = self.inner.lock().await;
+            inner.servers.insert(key.clone(), Arc::clone(&arc));
+            inner.starting.remove(key);
+        }
+        Ok(arc)
+    }
+
+    async fn drop_server(&self, key: &ServerKey) {
+        let mut inner = self.inner.lock().await;
+        inner.servers.remove(key);
+    }
+
     pub async fn request(
         &self,
         language: &str,
@@ -149,11 +332,23 @@ impl LspService {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language, workspace_root);
-        inner
-            .execute_request(&key, workspace_root, file_path, method, params)
-            .await
+        let handle = self.server_handle(&key, workspace_root).await?;
+        let result = {
+            let mut h = handle.lock().await;
+            h.execute_with_open(file_path, &key.language_id, method, params)
+                .await
+        };
+        match result {
+            Ok(val) => Ok(val),
+            Err(e) => {
+                if e.downcast_ref::<LspRequestFailure>().is_some() {
+                    return Err(e);
+                }
+                self.drop_server(&key).await;
+                Err(e.context("LSP server error; the server will be restarted on next attempt"))
+            }
+        }
     }
 
     pub async fn notify(
@@ -163,14 +358,10 @@ impl LspService {
         method: &str,
         params: serde_json::Value,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language, workspace_root);
-        inner.ensure_started(&key, workspace_root).await?;
-        let handle = inner
-            .servers
-            .get_mut(&key)
-            .ok_or_else(|| anyhow::anyhow!("LSP server handle missing after ensure_started"))?;
-        handle.send_notification(method, params).await
+        let handle = self.server_handle(&key, workspace_root).await?;
+        let mut h = handle.lock().await;
+        h.send_notification(method, params).await
     }
 
     pub async fn notify_file_changed(&self, path: &Path, contents: &str) -> Result<()> {
@@ -179,35 +370,27 @@ impl LspService {
             None => return Ok(()),
         };
         let workspace_root = infer_workspace_root(path).unwrap_or_else(|| path.to_path_buf());
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(&language, &workspace_root);
-        if !inner.servers.contains_key(&key) {
-            return Ok(());
-        }
-        let uri = path_to_uri(path);
-        let Some(handle) = inner.servers.get_mut(&key) else {
-            tracing::warn!("LSP didChange: handle missing despite contains_key; skipping");
+        let Some(handle) = self.existing_handle(&key).await else {
             return Ok(());
         };
-        if !handle.opened_files.contains(&uri) {
+        let uri = path_to_uri(path);
+        let mut h = handle.lock().await;
+        if !h.opened_files.contains(&uri) {
             return Ok(());
         }
-        let version = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(1);
-        handle
-            .send_notification(
-                "textDocument/didChange",
-                json!({
-                    "textDocument": {
-                        "uri": uri,
-                        "version": version,
-                    },
-                    "contentChanges": [{ "text": contents }],
-                }),
-            )
-            .await
+        let version = h.next_doc_version(&uri);
+        h.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "version": version,
+                },
+                "contentChanges": [{ "text": contents }],
+            }),
+        )
+        .await
     }
 
     pub async fn ensure_server_started(
@@ -215,9 +398,9 @@ impl LspService {
         language_id: &str,
         workspace_root: &Path,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language_id, workspace_root);
-        inner.ensure_started(&key, workspace_root).await
+        self.server_handle(&key, workspace_root).await?;
+        Ok(())
     }
 
     pub async fn open_text_document(
@@ -229,31 +412,28 @@ impl LspService {
     ) -> Result<()> {
         let workspace_root =
             infer_workspace_root(path).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language_id, &workspace_root);
-        inner.ensure_started(&key, &workspace_root).await?;
+        let handle = self.server_handle(&key, &workspace_root).await?;
         let uri = path_to_uri(path);
-        let handle = inner
-            .servers
-            .get_mut(&key)
-            .ok_or_else(|| anyhow::anyhow!("LSP server failed to start for {language_id}"))?;
-        if handle.opened_files.contains(&uri) {
+        let mut h = handle.lock().await;
+        if h.opened_files.contains(&uri) {
             return Ok(());
         }
-        handle
-            .send_notification(
-                "textDocument/didOpen",
-                json!({
-                    "textDocument": {
-                        "uri": &uri,
-                        "languageId": language_id,
-                        "version": version,
-                        "text": text,
-                    }
-                }),
-            )
-            .await?;
-        handle.opened_files.insert(uri);
+        let version = clamp_doc_version(version).unwrap_or(1);
+        h.doc_versions.insert(uri.clone(), version);
+        h.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": &uri,
+                    "languageId": language_id,
+                    "version": version,
+                    "text": text,
+                }
+            }),
+        )
+        .await?;
+        h.opened_files.insert(uri);
         Ok(())
     }
 
@@ -266,42 +446,45 @@ impl LspService {
     ) -> Result<()> {
         let workspace_root =
             infer_workspace_root(path).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language_id, &workspace_root);
-        inner.ensure_started(&key, &workspace_root).await?;
+        let handle = self.server_handle(&key, &workspace_root).await?;
         let uri = path_to_uri(path);
-        let handle = inner
-            .servers
-            .get_mut(&key)
-            .ok_or_else(|| anyhow::anyhow!("LSP server unavailable for {language_id}"))?;
-        if !handle.opened_files.contains(&uri) {
-            handle
-                .send_notification(
-                    "textDocument/didOpen",
-                    json!({
-                        "textDocument": {
-                            "uri": &uri,
-                            "languageId": language_id,
-                            "version": version,
-                            "text": text,
-                        }
-                    }),
-                )
-                .await?;
-            handle.opened_files.insert(uri.clone());
-        }
-        handle
-            .send_notification(
-                "textDocument/didChange",
+        let mut h = handle.lock().await;
+        if !h.opened_files.contains(&uri) {
+            let open_version = clamp_doc_version(version).unwrap_or(1);
+            h.doc_versions.insert(uri.clone(), open_version);
+            h.send_notification(
+                "textDocument/didOpen",
                 json!({
                     "textDocument": {
-                        "uri": uri,
-                        "version": version,
-                    },
-                    "contentChanges": [{ "text": text }],
+                        "uri": &uri,
+                        "languageId": language_id,
+                        "version": open_version,
+                        "text": text,
+                    }
                 }),
             )
-            .await
+            .await?;
+            h.opened_files.insert(uri.clone());
+        }
+        let change_version = match clamp_doc_version(version) {
+            Some(v) => {
+                h.doc_versions.insert(uri.clone(), v);
+                v
+            }
+            None => h.next_doc_version(&uri),
+        };
+        h.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "version": change_version,
+                },
+                "contentChanges": [{ "text": text }],
+            }),
+        )
+        .await
     }
 
     pub async fn save_text_document(
@@ -312,17 +495,13 @@ impl LspService {
     ) -> Result<()> {
         let workspace_root =
             infer_workspace_root(path).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language_id, &workspace_root);
-        if !inner.servers.contains_key(&key) {
-            return Ok(());
-        }
-        let uri = path_to_uri(path);
-        let Some(handle) = inner.servers.get_mut(&key) else {
-            tracing::warn!("LSP didSave: handle missing despite contains_key; skipping");
+        let Some(handle) = self.existing_handle(&key).await else {
             return Ok(());
         };
-        if !handle.opened_files.contains(&uri) {
+        let uri = path_to_uri(path);
+        let mut h = handle.lock().await;
+        if !h.opened_files.contains(&uri) {
             return Ok(());
         }
         let mut params = json!({
@@ -331,35 +510,29 @@ impl LspService {
         if let Some(t) = text {
             params["text"] = serde_json::Value::String(t.to_string());
         }
-        handle
-            .send_notification("textDocument/didSave", params)
-            .await
+        h.send_notification("textDocument/didSave", params).await
     }
 
     pub async fn close_text_document(&self, path: &Path, language_id: &str) -> Result<()> {
         let workspace_root =
             infer_workspace_root(path).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language_id, &workspace_root);
-        if !inner.servers.contains_key(&key) {
-            return Ok(());
-        }
-        let uri = path_to_uri(path);
-        let Some(handle) = inner.servers.get_mut(&key) else {
-            tracing::warn!("LSP didClose: handle missing despite contains_key; skipping");
+        let Some(handle) = self.existing_handle(&key).await else {
             return Ok(());
         };
-        if !handle.opened_files.remove(&uri) {
+        let uri = path_to_uri(path);
+        let mut h = handle.lock().await;
+        if !h.opened_files.remove(&uri) {
             return Ok(());
         }
-        handle
-            .send_notification(
-                "textDocument/didClose",
-                json!({
-                    "textDocument": { "uri": uri }
-                }),
-            )
-            .await
+        h.doc_versions.remove(&uri);
+        h.send_notification(
+            "textDocument/didClose",
+            json!({
+                "textDocument": { "uri": uri }
+            }),
+        )
+        .await
     }
 
     pub async fn is_server_running(&self, language: &str, workspace_root: &Path) -> bool {
@@ -369,59 +542,93 @@ impl LspService {
     }
 
     pub async fn list_servers(&self) -> Vec<ServerInfo> {
-        let inner = self.inner.lock().await;
-        inner
-            .servers
-            .iter()
-            .map(|(key, handle)| ServerInfo {
+        let entries: Vec<(ServerKey, Arc<Mutex<LspServerHandle>>)> = {
+            let inner = self.inner.lock().await;
+            inner
+                .servers
+                .iter()
+                .map(|(key, handle)| (key.clone(), Arc::clone(handle)))
+                .collect()
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for (key, handle) in entries {
+            let open_files = match handle.try_lock() {
+                Ok(h) => h.opened_files.len(),
+                Err(_) => 0,
+            };
+            out.push(ServerInfo {
                 language_id: key.language_id.clone(),
                 workspace_root: key.workspace_root.clone(),
                 status: "Running".to_string(),
-                open_files: handle.opened_files.len(),
-            })
-            .collect()
+                open_files,
+            });
+        }
+        out
     }
 
     pub async fn shutdown_all(&self) {
-        let mut inner = self.inner.lock().await;
-        let keys: Vec<ServerKey> = inner.servers.keys().cloned().collect();
-        for key in keys {
-            if let Some(mut handle) = inner.servers.remove(&key) {
-                let _ = handle.shutdown().await;
-            }
-            inner.server_configs.remove(&key);
+        let handles: Vec<(ServerKey, Arc<Mutex<LspServerHandle>>)> = {
+            let mut inner = self.inner.lock().await;
+            let entries: Vec<(ServerKey, Arc<Mutex<LspServerHandle>>)> =
+                inner.servers.drain().collect();
+            inner.server_configs.clear();
+            entries
+        };
+        for (_key, handle) in handles {
+            let mut h = handle.lock().await;
+            let _ = h.shutdown().await;
         }
     }
 
     pub async fn shutdown_server(&self, language: &str, workspace_root: &Path) {
-        let mut inner = self.inner.lock().await;
         let key = ServerKey::new(language, workspace_root);
-        if let Some(mut handle) = inner.servers.remove(&key) {
-            let _ = handle.shutdown().await;
+        let handle = {
+            let mut inner = self.inner.lock().await;
+            inner.server_configs.remove(&key);
+            inner.servers.remove(&key)
+        };
+        if let Some(handle) = handle {
+            let mut h = handle.lock().await;
+            let _ = h.shutdown().await;
         }
-        inner.server_configs.remove(&key);
     }
 
     pub async fn restart_server(&self, language: &str, workspace_root: &Path) -> Result<()> {
         let key = ServerKey::new(language, workspace_root);
-        {
+        let handle = {
             let mut inner = self.inner.lock().await;
-            if let Some(mut handle) = inner.servers.remove(&key) {
-                let _ = handle.shutdown().await;
-            }
+            inner.servers.remove(&key)
+        };
+        if let Some(handle) = handle {
+            let mut h = handle.lock().await;
+            let _ = h.shutdown().await;
         }
-        let mut inner = self.inner.lock().await;
-        inner.ensure_started(&key, workspace_root).await
+        self.server_handle(&key, workspace_root).await?;
+        Ok(())
     }
 
     pub async fn get_diagnostics(&self, file: &PathBuf) -> Vec<LspDiagnostic> {
         let inner = self.inner.lock().await;
+        #[cfg(feature = "lsp-push-diagnostics")]
+        if let Ok(push) = inner.push_diagnostics.read() {
+            if let Some(diags) = push.get(file) {
+                return diags.clone();
+            }
+        }
         inner.diagnostics.get(file).cloned().unwrap_or_default()
     }
 
     pub async fn get_all_diagnostics(&self) -> HashMap<PathBuf, Vec<LspDiagnostic>> {
         let inner = self.inner.lock().await;
-        inner.diagnostics.clone()
+        #[cfg_attr(not(feature = "lsp-push-diagnostics"), allow(unused_mut))]
+        let mut merged = inner.diagnostics.clone();
+        #[cfg(feature = "lsp-push-diagnostics")]
+        if let Ok(push) = inner.push_diagnostics.read() {
+            for (path, diags) in push.iter() {
+                merged.insert(path.clone(), diags.clone());
+            }
+        }
+        merged
     }
 
     pub async fn update_diagnostics(&self, file: PathBuf, diagnostics: Vec<LspDiagnostic>) {
@@ -451,18 +658,13 @@ impl LspService {
         let language = lsp_language_id_from_path(path)?;
         let workspace_root =
             infer_workspace_root(path).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
-        let mut inner = self.inner.lock().await;
-        let key = ServerKey::new(&language, &workspace_root);
-        if inner.ensure_started(&key, &workspace_root).await.is_err() {
-            return None;
-        }
         let file_uri = path_to_uri(path);
         let params = json!({
             "textDocument": { "uri": file_uri },
             "position": { "line": line, "character": character },
         });
-        match inner
-            .execute_request(&key, &workspace_root, Some(path), "textDocument/hover", params)
+        match self
+            .request(&language, &workspace_root, Some(path), "textDocument/hover", params)
             .await
         {
             Ok(result) => {
@@ -483,10 +685,6 @@ impl LspService {
         language: &str,
         workspace_root: &Path,
     ) -> Result<Vec<LspDiagnostic>> {
-        let mut inner = self.inner.lock().await;
-        let key = ServerKey::new(language, workspace_root);
-        inner.ensure_started(&key, workspace_root).await?;
-
         let file_uri = path_to_uri(file);
         let params = json!({
             "textDocument": {
@@ -494,9 +692,9 @@ impl LspService {
             }
         });
 
-        let result = inner
-            .execute_request(
-                &key,
+        let result = self
+            .request(
+                language,
                 workspace_root,
                 Some(file),
                 "textDocument/diagnostic",
@@ -508,11 +706,13 @@ impl LspService {
             Ok(response) => {
                 let diags = parse_lsp_diagnostics(&response);
                 let path = file.to_path_buf();
+                let mut inner = self.inner.lock().await;
                 inner.diagnostics.insert(path, diags.clone());
                 Ok(diags)
             }
             Err(e) => {
                 tracing::debug!(error = %e, "textDocument/diagnostic not supported, trying alternative");
+                let inner = self.inner.lock().await;
                 Ok(inner
                     .diagnostics
                     .get(&file.to_path_buf())
@@ -526,59 +726,6 @@ impl LspService {
 impl Default for LspService {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl LspServiceInner {
-    async fn ensure_started(&mut self, key: &ServerKey, workspace_root: &Path) -> Result<()> {
-        if self.servers.contains_key(key) {
-            return Ok(());
-        }
-        let handle = if let Some(config) = self.server_configs.get(key).cloned() {
-            LspServerHandle::start_with_config(config).await?
-        } else {
-            LspServerHandle::start(&key.language_id, workspace_root).await?
-        };
-
-        #[cfg(feature = "lsp-push-diagnostics")]
-        let handle = {
-            let mut h = handle;
-            h.notification_listeners = Arc::clone(&self.diagnostics_listeners);
-            h
-        };
-        self.servers.insert(key.clone(), handle);
-        Ok(())
-    }
-
-    async fn execute_request(
-        &mut self,
-        key: &ServerKey,
-        workspace_root: &Path,
-        file_path: Option<&Path>,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        self.ensure_started(key, workspace_root).await?;
-
-        let mut handle = self
-            .servers
-            .remove(key)
-            .ok_or_else(|| anyhow::anyhow!("LSP server handle missing after ensure_started"))?;
-
-        let result = handle
-            .execute_with_open(file_path, &key.language_id, method, params)
-            .await;
-
-        match result {
-            Ok(val) => {
-                self.servers.insert(key.clone(), handle);
-                Ok(val)
-            }
-            Err(e) => {
-
-                Err(e.context("LSP server error; the server will be restarted on next attempt"))
-            }
-        }
     }
 }
 
@@ -616,13 +763,16 @@ impl LspServerHandle {
             .take()
             .context("Failed to capture server stdout")?;
 
+        let (incoming, reader_task) = spawn_stdout_reader(stdout);
         let mut handle = Self {
             _process: process,
             stdin,
-            reader: BufReader::new(stdout),
+            incoming,
+            reader_task,
             next_id: 1,
             initialized: false,
             opened_files: HashSet::new(),
+            doc_versions: HashMap::new(),
             #[cfg(feature = "lsp-push-diagnostics")]
             notification_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
         };
@@ -665,13 +815,16 @@ impl LspServerHandle {
             .take()
             .context("Failed to capture server stdout")?;
 
+        let (incoming, reader_task) = spawn_stdout_reader(stdout);
         let mut handle = Self {
             _process: process,
             stdin,
-            reader: BufReader::new(stdout),
+            incoming,
+            reader_task,
             next_id: 1,
             initialized: false,
             opened_files: HashSet::new(),
+            doc_versions: HashMap::new(),
             #[cfg(feature = "lsp-push-diagnostics")]
             notification_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
         };
@@ -896,9 +1049,9 @@ impl LspServerHandle {
             }]
         });
 
-        tokio::time::timeout(INIT_TIMEOUT, self.send_request("initialize", params))
+        self.send_request_with_timeout("initialize", params, INIT_TIMEOUT)
             .await
-            .context("Language server initialization timed out")??;
+            .context("Language server initialization failed")?;
 
         self.send_notification("initialized", json!({})).await?;
         self.initialized = true;
@@ -957,6 +1110,16 @@ impl LspServerHandle {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.send_request_with_timeout(method, params, REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -969,29 +1132,86 @@ impl LspServerHandle {
 
         write_message(&mut self.stdin, &msg).await?;
 
-        tokio::time::timeout(REQUEST_TIMEOUT, async {
-            loop {
-                let resp = read_message(&mut self.reader).await?;
-
-                let resp_id = resp.get("id").and_then(|v| v.as_u64());
-                if resp_id == Some(id) {
-                    if let Some(error) = resp.get("error") {
-                        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-                        let message = error
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown error");
-                        anyhow::bail!("LSP error {code}: {message}");
-                    }
-                    return Ok(resp.get("result").cloned().unwrap_or(json!(null)));
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let resp = match tokio::time::timeout_at(deadline, self.incoming.recv()).await {
+                Ok(Some(resp)) => resp,
+                Ok(None) => {
+                    anyhow::bail!("Language server closed its stdout unexpectedly");
                 }
+                Err(_) => {
+                    return Err(anyhow::Error::new(LspRequestFailure::Timeout {
+                        method: method.to_string(),
+                    }));
+                }
+            };
 
-                #[cfg(feature = "lsp-push-diagnostics")]
-                Self::dispatch_push_notification(&resp, &self.notification_listeners);
+            #[cfg(feature = "lsp-push-diagnostics")]
+            Self::dispatch_push_notification(&resp, &self.notification_listeners);
+
+            if resp.get("id").is_some() && resp.get("method").is_some() {
+                let req_id = resp.get("id").cloned().unwrap_or(json!(null));
+                let req_method = resp
+                    .get("method")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let reply = match req_method.as_str() {
+                    "workspace/configuration" => {
+                        let count = resp
+                            .pointer("/params/items")
+                            .and_then(|items| items.as_array())
+                            .map_or(0, Vec::len);
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": vec![serde_json::Value::Null; count],
+                        })
+                    }
+                    "window/workDoneProgress/create"
+                    | "client/registerCapability"
+                    | "client/unregisterCapability" => {
+                        json!({ "jsonrpc": "2.0", "id": req_id, "result": null })
+                    }
+                    _ => json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!(
+                                "method not supported by this client: {req_method}"
+                            ),
+                        },
+                    }),
+                };
+                if let Err(e) = write_message(&mut self.stdin, &reply).await {
+                    tracing::debug!(
+                        method = %req_method,
+                        error = %e,
+                        "failed to answer server-initiated LSP request"
+                    );
+                }
+                continue;
             }
-        })
-        .await
-        .context("LSP request timed out")?
+
+            let resp_id = resp.get("id").and_then(|v| v.as_u64());
+            if resp_id == Some(id) && resp.get("method").is_none() {
+                if let Some(error) = resp.get("error") {
+                    let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+                    let message = error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error")
+                        .to_string();
+                    return Err(anyhow::Error::new(LspRequestFailure::Protocol {
+                        method: method.to_string(),
+                        code,
+                        message,
+                    }));
+                }
+                return Ok(resp.get("result").cloned().unwrap_or(json!(null)));
+            }
+        }
     }
 
     async fn send_notification(&mut self, method: &str, params: serde_json::Value) -> Result<()> {
@@ -1034,12 +1254,19 @@ impl LspServerHandle {
     }
 }
 
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
 async fn write_message(stdin: &mut ChildStdin, msg: &serde_json::Value) -> Result<()> {
     let body = serde_json::to_string(msg)?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdin.write_all(header.as_bytes()).await?;
-    stdin.write_all(body.as_bytes()).await?;
-    stdin.flush().await?;
+    tokio::time::timeout(WRITE_TIMEOUT, async {
+        stdin.write_all(header.as_bytes()).await?;
+        stdin.write_all(body.as_bytes()).await?;
+        stdin.flush().await?;
+        Ok::<(), std::io::Error>(())
+    })
+    .await
+    .context("LSP stdin write timed out; language server is not draining its input")??;
     Ok(())
 }
 

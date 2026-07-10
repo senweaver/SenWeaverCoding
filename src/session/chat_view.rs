@@ -356,6 +356,19 @@ pub trait ChatViewSink {
     fn reset(&mut self) {}
 }
 
+#[derive(Debug, Default)]
+pub struct NullChatViewSink;
+
+impl ChatViewSink for NullChatViewSink {
+    fn push_user(&mut self, _text: &str) {}
+    fn append_assistant_delta(&mut self, _text: &str) {}
+    fn close_assistant_turn(&mut self, _output: &str) {}
+    fn push_tool_call(&mut self, _tool_name: &str, _arguments: &serde_json::Value) {}
+    fn push_tool_result(&mut self, _output: &str, _is_error: bool) {}
+    fn push_error(&mut self, _message: &str) {}
+    fn push_system(&mut self, _message: &str) {}
+}
+
 pub fn apply_session_event<S: ChatViewSink + ?Sized>(sink: &mut S, evt: &SessionEvent) {
     match &evt.kind {
         SessionEventKind::TurnStarted { input } => {

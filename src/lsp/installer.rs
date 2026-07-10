@@ -148,9 +148,9 @@ async fn install_gopls(progress: InstallProgress) -> Result<InstallReport> {
     cmd.env("GOBIN", &install_dir);
     cmd.kill_on_drop(true);
 
-    let output = cmd
-        .output()
+    let output = tokio::time::timeout(std::time::Duration::from_secs(600), cmd.output())
         .await
+        .map_err(|_| anyhow!("`go install gopls` timed out after 600s"))?
         .with_context(|| "run `go install golang.org/x/tools/gopls@latest`".to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -398,9 +398,9 @@ async fn install_npm_server(
     }
     cmd.kill_on_drop(true);
 
-    let output = cmd
-        .output()
+    let output = tokio::time::timeout(std::time::Duration::from_secs(600), cmd.output())
         .await
+        .map_err(|_| anyhow!("npm install timed out after 600s"))?
         .with_context(|| format!("run npm install --prefix {}", prefix.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -642,7 +642,10 @@ async fn run_version_query(bin: &Path, args: &[&str]) -> Option<String> {
         cmd.arg(*a);
     }
     cmd.kill_on_drop(true);
-    let output = cmd.output().await.ok()?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() {
         return None;
     }

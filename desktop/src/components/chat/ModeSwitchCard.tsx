@@ -64,12 +64,11 @@ export function ModeSwitchCard({
     : 'material-symbols-outlined text-[16px] text-[var(--color-text-secondary)]'
 
   const titleText = isCurator
-    ? t('curator.modeSwitchTitle') || '切换到 Agent · 按 impl_blueprint.md 落地完整工程'
+    ? t('curator.modeSwitchTitle')
     : t('plan.modeSwitchTitle')
 
   const bodyText = isCurator
-    ? t('curator.modeSwitchBody') ||
-      '点击切换后，Agent 将读取 impl_blueprint.md 并按其工程化完整代码、配置与文档。'
+    ? t('curator.modeSwitchBody')
     : t('plan.modeSwitchBody')
 
   const switchBtnCls = isCurator

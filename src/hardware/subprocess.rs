@@ -188,11 +188,20 @@ impl Tool for SubprocessTool {
             }
 
             Ok(Ok(line)) => {
-                let child_status =
-                    timeout(Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECS), child.wait())
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
+                let child_status = match timeout(
+                    Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECS),
+                    child.wait(),
+                )
+                .await
+                {
+                    Ok(Ok(status)) => Some(status),
+                    Ok(Err(_)) => None,
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        None
+                    }
+                };
                 let stderr_msg = collect_stderr(stderr_handle).await;
                 let line = line.trim();
 
@@ -263,8 +272,8 @@ async fn collect_stderr(handle: Option<tokio::process::ChildStderr>) -> String {
         return String::new();
     };
     let mut buf = vec![0u8; 512];
-    match stderr.read(&mut buf).await {
-        Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).trim().to_string(),
+    match timeout(Duration::from_secs(2), stderr.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => String::from_utf8_lossy(&buf[..n]).trim().to_string(),
         _ => String::new(),
     }
 }

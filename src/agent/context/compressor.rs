@@ -325,6 +325,7 @@ impl ContextCompressor {
         provider: &dyn Provider,
         model: &str,
         error_msg: &str,
+        preserved_fn: Option<&PreservedIndexFn>,
     ) -> Result<bool> {
 
         if let Some(limit) = parse_context_limit_from_error(error_msg) {
@@ -339,8 +340,54 @@ impl ContextCompressor {
             "Context limit adjusted, re-compressing"
         );
 
-        let result = self.compress_if_needed(history, provider, model).await?;
+        let result = self
+            .compress_if_needed_with_progress(history, provider, model, preserved_fn, None)
+            .await?;
         Ok(result.compressed)
+    }
+
+    pub async fn summarize_messages(
+        &self,
+        messages: &[ChatMessage],
+        provider: &dyn Provider,
+        model: &str,
+    ) -> Result<String> {
+        let transcript = build_compaction_transcript(messages, self.config.source_max_chars);
+        if transcript.trim().is_empty() {
+            return Ok(String::new());
+        }
+        let message_count = messages.len();
+        let summary_model = self.config.summary_model.as_deref().unwrap_or(model);
+        let identifier_note = if self.config.identifier_policy == "strict" {
+            "\nIMPORTANT: Preserve all identifiers exactly as they appear."
+        } else {
+            ""
+        };
+        let user_prompt = format!(
+            "Summarize the following conversation history ({message_count} messages) for context preservation. \
+             Keep it concise (max 20 bullet points).{identifier_note}\n\n{transcript}"
+        );
+        let timeout = Duration::from_secs(self.config.timeout_secs);
+        let summary_raw = match tokio::time::timeout(
+            timeout,
+            provider.chat_with_system(Some(SUMMARIZER_SYSTEM), &user_prompt, summary_model, 0.1),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "rolling summary LLM call failed, using transcript truncation");
+                truncate_chars(&transcript, self.config.summary_max_chars)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "rolling summary timed out after {}s, using transcript truncation",
+                    self.config.timeout_secs
+                );
+                truncate_chars(&transcript, self.config.summary_max_chars)
+            }
+        };
+        Ok(truncate_chars(&summary_raw, self.config.summary_max_chars))
     }
 
     async fn compress_once_with_preserved(

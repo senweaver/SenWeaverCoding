@@ -218,12 +218,32 @@ impl WorkflowEngine {
                                     let _ = tx.send(fut.await);
                                 },
                             );
-                            receivers.push(rx);
+                            receivers.push((idx, rx));
                         }
                         let mut collected = Vec::new();
-                        for rx in receivers {
-                            if let Ok(r) = rx.await {
-                                collected.push(r);
+                        for (idx, rx) in receivers {
+                            match rx.await {
+                                Ok(r) => collected.push(r),
+                                Err(_) => {
+                                    let step_name = fanout_steps
+                                        .get(idx)
+                                        .map(|s| s.name.clone())
+                                        .unwrap_or_else(|| format!("fanout-{idx}"));
+                                    warn!(
+                                        run_id = %run.id,
+                                        step = %step_name,
+                                        "FanOut step task aborted before reporting a result \
+                                         (likely panicked); recording as failed"
+                                    );
+                                    collected.push((
+                                        step_name.clone(),
+                                        crate::workflows::types::StepResult::failure(
+                                            step_name,
+                                            fanout_start + idx,
+                                            "step task aborted before completion",
+                                        ),
+                                    ));
+                                }
                             }
                         }
                         collected

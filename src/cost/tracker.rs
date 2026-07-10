@@ -473,14 +473,23 @@ impl CostStorage {
     }
 
     fn add_record(&mut self, record: CostRecord) -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("Failed to open cost storage at {}", self.path.display()))?;
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .with_context(|| {
+                    format!("Failed to open cost storage at {}", self.path.display())
+                })?;
 
-        writeln!(file, "{}", serde_json::to_string(&record)?)
-            .with_context(|| format!("Failed to write cost record to {}", self.path.display()))?;
+            writeln!(file, "{}", serde_json::to_string(&record)?).with_context(|| {
+                format!("Failed to write cost record to {}", self.path.display())
+            })?;
+        }
+
+        if let Err(e) = self.maybe_compact() {
+            tracing::warn!("cost storage compaction skipped: {e}");
+        }
 
         let day_before = self.cached_day;
         let year_before = self.cached_year;
@@ -506,6 +515,43 @@ impl CostStorage {
     fn get_aggregated_costs(&mut self) -> Result<(f64, f64)> {
         self.ensure_period_cache_current()?;
         Ok((self.daily_cost_usd, self.monthly_cost_usd))
+    }
+
+    /// Bound unbounded growth of costs.jsonl: once the file grows past a size
+    /// threshold, rewrite it atomically keeping only records within the retention
+    /// window. The window comfortably covers daily + monthly aggregation, so the
+    /// visible budget numbers are unaffected while historical rows stop
+    /// accumulating forever.
+    fn maybe_compact(&self) -> Result<()> {
+        const COMPACT_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+        const RETENTION_DAYS: i64 = 92;
+
+        let Ok(meta) = fs::metadata(&self.path) else {
+            return Ok(());
+        };
+        if meta.len() < COMPACT_THRESHOLD_BYTES {
+            return Ok(());
+        }
+
+        let cutoff = Utc::now() - chrono::Duration::days(RETENTION_DAYS);
+        let mut kept = String::new();
+        self.for_each_record(|record| {
+            if record.usage.timestamp >= cutoff {
+                if let Ok(line) = serde_json::to_string(&record) {
+                    kept.push_str(&line);
+                    kept.push('\n');
+                }
+            }
+        })?;
+
+        crate::util::atomic_write(&self.path, kept.as_bytes())
+            .with_context(|| format!("Failed to compact cost storage {}", self.path.display()))?;
+        tracing::info!(
+            path = %self.path.display(),
+            retention_days = RETENTION_DAYS,
+            "compacted cost storage to bound file growth"
+        );
+        Ok(())
     }
 
     fn get_cost_for_date(&self, date: NaiveDate) -> Result<f64> {

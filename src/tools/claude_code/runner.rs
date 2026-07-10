@@ -348,7 +348,7 @@ async fn tmux_output_with_timeout(args: &[&str]) -> std::io::Result<std::process
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "tmux command timed out after 30s",

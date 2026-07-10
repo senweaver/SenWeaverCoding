@@ -9,6 +9,7 @@ static GATEWAY_SHUTDOWN: parking_lot::RwLock<Option<tokio::sync::watch::Sender<b
     parking_lot::RwLock::new(None);
 pub(crate) static GATEWAY_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static GATEWAY_FULLY_STOPPED: AtomicBool = AtomicBool::new(false);
+static GATEWAY_SHUTDOWN_PENDING: AtomicBool = AtomicBool::new(false);
 
 static GATEWAY_STARTUP_WARNINGS: OnceLock<parking_lot::RwLock<Vec<StartupWarning>>> =
     OnceLock::new();
@@ -36,6 +37,12 @@ pub fn snapshot_startup_warnings() -> Vec<StartupWarning> {
 }
 
 pub(crate) fn install_shutdown_sender(tx: tokio::sync::watch::Sender<bool>) {
+    // A restart may have requested shutdown before this instance finished wiring
+    // its channel. Honor that pending request immediately so the just-started
+    // instance stops instead of leaking alongside its replacement.
+    if GATEWAY_SHUTDOWN_PENDING.swap(false, Ordering::SeqCst) {
+        let _ = tx.send(true);
+    }
     *GATEWAY_SHUTDOWN.write() = Some(tx);
 }
 
@@ -54,7 +61,16 @@ pub fn request_shutdown() -> bool {
 }
 
 pub fn request_embedded_shutdown() -> bool {
-    request_shutdown()
+    if request_shutdown() {
+        return true;
+    }
+    // The gateway is starting but has not wired its shutdown channel yet. Latch
+    // the request so `install_shutdown_sender` fires it as soon as the channel
+    // exists, preventing a double-gateway leak on restart.
+    if is_running() {
+        GATEWAY_SHUTDOWN_PENDING.store(true, Ordering::SeqCst);
+    }
+    false
 }
 
 pub async fn wait_embedded_stopped(timeout: std::time::Duration) -> bool {

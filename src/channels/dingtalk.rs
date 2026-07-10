@@ -130,7 +130,27 @@ impl DingTalkChannel {
 
         tracing::info!("DingTalk: connected and listening for messages...");
 
-        while let Some(msg) = read.next().await {
+        const READ_IDLE_TIMEOUT_SECS: u64 = 120;
+
+        loop {
+            let next = match tokio::time::timeout(
+                std::time::Duration::from_secs(READ_IDLE_TIMEOUT_SECS),
+                read.next(),
+            )
+            .await
+            {
+                Ok(item) => item,
+                Err(_) => {
+                    tracing::warn!(
+                        "DingTalk: no frames for {READ_IDLE_TIMEOUT_SECS}s; \
+                         treating connection as dead and reconnecting"
+                    );
+                    return Ok(false);
+                }
+            };
+            let Some(msg) = next else {
+                break;
+            };
             let msg = match msg {
                 Ok(Message::Text(t)) => t,
                 Ok(Message::Close(_)) => return Ok(false),
@@ -286,8 +306,11 @@ impl Channel for DingTalkChannel {
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let webhooks = self.session_webhooks.read().await;
-        let webhook_url = webhooks.get(&message.recipient).ok_or_else(|| {
+        let webhook_url = {
+            let webhooks = self.session_webhooks.read().await;
+            webhooks.get(&message.recipient).cloned()
+        }
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "No session webhook found for chat {}. \
                  The user must send a message first to establish a session.",
@@ -306,7 +329,7 @@ impl Channel for DingTalkChannel {
 
         let resp = self
             .http_client()
-            .post(webhook_url)
+            .post(&webhook_url)
             .json(&body)
             .send()
             .await?;

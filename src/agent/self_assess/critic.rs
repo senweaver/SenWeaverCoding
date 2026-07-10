@@ -157,10 +157,24 @@ impl IndependentCritic {
         let mut last_rationale = String::new();
         let mut parsed_any = false;
 
+        const CRITIC_VOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         for _ in 0..votes {
-            let raw = provider
-                .chat_with_history(messages, &model, ctx.config.judge_temperature)
-                .await;
+            let raw = match tokio::time::timeout(
+                CRITIC_VOTE_TIMEOUT,
+                provider.chat_with_history(messages, &model, ctx.config.judge_temperature),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "agent.self_assess",
+                        model = %model,
+                        "critic vote timed out; skipping this vote so the turn is not blocked"
+                    );
+                    continue;
+                }
+            };
             let Ok(text) = raw else { continue };
             let parsed = crate::providers::traits::parse_first_json_object(&text)
                 .and_then(|v| serde_json::from_value::<RawCriticResponse>(v).ok());

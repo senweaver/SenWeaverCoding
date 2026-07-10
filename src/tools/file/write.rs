@@ -18,9 +18,10 @@ pub struct FileWriteTool {
 
 impl FileWriteTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        let ops_applier = Arc::new(OpsApplier::default_for_shared_workspace(
-            security.workspace_root_handle(),
-        ));
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
         Self {
             security,
             edit_history: None,

@@ -2502,7 +2502,27 @@ impl SlackChannel {
 
             let (mut write, mut read) = ws_stream.split();
 
-            while let Some(frame) = read.next().await {
+            const READ_IDLE_TIMEOUT_SECS: u64 = 120;
+
+            loop {
+                let next = match tokio::time::timeout(
+                    std::time::Duration::from_secs(READ_IDLE_TIMEOUT_SECS),
+                    read.next(),
+                )
+                .await
+                {
+                    Ok(item) => item,
+                    Err(_) => {
+                        tracing::warn!(
+                            "Slack Socket Mode: no frames for {READ_IDLE_TIMEOUT_SECS}s; \
+                             treating connection as dead and reconnecting"
+                        );
+                        break;
+                    }
+                };
+                let Some(frame) = next else {
+                    break;
+                };
                 let text = match frame {
                     Ok(WsMessage::Text(text)) => text,
                     Ok(WsMessage::Ping(payload)) => {

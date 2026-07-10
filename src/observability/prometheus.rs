@@ -41,7 +41,6 @@ pub struct PrometheusObserver {
 
     session_events_total: IntCounterVec,
     keybindings_reload_total: prometheus::IntCounter,
-    fulltext_index_size_bytes: prometheus::IntGauge,
     deploy_success_count: std::sync::atomic::AtomicU64,
     deploy_failure_count: std::sync::atomic::AtomicU64,
 
@@ -238,11 +237,6 @@ impl PrometheusObserver {
             "Total `~/.sen/keybindings.toml` reloads accepted",
         )
         .expect("valid metric");
-        let fulltext_index_size_bytes = prometheus::IntGauge::new(
-            "sen_fulltext_index_size_bytes",
-            "Current on-disk size of the tantivy full-text index",
-        )
-        .expect("valid metric");
 
         let first_token_latency_ms = HistogramVec::new(
             HistogramOpts::new(
@@ -333,9 +327,6 @@ impl PrometheusObserver {
             .register(Box::new(keybindings_reload_total.clone()))
             .ok();
         registry
-            .register(Box::new(fulltext_index_size_bytes.clone()))
-            .ok();
-        registry
             .register(Box::new(first_token_latency_ms.clone()))
             .ok();
         registry
@@ -380,7 +371,6 @@ impl PrometheusObserver {
             deploy_failure_count: std::sync::atomic::AtomicU64::new(0),
             session_events_total,
             keybindings_reload_total,
-            fulltext_index_size_bytes,
             first_token_latency_ms,
             response_cache_hits_total,
             response_cache_misses_total,
@@ -422,10 +412,6 @@ impl PrometheusObserver {
 
     pub fn inc_keybindings_reload(&self) {
         self.keybindings_reload_total.inc();
-    }
-
-    pub fn set_fulltext_index_size_bytes(&self, bytes: i64) {
-        self.fulltext_index_size_bytes.set(bytes);
     }
 
     pub fn encode(&self) -> String {

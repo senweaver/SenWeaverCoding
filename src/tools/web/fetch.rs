@@ -148,11 +148,14 @@ impl WebFetchTool {
                     .redirect(redirect_policy)
                     .cookie_store(true)
                     .user_agent(BROWSER_USER_AGENT);
-                crate::services::require_services()
-                    .proxy_runtime()
-                    .apply_to_builder(builder, "tool.web_fetch")
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new())
+                match crate::services::try_get_services() {
+                    Some(services) => services
+                        .proxy_runtime()
+                        .apply_to_builder(builder, "tool.web_fetch")
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new()),
+                    None => builder.build().unwrap_or_else(|_| reqwest::Client::new()),
+                }
             })
             .clone()
     }
@@ -227,7 +230,10 @@ impl WebFetchTool {
     async fn fetch_via_jina_reader(&self, url: &str) -> anyhow::Result<ToolResult> {
         let jina_url = format!("{}{}", JINA_READER_BASE, url);
 
-        let client = crate::services::require_services()
+        let client = crate::services::try_get_services()
+            .ok_or_else(|| {
+                anyhow::anyhow!("web_fetch blocked: service container unavailable (fail-closed)")
+            })?
             .proxy_runtime()
             .build_client_with_timeouts("tool.web_fetch", 30, 10);
 
@@ -277,7 +283,10 @@ impl WebFetchTool {
 
         let endpoint = format!("{}/scrape", self.firecrawl.api_url.trim_end_matches('/'));
 
-        let client = crate::services::require_services()
+        let client = crate::services::try_get_services()
+            .ok_or_else(|| {
+                anyhow::anyhow!("web_fetch blocked: service container unavailable (fail-closed)")
+            })?
             .proxy_runtime()
             .build_client_with_timeouts("tool.web_fetch", 60, 10);
 
@@ -877,7 +886,7 @@ fn normalize_domain(raw: &str) -> Option<String> {
     Some(d)
 }
 
-fn extract_host(url: &str) -> anyhow::Result<String> {
+pub(crate) fn extract_host(url: &str) -> anyhow::Result<String> {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
@@ -928,7 +937,7 @@ fn host_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {
     })
 }
 
-fn is_private_or_local_host(host: &str) -> bool {
+pub(crate) fn is_private_or_local_host(host: &str) -> bool {
     let bare = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
@@ -953,7 +962,7 @@ fn is_private_or_local_host(host: &str) -> bool {
     false
 }
 
-fn validate_resolved_host_is_public(host: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_resolved_host_is_public(host: &str) -> anyhow::Result<()> {
     use std::net::ToSocketAddrs;
 
     let ips = (host, 0)

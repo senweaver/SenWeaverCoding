@@ -270,6 +270,37 @@ pub fn decode_subprocess_bytes(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
+pub async fn kill_child_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    {
+        if let Some(pid) = child.id() {
+            let mut cmd = hidden_async_command("taskkill");
+            cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            match tokio::time::timeout(std::time::Duration::from_secs(5), cmd.status()).await {
+                Ok(Ok(status)) if status.success() => {}
+                Ok(Ok(status)) => {
+                    tracing::debug!(
+                        pid,
+                        code = status.code().unwrap_or(-1),
+                        "taskkill /T did not terminate the process tree cleanly; \
+                         falling back to direct kill"
+                    );
+                }
+                Ok(Err(err)) => {
+                    tracing::debug!(pid, error = %err, "taskkill spawn failed; falling back to direct kill");
+                }
+                Err(_) => {
+                    tracing::debug!(pid, "taskkill timed out; falling back to direct kill");
+                }
+            }
+        }
+    }
+    let _ = child.start_kill();
+}
+
 pub fn describe_panic(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
@@ -306,7 +337,15 @@ pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
         let _ = std::fs::set_permissions(&tmp, meta.permissions());
     }
     match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                if let Ok(dir_handle) = std::fs::File::open(&dir) {
+                    let _ = dir_handle.sync_all();
+                }
+            }
+            Ok(())
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)

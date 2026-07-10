@@ -99,11 +99,17 @@ export function selectPlanCardExecutionState(
   return 'executing'
 }
 
-export function selectActiveExecutingPlan(
-  messages: UIMessage[] | undefined,
+type ActivePlanResult = { card: PlanCardMsg; state: PlanExecutionState } | null
+
+// Memoize by the messages array reference so the O(n) tail scan runs at most once
+// per (messages, chatState) instead of on every zustand set() (many of which only
+// touch streamingText and leave the messages array reference unchanged).
+const activePlanCache = new WeakMap<UIMessage[], Map<string, ActivePlanResult>>()
+
+function computeActiveExecutingPlan(
+  messages: UIMessage[],
   chatState?: ChatState,
-): { card: PlanCardMsg; state: PlanExecutionState } | null {
-  if (!messages) return null
+): ActivePlanResult {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (m && m.type === 'plan_card') {
@@ -111,9 +117,27 @@ export function selectActiveExecutingPlan(
       if (state === 'executing' || state === 'incomplete_run') {
         return { card: m, state }
       }
-
       return null
     }
   }
   return null
+}
+
+export function selectActiveExecutingPlan(
+  messages: UIMessage[] | undefined,
+  chatState?: ChatState,
+): ActivePlanResult {
+  if (!messages) return null
+  const key = chatState ?? '__undef__'
+  let inner = activePlanCache.get(messages)
+  if (inner) {
+    const cached = inner.get(key)
+    if (cached !== undefined) return cached
+  } else {
+    inner = new Map()
+    activePlanCache.set(messages, inner)
+  }
+  const result = computeActiveExecutingPlan(messages, chatState)
+  inner.set(key, result)
+  return result
 }

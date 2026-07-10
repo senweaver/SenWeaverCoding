@@ -421,6 +421,60 @@ impl TaskQueue {
         count
     }
 
+    pub fn reclaim_stale_running(&self, max_running: Duration) -> usize {
+        let cutoff = Utc::now() - chrono::Duration::from_std(max_running).unwrap_or_default();
+        let mut requeues: Vec<(String, PrioritizedTask)> = Vec::new();
+        let mut count = 0;
+        {
+            let mut tasks = self.tasks.write();
+            for task in tasks.values_mut() {
+                if task.status != TaskStatus::Running {
+                    continue;
+                }
+                let stale = task.claimed_at.map(|at| at < cutoff).unwrap_or(true);
+                if !stale {
+                    continue;
+                }
+                count += 1;
+                if task.can_retry() {
+                    warn!(
+                        task_id = %task.id,
+                        claimed_by = task.claimed_by.as_deref().unwrap_or("unknown"),
+                        "Running task exceeded max runtime; reclaiming for retry"
+                    );
+                    task.status = TaskStatus::Queued;
+                    task.claimed_by = None;
+                    task.claimed_at = None;
+                    task.error = Some("reclaimed: executor did not report a result".to_string());
+                    requeues.push((
+                        task.required_capability.clone(),
+                        PrioritizedTask {
+                            task_id: task.id.clone(),
+                            priority: task.priority,
+                            submitted_at: task.submitted_at,
+                        },
+                    ));
+                } else {
+                    warn!(
+                        task_id = %task.id,
+                        claimed_by = task.claimed_by.as_deref().unwrap_or("unknown"),
+                        "Running task exceeded max runtime with no retries left; marking failed"
+                    );
+                    task.status = TaskStatus::Failed;
+                    task.error = Some("reclaimed: executor did not report a result".to_string());
+                    task.finished_at = Some(Utc::now());
+                }
+            }
+        }
+        if !requeues.is_empty() {
+            let mut index = self.capability_index.write();
+            for (capability, prioritized) in requeues {
+                index.entry(capability).or_default().push(prioritized);
+            }
+        }
+        count
+    }
+
     pub fn status_summary(&self) -> HashMap<String, usize> {
         let mut summary = HashMap::new();
         for task in self.tasks.read().values() {

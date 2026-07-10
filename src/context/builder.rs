@@ -269,7 +269,22 @@ impl ContextBuilder {
         };
 
         let rag_hits = match (self.rag_source.as_ref(), self.rag_query.as_ref()) {
-            (Some(rag), Some(q)) => rag.retrieve(q, self.rag_top_k).await,
+            (Some(rag), Some(q)) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    rag.retrieve(q, self.rag_top_k),
+                )
+                .await
+                {
+                    Ok(hits) => hits,
+                    Err(_) => {
+                        tracing::warn!(
+                            "RAG retrieval timed out after 30s; continuing without RAG context"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
             _ => Vec::new(),
         };
 
@@ -327,13 +342,22 @@ pub fn empty_open_files_source() -> Arc<dyn OpenFilesSource> {
 
 pub struct FocusPathRegistry;
 
-static FOCUS_REGISTRY: Lazy<RwLock<Vec<PathBuf>>> = Lazy::new(|| RwLock::new(Vec::new()));
+// Keyed per session so one session's focus files never leak into another's
+// context. Falls back to a shared key only when there is no active session.
+static FOCUS_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, Vec<PathBuf>>>> =
+    Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
 
 impl FocusPathRegistry {
+    fn session_key() -> String {
+        crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .unwrap_or_else(|| "__no_session__".to_string())
+    }
 
     pub fn set(paths: Vec<PathBuf>) {
+        let key = Self::session_key();
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
-            *guard = paths;
+            guard.insert(key, paths);
         }
     }
 
@@ -341,10 +365,12 @@ impl FocusPathRegistry {
         if paths.is_empty() {
             return;
         }
+        let key = Self::session_key();
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
+            let entry = guard.entry(key).or_default();
             for p in paths {
-                if !guard.contains(p) {
-                    guard.push(p.clone());
+                if !entry.contains(p) {
+                    entry.push(p.clone());
                 }
             }
         }
@@ -352,15 +378,18 @@ impl FocusPathRegistry {
 
     #[must_use]
     pub fn current() -> Vec<PathBuf> {
+        let key = Self::session_key();
         FOCUS_REGISTRY
             .read()
-            .map(|g| g.clone())
+            .ok()
+            .and_then(|g| g.get(&key).cloned())
             .unwrap_or_default()
     }
 
     pub fn clear() {
+        let key = Self::session_key();
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
-            guard.clear();
+            guard.remove(&key);
         }
     }
 }

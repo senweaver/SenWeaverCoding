@@ -2382,6 +2382,20 @@ fn dock_thread_is_main() -> bool {
         .is_some_and(|id| *id == std::thread::current().id())
 }
 
+fn blocking_recv_without_starving_runtime<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    timeout: Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            tokio::task::block_in_place(|| rx.recv_timeout(timeout))
+        }
+        _ => rx.recv_timeout(timeout),
+    }
+}
+
 fn with_dock_on_main_thread<F>(app: &AppHandle, label: &'static str, f: F) -> Result<(), String>
 where
     F: FnOnce(&AppHandle) -> Result<(), String> + Send + 'static,
@@ -2395,7 +2409,7 @@ where
         let _ = tx.send(f(&app_for_main));
     })
     .map_err(|e| format!("schedule {label} on the main thread failed: {e}"))?;
-    rx.recv_timeout(Duration::from_secs(15))
+    blocking_recv_without_starving_runtime(&rx, Duration::from_secs(15))
         .map_err(|e| format!("await {label} result failed: {e}"))?
 }
 
@@ -2434,8 +2448,7 @@ fn ensure_dock_webview(
     .map_err(|e| {
         format!("schedule add_child({DOCK_WEBVIEW_LABEL}) on the main thread failed: {e}")
     })?;
-    add_rx
-        .recv_timeout(Duration::from_secs(15))
+    blocking_recv_without_starving_runtime(&add_rx, Duration::from_secs(15))
         .map_err(|e| format!("await add_child({DOCK_WEBVIEW_LABEL}) result failed: {e}"))??;
 
     state.set_dock_visible(true);

@@ -876,6 +876,12 @@ button, input, textarea, select, a, [role="button"] {
 .animate-spin { animation: spin 1s linear infinite; }
 .animate-pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
 
+@keyframes minimal-marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.animate-minimal-marquee { animation: minimal-marquee 12s linear infinite; }
+
 @keyframes browser-dock-pulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-brand) 0%, transparent), var(--shadow-dropdown); }
   50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 55%, transparent), var(--shadow-dropdown); }

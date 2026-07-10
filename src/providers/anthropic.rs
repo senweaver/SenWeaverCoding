@@ -648,14 +648,18 @@ impl AnthropicProvider {
                         });
                     }
 
-                    let same_role = native_messages.last().is_some_and(|m| m.role == "user");
-                    if let (true, Some(last)) = (same_role, native_messages.last_mut()) {
-                        last.content.extend(content_blocks);
-                    } else {
-                        native_messages.push(NativeMessage {
-                            role: "user".to_string(),
-                            content: content_blocks,
-                        });
+                    // Never emit a user message with an empty content array:
+                    // Anthropic rejects it with a 400 (`content: field required`).
+                    if !content_blocks.is_empty() {
+                        let same_role = native_messages.last().is_some_and(|m| m.role == "user");
+                        if let (true, Some(last)) = (same_role, native_messages.last_mut()) {
+                            last.content.extend(content_blocks);
+                        } else {
+                            native_messages.push(NativeMessage {
+                                role: "user".to_string(),
+                                content: content_blocks,
+                            });
+                        }
                     }
                 }
             }
@@ -808,6 +812,7 @@ impl AnthropicProvider {
         let mut tool_name: Option<String> = None;
         let mut tool_input_json = String::new();
         let mut made_progress = false;
+        let mut usage_acc = AnthropicStreamUsage::default();
 
         loop {
             let line = match lines.next_line().await {
@@ -844,6 +849,16 @@ impl AnthropicProvider {
                 .unwrap_or_default();
 
             match event_type {
+                "message_start" => {
+                    if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
+                        usage_acc.merge(usage);
+                    }
+                }
+                "message_delta" => {
+                    if let Some(usage) = event.get("usage") {
+                        usage_acc.merge(usage);
+                    }
+                }
                 "content_block_start" => {
                     if let Some(block) = event.get("content_block") {
                         let block_type = block
@@ -954,18 +969,23 @@ impl AnthropicProvider {
                 "message_stop" => {
                     flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx)
                         .await;
+                    if let Some(usage) = usage_acc.into_token_usage() {
+                        let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                    }
                     let _ = tx.send(Ok(StreamEvent::Final)).await;
                     return;
                 }
                 "error" => {
-                    flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx)
-                        .await;
+                    // Deliberately do NOT flush any half-streamed tool_use here: the
+                    // stream errored mid-response, so its arguments are incomplete
+                    // and must not be executed. The pending state is simply dropped.
                     let msg = event
                         .get("error")
                         .and_then(|e| e.get("message"))
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown streaming error");
-                    let _ = tx.send(Err(StreamError::Provider(msg.to_string()))).await;
+                    let sanitized = super::sanitize_api_error(msg);
+                    let _ = tx.send(Err(StreamError::Provider(sanitized))).await;
                     return;
                 }
                 _ => {}
@@ -988,7 +1008,57 @@ impl AnthropicProvider {
                 .await;
             return;
         }
+        if let Some(usage) = usage_acc.into_token_usage() {
+            let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+        }
         let _ = tx.send(Ok(StreamEvent::Final)).await;
+    }
+}
+
+#[derive(Debug, Default)]
+struct AnthropicStreamUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+}
+
+impl AnthropicStreamUsage {
+    fn merge(&mut self, usage: &serde_json::Value) {
+        if let Some(v) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+            self.input_tokens = Some(v);
+        }
+        if let Some(v) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+            self.output_tokens = Some(v);
+        }
+        if let Some(v) = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            self.cache_read_input_tokens = Some(v);
+        }
+        if let Some(v) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            self.cache_creation_input_tokens = Some(v);
+        }
+    }
+
+    fn into_token_usage(self) -> Option<TokenUsage> {
+        if self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.cache_read_input_tokens.is_none()
+            && self.cache_creation_input_tokens.is_none()
+        {
+            return None;
+        }
+        Some(TokenUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self.cache_read_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+        })
     }
 }
 
@@ -1037,6 +1107,13 @@ async fn flush_pending_tool_call(
     );
     let name = tool_name.take().unwrap_or_default();
     let input = std::mem::take(tool_input_json);
+    if name.is_empty() {
+        tracing::warn!(
+            target: "provider.stream",
+            "discarding anthropic tool_use flush with empty name (malformed/incomplete block)"
+        );
+        return;
+    }
     let safe_input = sanitize_tool_call_arguments(input);
     let _ = tx
         .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
@@ -1451,8 +1528,9 @@ impl Provider for AnthropicProvider {
                     .text()
                     .await
                     .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                let sanitized = super::sanitize_api_error(&error);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!("{status}: {error}"))))
+                    .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
                     .await;
                 return;
             }

@@ -113,8 +113,21 @@ pub async fn apply_suggestion(
     {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    tokio::fs::write(&suggestion.file_path, outcome.applied.as_bytes())
+    // Conflict guard: the diff was generated against `source`; abort if the file
+    // changed on disk in the meantime rather than silently clobbering it.
+    if let Ok(current) = tokio::fs::read_to_string(&suggestion.file_path).await {
+        if current != source {
+            return Err(anyhow::anyhow!(
+                "file {} changed on disk during NEP apply; aborting to avoid overwriting concurrent changes",
+                suggestion.file_path.display()
+            ));
+        }
+    }
+    let write_path = suggestion.file_path.clone();
+    let write_bytes = outcome.applied.clone().into_bytes();
+    tokio::task::spawn_blocking(move || crate::util::atomic_write(&write_path, &write_bytes))
         .await
+        .map_err(|e| anyhow::anyhow!("NEP apply write task join failed: {e}"))?
         .map_err(|e| {
             anyhow::anyhow!(
                 "failed to write {}: {e}",

@@ -26,6 +26,11 @@ type DebugState = {
   load: () => Promise<void>
   selectSubmode: (sessionId: string, id: string) => void
   setParam: (sessionId: string, submodeId: string, key: string, value: unknown) => void
+  applyServerConfirmed: (
+    sessionId: string,
+    submodeId: string,
+    params: Record<string, unknown>,
+  ) => void
 }
 
 function defaultsFor(submode: DebugSubmode): Record<string, unknown> {
@@ -78,6 +83,28 @@ export const useDebugStore = create<DebugState>((set, get) => ({
           [sessionId]: {
             selectedSubmodeId: id,
             paramsBySubmode: { ...session.paramsBySubmode, [id]: params },
+          },
+        },
+      }
+    })
+  },
+
+  applyServerConfirmed: (sessionId, submodeId, params) => {
+    if (!sessionId || !submodeId) return
+    set((state) => {
+      const session = state.sessions[sessionId] ?? EMPTY_SESSION_STATE
+      return {
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            selectedSubmodeId: submodeId,
+            paramsBySubmode: {
+              ...session.paramsBySubmode,
+              [submodeId]: {
+                ...(session.paramsBySubmode[submodeId] ?? {}),
+                ...params,
+              },
+            },
           },
         },
       }

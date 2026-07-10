@@ -75,15 +75,24 @@ impl SessionRunGuard {
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
+
+    /// Whether this guard actually claimed the session's run slot (i.e. the
+    /// session was not already running when this guard was created).
+    pub fn was_inserted(&self) -> bool {
+        self.was_inserted
+    }
 }
 
 impl Drop for SessionRunGuard {
     fn drop(&mut self) {
-        if let Some(manager) = crate::session::global_workspace_resources() {
-            manager.release_all_for_session(&self.session_id);
-        }
+        // A nested/duplicate guard (was_inserted == false) does NOT own this
+        // session's run: releasing its resource locks here would strip the
+        // still-running outer turn of the file/shell/browser locks it holds.
         if !self.was_inserted {
             return;
+        }
+        if let Some(manager) = crate::session::global_workspace_resources() {
+            manager.release_all_for_session(&self.session_id);
         }
         let removed = {
             let mut guard = self.registry.inner.write();

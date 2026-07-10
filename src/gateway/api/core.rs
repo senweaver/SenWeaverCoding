@@ -2008,6 +2008,19 @@ fn message_entry(
                 );
             }
         }
+        if let Some(display) = msg
+            .metadata
+            .get("display_content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "displayContent".to_string(),
+                    serde_json::Value::String(display.to_string()),
+                );
+            }
+        }
     }
     if let Some(design_ref) = msg
         .metadata
@@ -2064,11 +2077,18 @@ fn message_entry_with_tombstone(
     msg: &crate::providers::ChatMessage,
     fallback_ts: &str,
     tombstoned: bool,
+    user_message_index: Option<usize>,
 ) -> serde_json::Value {
     let mut v = message_entry(session_id, index, msg, fallback_ts);
-    if tombstoned {
-        if let Some(obj) = v.as_object_mut() {
+    if let Some(obj) = v.as_object_mut() {
+        if tombstoned {
             obj.insert("tombstoned".to_string(), serde_json::Value::Bool(true));
+        }
+        if let Some(umi) = user_message_index {
+            obj.insert(
+                "userMessageIndex".to_string(),
+                serde_json::Value::from(umi as u64),
+            );
         }
     }
     v
@@ -2252,26 +2272,47 @@ pub async fn handle_api_session_messages(
         .unwrap_or_else(|_| (Vec::new(), 0, 0, chrono::Utc::now().to_rfc3339()))
     };
 
+    let base_user_index: usize = match loaded.first().map(|m| m.id) {
+        Some(first_row_id) => {
+            let backend_arc = std::sync::Arc::clone(backend);
+            let session_key_owned = session_key.clone();
+            tokio::task::spawn_blocking(move || {
+                backend_arc.count_live_user_messages_before_id(&session_key_owned, first_row_id)
+            })
+            .await
+            .unwrap_or(0)
+        }
+        None => 0,
+    };
+
     let messages: Vec<serde_json::Value> = {
         let id_for_map = id.clone();
         let last_activity_for_map = last_activity.clone();
         tokio::task::spawn_blocking(move || {
-            loaded
+            let mut running_user_index = base_user_index;
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            for (i, lm) in loaded
                 .iter()
                 .enumerate()
                 .map(|(i, lm)| (first_index + i, lm))
                 .filter(|(_, lm)| !lm.hidden_for_ui)
                 .filter(|(_, lm)| !(lm.message.role == "system" && lm.message.content.is_empty()))
-                .map(|(i, lm)| {
-                    message_entry_with_tombstone(
-                        &id_for_map,
-                        i,
-                        &lm.message,
-                        &last_activity_for_map,
-                        lm.tombstoned_at.is_some(),
-                    )
-                })
-                .collect()
+            {
+                let is_live_user = lm.message.role == "user" && lm.tombstoned_at.is_none();
+                let user_message_index = is_live_user.then_some(running_user_index);
+                out.push(message_entry_with_tombstone(
+                    &id_for_map,
+                    i,
+                    &lm.message,
+                    &last_activity_for_map,
+                    lm.tombstoned_at.is_some(),
+                    user_message_index,
+                ));
+                if is_live_user {
+                    running_user_index += 1;
+                }
+            }
+            out
         })
         .await
         .unwrap_or_default()

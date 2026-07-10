@@ -314,8 +314,6 @@ pub struct ParallelExecutor {
     metrics: Arc<ExecutorMetrics>,
 
     worker_count: usize,
-
-    per_worker_cap: usize,
 }
 
 impl Drop for ParallelExecutor {
@@ -354,8 +352,6 @@ impl ParallelExecutor {
         let metrics = Arc::new(ExecutorMetrics::default());
         let shutdown = CancellationToken::new();
 
-        let per_worker_cap = (config.queue_capacity / worker_count.max(1)).max(16);
-
         let executor = Self {
             injector: injector.clone(),
             stealers: stealers.clone(),
@@ -368,7 +364,6 @@ impl ParallelExecutor {
             shutdown: shutdown.clone(),
             metrics: metrics.clone(),
             worker_count,
-            per_worker_cap,
             config,
         };
 
@@ -460,13 +455,7 @@ impl ParallelExecutor {
         let worker_idx =
             self.next_worker.fetch_add(1, Ordering::Relaxed) % self.worker_count.max(1);
 
-        let local_len = self.stealers[worker_idx].len();
-        if local_len >= self.per_worker_cap {
-            self.injector.push(queued);
-        } else {
-
-            self.injector.push(queued);
-        }
+        self.injector.push(queued);
 
         self.queued_count.fetch_add(1, Ordering::Relaxed);
         self.metrics.spawned.fetch_add(1, Ordering::Relaxed);

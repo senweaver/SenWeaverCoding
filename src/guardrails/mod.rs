@@ -407,15 +407,49 @@ impl GuardrailsEngine {
         if pattern == "*" {
             return true;
         }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return name.starts_with(prefix);
+        if !pattern.contains(['*', '?', '[']) {
+            return pattern == name;
         }
-        if let Some(suffix) = pattern.strip_prefix('*') {
-            return name.ends_with(suffix);
+        {
+            let cache = GLOB_MATCHER_CACHE.read();
+            if let Some(cached) = cache.get(pattern) {
+                return match cached {
+                    Some(matcher) => matcher.is_match(name),
+                    None => pattern == name,
+                };
+            }
         }
-        pattern == name
+        let compiled = match globset::GlobBuilder::new(pattern)
+            .literal_separator(false)
+            .build()
+        {
+            Ok(glob) => Some(glob.compile_matcher()),
+            Err(error) => {
+                tracing::warn!(
+                    target: "guardrails",
+                    pattern,
+                    %error,
+                    "invalid guardrail tool pattern; treating as exact match"
+                );
+                None
+            }
+        };
+        let result = match &compiled {
+            Some(matcher) => matcher.is_match(name),
+            None => pattern == name,
+        };
+        let mut cache = GLOB_MATCHER_CACHE.write();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(pattern.to_string(), compiled);
+        result
     }
 }
+
+static GLOB_MATCHER_CACHE: std::sync::LazyLock<
+    RwLock<HashMap<String, Option<globset::GlobMatcher>>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 static GLOBAL_GUARDRAILS: std::sync::LazyLock<RwLock<Option<GuardrailsEngine>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));

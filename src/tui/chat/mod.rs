@@ -4,4 +4,3 @@
 
 pub mod message_reconciler;
 pub mod render_cache;
-pub mod view;

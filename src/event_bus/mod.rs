@@ -2,68 +2,32 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
-use crate::event_bus::types::{AgentId, Event, EventHistory, EventId, EventTarget};
+use crate::event_bus::types::{Event, EventHistory, EventId, EventTarget};
 
 pub mod backpressure;
 pub mod integration;
 pub mod types;
 pub use backpressure::BoundedSubscriber;
 
-const GLOBAL_CHANNEL_CAPACITY: usize = 1024;
-
-const AGENT_CHANNEL_CAPACITY: usize = 256;
+// The global channel multiplexes high-frequency Broadcast/Tool events together
+// with infrequent but delivery-critical targeted Agent(_) task assignments. A
+// small buffer let a burst of broadcast events evict a pending AgentRequest on a
+// lagging subscriber, so the target agent never received its task. Size the buffer
+// generously so targeted events are not dropped in practice.
+const GLOBAL_CHANNEL_CAPACITY: usize = 8192;
 
 const DEFAULT_HISTORY_SIZE: usize = 1000;
-
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    let value_chars: Vec<char> = value.chars().collect();
-    glob_match_dp(&pattern_chars, &value_chars)
-}
-
-fn glob_match_dp(pattern: &[char], value: &[char]) -> bool {
-    let plen = pattern.len();
-    let vlen = value.len();
-    let mut prev = vec![false; vlen + 1];
-    let mut curr = vec![false; vlen + 1];
-    prev[0] = true;
-    for pi in 1..=plen {
-        if pattern[pi - 1] == '*' {
-            curr[0] = prev[0];
-            for vi in 1..=vlen {
-                curr[vi] = prev[vi] || curr[vi - 1];
-            }
-        } else {
-            curr[0] = false;
-            for vi in 1..=vlen {
-                curr[vi] = prev[vi - 1]
-                    && (pattern[pi - 1] == '?' || pattern[pi - 1] == value[vi - 1]);
-            }
-        }
-        std::mem::swap(&mut prev, &mut curr);
-        for v in curr.iter_mut() {
-            *v = false;
-        }
-    }
-    prev[vlen]
-}
 
 #[derive(Debug)]
 pub struct EventBus {
 
     global_sender: broadcast::Sender<Event>,
-
-    agent_channels: RwLock<HashMap<AgentId, broadcast::Sender<Event>>>,
 
     history: RwLock<EventHistory>,
 }
@@ -75,7 +39,6 @@ impl EventBus {
 
         Self {
             global_sender,
-            agent_channels: RwLock::new(HashMap::new()),
             history: RwLock::new(EventHistory::new(DEFAULT_HISTORY_SIZE)),
         }
     }
@@ -85,7 +48,6 @@ impl EventBus {
 
         Self {
             global_sender,
-            agent_channels: RwLock::new(HashMap::new()),
             history: RwLock::new(EventHistory::new(history_size)),
         }
     }
@@ -100,52 +62,12 @@ impl EventBus {
         self.history.write().push(event.clone());
 
         match &event.target {
-            EventTarget::Agent(agent_id) => {
-
-                let channels = self.agent_channels.read();
-                if let Some(sender) = channels.get(agent_id) {
-                    if let Err(_e) = sender.send(event.clone()) {
-                        warn!(agent_id = %agent_id, "failed to send to agent channel (receiver dropped)");
-                    }
-                }
-                drop(channels);
-
-                let _ = self.global_sender.send(event);
-            }
-            EventTarget::Broadcast => {
-
-                if let Err(_e) = self.global_sender.send(event.clone()) {
-                    warn!("failed to broadcast to global channel (no receivers)");
-                }
-
-                let channels = self.agent_channels.read();
-                for (agent_id, sender) in channels.iter() {
-                    if let Err(_e) = sender.send(event.clone()) {
-                        warn!(agent_id = %agent_id, "failed to duplicate broadcast to agent (receiver dropped)");
-                    }
-                }
-            }
-            EventTarget::System => {
-
+            EventTarget::Broadcast | EventTarget::System => {
                 if let Err(_e) = self.global_sender.send(event) {
-                    warn!("failed to send system event to global channel (no receivers)");
+                    warn!("failed to send event to global channel (no receivers)");
                 }
             }
-            EventTarget::Pattern(pattern) => {
-
-                let channels = self.agent_channels.read();
-                let mut matched = 0usize;
-                for (agent_id, sender) in channels.iter() {
-                    if pattern_matches(pattern, agent_id) {
-                        if let Err(_e) = sender.send(event.clone()) {
-                            warn!(agent_id = %agent_id, "failed to send pattern-matched event (receiver dropped)");
-                        }
-                        matched += 1;
-                    }
-                }
-                drop(channels);
-                debug!(pattern = %pattern, matched, "pattern-based routing complete");
-
+            EventTarget::Agent(_) | EventTarget::Pattern(_) => {
                 let _ = self.global_sender.send(event);
             }
         }
@@ -153,40 +75,6 @@ impl EventBus {
 
     pub fn subscribe_all(&self) -> broadcast::Receiver<Event> {
         self.global_sender.subscribe()
-    }
-
-    pub fn subscribe_agent(&self, agent_id: AgentId) -> broadcast::Receiver<Event> {
-        let mut channels = self.agent_channels.write();
-        let sender = channels.entry(agent_id.clone()).or_insert_with(|| {
-            let (sender, _rx) = broadcast::channel(AGENT_CHANNEL_CAPACITY);
-            debug!(agent_id = %agent_id, "created agent event channel");
-            sender
-        });
-
-        sender.subscribe()
-    }
-
-    pub fn unsubscribe_agent(&self, agent_id: &AgentId) {
-        let mut channels = self.agent_channels.write();
-        channels.remove(agent_id);
-        debug!(agent_id = %agent_id, "removed agent event channel");
-    }
-
-    pub fn prune_orphaned_channels(&self) {
-        let mut channels = self.agent_channels.write();
-        let before = channels.len();
-        channels.retain(|id, sender| {
-            if sender.receiver_count() == 0 {
-                debug!(agent_id = %id, "pruning orphaned agent channel");
-                false
-            } else {
-                true
-            }
-        });
-        let pruned = before - channels.len();
-        if pruned > 0 {
-            debug!(pruned, "pruned orphaned agent event channels");
-        }
     }
 
     pub fn history(&self, limit: Option<usize>) -> Vec<Event> {
@@ -199,19 +87,11 @@ impl EventBus {
 
     pub fn clear_history(&self) {
         self.history.write().clear();
-        debug!("event history cleared");
+        trace!("event history cleared");
     }
 
     pub fn history_len(&self) -> usize {
         self.history.read().len()
-    }
-
-    pub fn has_agent_channel(&self, agent_id: &AgentId) -> bool {
-        self.agent_channels.read().contains_key(agent_id)
-    }
-
-    pub fn agent_channel_count(&self) -> usize {
-        self.agent_channels.read().len()
     }
 
     pub fn get_event(&self, event_id: EventId) -> Option<Event> {
@@ -261,14 +141,6 @@ impl EventBusHandle {
 
     pub fn subscribe_all(&self) -> broadcast::Receiver<Event> {
         self.inner.subscribe_all()
-    }
-
-    pub fn subscribe_agent(&self, agent_id: AgentId) -> broadcast::Receiver<Event> {
-        self.inner.subscribe_agent(agent_id)
-    }
-
-    pub fn unsubscribe_agent(&self, agent_id: &AgentId) {
-        self.inner.unsubscribe_agent(agent_id);
     }
 
     pub fn history(&self, limit: Option<usize>) -> Vec<Event> {

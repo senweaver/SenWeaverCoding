@@ -44,7 +44,8 @@ impl AuthService {
     pub fn new(state_dir: &Path, encrypt_secrets: bool) -> Self {
         Self {
             store: AuthProfilesStore::new(state_dir, encrypt_secrets),
-            client: reqwest::Client::new(),
+            client: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("auth.oauth", 60, 15),
         }
     }
 

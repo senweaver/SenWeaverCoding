@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
+const MAX_BUCKET_WAIT: Duration = Duration::from_secs(120);
+
 #[derive(Debug)]
 pub struct TokenBucket {
     capacity: f64,
@@ -71,9 +73,33 @@ impl TokenBucket {
     }
 
     pub async fn wait(&mut self, n: f64) {
+        if !n.is_finite() || n <= 0.0 {
+            return;
+        }
+        if self.try_acquire(n) {
+            return;
+        }
+        if n > self.capacity || self.refill_per_sec <= 0.0 {
+            tracing::warn!(
+                requested = n,
+                capacity = self.capacity,
+                refill_per_sec = self.refill_per_sec,
+                "token bucket can never satisfy request; proceeding without acquiring"
+            );
+            return;
+        }
+        let start = Instant::now();
         loop {
             let eta = self.eta_for(n);
             if eta.is_zero() && self.try_acquire(n) {
+                return;
+            }
+            if start.elapsed() >= MAX_BUCKET_WAIT {
+                tracing::warn!(
+                    requested = n,
+                    waited_secs = start.elapsed().as_secs(),
+                    "token bucket wait exceeded upper bound; proceeding without acquiring"
+                );
                 return;
             }
             tokio::time::sleep(eta.min(Duration::from_secs(1))).await;
@@ -120,7 +146,23 @@ impl<K: Eq + Hash + Clone> RateLimiterMap<K> {
     }
 
     pub async fn wait(&self, key: &K, n: f64) {
+        if !n.is_finite() || n <= 0.0 {
+            return;
+        }
         let b = self.get_or_create(key);
+        if b.lock().try_acquire(n) {
+            return;
+        }
+        if n > self.capacity || self.refill_per_sec <= 0.0 {
+            tracing::warn!(
+                requested = n,
+                capacity = self.capacity,
+                refill_per_sec = self.refill_per_sec,
+                "token bucket can never satisfy request; proceeding without acquiring"
+            );
+            return;
+        }
+        let start = Instant::now();
         loop {
             let eta = { b.lock().eta_for(n) };
             if eta.is_zero() {
@@ -128,6 +170,14 @@ impl<K: Eq + Hash + Clone> RateLimiterMap<K> {
                 if g.try_acquire(n) {
                     return;
                 }
+            }
+            if start.elapsed() >= MAX_BUCKET_WAIT {
+                tracing::warn!(
+                    requested = n,
+                    waited_secs = start.elapsed().as_secs(),
+                    "token bucket wait exceeded upper bound; proceeding without acquiring"
+                );
+                return;
             }
             tokio::time::sleep(eta.min(Duration::from_secs(1))).await;
         }

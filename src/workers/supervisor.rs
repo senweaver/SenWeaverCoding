@@ -25,10 +25,23 @@ fn generate_worker_id() -> String {
     suffix
 }
 
+const MAX_WORKERS_PER_PARENT: usize = 8;
+
+fn max_global_workers() -> usize {
+    crate::util::get_runtime_var("SEN_MAX_GLOBAL_WORKERS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(32)
+}
+
 pub struct WorkerSupervisor {
     workers: DashMap<String, Arc<WorkerHandle>>,
 
     workspace_root: PathBuf,
+
+    // Serializes admission (cap check + spawn/register) so concurrent
+    // spawn_workers calls cannot both pass the check and blow past the caps.
+    admission_lock: parking_lot::Mutex<()>,
 }
 
 impl WorkerSupervisor {
@@ -36,6 +49,7 @@ impl WorkerSupervisor {
         Self {
             workers: DashMap::new(),
             workspace_root,
+            admission_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -109,6 +123,55 @@ impl WorkerSupervisor {
                 h.parent_session_id == parent_session_id && !h.status().is_terminal()
             })
             .count()
+    }
+
+    pub fn active_count_total(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|e| !e.value().status().is_terminal())
+            .count()
+    }
+
+    /// Atomically admits a batch of workers against the per-parent and global
+    /// concurrency caps, then spawns them. Because `spawn` registers each handle
+    /// synchronously while the admission lock is held, the counts observed here
+    /// stay accurate across concurrent callers (no TOCTOU).
+    pub fn admit_and_spawn_batch(
+        self: &Arc<Self>,
+        specs: Vec<WorkerSpec>,
+        parent_draft_tx: Option<mpsc::Sender<DraftEvent>>,
+        ctx: WorkerRunContext,
+    ) -> Result<Vec<Arc<WorkerHandle>>, String> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent = specs[0].parent_session_id.clone();
+        let _guard = self.admission_lock.lock();
+
+        let per_parent = self.active_count_for_parent(&parent);
+        if per_parent + specs.len() > MAX_WORKERS_PER_PARENT {
+            return Err(format!(
+                "worker quota exceeded: {per_parent} workers already active for this session and \
+                 {} more requested (per-session limit {MAX_WORKERS_PER_PARENT}); wait for running \
+                 workers to finish or cancel them first",
+                specs.len()
+            ));
+        }
+        let global = self.active_count_total();
+        let global_cap = max_global_workers();
+        if global + specs.len() > global_cap {
+            return Err(format!(
+                "global worker quota exceeded: {global} workers active process-wide and {} more \
+                 requested (global limit {global_cap}, override with SEN_MAX_GLOBAL_WORKERS)",
+                specs.len()
+            ));
+        }
+
+        let mut handles = Vec::with_capacity(specs.len());
+        for spec in specs {
+            handles.push(self.spawn(spec, parent_draft_tx.clone(), ctx.clone()));
+        }
+        Ok(handles)
     }
 
     pub fn spawn(

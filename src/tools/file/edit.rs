@@ -37,9 +37,10 @@ pub struct FileEditTool {
 
 impl FileEditTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        let ops_applier = Arc::new(OpsApplier::default_for_shared_workspace(
-            security.workspace_root_handle(),
-        ));
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
         Self {
             security,
             edit_history: None,
@@ -431,16 +432,8 @@ impl FileEditTool {
         };
 
         let scope_range: Option<std::ops::Range<usize>> = if let Some(ref name) = scope_name {
-            // locate_named_scope reads the file from disk; run it on the blocking pool so the
-            // async worker thread is not stalled on I/O for scoped edits.
-            let target = resolved_target.to_path_buf();
-            let name_owned = name.clone();
-            let range = tokio::task::spawn_blocking(move || {
-                crate::code_intel::outline::locate_named_scope(&target, &name_owned)
-            })
-            .await
-            .ok()
-            .flatten();
+            let range = crate::code_intel::outline::locate_named_scope_in(&content, name)
+                .map(|r| r.start.min(content.len())..r.end.min(content.len()));
             if range.is_none() {
                 tracing::warn!(
                     scope = %name,
@@ -532,7 +525,12 @@ impl FileEditTool {
             out
         };
 
-        let replaced_count = if replace_all { hits.len() } else { 1 };
+        let replaced_count = if replace_all {
+            // `hits` is capped at 4 for the ambiguity check; count the real total.
+            finder.find_iter(&bytes[search_range.clone()]).count()
+        } else {
+            1
+        };
 
         match self
             .dispatch_full_file_rewrite(resolved_target, &content, &new_content)

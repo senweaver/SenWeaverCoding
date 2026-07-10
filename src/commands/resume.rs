@@ -15,63 +15,91 @@ inventory::submit!(StaticSlashCommand {
     handler: make_handler!(handle_resume),
 });
 
+pub fn list_unified_sessions(workspace_root: &std::path::Path) -> Vec<(String, std::time::SystemTime)> {
+    let sessions_root = workspace_root.join(".sen").join("sessions");
+    let mut sessions: Vec<(String, std::time::SystemTime)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&sessions_root) else {
+        return sessions;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let mut newest: Option<std::time::SystemTime> = None;
+        if let Ok(files) = std::fs::read_dir(&path) {
+            for file in files.flatten() {
+                if let Ok(modified) = file.metadata().and_then(|m| m.modified()) {
+                    if newest.is_none_or(|current| modified > current) {
+                        newest = Some(modified);
+                    }
+                }
+            }
+        }
+        let Some(modified) = newest else { continue };
+        sessions.push((id, modified));
+    }
+    sessions.sort_by(|a, b| b.1.cmp(&a.1));
+    sessions
+}
+
+pub fn unified_session_exists(workspace_root: &std::path::Path, id: &str) -> bool {
+    if id.is_empty() || id.contains(['/', '\\', '.']) {
+        return false;
+    }
+    workspace_root
+        .join(".sen")
+        .join("sessions")
+        .join(id)
+        .is_dir()
+}
+
+fn format_age(modified: std::time::SystemTime) -> String {
+    match modified.elapsed() {
+        Ok(age) => {
+            let mins = age.as_secs() / 60;
+            if mins < 60 {
+                format!("{mins}m ago")
+            } else if mins < 60 * 24 {
+                format!("{}h {}m ago", mins / 60, mins % 60)
+            } else {
+                format!("{}d ago", mins / (60 * 24))
+            }
+        }
+        Err(_) => "just now".to_string(),
+    }
+}
+
 pub async fn handle_resume(ctx: CommandContext) -> CommandResult {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = ctx.cwd.clone();
 
     match ctx.args.first().map(|s| s.as_str()) {
         Some("list") | None => {
-
-            match crate::cli::bg::list_sessions_sync(&cwd) {
-                Ok(sessions) if sessions.is_empty() => {
-                    CommandResult::ok("No previous sessions found. Start a new session first.")
-                }
-                Ok(sessions) => {
-                    let mut lines = vec!["Available sessions (use /resume <id>):".to_string()];
-                    for s in sessions.iter().take(10) {
-                        lines.push(format!(
-                            "  {} | {} | {} | {}",
-                            s.id,
-                            s.status,
-                            s.started_at,
-                            s.cwd.display()
-                        ));
-                    }
-                    CommandResult::ok(lines.join("\n"))
-                }
-                Err(e) => CommandResult::err(format!("Failed to list sessions: {e}")),
+            let sessions = list_unified_sessions(&cwd);
+            if sessions.is_empty() {
+                return CommandResult::ok(
+                    "No previous sessions found. Start a new session first.",
+                );
             }
+            let mut lines = vec!["Available sessions (use /resume <id>):".to_string()];
+            for (id, modified) in sessions.iter().take(10) {
+                lines.push(format!("  {id}  ({})", format_age(*modified)));
+            }
+            CommandResult::ok(lines.join("\n"))
         }
         Some(id) => {
-
-            let session_file = cwd
-                .join(".senweavercoding")
-                .join("sessions")
-                .join(format!("{}.json", id));
-
-            if !session_file.exists() {
+            if !unified_session_exists(&cwd, id) {
                 return CommandResult::err(format!(
-                    "Session '{}' not found. Use /resume list to see available sessions.",
-                    id
+                    "Session '{id}' not found under .sen/sessions. Use /resume list to see available sessions.",
                 ));
             }
-
-            let state_file = cwd
-                .join(".senweavercoding")
-                .join("sessions")
-                .join(format!("{}.state.json", id));
-
-            if state_file.exists() {
-                CommandResult::ok(format!(
-                    "Ready to resume session: {}\nSession state file: {}",
-                    id,
-                    state_file.display()
-                ))
-            } else {
-                CommandResult::ok(format!(
-                    "Session '{}' found (no state file). To resume, run: sen agent --continue",
-                    id
-                ))
-            }
+            CommandResult::ok(format!(
+                "Session '{id}' found. In the TUI, /resume {id} restores it directly; \
+                 from the shell run `sen --continue` to resume the most recent session.",
+            ))
         }
     }
 }

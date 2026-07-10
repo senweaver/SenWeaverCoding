@@ -1,0 +1,209 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 SenWeaverCoding
+// Licensed under the MIT License.
+
+import { useEffect } from 'react'
+import { useSettingsStore } from '../stores/settingsStore'
+import { useSessionRunStateStore } from '../stores/sessionRunStateStore'
+import { useTabStore } from '../stores/tabStore'
+import { useProviderStore } from '../stores/providerStore'
+import { useMinimalStore } from '../stores/minimalStore'
+import { useMinimalComputerStore } from '../stores/minimalComputerStore'
+import { useMinimalRecorderStore } from '../stores/minimalRecorderStore'
+import { isTauriRuntime, subscribeServerStatus } from '../lib/desktopRuntime'
+import { getBaseUrl, setBaseUrl } from '../api/client'
+import { wsManager } from '../api/websocket'
+import {
+  MINIMAL_EVENT_ACTIVATE,
+  MINIMAL_EVENT_ACTIVE_SESSION,
+  MINIMAL_EVENT_COMPUTER_PROGRESS,
+  MINIMAL_EVENT_COMPUTER_SYNC,
+  MINIMAL_EVENT_RECORDER_PROGRESS,
+  MINIMAL_EVENT_RECORDER_SYNC,
+} from '../lib/minimalMode'
+import type {
+  MinimalActivatePayload,
+  MinimalActiveSession,
+  MinimalComputerProgress,
+  MinimalRecorderProgress,
+} from '../lib/minimalMode'
+
+export function useMinimalWindowBridge() {
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let ran = false
+    let disposed = false
+    let unlisten: (() => void) | null = null
+
+    const bootstrap = async () => {
+      if (ran) return
+      ran = true
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        try {
+          const url = await invoke<string>('get_server_url')
+          if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+            setBaseUrl(url.replace(/\/$/, ''))
+          }
+        } catch {
+
+        }
+        await useSettingsStore.getState().fetchAll().catch(() => {})
+        useSessionRunStateStore.getState().start()
+        void useProviderStore.getState().fetchProviders().catch(() => {})
+      } catch (err) {
+        console.warn('[minimal] bootstrap failed', err)
+      }
+    }
+
+    void (async () => {
+      const { listen, emit } = await import('@tauri-apps/api/event')
+      const off = await listen<MinimalActivatePayload>(MINIMAL_EVENT_ACTIVATE, (event) => {
+        const variant = event.payload?.variant === 'computer' ? 'computer' : 'code'
+        useMinimalStore.getState().setVariant(variant)
+        if (variant === 'computer') {
+          void emit(MINIMAL_EVENT_COMPUTER_SYNC).catch(() => {})
+          void emit(MINIMAL_EVENT_RECORDER_SYNC).catch(() => {})
+        }
+        void bootstrap()
+      })
+      if (disposed) off()
+      else unlisten = off
+    })()
+
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const off = await subscribeServerStatus((snap) => {
+        if (snap.state !== 'ready') return
+        const url = snap.url?.trim()
+        if (!url) return
+        const normalized = url.replace(/\/$/, '')
+        if (normalized === getBaseUrl().replace(/\/$/, '')) return
+        setBaseUrl(normalized)
+        useSessionRunStateStore.getState().stop()
+        useSessionRunStateStore.getState().start()
+        wsManager.forceReconnectAll()
+      })
+      if (disposed) off()
+      else unlisten = off
+    })()
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event')
+      const off = await listen<MinimalActiveSession | null>(MINIMAL_EVENT_ACTIVE_SESSION, (event) => {
+        const active = event.payload
+        if (!active?.id) {
+          useTabStore.setState({ activeTabId: null })
+          return
+        }
+        const { id, title } = active
+        useTabStore.setState((state) => {
+          const existing = state.tabs.find((tab) => tab.sessionId === id)
+          if (existing) {
+            const tabs =
+              title && existing.title !== title
+                ? state.tabs.map((tab) =>
+                    tab.sessionId === id ? { ...tab, title } : tab,
+                  )
+                : state.tabs
+            return { tabs, activeTabId: id }
+          }
+          return {
+            tabs: [
+              ...state.tabs,
+              {
+                sessionId: id,
+                title: title ?? 'Session',
+                type: 'session' as const,
+                status: 'idle' as const,
+              },
+            ],
+            activeTabId: id,
+          }
+        })
+      })
+      if (disposed) off()
+      else unlisten = off
+    })()
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const { listen, emit } = await import('@tauri-apps/api/event')
+      const off = await listen<MinimalComputerProgress>(
+        MINIMAL_EVENT_COMPUTER_PROGRESS,
+        (event) => {
+          if (event.payload) useMinimalComputerStore.getState().applyProgress(event.payload)
+        },
+      )
+      if (disposed) {
+        off()
+        return
+      }
+      unlisten = off
+      try {
+        await emit(MINIMAL_EVENT_COMPUTER_SYNC)
+      } catch {
+
+      }
+    })()
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const { listen, emit } = await import('@tauri-apps/api/event')
+      const off = await listen<MinimalRecorderProgress>(
+        MINIMAL_EVENT_RECORDER_PROGRESS,
+        (event) => {
+          if (event.payload) useMinimalRecorderStore.getState().applyProgress(event.payload)
+        },
+      )
+      if (disposed) {
+        off()
+        return
+      }
+      unlisten = off
+      try {
+        await emit(MINIMAL_EVENT_RECORDER_SYNC)
+      } catch {
+
+      }
+    })()
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+}

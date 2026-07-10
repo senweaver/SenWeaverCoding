@@ -666,8 +666,13 @@ impl Tool for IncrementalOptimizeTool {
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped());
 
-                    let result = match verify_cmd.spawn() {
-                        Ok(mut child) => {
+                    let result = match crate::security::job_object::spawn_in_job(
+                        verify_cmd,
+                        crate::security::job_object::JobLimits::unlimited(),
+                    )
+                    .await
+                    {
+                        Ok((_job_guard, mut child)) => {
                             let stdout_pipe = child.stdout.take();
                             let stderr_pipe = child.stderr.take();
                             let stdout_task = tokio::spawn(async move {
@@ -699,8 +704,12 @@ impl Tool for IncrementalOptimizeTool {
                                 }),
                                 Ok(Err(e)) => Err(e),
                                 Err(_) => {
-                                    let _ = child.start_kill();
-                                    let _ = child.wait().await;
+                                    crate::util::kill_child_process_tree(&mut child).await;
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(3),
+                                        child.wait(),
+                                    )
+                                    .await;
                                     return Ok(ToolResult {
                                         success: false,
                                         output: String::new(),

@@ -157,7 +157,7 @@ pub(crate) async fn run_foreground_streamed(
                 };
             }
             _ = &mut sleep => {
-                let _ = child.start_kill();
+                crate::util::kill_child_process_tree(&mut child).await;
                 if tokio::time::timeout(Duration::from_secs(3), child.wait())
                     .await
                     .is_err()
@@ -170,7 +170,7 @@ pub(crate) async fn run_foreground_streamed(
                 break WaitOutcome::Timeout;
             }
             _ = &mut kill_rx => {
-                let _ = child.start_kill();
+                crate::util::kill_child_process_tree(&mut child).await;
                 let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
                 break WaitOutcome::Cancelled;
             }

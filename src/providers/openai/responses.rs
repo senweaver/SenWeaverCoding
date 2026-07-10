@@ -112,7 +112,47 @@ enum ResponsesInput<'a> {
 #[derive(Debug, Serialize)]
 struct ResponsesMessage<'a> {
     role: &'a str,
-    content: &'a str,
+    content: ResponsesMessageContent<'a>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ResponsesMessageContent<'a> {
+    Text(&'a str),
+    Parts(Vec<ResponsesContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesContentPart {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_url: Option<String>,
+}
+
+fn user_message_content(content: &str) -> ResponsesMessageContent<'_> {
+    let (cleaned_text, image_refs) = crate::multimodal::parse_image_markers(content);
+    if image_refs.is_empty() {
+        return ResponsesMessageContent::Text(content);
+    }
+    let mut parts = Vec::with_capacity(image_refs.len() + 1);
+    if !cleaned_text.trim().is_empty() {
+        parts.push(ResponsesContentPart {
+            kind: "input_text".to_string(),
+            text: Some(cleaned_text),
+            image_url: None,
+        });
+    }
+    for image_ref in image_refs {
+        parts.push(ResponsesContentPart {
+            kind: "input_image".to_string(),
+            text: None,
+            image_url: Some(image_ref),
+        });
+    }
+    ResponsesMessageContent::Parts(parts)
 }
 
 #[derive(Debug, Serialize)]
@@ -293,17 +333,23 @@ impl Provider for OpenAiResponsesProvider {
                 "system" => {
                     instructions = Some(m.content.as_str());
                 }
-                "user" | "assistant" => {
+                "user" => {
                     messages.push(ResponsesMessage {
-                        role: m.role.as_str(),
-                        content: m.content.as_str(),
+                        role: "user",
+                        content: user_message_content(m.content.as_str()),
+                    });
+                }
+                "assistant" => {
+                    messages.push(ResponsesMessage {
+                        role: "assistant",
+                        content: ResponsesMessageContent::Text(m.content.as_str()),
                     });
                 }
 
                 "tool" => {
                     messages.push(ResponsesMessage {
                         role: "assistant",
-                        content: m.content.as_str(),
+                        content: ResponsesMessageContent::Text(m.content.as_str()),
                     });
                 }
                 _ => {}
@@ -373,9 +419,13 @@ impl Provider for OpenAiResponsesProvider {
         for m in messages {
             match m.role.as_str() {
                 "system" => instructions = Some(m.content.as_str()),
-                "user" | "assistant" => input_msgs.push(ResponsesMessage {
-                    role: m.role.as_str(),
-                    content: m.content.as_str(),
+                "user" => input_msgs.push(ResponsesMessage {
+                    role: "user",
+                    content: user_message_content(m.content.as_str()),
+                }),
+                "assistant" => input_msgs.push(ResponsesMessage {
+                    role: "assistant",
+                    content: ResponsesMessageContent::Text(m.content.as_str()),
                 }),
                 _ => {}
             }

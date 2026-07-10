@@ -16,7 +16,7 @@ pub const MAX_ERROR_LOG_ENTRIES: usize = 100;
 
 pub const MAX_HISTORY_ITEMS: usize = 100;
 
-pub const MAX_PASTED_CONTENT_LENGTH: usize = 1024;
+pub const MAX_PASTED_CONTENT_LENGTH: usize = 200_000;
 
 pub const CLEANUP_POLL_INTERVAL_MS: u64 = 60_000;
 

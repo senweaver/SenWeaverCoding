@@ -92,6 +92,11 @@ impl<'a> ConfigValidator<'a> {
             errors: self.config.memory.validate(),
         });
 
+        report.sections.push(SectionReport {
+            section: "memory_runtime",
+            errors: self.config.memory_runtime.validate(),
+        });
+
         let mut embedding_errors = Vec::new();
         for (i, route) in self.config.embedding_routes.iter().enumerate() {
             if route.hint.trim().is_empty() {
@@ -115,13 +120,38 @@ impl<'a> ConfigValidator<'a> {
             code_rag_errors.push("code_rag.top_k must be greater than 0".to_string());
         }
         if cr.dense_enabled {
-            let backend = cr.embedder.backend.trim();
-            let valid_backends = ["ollama", "openai", "gemini", "openai_compatible"];
+            let backend = cr.embedder.backend.trim().to_ascii_lowercase();
+            let backend = backend.as_str();
+            let valid_backends = [
+                "ollama",
+                "openai",
+                "gemini",
+                "openai_compatible",
+                "openai-compatible",
+                "compatible",
+                "local_bge",
+                "localbge",
+                "bge",
+            ];
             if !valid_backends.contains(&backend) {
                 code_rag_errors.push(format!(
                     "code_rag.embedder.backend '{}' is not one of {:?}",
                     backend, valid_backends
                 ));
+            }
+            if matches!(backend, "openai_compatible" | "openai-compatible" | "compatible")
+                && cr
+                    .embedder
+                    .endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .is_none()
+            {
+                code_rag_errors.push(
+                    "code_rag.embedder.endpoint is required when backend is 'openai_compatible'"
+                        .to_string(),
+                );
             }
             if cr.embedder.model.trim().is_empty() {
                 code_rag_errors.push("code_rag.embedder.model must not be empty".to_string());

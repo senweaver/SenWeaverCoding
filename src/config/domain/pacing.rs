@@ -40,10 +40,13 @@ pub struct PacingConfig {
 
     #[serde(default = "default_loop_detection_identical_output_threshold")]
     pub loop_detection_identical_output_threshold: u32,
+
+    #[serde(default = "default_no_progress_iteration_limit")]
+    pub no_progress_iteration_limit: usize,
 }
 
 pub(crate) fn default_stream_idle_timeout_secs() -> Option<u64> {
-    Some(180)
+    Some(300)
 }
 
 pub(crate) fn default_tool_timeout_secs() -> Option<u64> {
@@ -66,6 +69,10 @@ pub(crate) fn default_loop_detection_identical_output_threshold() -> u32 {
     5
 }
 
+pub(crate) fn default_no_progress_iteration_limit() -> usize {
+    200
+}
+
 impl Default for PacingConfig {
     fn default() -> Self {
         Self {
@@ -81,6 +88,7 @@ impl Default for PacingConfig {
             loop_detection_max_repeats: default_loop_detection_max_repeats(),
             loop_detection_identical_output_threshold:
                 default_loop_detection_identical_output_threshold(),
+            no_progress_iteration_limit: default_no_progress_iteration_limit(),
         }
     }
 }
@@ -127,6 +135,9 @@ impl PacingConfig {
             if t == 0 {
                 errors.push("pacing.stream_idle_timeout_secs must be > 0 when set".into());
             }
+        }
+        if self.no_progress_iteration_limit == 0 {
+            errors.push("pacing.no_progress_iteration_limit must be >= 1".into());
         }
         errors
     }

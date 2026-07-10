@@ -123,9 +123,18 @@ export const useTabStore = create<TabStore>((set, get) => ({
   },
 
   updateTabStatus: (sessionId, status) => {
-    set((s) => ({
-      tabs: s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status } : t)),
-    }))
+    set((s) => {
+      const target = s.tabs.find((t) => t.sessionId === sessionId)
+      // Skip the state update entirely when the status is unchanged: every
+      // ProgressTick frame calls this, and rebuilding the tabs array on each
+      // no-op forces the TabBar to re-render on every streaming iteration.
+      if (!target || target.status === status) return s
+      return {
+        tabs: s.tabs.map((t) =>
+          t.sessionId === sessionId ? { ...t, status } : t,
+        ),
+      }
+    })
   },
 
   replaceTabSession: (oldSessionId, newSessionId) => {

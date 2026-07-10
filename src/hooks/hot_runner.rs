@@ -208,8 +208,10 @@ pub fn build_runner(config: &Config, workspace_dir: &Path) -> Option<Arc<HookRun
         }
     }
 
-    let script_runner =
-        super::script_runner::ScriptHookRunner::load_default(workspace_dir.to_path_buf());
+    let script_runner = super::script_runner::ScriptHookRunner::load_default(
+        workspace_dir.to_path_buf(),
+        config.hooks.allow_workspace_hooks,
+    );
     if script_runner.source_count() > 0 {
         tracing::info!(
             sources = script_runner.source_count(),

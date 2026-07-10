@@ -588,6 +588,20 @@ fn fetch_thread_is_main() -> bool {
         .is_some_and(|id| *id == std::thread::current().id())
 }
 
+fn blocking_recv_without_starving_runtime<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    timeout: Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            tokio::task::block_in_place(|| rx.recv_timeout(timeout))
+        }
+        _ => rx.recv_timeout(timeout),
+    }
+}
+
 fn run_fetch_on_main_thread<F>(app: &AppHandle, label: &'static str, f: F) -> Result<()>
 where
     F: FnOnce(&AppHandle) -> Result<()> + Send + 'static,
@@ -601,7 +615,7 @@ where
         let _ = tx.send(f(&app_for_main));
     })
     .map_err(|e| anyhow::anyhow!("schedule {label} on the main thread failed: {e}"))?;
-    rx.recv_timeout(Duration::from_secs(20))
+    blocking_recv_without_starving_runtime(&rx, Duration::from_secs(20))
         .map_err(|e| anyhow::anyhow!("await {label} result failed: {e}"))?
 }
 

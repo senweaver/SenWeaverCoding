@@ -5,7 +5,6 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(
     clippy::assigning_clones,
-    clippy::await_holding_lock,
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
@@ -169,9 +168,6 @@ pub mod crdt;
 pub mod entrypoints;
 
 pub mod keybindings;
-pub mod output_styles;
-pub mod proxy;
-pub mod query;
 pub mod remote;
 pub mod schemas;
 pub mod workers;

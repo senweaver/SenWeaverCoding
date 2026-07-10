@@ -3,7 +3,6 @@
 // Licensed under the MIT License.
 
 pub mod defaults;
-pub mod flat;
 pub mod parser;
 pub mod resolver;
 pub mod schema;

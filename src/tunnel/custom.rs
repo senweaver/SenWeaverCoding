@@ -50,11 +50,21 @@ impl Tunnel for CustomTunnel {
             .kill_on_drop(true)
             .spawn()?;
 
+        if let Some(stderr) = child.stderr.take() {
+            crate::runtime::spawn_supervised("tunnel.custom.stderr_drain", async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "tunnel.custom", "{line}");
+                }
+            });
+        }
+
         let mut public_url = format!("http://{local_host}:{local_port}");
 
-        if let Some(ref pattern) = self.url_pattern {
-            if let Some(stdout) = child.stdout.take() {
-                let mut reader = tokio::io::BufReader::new(stdout).lines();
+        if let Some(stdout) = child.stdout.take() {
+            let mut reader = tokio::io::BufReader::new(stdout).lines();
+
+            if let Some(ref pattern) = self.url_pattern {
                 let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
 
                 while tokio::time::Instant::now() < deadline {
@@ -95,6 +105,12 @@ impl Tunnel for CustomTunnel {
                     }
                 }
             }
+
+            crate::runtime::spawn_supervised("tunnel.custom.stdout_drain", async move {
+                while let Ok(Some(line)) = reader.next_line().await {
+                    tracing::debug!(target: "tunnel.custom", "{line}");
+                }
+            });
         }
 
         let mut guard = self.proc.lock().await;
@@ -123,8 +139,11 @@ impl Tunnel for CustomTunnel {
                 .is_ok();
         }
 
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        match guard.as_mut() {
+            Some(tp) => matches!(tp.child.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 
     fn public_url(&self) -> Option<String> {

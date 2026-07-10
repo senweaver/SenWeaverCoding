@@ -16,6 +16,11 @@ fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     })
 }
 
+fn markdown_write_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 pub struct MarkdownMemory {
     workspace_dir: PathBuf,
 }
@@ -48,6 +53,11 @@ impl MarkdownMemory {
     async fn append_to_file(&self, path: &Path, content: &str) -> anyhow::Result<()> {
         self.ensure_dirs().await?;
 
+        // Serialize the read-modify-write so concurrent stores never clobber each
+        // other's appends, and write atomically so a crash mid-write cannot leave
+        // a truncated/corrupt memory file.
+        let _guard = markdown_write_lock().lock().await;
+
         let existing = if path.exists() {
             fs::read_to_string(path).await?
         } else {
@@ -66,7 +76,11 @@ impl MarkdownMemory {
             format!("{existing}\n{content}\n")
         };
 
-        fs::write(path, updated).await?;
+        let path_owned = path.to_path_buf();
+        let bytes = updated.into_bytes();
+        tokio::task::spawn_blocking(move || crate::util::atomic_write(&path_owned, &bytes))
+            .await
+            .map_err(|e| anyhow::anyhow!("atomic write task join failed: {e}"))??;
         Ok(())
     }
 

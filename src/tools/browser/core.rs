@@ -717,14 +717,19 @@ impl BrowserTool {
         cfg!(feature = "browser-native")
     }
 
-    fn rust_native_available(&self) -> bool {
+    async fn rust_native_available(&self) -> bool {
         #[cfg(feature = "browser-native")]
         {
-            native_backend::NativeBrowserState::is_available(
-                self.native_headless,
-                &self.native_webdriver_url,
-                self.native_chrome_path.as_deref(),
-            )
+            // The availability probe does blocking DNS + TCP connect; keep it off
+            // the async runtime worker threads.
+            let headless = self.native_headless;
+            let url = self.native_webdriver_url.clone();
+            let chrome = self.native_chrome_path.clone();
+            tokio::task::spawn_blocking(move || {
+                native_backend::NativeBrowserState::is_available(headless, &url, chrome.as_deref())
+            })
+            .await
+            .unwrap_or(false)
         }
         #[cfg(not(feature = "browser-native"))]
         {
@@ -766,7 +771,7 @@ impl BrowserTool {
                         "browser.backend='rust_native' requires build feature 'browser-native'"
                     );
                 }
-                if !self.rust_native_available() {
+                if !self.rust_native_available().await {
                     anyhow::bail!(
                         "Rust-native browser backend is enabled but WebDriver endpoint is unreachable. Set browser.native_webdriver_url and start a compatible driver"
                     );
@@ -777,7 +782,7 @@ impl BrowserTool {
                 if dock_controller().is_some() {
                     return Ok(ResolvedBackend::TauriDock);
                 }
-                if Self::rust_native_compiled() && self.rust_native_available() {
+                if Self::rust_native_compiled() && self.rust_native_available().await {
                     return Ok(ResolvedBackend::RustNative);
                 }
                 if Self::is_agent_browser_available().await {
@@ -1153,6 +1158,7 @@ impl BrowserTool {
                 self.validate_url(url, self.url_validation_permissive())?;
             }
 
+            let screenshot_anchor = self.security.safe_artifact_anchor();
             let mut state = self.native_state.lock().await;
 
             let first_attempt = state
@@ -1161,6 +1167,7 @@ impl BrowserTool {
                     self.native_headless,
                     &self.native_webdriver_url,
                     self.native_chrome_path.as_deref(),
+                    &screenshot_anchor,
                 )
                 .await;
 
@@ -1178,6 +1185,7 @@ impl BrowserTool {
                             self.native_headless,
                             &self.native_webdriver_url,
                             self.native_chrome_path.as_deref(),
+                            &screenshot_anchor,
                         )
                         .await
                         .with_context(|| "rust_native backend retry after session reset failed")?
@@ -2512,6 +2520,7 @@ mod native_backend {
             headless: bool,
             webdriver_url: &str,
             chrome_path: Option<&str>,
+            screenshot_anchor: &std::path::Path,
         ) -> Result<Value> {
             match action {
                 BrowserAction::Open { url } => {
@@ -2637,9 +2646,8 @@ mod native_backend {
                     });
 
                     if let Some(path_str) = path {
-                        let anchor = self.security.safe_artifact_anchor();
                         let (abs_path, relative_path) =
-                            resolve_screenshot_path(&path_str, &anchor)?;
+                            super::resolve_screenshot_path(&path_str, screenshot_anchor)?;
                         if let Some(parent) = abs_path.parent() {
                             if !parent.as_os_str().is_empty() {
                                 tokio::fs::create_dir_all(parent).await.with_context(|| {
@@ -2677,16 +2685,23 @@ mod native_backend {
                             "selector": sel,
                         }))
                     } else if let Some(duration_ms) = ms {
-                        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+                        // Clamp model-supplied sleeps so a huge value cannot hang the
+                        // turn until the outer pacing timeout.
+                        const MAX_WAIT_MS: u64 = 60_000;
+                        let clamped = duration_ms.min(MAX_WAIT_MS);
+                        tokio::time::sleep(Duration::from_millis(clamped)).await;
                         Ok(json!({
                             "backend": "rust_native",
                             "action": "wait",
-                            "ms": duration_ms,
+                            "ms": clamped,
                         }))
                     } else if let Some(needle) = text.as_ref() {
+                        const WAIT_TEXT_TIMEOUT: std::time::Duration =
+                            std::time::Duration::from_secs(30);
                         let xpath = xpath_contains_text(needle);
                         client
                             .wait()
+                            .at_most(WAIT_TEXT_TIMEOUT)
                             .for_element(Locator::XPath(&xpath))
                             .await
                             .with_context(|| {
@@ -2849,6 +2864,7 @@ mod native_backend {
                 BrowserAction::OpenTab { .. }
                 | BrowserAction::CloseTab { .. }
                 | BrowserAction::ActivateTab { .. }
+                | BrowserAction::AttachTab { .. }
                 | BrowserAction::ListTabs => anyhow::bail!(
                     "Multi-tab actions are only supported by the embedded dock backend \
                      (tauri_dock). Switch backend or run inside the SenAgentOS desktop app."
@@ -2864,10 +2880,12 @@ mod native_backend {
                 | BrowserAction::PerfVitals
                 | BrowserAction::Emulate { .. }
                 | BrowserAction::NetworkCapture { .. }
+                | BrowserAction::CollectLinks { .. }
+                | BrowserAction::NetworkErrors { .. }
                 | BrowserAction::WebToolsList
                 | BrowserAction::WebToolsCall { .. }
                 | BrowserAction::RunSteps { .. } => anyhow::bail!(
-                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload/get_styles/perf_vitals/emulate/network_capture/web_tools_list/web_tools_call/run_steps) require the \
+                    "QA actions (assert/console_logs/network_idle/clear_storage/back/forward/reload/get_styles/perf_vitals/emulate/network_capture/collect_links/network_errors/web_tools_list/web_tools_call/run_steps) require the \
                      embedded dock backend (tauri_dock). Run inside the SenAgentOS desktop app."
                 ),
                 BrowserAction::PinTestTarget { .. }
@@ -2994,10 +3012,15 @@ mod native_backend {
     }
 
     async fn wait_for_selector(client: &Client, selector: &str) -> Result<()> {
+        // fantoccini's default `wait()` never times out. Bound it so a selector
+        // that never appears fails promptly instead of hanging the whole turn until
+        // the outer tool-pacing timeout.
+        const WAIT_SELECTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         match parse_selector(selector) {
             SelectorKind::Css(css) => {
                 client
                     .wait()
+                    .at_most(WAIT_SELECTOR_TIMEOUT)
                     .for_element(Locator::Css(&css))
                     .await
                     .with_context(|| format!("Timed out waiting for selector '{selector}'"))?;
@@ -3005,6 +3028,7 @@ mod native_backend {
             SelectorKind::XPath(xpath) => {
                 client
                     .wait()
+                    .at_most(WAIT_SELECTOR_TIMEOUT)
                     .for_element(Locator::XPath(&xpath))
                     .await
                     .with_context(|| format!("Timed out waiting for selector '{selector}'"))?;

@@ -7,7 +7,11 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useShallow } from 'zustand/react/shallow'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionRewindResponse } from '../../api/sessions'
-import { useChatStore, isAskQuestionToolName } from '../../stores/chatStore'
+import {
+  useChatStore,
+  isAskQuestionToolName,
+  MAX_IN_MEMORY_MESSAGES,
+} from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTeamStore } from '../../stores/teamStore'
@@ -138,7 +142,6 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
   const emittedToolUseIds = new Set<string>()
   let buffer: UIMessage[] = []
   let bufferToolUseIds = new Set<string>()
-  let nextExploredId = 0
 
   for (const msg of messages) {
     if (msg.type === 'tool_use') seenToolUseIds.add(msg.toolUseId)
@@ -160,9 +163,13 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
       }
     } else {
       const summary = buildExploredSummary(buffer)
+      // Key the group solely by its first message id (stable and unique), NOT by
+      // ordinal position: a positional counter would change every retained
+      // group's key when older messages are trimmed from the front, forcing
+      // Virtuoso to remount the whole list.
       items.push({
         kind: 'explored',
-        id: `explored-${++nextExploredId}-${buffer[0]?.id ?? ''}`,
+        id: `explored-${buffer[0]?.id ?? 'empty'}`,
         items: buffer.filter((m) => m.type !== 'tool_result'),
         summary,
       })
@@ -363,6 +370,9 @@ type MessageListProps = {
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160
 const USER_SCROLL_UP_CANCEL_PX = 24
+// Follow-mode only re-arms when the viewport is essentially pinned to the bottom,
+// so a small scroll-up to read back is no longer yanked back down.
+const AUTO_SCROLL_REARM_THRESHOLD_PX = 8
 const FIRST_ITEM_INDEX_BASE = 1_000_000
 
 const EMPTY_MESSAGES: UIMessage[] = []
@@ -500,8 +510,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const scrollRafRef = useRef<number | null>(null)
   const followRafRef = useRef<number | null>(null)
   const followForceRef = useRef(false)
-  const prevFirstKeyRef = useRef<string | null>(null)
-  const prevListLenRef = useRef(0)
+  const prevRenderKeysRef = useRef<string[]>([])
   const initialPinPendingRef = useRef(true)
   const initialPinDeadlineRef = useRef(0)
   const followSettleDeadlineRef = useRef(0)
@@ -576,16 +585,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       const onScroll = () => {
         const st = next.scrollTop
         const distanceFromBottom = next.scrollHeight - st - next.clientHeight
-        if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX) {
-          followRef.current = true
-          setShowScrollToBottom((prev) => (prev ? false : prev))
-        } else if (
+        const scrolledUp =
           !programmaticScrollRef.current &&
-          st < lastScrollTopRef.current - USER_SCROLL_UP_CANCEL_PX &&
-          followRef.current
-        ) {
+          st < lastScrollTopRef.current - USER_SCROLL_UP_CANCEL_PX
+        if (scrolledUp && followRef.current) {
+          // User actively scrolled up (even while near the bottom): stop following
+          // so streaming content no longer drags the reading position back down.
           followRef.current = false
           setShowScrollToBottom(true)
+        } else if (distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
+          followRef.current = true
+          setShowScrollToBottom((prev) => (prev ? false : prev))
+        } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX && followRef.current) {
+          setShowScrollToBottom((prev) => (prev ? false : prev))
         }
         lastScrollTopRef.current = st
       }
@@ -606,8 +618,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     followRef.current = true
     atBottomRef.current = true
     atTopRef.current = false
-    prevFirstKeyRef.current = null
-    prevListLenRef.current = 0
+    prevRenderKeysRef.current = []
     initialPinPendingRef.current = true
     initialPinDeadlineRef.current = 0
     setFirstItemIndex(FIRST_ITEM_INDEX_BASE)
@@ -633,6 +644,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     if (!atTopRef.current) return
     maybeLoadOlder()
   }, [historyLoadingOlder, historyHasMore, maybeLoadOlder])
+
+  // Window the in-memory message list once a turn settles: only when the user is
+  // pinned to the tail (not reading older messages) and not mid-pagination, so a
+  // trim never yanks the viewport. The symmetric firstItemIndex handling above
+  // keeps retained rows anchored; loadOlderHistory refetches trimmed messages.
+  useEffect(() => {
+    if (!resolvedSessionId) return
+    if (chatState !== 'idle') return
+    if (messages.length <= MAX_IN_MEMORY_MESSAGES) return
+    if (!atBottomRef.current || !followRef.current) return
+    if (historyLoadingOlder) return
+    useChatStore.getState().capMessageWindow(resolvedSessionId)
+  }, [resolvedSessionId, chatState, messages.length, historyLoadingOlder])
 
   useEffect(() => {
     setRewindTarget(null)
@@ -779,20 +803,32 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   }, [renderItems, chatState, streamingText])
 
   useLayoutEffect(() => {
-    const first = listRenderItems[0]
-    const firstKey = first ? renderItemKey(first) : null
-    const prevKey = prevFirstKeyRef.current
-    const prevLen = prevListLenRef.current
-    if (prevKey !== null && firstKey !== null && firstKey !== prevKey) {
-      const idx = listRenderItems.findIndex((it) => renderItemKey(it) === prevKey)
-      const prependCount =
-        idx > 0 ? idx : Math.max(0, listRenderItems.length - prevLen)
+    // Keep Virtuoso's firstItemIndex consistent with front-of-list mutations so
+    // retained rows keep a stable virtual index (no remount / scroll jump):
+    //  - prepend K rows (loadOlderHistory)  -> firstItemIndex -= K
+    //  - trim   K rows from the front (cap)  -> firstItemIndex += K
+    // Render-item keys are stable (message id / first-message id for groups), so
+    // we detect which case happened by locating the anchor key across renders.
+    const keys = listRenderItems.map(renderItemKey)
+    const prevKeys = prevRenderKeysRef.current
+    const firstKey = keys[0]
+    const prevFirstKey = prevKeys[0]
+    if (
+      prevFirstKey !== undefined &&
+      firstKey !== undefined &&
+      firstKey !== prevFirstKey
+    ) {
+      const prependCount = keys.indexOf(prevFirstKey)
       if (prependCount > 0) {
         setFirstItemIndex((v) => v - prependCount)
+      } else {
+        const trimCount = prevKeys.indexOf(firstKey)
+        if (trimCount > 0) {
+          setFirstItemIndex((v) => v + trimCount)
+        }
       }
     }
-    prevFirstKeyRef.current = firstKey
-    prevListLenRef.current = listRenderItems.length
+    prevRenderKeysRef.current = keys
   }, [listRenderItems])
 
   useLayoutEffect(() => {
@@ -822,6 +858,18 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
     return map
   }, [listRenderItems])
+
+  const restoreAnchorMsgId = useMemo(() => {
+    if (!pendingRewind) return null
+    for (const item of listRenderItems) {
+      if (item.kind !== 'message') continue
+      const msg = item.message
+      if (msg.type === 'user_text' && msg.superseded) {
+        return msg.id
+      }
+    }
+    return null
+  }, [listRenderItems, pendingRewind])
 
   const assistantTurnCopyByMsgId = useMemo(
     () => buildAssistantTurnCopyMap(messages),
@@ -890,7 +938,14 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           try {
             await sessionsApi.commitRewind(resolvedSessionId, result.rewindId)
           } catch {
-
+            // Commit failed: the rewind checkpoint stays open on the backend.
+            // Warn the user rather than silently proceeding to resend, since the
+            // session and backend rewind state may now disagree.
+            addToast({
+              type: 'error',
+              message: t('chat.rewindCommitFailed'),
+              duration: 5000,
+            })
           }
         }
 
@@ -1033,16 +1088,23 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
                 if (entry.type === 'tool_use') return !toolResultMap.has(entry.toolUseId)
                 return false
               })
+            const exploredKey = item.items[0]?.id ?? 'explored'
             return (
-              <ExploredCard
-                items={item.items}
-                resultMap={toolResultMap}
-                summary={item.summary}
-                isStreaming={stillStreaming}
-                activeThinkingId={activeThinkingId}
-                sessionId={resolvedSessionId}
-                onLiveThinkingGrow={handleLiveThinkingGrow}
-              />
+              <SectionErrorBoundary
+                key={exploredKey}
+                label="explored"
+                resetKeys={[exploredKey]}
+              >
+                <ExploredCard
+                  items={item.items}
+                  resultMap={toolResultMap}
+                  summary={item.summary}
+                  isStreaming={stillStreaming}
+                  activeThinkingId={activeThinkingId}
+                  sessionId={resolvedSessionId}
+                  onLiveThinkingGrow={handleLiveThinkingGrow}
+                />
+              </SectionErrorBoundary>
             )
           }
 
@@ -1051,10 +1113,9 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           const rewindableUserIndex: number | null =
             msg.type === 'user_text' ? rewindIndexByMsgId.get(msg.id) ?? null : null
           const isRestoreAnchor =
-            !!pendingRewind &&
+            !!restoreAnchorMsgId &&
             msg.type === 'user_text' &&
-            typeof msg.userMessageIndex === 'number' &&
-            msg.userMessageIndex === pendingRewind.userMessageIndex
+            msg.id === restoreAnchorMsgId
 
           if (
             msg.type === 'user_text' &&

@@ -204,6 +204,8 @@ impl CopilotProvider {
                     );
                 }
             }
+            #[cfg(windows)]
+            restrict_dir_to_current_user(&token_dir);
         }
 
         Self {
@@ -394,12 +396,18 @@ impl CopilotProvider {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tool_call| ProviderToolCall {
-                id: tool_call
-                    .id
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
+            .map(|tool_call| {
+                let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                    &tool_call.function.name,
+                    tool_call.function.arguments,
+                );
+                ProviderToolCall {
+                    id: tool_call
+                        .id
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    name: tool_call.function.name,
+                    arguments,
+                }
             })
             .collect();
 
@@ -412,11 +420,12 @@ impl CopilotProvider {
     }
 
     async fn get_api_key(&self) -> anyhow::Result<(String, String)> {
-        let mut cached = self.refresh_lock.lock().await;
-
-        if let Some(cached_key) = cached.as_ref() {
-            if chrono::Utc::now().timestamp() + 120 < cached_key.expires_at {
-                return Ok((cached_key.token.clone(), cached_key.api_endpoint.clone()));
+        {
+            let cached = self.refresh_lock.lock().await;
+            if let Some(cached_key) = cached.as_ref() {
+                if chrono::Utc::now().timestamp() + 120 < cached_key.expires_at {
+                    return Ok((cached_key.token.clone(), cached_key.api_endpoint.clone()));
+                }
             }
         }
 
@@ -429,6 +438,7 @@ impl CopilotProvider {
                     .unwrap_or_else(|| DEFAULT_API.to_string());
                 let token = info.token;
 
+                let mut cached = self.refresh_lock.lock().await;
                 *cached = Some(CachedApiKey {
                     token: token.clone(),
                     api_endpoint: endpoint.clone(),
@@ -438,6 +448,10 @@ impl CopilotProvider {
             }
         }
 
+        // The GitHub access-token acquisition may run an interactive device-code
+        // login that polls for up to ~15 minutes. Do NOT hold `refresh_lock` across
+        // it, otherwise every concurrent Copilot request (including ones that could
+        // be served from cache) blocks on the lock for the whole login.
         let access_token = self.get_github_access_token().await?;
         let api_key_info = self.exchange_for_api_key(&access_token).await?;
         self.save_api_key_to_disk(&api_key_info).await;
@@ -448,6 +462,14 @@ impl CopilotProvider {
             .and_then(|e| e.api.clone())
             .unwrap_or_else(|| DEFAULT_API.to_string());
 
+        let mut cached = self.refresh_lock.lock().await;
+        // Another task may have refreshed while we were logging in; prefer its
+        // still-valid token to avoid churn.
+        if let Some(existing) = cached.as_ref() {
+            if chrono::Utc::now().timestamp() + 120 < existing.expires_at {
+                return Ok((existing.token.clone(), existing.api_endpoint.clone()));
+            }
+        }
         *cached = Some(CachedApiKey {
             token: api_key_info.token.clone(),
             api_endpoint: endpoint.clone(),
@@ -468,6 +490,14 @@ impl CopilotProvider {
             if !token.is_empty() {
                 return Ok(token.to_string());
             }
+        }
+
+        if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            anyhow::bail!(
+                "GitHub Copilot is not authenticated and no interactive terminal is available. \
+                 Set GITHUB_TOKEN (or provide the provider API key) or run an interactive \
+                 `sen agent -p copilot` session once to complete the device-code login."
+            );
         }
 
         let token = self.device_code_login().await?;
@@ -580,6 +610,39 @@ impl CopilotProvider {
     }
 }
 
+#[cfg(windows)]
+fn restrict_dir_to_current_user(dir: &Path) {
+    let Ok(user) = std::env::var("USERNAME") else {
+        return;
+    };
+    if user.trim().is_empty() {
+        return;
+    }
+    let mut cmd = crate::util::hidden_sync_command("icacls");
+    cmd.arg(dir)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:(OI)(CI)F"))
+        .arg("/grant:r")
+        .arg("*S-1-5-18:(OI)(CI)F");
+    match cmd.output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            warn!(
+                "icacls could not restrict Copilot token directory {:?}: {}",
+                dir,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(err) => {
+            warn!(
+                "failed to run icacls to restrict Copilot token directory {:?}: {err}",
+                dir
+            );
+        }
+    }
+}
+
 async fn write_file_secure(path: &Path, content: &str) {
     let path = path.to_path_buf();
     let content = content.to_string();
@@ -618,6 +681,15 @@ async fn write_file_secure(path: &Path, content: &str) {
 
 #[async_trait]
 impl Provider for CopilotProvider {
+    fn capabilities(&self) -> crate::providers::traits::ProviderCapabilities {
+        crate::providers::traits::ProviderCapabilities {
+            native_tool_calling: true,
+            vision: true,
+            prompt_caching: false,
+            responses_api: false,
+        }
+    }
+
     async fn chat_with_system(
         &self,
         system_prompt: Option<&str>,

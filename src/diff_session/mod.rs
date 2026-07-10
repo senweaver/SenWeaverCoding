@@ -26,6 +26,7 @@ struct StagedDiff {
 #[derive(Debug)]
 pub struct DiffSession {
     root: PathBuf,
+    allowed_roots: Vec<PathBuf>,
     staged: Vec<StagedDiff>,
     backups: BTreeMap<PathBuf, FileBackup>,
     applied: bool,
@@ -94,6 +95,7 @@ impl DiffSession {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            allowed_roots: Vec::new(),
             staged: Vec::new(),
             backups: BTreeMap::new(),
             applied: false,
@@ -105,6 +107,12 @@ impl DiffSession {
             ops_applier: None,
             last_batch_id: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_allowed_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.allowed_roots = roots;
+        self
     }
 
     #[must_use]
@@ -134,7 +142,7 @@ impl DiffSession {
         if self.applied {
             return Err(DiffSessionError::AlreadyApplied);
         }
-        let abs = resolve_inside(&self.root, path.as_ref())?;
+        let abs = resolve_inside(&self.root, &self.allowed_roots, path.as_ref())?;
         self.staged.push(StagedDiff {
             path: abs,
             diff: diff.into(),
@@ -415,7 +423,11 @@ fn restore_backups_atomic(
         Ok(())
 }
 
-fn resolve_inside(root: &Path, path: &Path) -> Result<PathBuf, DiffSessionError> {
+fn resolve_inside(
+    root: &Path,
+    allowed_roots: &[PathBuf],
+    path: &Path,
+) -> Result<PathBuf, DiffSessionError> {
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -433,8 +445,13 @@ fn resolve_inside(root: &Path, path: &Path) -> Result<PathBuf, DiffSessionError>
             other => normal.push(other.as_os_str()),
         }
     }
-    if !crate::util::path_is_within(&normal, root) {
-        return Err(DiffSessionError::PathEscape(normal));
+    if crate::util::path_is_within(&normal, root) {
+        return Ok(normal);
     }
-    Ok(normal)
+    for extra in allowed_roots {
+        if crate::util::path_is_within(&normal, extra) {
+            return Ok(normal);
+        }
+    }
+    Err(DiffSessionError::PathEscape(normal))
 }

@@ -49,6 +49,19 @@ impl RemoteSessionManager {
     }
 
     pub async fn register_session(&self, session: RemoteSession) -> Arc<SessionWebSocket> {
+        let previous = {
+            let inner = self.inner.read().await;
+            inner
+                .get(&session.session_id)
+                .map(|entry| Arc::clone(&entry.socket))
+        };
+        if let Some(old_socket) = previous {
+            tracing::info!(
+                session_id = %session.session_id,
+                "remote session re-registered; disconnecting previous socket"
+            );
+            old_socket.disconnect().await;
+        }
         let socket = Arc::new(SessionWebSocket::with_auth_and_signing(
             &session.url,
             session.auth_token.clone(),

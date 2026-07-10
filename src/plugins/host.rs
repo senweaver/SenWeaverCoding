@@ -13,6 +13,7 @@ pub struct PluginHost {
     loaded: HashMap<String, LoadedPlugin>,
     signature_mode: SignatureMode,
     trusted_publisher_keys: Vec<String>,
+    max_plugins: usize,
 }
 
 struct LoadedPlugin {
@@ -27,10 +28,36 @@ impl PluginHost {
         Self::with_security(workspace_dir, SignatureMode::Disabled, Vec::new())
     }
 
+    pub fn from_plugins_config(
+        workspace_dir: &Path,
+        plugins: &crate::config::schema::PluginsConfig,
+    ) -> Result<Self, PluginError> {
+        Self::with_limits(
+            workspace_dir,
+            Self::parse_signature_mode(&plugins.security.signature_mode),
+            plugins.security.trusted_publisher_keys.clone(),
+            plugins.max_plugins.max(1),
+        )
+    }
+
     pub fn with_security(
         workspace_dir: &Path,
         signature_mode: SignatureMode,
         trusted_publisher_keys: Vec<String>,
+    ) -> Result<Self, PluginError> {
+        Self::with_limits(
+            workspace_dir,
+            signature_mode,
+            trusted_publisher_keys,
+            crate::config::schema::PluginsConfig::default().max_plugins,
+        )
+    }
+
+    fn with_limits(
+        workspace_dir: &Path,
+        signature_mode: SignatureMode,
+        trusted_publisher_keys: Vec<String>,
+        max_plugins: usize,
     ) -> Result<Self, PluginError> {
         let plugins_dir = workspace_dir.join("plugins");
         if !plugins_dir.exists() {
@@ -42,10 +69,51 @@ impl PluginHost {
             loaded: HashMap::new(),
             signature_mode,
             trusted_publisher_keys,
+            max_plugins,
         };
 
         host.discover()?;
         Ok(host)
+    }
+
+    const DISABLED_MARKER: &'static str = ".disabled";
+
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), PluginError> {
+        let plugin_dir = self.plugins_dir.join(name);
+        if !plugin_dir.join("manifest.toml").exists() {
+            return Err(PluginError::NotFound(name.to_string()));
+        }
+        let marker = plugin_dir.join(Self::DISABLED_MARKER);
+        if enabled {
+            if marker.exists() {
+                std::fs::remove_file(&marker)?;
+            }
+            self.discover()?;
+        } else {
+            std::fs::write(&marker, b"disabled by user\n")?;
+            self.loaded.remove(name);
+        }
+        Ok(())
+    }
+
+    pub fn disabled_plugin_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.plugins_dir) else {
+            return names;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && path.join(Self::DISABLED_MARKER).exists()
+                && path.join("manifest.toml").exists()
+            {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names.sort();
+        names
     }
 
     pub fn parse_signature_mode(mode: &str) -> SignatureMode {
@@ -65,9 +133,23 @@ impl PluginHost {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                if path.join(Self::DISABLED_MARKER).exists() {
+                    continue;
+                }
                 let manifest_path = path.join("manifest.toml");
                 if manifest_path.exists() {
                     if let Ok(manifest) = self.load_manifest(&manifest_path) {
+                        if !self.loaded.contains_key(&manifest.name)
+                            && self.loaded.len() >= self.max_plugins
+                        {
+                            tracing::warn!(
+                                plugin = %manifest.name,
+                                loaded = self.loaded.len(),
+                                max = self.max_plugins,
+                                "plugins.max_plugins reached; skipping remaining plugins"
+                            );
+                            break;
+                        }
 
                         let manifest_toml =
                             std::fs::read_to_string(&manifest_path).unwrap_or_default();
@@ -182,6 +264,13 @@ impl PluginHost {
 
         if self.loaded.contains_key(&manifest.name) {
             return Err(PluginError::AlreadyLoaded(manifest.name));
+        }
+
+        if self.loaded.len() >= self.max_plugins {
+            return Err(PluginError::LimitReached {
+                loaded: self.loaded.len(),
+                max: self.max_plugins,
+            });
         }
 
         let manifest_toml = std::fs::read_to_string(&manifest_path)?;

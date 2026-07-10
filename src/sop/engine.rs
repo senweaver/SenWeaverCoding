@@ -28,6 +28,20 @@ pub struct SopEngine {
     deterministic_savings: DeterministicSavings,
 }
 
+static GLOBAL_SOP_ENGINE: std::sync::OnceLock<
+    std::sync::Arc<parking_lot::Mutex<SopEngine>>,
+> = std::sync::OnceLock::new();
+
+pub fn global_sop_engine(
+    config: &SopConfig,
+) -> std::sync::Arc<parking_lot::Mutex<SopEngine>> {
+    GLOBAL_SOP_ENGINE
+        .get_or_init(|| {
+            std::sync::Arc::new(parking_lot::Mutex::new(SopEngine::new(config.clone())))
+        })
+        .clone()
+}
+
 impl SopEngine {
 
     pub fn new(config: SopConfig) -> Self {
@@ -576,10 +590,46 @@ impl SopEngine {
                     Err(e) => warn!("SOP run {run_id}: auto-approve failed: {e}"),
                 }
             } else {
-                info!("SOP run {run_id}: approval timeout  -  waiting indefinitely (non-critical)");
+                info!(
+                    "SOP run {run_id}: approval timeout  -  cancelling run (non-critical) to \
+                     release its concurrency slot"
+                );
+                actions.push(self.finish_run(
+                    &run_id,
+                    SopRunStatus::Cancelled,
+                    Some("approval timeout".to_string()),
+                ));
             }
         }
 
+        actions
+    }
+
+    pub const MAX_RUN_LIFETIME_SECS: u64 = 24 * 60 * 60;
+
+    pub fn reap_stale_runs(&mut self, max_age_secs: u64) -> Vec<SopRunAction> {
+        if max_age_secs == 0 {
+            return Vec::new();
+        }
+        let stale: Vec<String> = self
+            .active_runs
+            .values()
+            .filter(|r| cooldown_elapsed(&r.started_at, max_age_secs))
+            .map(|r| r.run_id.clone())
+            .collect();
+
+        let mut actions = Vec::new();
+        for run_id in stale {
+            warn!(
+                "SOP run {run_id}: exceeded max lifetime ({max_age_secs}s) without reaching a \
+                 terminal state; marking failed to release its concurrency slot"
+            );
+            actions.push(self.finish_run(
+                &run_id,
+                SopRunStatus::Failed,
+                Some(format!("run exceeded max lifetime of {max_age_secs}s")),
+            ));
+        }
         actions
     }
 

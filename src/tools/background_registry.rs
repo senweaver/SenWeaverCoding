@@ -217,7 +217,10 @@ pub fn snapshot() -> Vec<(String, String)> {
         .filter(|(_, v)| match (&scope, &v.session_id) {
             (Some(want), Some(have)) => want == have,
             (Some(_), None) => false,
-            (None, _) => true,
+            // An unscoped caller must not see other sessions' background
+            // processes; only truly session-less (legacy/global) entries.
+            (None, Some(_)) => false,
+            (None, None) => true,
         })
         .map(|(k, v)| (k.clone(), v.command.clone()))
         .collect()

@@ -18,9 +18,10 @@ pub struct MultiEditTool {
 
 impl MultiEditTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        let ops_applier = Arc::new(OpsApplier::default_for_shared_workspace(
-            security.workspace_root_handle(),
-        ));
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
         Self {
             security,
             edit_history: None,
@@ -125,15 +126,127 @@ impl Tool for MultiEditTool {
             });
         }
 
+        let mut planned_paths: Vec<std::path::PathBuf> = Vec::with_capacity(edits.len());
+        for (i, edit) in edits.iter().enumerate() {
+            let path_str = edit
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Edit {i}: missing 'path'"))?;
+
+            if !self.security.is_path_allowed(path_str) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Edit {i}: security policy blocked path '{path_str}'"
+                    )),
+                });
+            }
+
+            let full_path = self.security.resolve_tool_path(path_str);
+
+            let Some(parent) = full_path.parent() else {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Edit {i}: invalid path (missing parent directory)")),
+                });
+            };
+
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Edit {i}: cannot create parent directory for '{}': {e}",
+                        full_path.display()
+                    )),
+                });
+            }
+
+            let resolved_parent = match tokio::fs::canonicalize(parent).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Edit {i}: failed to resolve file path: {e}")),
+                    });
+                }
+            };
+
+            if !self.security.is_resolved_path_allowed(&resolved_parent) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Edit {i}: {}",
+                        self.security
+                            .resolved_path_violation_message(&resolved_parent)
+                    )),
+                });
+            }
+
+            if !crate::security::sandbox_allows_path(&resolved_parent) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Edit {i}: sandbox policy denies write to {}",
+                        resolved_parent.display()
+                    )),
+                });
+            }
+
+            let Some(file_name) = full_path.file_name() else {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Edit {i}: invalid path (missing file name)")),
+                });
+            };
+
+            let resolved_target = resolved_parent.join(file_name);
+
+            if self.security.is_runtime_config_path(&resolved_target) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Edit {i}: {}",
+                        self.security
+                            .runtime_config_violation_message(&resolved_target)
+                    )),
+                });
+            }
+
+            if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await {
+                if meta.file_type().is_symlink() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Edit {i}: refusing to edit through symlink '{}'",
+                            resolved_target.display()
+                        )),
+                    });
+                }
+            }
+
+            planned_paths.push(resolved_target);
+        }
+
+        if !self.security.record_action() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Rate limit exceeded: action budget exhausted".into()),
+            });
+        }
+
         let mut batch = EditBatch::new(EditOrigin::MultiEditTool).with_atomic(true);
         let mut summary_paths: Vec<std::path::PathBuf> = Vec::new();
         let mut emit_records: Vec<(Option<Vec<u8>>, Vec<u8>)> = Vec::new();
-        let mut planned_paths: Vec<std::path::PathBuf> = Vec::new();
-        for edit in edits.iter() {
-            if let Some(p) = edit.get("path").and_then(|v| v.as_str()) {
-                planned_paths.push(std::path::PathBuf::from(p));
-            }
-        }
         let _resource_guards = match crate::session::acquire_many_file_writes_for_current_session(
             planned_paths.clone(),
         )
@@ -161,10 +274,6 @@ impl Tool for MultiEditTool {
         }
 
         for (i, edit) in edits.iter().enumerate() {
-            let path_str = edit
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Edit {i}: missing 'path'"))?;
             let new_string = edit
                 .get("new_string")
                 .and_then(|v| v.as_str())
@@ -175,33 +284,7 @@ impl Tool for MultiEditTool {
                 .and_then(|v| v.as_i64())
                 .map(|v| v as u64);
 
-            if !self.security.is_path_allowed(path_str) {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Edit {i}: security policy blocked path '{}'",
-                        path_str
-                    )),
-                });
-            }
-
-            let path = std::path::PathBuf::from(path_str);
-
-            if tokio::fs::symlink_metadata(&path)
-                .await
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Edit {i}: refusing to edit through symlink '{}'",
-                        path.display()
-                    )),
-                });
-            }
+            let path = planned_paths[i].clone();
 
             if let Some(expected) = expected_mtime_ms {
                 let actual_mtime = tokio::fs::metadata(&path)

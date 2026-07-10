@@ -35,6 +35,8 @@ pub fn spawn_input_thread() -> InputThreadHandle {
 
         let poll_budget = Duration::from_millis(50);
         let mut backoff_ms = 50u64;
+        let mut consecutive_read_errors = 0u32;
+        const MAX_CONSECUTIVE_READ_ERRORS: u32 = 20;
         loop {
             if shutdown_thread.load(Ordering::Acquire) {
                 break;
@@ -43,16 +45,26 @@ pub fn spawn_input_thread() -> InputThreadHandle {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
                         backoff_ms = 50;
+                        consecutive_read_errors = 0;
                         if tx.send(ev).is_err() {
                             break;
                         }
                     }
                     Err(e) => {
+                        consecutive_read_errors += 1;
                         tracing::warn!(
                             target: "tui.event_loop",
-                            "crossterm::event::read failed: {e}"
+                            "crossterm::event::read failed ({consecutive_read_errors}/{MAX_CONSECUTIVE_READ_ERRORS}, retry in {backoff_ms}ms): {e}"
                         );
-                        break;
+                        if consecutive_read_errors >= MAX_CONSECUTIVE_READ_ERRORS {
+                            tracing::error!(
+                                target: "tui.event_loop",
+                                "crossterm::event::read failed too many times consecutively; stopping input thread"
+                            );
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
+                        backoff_ms = (backoff_ms * 2).min(200);
                     }
                 },
                 Ok(false) => {

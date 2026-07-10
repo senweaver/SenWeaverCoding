@@ -6,9 +6,11 @@ import { useEffect, useRef, useState } from 'react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { debugApi, type DebugReport } from '../../api/debug'
+import { useTranslation } from '../../i18n'
+import type { TranslationKey } from '../../i18n'
 
 export function DebugResultCard({ sessionId }: { sessionId: string }) {
-  const locale = useSettingsStore((s) => s.locale)
+  const t = useTranslation()
   const globalCodingMode = useSettingsStore((s) => s.codingMode)
   const sessionCodingMode = useChatStore((s) => s.sessionCodingMode[sessionId])
   const codingMode = sessionCodingMode ?? globalCodingMode
@@ -17,9 +19,6 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
   const [report, setReport] = useState<DebugReport | null>(null)
   const [dismissed, setDismissed] = useState(false)
   const prevChatState = useRef(chatState)
-
-  const isZh = locale === 'zh'
-  const tr = (en: string, zh: string) => (isZh ? zh : en)
 
   const fetchReport = () => {
     void debugApi
@@ -59,10 +58,8 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
 
   const f = report.summary.findings
   const c = report.summary.cases
-  const submodeLabel = SUBMODE_LABELS[report.submode] ?? {
-    en: report.submode,
-    zh: report.submode,
-  }
+  const submodeKey = SUBMODE_LABEL_KEYS[report.submode]
+  const submodeLabel = submodeKey ? t(submodeKey) : report.submode
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-4 pb-2">
@@ -77,7 +74,7 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
                 {report.title}
               </div>
               <div className="text-[11px] text-[var(--color-text-secondary)]">
-                {tr('Debug report', '调试报告')} · {tr(submodeLabel.en, submodeLabel.zh)}
+                {t('debug.card.reportLabel')} · {submodeLabel}
               </div>
             </div>
           </div>
@@ -85,7 +82,7 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
             <button
               type="button"
               onClick={fetchReport}
-              title={tr('Refresh', '刷新')}
+              title={t('debug.card.refresh')}
               className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
             >
               <span className="material-symbols-outlined text-[15px]">refresh</span>
@@ -93,7 +90,7 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
             <button
               type="button"
               onClick={() => setDismissed(true)}
-              title={tr('Dismiss', '关闭')}
+              title={t('debug.card.dismiss')}
               className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
             >
               <span className="material-symbols-outlined text-[15px]">close</span>
@@ -102,22 +99,26 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
         </div>
 
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-          <Stat label={tr('Findings', '问题')} value={f.total} />
+          <Stat label={t('debug.card.findings')} value={f.total} />
           {f.p0 > 0 && <Badge tone="error" label={`P0 ${f.p0}`} />}
           {f.p1 > 0 && <Badge tone="warning" label={`P1 ${f.p1}`} />}
           {f.p2 > 0 && <Badge tone="muted" label={`P2 ${f.p2}`} />}
           {c.total > 0 && (
             <>
               <span className="mx-0.5 h-3 w-px bg-[var(--color-border)]" />
-              {c.passed > 0 && <Badge tone="success" label={`${tr('Pass', '通过')} ${c.passed}`} />}
-              {c.failed > 0 && <Badge tone="error" label={`${tr('Fail', '失败')} ${c.failed}`} />}
+              {c.passed > 0 && (
+                <Badge tone="success" label={`${t('debug.card.pass')} ${c.passed}`} />
+              )}
+              {c.failed > 0 && (
+                <Badge tone="error" label={`${t('debug.card.fail')} ${c.failed}`} />
+              )}
               {c.blocked > 0 && (
-                <Badge tone="warning" label={`${tr('Blocked', '阻塞')} ${c.blocked}`} />
+                <Badge tone="warning" label={`${t('debug.card.blocked')} ${c.blocked}`} />
               )}
             </>
           )}
           {report.summary.coverage > 0 && (
-            <Stat label={tr('Pages', '页面')} value={report.summary.coverage} />
+            <Stat label={t('debug.card.pages')} value={report.summary.coverage} />
           )}
         </div>
 
@@ -149,10 +150,7 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
             ))}
             {report.findings.length > 5 && (
               <div className="px-1 text-[11px] text-[var(--color-text-secondary)]">
-                {tr(
-                  `+${report.findings.length - 5} more`,
-                  `还有 ${report.findings.length - 5} 项`,
-                )}
+                {t('debug.card.moreFindings', { count: report.findings.length - 5 })}
               </div>
             )}
           </div>
@@ -168,12 +166,12 @@ export function DebugResultCard({ sessionId }: { sessionId: string }) {
   )
 }
 
-const SUBMODE_LABELS: Record<string, { en: string; zh: string }> = {
-  auto: { en: 'Auto', zh: '自动' },
-  'code-review': { en: 'Code Review', zh: '代码审查' },
-  'security-review': { en: 'Security Review', zh: '安全审查' },
-  e2e: { en: 'E2E Testing', zh: '端到端测试' },
-  performance: { en: 'Performance & Load', zh: '性能与负载' },
+const SUBMODE_LABEL_KEYS: Record<string, TranslationKey> = {
+  auto: 'debug.card.submode.auto',
+  'code-review': 'debug.card.submode.codeReview',
+  'security-review': 'debug.card.submode.securityReview',
+  e2e: 'debug.card.submode.e2e',
+  performance: 'debug.card.submode.performance',
 }
 
 function bucketClass(bucket: string): string {

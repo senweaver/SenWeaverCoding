@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
+import { confirmDialog } from '../../lib/dialogs'
 import { useLanStore } from '../../stores/lanStore'
 import { useLanGroupStore } from '../../stores/lanGroupStore'
 import type { LanGroupRole, LanGroupSnapshot } from '../../types/lanGroup'
@@ -144,9 +145,11 @@ export function GroupMembers({
         <button
           type="button"
           onClick={() => {
-            if (window.confirm(t('lanGroup.leaveConfirm'))) {
-              void leaveGroup(groupId)
-            }
+            void (async () => {
+              if (await confirmDialog(t('lanGroup.leaveConfirm'))) {
+                await leaveGroup(groupId)
+              }
+            })()
           }}
           className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--color-error)] hover:bg-[var(--color-surface-hover)]"
         >

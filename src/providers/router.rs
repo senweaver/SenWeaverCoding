@@ -364,11 +364,21 @@ impl Provider for RouterProvider {
             }
         };
         let (provider_name, provider) = &self.providers[provider_idx];
-        if !provider.supports_streaming() {
-            let detail = format!(
+        let needs_tool_events = request.tools.is_some_and(|tools| !tools.is_empty());
+        let stream_guard: Result<(), StreamError> = if !provider.supports_streaming() {
+            Err(StreamError::Provider(format!(
                 "routed provider '{provider_name}' does not support streaming for model '{resolved_model}'"
-            );
-            return stream::once(async move { Err(StreamError::Provider(detail)) }).boxed();
+            )))
+        } else if needs_tool_events && !provider.supports_streaming_tool_events() {
+            Err(StreamError::Provider(format!(
+                "routed provider '{provider_name}' cannot stream tool calls for model \
+                 '{resolved_model}'; tools would be silently dropped"
+            )))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = stream_guard {
+            return stream::once(async move { Err(error) }).boxed();
         }
         provider.stream_chat(request, &resolved_model, temperature, options)
     }

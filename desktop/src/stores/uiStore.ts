@@ -3,6 +3,8 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
+import { useLanGroupStore } from './lanGroupStore'
+import { useLanShareStore } from './lanShareStore'
 import type { ThemeMode } from '../types/settings'
 
 const THEME_STORAGE_KEY = 'sen-theme'
@@ -297,7 +299,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
   },
   closeWorkspaceFinder: () => set({ workspaceFinderMode: null }),
 
-  dismissChatOverlays: () =>
+  dismissChatOverlays: () => {
+    const lanGroup = useLanGroupStore.getState()
+    if (lanGroup.panelOpen) lanGroup.closePanel()
+    const lanShare = useLanShareStore.getState()
+    if (lanShare.panelOpen) lanShare.closePanel()
     set((s) => {
       if (
         !s.settingsOverlayOpen &&
@@ -322,7 +328,8 @@ export const useUIStore = create<UIStore>((set, get) => ({
         next.activeModal = null
       }
       return next
-    }),
+    })
+  },
 
   setClosePromptOpen: (open) => set({ closePromptOpen: open }),
   setSafeExiting: (active) => set({ safeExiting: active }),

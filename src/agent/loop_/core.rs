@@ -188,7 +188,20 @@ impl<'a> AgentLoopCore<'a> {
 
         let result = self.run_turn(history, Some(delta_tx)).await;
 
-        bridge_handle.abort();
+        // `run_turn` consumed the only `delta_tx`, so once it returns the sender is
+        // dropped and the bridge task drains any buffered events and then exits on
+        // its own. Await it (bounded) instead of aborting, so the final Content /
+        // ToolResult events still sitting in the channel are forwarded to the
+        // consumer instead of being dropped mid-flight.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), bridge_handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                tracing::debug!(
+                    "AgentLoopCore draft bridge did not drain within 5s after turn end; \
+                     continuing without blocking"
+                );
+            }
+        }
         result
     }
 

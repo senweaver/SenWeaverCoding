@@ -14,6 +14,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+pub mod record;
+
 use crate::computer::run::{run_loop, ComputerEvent, RunParams};
 use crate::computer::session::run_registry;
 use crate::config::Config;
@@ -65,6 +67,11 @@ pub async fn handle_ws_computer(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(reject) =
+        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/computer")
+    {
+        return reject;
+    }
     if state.exposed || state.pairing.require_pairing() {
         let token = super::ws::extract_ws_token(&headers, None).unwrap_or("");
         let authed = if state.exposed {
@@ -121,17 +128,133 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
                         if started {
                             continue;
                         }
-                        let Some(params) = parse_start(&parsed, &run_id) else {
-                            let _ = event_tx.send(ComputerEvent::Error {
-                                message: "start message missing task/provider/model".into(),
-                            });
+                        let config: Config = state.live_config.load_ref().as_ref().clone();
+                        let mode = parsed.get("mode").and_then(|v| v.as_str()).unwrap_or("agent");
+
+                        if mode == "replay" {
+                            let Some(name) = parsed
+                                .get("recording")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                            else {
+                                let _ = event_tx.send(ComputerEvent::error_code(
+                                    "replay_missing_recording",
+                                    "replay start message missing recording name",
+                                ));
+                                continue;
+                            };
+                            let manifest = match crate::computer::recorder::load_recording(
+                                &config.workspace_dir,
+                                name,
+                            )
+                            .await
+                            {
+                                Ok(manifest) => manifest,
+                                Err(e) => {
+                                    let _ = event_tx.send(ComputerEvent::error_code(
+                                        "replay_load_failed",
+                                        format!("failed to load recording: {e}"),
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let smart = parsed
+                                .get("smart")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false);
+                            if smart {
+                                let provider = parsed
+                                    .get("provider")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string)
+                                    .or_else(|| config.multimodal.vision_provider.clone())
+                                    .or_else(|| config.default_provider.clone());
+                                let model = parsed
+                                    .get("model")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string)
+                                    .or_else(|| config.multimodal.vision_model.clone())
+                                    .or_else(|| config.default_model.clone());
+                                let (Some(provider), Some(model)) = (provider, model) else {
+                                    let _ = event_tx.send(ComputerEvent::error_code(
+                                        "no_vision_model",
+                                        "no vision provider/model configured for smart replay",
+                                    ));
+                                    continue;
+                                };
+                                let recording_dir =
+                                    config.workspace_dir.join("skills").join(name);
+                                started = true;
+                                let cancel = registry.register(&run_id);
+                                let event_tx = event_tx.clone();
+                                loop_handle = Some(tokio::spawn(
+                                    crate::computer::recorder::replay_recording_smart(
+                                        manifest,
+                                        recording_dir,
+                                        config,
+                                        provider,
+                                        model,
+                                        cancel,
+                                        event_tx,
+                                    ),
+                                ));
+                                continue;
+                            }
+                            started = true;
+                            let cancel = registry.register(&run_id);
+                            let event_tx = event_tx.clone();
+                            loop_handle = Some(tokio::spawn(
+                                crate::computer::recorder::replay_recording(
+                                    manifest, cancel, event_tx,
+                                ),
+                            ));
+                            continue;
+                        }
+
+                        let Some(mut params) = parse_start(&parsed, &run_id) else {
+                            let _ = event_tx.send(ComputerEvent::error_code(
+                                "start_missing_params",
+                                "start message missing task/provider/model",
+                            ));
                             continue;
                         };
+                        if let Some(skill) = parsed
+                            .get("skill")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            let Some(instructions) =
+                                crate::computer::recorder::load_skill_instructions(
+                                    &config.workspace_dir,
+                                    skill,
+                                )
+                            else {
+                                let _ = event_tx.send(ComputerEvent::error_code(
+                                    "skill_not_found",
+                                    format!("skill '{skill}' not found"),
+                                ));
+                                let _ = event_tx.send(ComputerEvent::status_code(
+                                    crate::computer::run::RunStatus::Error,
+                                    "skill_not_found",
+                                    format!("skill '{skill}' not found; run aborted"),
+                                ));
+                                continue;
+                            };
+                            params.task = format!(
+                                "{instructions}\n\n---\nValues for this run:\n{}",
+                                params.task
+                            );
+                        }
                         let Some(reply_rx) = reply_rx.take() else {
                             continue;
                         };
                         started = true;
-                        let config: Config = state.live_config.load_ref().as_ref().clone();
                         let cancel = registry.register(&run_id);
                         let event_tx = event_tx.clone();
                         loop_handle = Some(tokio::spawn(run_loop(

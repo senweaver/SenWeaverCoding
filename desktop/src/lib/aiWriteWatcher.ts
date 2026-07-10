@@ -7,7 +7,8 @@ import { useWorkspaceFilesStore } from '../stores/workspaceFilesStore'
 import type { PerSessionState } from '../stores/chatStore'
 import type { UIMessage } from '../types/chat'
 
-const seenIdsByMessages: WeakMap<readonly UIMessage[], Set<string>> = new WeakMap()
+type SessionWatchState = { seen: Set<string>; scannedLen: number }
+const watchStateBySession: Map<string, SessionWatchState> = new Map()
 
 const MUTATION_TOOLS = new Set([
   'file_write',
@@ -28,8 +29,8 @@ export function startAiWriteWatcher(): () => void {
   if (unsubscribe) return unsubscribe
 
   const initial = useChatStore.getState().sessions
-  for (const state of Object.values(initial)) {
-    primeSeenIds(state.messages)
+  for (const [sessionId, state] of Object.entries(initial)) {
+    primeSeenIds(sessionId, state.messages)
   }
 
   unsubscribe = useChatStore.subscribe((state, prev) => {
@@ -44,20 +45,21 @@ export function startAiWriteWatcher(): () => void {
   }
 }
 
-function primeSeenIds(messages: readonly UIMessage[]) {
-  let seen = seenIdsByMessages.get(messages)
-  if (!seen) {
-    seen = new Set()
-    seenIdsByMessages.set(messages, seen)
+function primeSeenIds(sessionId: string, messages: readonly UIMessage[]) {
+  let ws = watchStateBySession.get(sessionId)
+  if (!ws) {
+    ws = { seen: new Set(), scannedLen: 0 }
+    watchStateBySession.set(sessionId, ws)
   }
   for (const msg of messages) {
     if (msg.type === 'file_edit') {
-      seen.add(msg.id)
+      ws.seen.add(msg.id)
     }
     if (msg.type === 'tool_result') {
-      seen.add(`tool_result:${msg.toolUseId}`)
+      ws.seen.add(`tool_result:${msg.toolUseId}`)
     }
   }
+  ws.scannedLen = messages.length
 }
 
 function handleSessions(
@@ -74,22 +76,29 @@ function handleSessions(
     const prevMessages = prevSessions[sessionId]?.messages
     if (messages === prevMessages) continue
 
-    let seen = seenIdsByMessages.get(messages)
-    if (!seen) {
-      const prevSeen = prevMessages ? seenIdsByMessages.get(prevMessages) : undefined
-      seen = new Set(prevSeen ?? [])
-      seenIdsByMessages.set(messages, seen)
+    let ws = watchStateBySession.get(sessionId)
+    if (!ws) {
+      ws = { seen: new Set(), scannedLen: 0 }
+      watchStateBySession.set(sessionId, ws)
+    }
+    // Only scan the newly-appended tail. The persistent `seen` set (kept per
+    // session rather than copied per array) plus the `scannedLen` cursor turns
+    // the previous O(n) full scan + O(n) set copy on every update into O(delta).
+    let start = ws.scannedLen
+    if (start > messages.length) {
+      // Array was replaced/shrank (rewind, reload); rescan from the top. The
+      // `seen` set still dedups already-notified entries.
+      start = 0
     }
 
-    // Build the tool_use → paths index lazily: only when an unseen, successful tool_result is
-    // actually encountered. The common streaming case (appended file_edit / tool_use / assistant
-    // messages) then avoids an O(n) full-message scan on every store update.
     let toolPaths: Map<string, string[]> | null = null
 
-    for (const msg of messages) {
+    for (let i = start; i < messages.length; i++) {
+      const msg = messages[i]
+      if (!msg) continue
       if (msg.type === 'file_edit') {
-        if (seen.has(msg.id)) continue
-        seen.add(msg.id)
+        if (ws.seen.has(msg.id)) continue
+        ws.seen.add(msg.id)
         const rel = normalizeRelPath(msg.path, root)
         if (rel) {
           notify(rel)
@@ -99,9 +108,9 @@ function handleSessions(
 
       if (msg.type === 'tool_result') {
         const key = `tool_result:${msg.toolUseId}`
-        if (seen.has(key)) continue
+        if (ws.seen.has(key)) continue
         if (msg.isError) continue
-        seen.add(key)
+        ws.seen.add(key)
         if (!toolPaths) toolPaths = buildToolPathIndex(messages)
         const paths = toolPaths.get(msg.toolUseId)
         if (!paths) continue
@@ -111,6 +120,16 @@ function handleSessions(
             notify(rel)
           }
         }
+      }
+    }
+    ws.scannedLen = messages.length
+  }
+
+  // Drop watch state for sessions that no longer exist to avoid unbounded growth.
+  if (watchStateBySession.size > Object.keys(sessions).length) {
+    for (const key of watchStateBySession.keys()) {
+      if (!(key in sessions)) {
+        watchStateBySession.delete(key)
       }
     }
   }

@@ -3,8 +3,6 @@
 // Licensed under the MIT License.
 
 pub mod agent_bridge;
-pub mod agents_panel;
-
 pub mod chat;
 
 pub mod edit_batch_registry;
@@ -305,12 +303,30 @@ pub struct App {
 
     pub revert_hunk_outcome_tx: tokio::sync::mpsc::Sender<RevertHunkOutcome>,
     pub revert_hunk_outcome_rx: tokio::sync::mpsc::Receiver<RevertHunkOutcome>,
+
+    pub resume_outcome_tx: tokio::sync::mpsc::Sender<ResumeOutcome>,
+    pub resume_outcome_rx: tokio::sync::mpsc::Receiver<ResumeOutcome>,
+    pub resume_in_progress: bool,
 }
 
 #[derive(Debug)]
 pub enum RunnerOutcomeMessage {
     Success(inline_edit_modal::RunnerSubmitOutcome),
     Failure { path: std::path::PathBuf, error: String },
+    NoRunner { path: std::path::PathBuf, instruction: String },
+}
+
+#[derive(Debug)]
+pub enum ResumeOutcome {
+    Loaded {
+        id: String,
+        messages: Vec<crate::providers::ChatMessage>,
+        turns: usize,
+    },
+    Failed {
+        id: String,
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -456,6 +472,79 @@ impl ChatMessage {
     }
 }
 
+const CHAT_DISPLAY_TRUNCATE_BYTES: usize = 16 * 1024;
+
+fn truncate_for_chat_display(text: &str) -> String {
+    if text.len() <= CHAT_DISPLAY_TRUNCATE_BYTES {
+        return text.to_string();
+    }
+    let mut end = CHAT_DISPLAY_TRUNCATE_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = text.len() - end;
+    format!(
+        "{}\n… [{} bytes truncated for display; full output was delivered to the agent]",
+        &text[..end],
+        omitted
+    )
+}
+
+fn load_session_for_resume(workspace_root: &std::path::Path, id: &str) -> ResumeOutcome {
+    if !crate::commands::resume::unified_session_exists(workspace_root, id) {
+        return ResumeOutcome::Failed {
+            id: id.to_string(),
+            error: format!(
+                "Session '{id}' not found. Use /resume list to see available sessions."
+            ),
+        };
+    }
+    let state = match crate::session::SessionEventLog::open_at(workspace_root, id) {
+        Ok(log) => match log.replay(id) {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                return ResumeOutcome::Failed {
+                    id: id.to_string(),
+                    error: format!("Session '{id}' has no recorded history to restore."),
+                };
+            }
+            Err(err) => {
+                return ResumeOutcome::Failed {
+                    id: id.to_string(),
+                    error: format!("Failed to read session '{id}': {err}"),
+                };
+            }
+        },
+        Err(err) => {
+            return ResumeOutcome::Failed {
+                id: id.to_string(),
+                error: format!("Failed to open session '{id}': {err}"),
+            };
+        }
+    };
+    if state.turns.is_empty() {
+        return ResumeOutcome::Failed {
+            id: id.to_string(),
+            error: format!("Session '{id}' contains no turns; nothing to restore."),
+        };
+    }
+    let mut messages: Vec<crate::providers::ChatMessage> =
+        Vec::with_capacity(state.turns.len() * 2);
+    for turn in &state.turns {
+        messages.push(crate::providers::ChatMessage::user(turn.input.clone()));
+        if let Some(output) = turn.output.as_ref() {
+            if !output.is_empty() {
+                messages.push(crate::providers::ChatMessage::assistant(output.clone()));
+            }
+        }
+    }
+    ResumeOutcome::Loaded {
+        id: id.to_string(),
+        messages,
+        turns: state.turns.len(),
+    }
+}
+
 impl crate::session::ChatViewSink for Vec<ChatMessage> {
     fn push_user(&mut self, text: &str) {
         self.push(ChatMessage::with_role_now("user", text.to_string()));
@@ -596,6 +685,8 @@ impl App {
             tokio::sync::mpsc::channel::<RunnerOutcomeMessage>(256);
         let (revert_hunk_outcome_tx, revert_hunk_outcome_rx) =
             tokio::sync::mpsc::channel::<RevertHunkOutcome>(256);
+        let (resume_outcome_tx, resume_outcome_rx) =
+            tokio::sync::mpsc::channel::<ResumeOutcome>(4);
 
         Self {
             active_tab: Tab::Dashboard,
@@ -678,6 +769,9 @@ impl App {
             inline_edit_outcome_rx,
             revert_hunk_outcome_tx,
             revert_hunk_outcome_rx,
+            resume_outcome_tx,
+            resume_outcome_rx,
+            resume_in_progress: false,
         }
     }
 
@@ -696,6 +790,8 @@ impl App {
     fn handle_interrupt_key(&mut self) {
         if self.bridge.is_busy {
             let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+            self.pending_questions.clear();
+            self.pending_approvals.clear();
             self.chat_messages.push(ChatMessage::with_role_now(
                 "system",
                 "Cancelling current turn\u{2026}".into(),
@@ -719,6 +815,8 @@ impl App {
     fn handle_exit_key(&mut self) {
         if self.bridge.is_busy {
             let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+            self.pending_questions.clear();
+            self.pending_approvals.clear();
             self.chat_messages.push(ChatMessage::with_role_now(
                 "system",
                 "Cancelling current turn\u{2026}".into(),
@@ -807,16 +905,63 @@ impl App {
                     false
                 }
             }
-            KeyAction::AutoMode
-            | KeyAction::PlanMode
-            | KeyAction::Compact
-            | KeyAction::TabComplete
-            | KeyAction::VoiceToggle
-            | KeyAction::Custom(_) => false,
+            KeyAction::AutoMode => {
+                let current = crate::services::try_get_services()
+                    .map(|svc| *svc.coding_mode.read())
+                    .unwrap_or_default();
+                let target = if current == crate::agent::coding_mode::CodingMode::Vibe {
+                    "agent"
+                } else {
+                    "vibe"
+                };
+                let _ = self
+                    .bridge
+                    .send(agent_bridge::UserInput::ModeSwitch(target.to_string()));
+                true
+            }
+            KeyAction::PlanMode => {
+                let current = crate::services::try_get_services()
+                    .map(|svc| *svc.coding_mode.read())
+                    .unwrap_or_default();
+                let target = if current == crate::agent::coding_mode::CodingMode::Plan {
+                    "agent"
+                } else {
+                    "plan"
+                };
+                let _ = self
+                    .bridge
+                    .send(agent_bridge::UserInput::ModeSwitch(target.to_string()));
+                true
+            }
+            KeyAction::Compact => {
+                let _ = self.bridge.send(agent_bridge::UserInput::SlashCommand {
+                    name: "compact".to_string(),
+                    args: Vec::new(),
+                });
+                true
+            }
+            KeyAction::TabComplete | KeyAction::VoiceToggle | KeyAction::Custom(_) => false,
         }
     }
 
     fn handle_key(&mut self, key: event::KeyEvent) {
+
+        let overlay_active = !self.pending_approvals.is_empty()
+            || !self.pending_questions.is_empty()
+            || self.command_palette_open;
+        if overlay_active && key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.handle_exit_key();
+                    return;
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    self.handle_interrupt_key();
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         if !self.pending_approvals.is_empty() {
             self.handle_approval_key(key);
@@ -825,6 +970,27 @@ impl App {
 
         if !self.pending_questions.is_empty() {
             self.handle_question_key(key);
+            return;
+        }
+
+        if !self.answered_questions.is_empty() && key.code == KeyCode::Enter {
+            let answers = std::mem::take(&mut self.answered_questions);
+            let sent = self.bridge.send(agent_bridge::UserInput::QuestionAnswerBatch {
+                answers: answers.clone(),
+            });
+            if sent {
+                self.chat_messages.push(ChatMessage::with_role_now(
+                    "system",
+                    "answers delivered to the agent".into(),
+                ));
+            } else {
+                self.answered_questions = answers;
+                self.chat_messages.push(ChatMessage::with_role_now(
+                    "error",
+                    "failed to deliver answers to the agent (channel full)  -  press Enter to retry"
+                        .into(),
+                ));
+            }
             return;
         }
 
@@ -871,7 +1037,7 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.handle_interrupt_key();
             }
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') if self.active_tab != Tab::Chat => {
                 self.show_help = !self.show_help;
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -982,7 +1148,11 @@ impl App {
             KeyCode::Backspace if question.text_focus => {
                 pop_last_char(&mut question.free_text);
             }
-            KeyCode::Char(c) if question.text_focus => {
+            KeyCode::Char(c)
+                if question.text_focus
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
                 question.free_text.push(c);
             }
             _ => {}
@@ -1027,13 +1197,15 @@ impl App {
             });
         if self.pending_questions.is_empty() {
             let answers = std::mem::take(&mut self.answered_questions);
-            let sent = self
-                .bridge
-                .send(agent_bridge::UserInput::QuestionAnswerBatch { answers });
+            let sent = self.bridge.send(agent_bridge::UserInput::QuestionAnswerBatch {
+                answers: answers.clone(),
+            });
             if !sent {
+                self.answered_questions = answers;
                 self.chat_messages.push(ChatMessage::with_role_now(
                     "error",
-                    "failed to deliver answers to the agent (channel full)".into(),
+                    "failed to deliver answers to the agent (channel full)  -  press Enter to retry"
+                        .into(),
                 ));
             }
         }
@@ -1096,12 +1268,7 @@ impl App {
         let Some(actor) = self.bridge.session_actor_slot.get() else {
             return Vec::new();
         };
-        let snapshot = actor.snapshot();
-        let mut rows: Vec<_> = snapshot
-            .open_files
-            .iter()
-            .map(|(p, meta)| (p.clone(), meta.last_read_at))
-            .collect();
+        let mut rows = actor.open_files();
         rows.sort_by(|a, b| b.1.cmp(&a.1));
         rows
     }
@@ -1166,8 +1333,7 @@ impl App {
                     .get_mut_by_id(entry_id)
                     .map(|e| e.clone());
                 if let Some(entry) = entry {
-                    let workspace = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let workspace = self.config.workspace_dir.clone();
                     self.diff_review_state.reverting_entries.insert(entry_id);
                     let tx = self.revert_hunk_outcome_tx.clone();
                     tokio::task::spawn_blocking(move || {
@@ -1274,46 +1440,50 @@ impl App {
                     crate::observability::tui_metrics::incr_tui_inline_edit_triggered();
                     self.pending_inline_path = Some(path.clone());
 
-                    let runner = crate::inline_edit::service::default_runner(&self.config);
-                    if let Some(runner) = runner {
-                        let tx = self.inline_edit_outcome_tx.clone();
-                        let target_path = path.clone();
-                        let instruction_clone = instruction.clone();
-                        tokio::spawn(async move {
-                            let outcome = inline_edit_modal::run_through_runner(
-                                runner.as_ref(),
-                                target_path.clone(),
-                                instruction_clone,
-                            )
-                            .await;
-                            let msg = match outcome {
-                                Ok(success) => RunnerOutcomeMessage::Success(success),
-                                Err(err) => RunnerOutcomeMessage::Failure {
+                    let cached_runner = crate::inline_edit::service::cached_runner();
+                    let tx = self.inline_edit_outcome_tx.clone();
+                    let target_path = path.clone();
+                    let instruction_clone = instruction.clone();
+                    let workspace_dir = self.config.workspace_dir.clone();
+                    let config = self.config.clone();
+                    tokio::spawn(async move {
+                        let runner = match cached_runner {
+                            Some(runner) => Some(runner),
+                            None => tokio::task::spawn_blocking(move || {
+                                crate::inline_edit::service::default_runner(&config)
+                            })
+                            .await
+                            .ok()
+                            .flatten(),
+                        };
+                        let Some(runner) = runner else {
+                            let _ = tx
+                                .send(RunnerOutcomeMessage::NoRunner {
                                     path: target_path,
-                                    error: err.to_string(),
-                                },
-                            };
-                            let _ = tx.send(msg).await;
-                        });
-                        self.inline_edit_modal.submitting = true;
-                        self.inline_edit_modal.status =
-                            Some("running inline-edit runner...".into());
-                    } else {
-                        let prompt = inline_edit_modal::build_agent_prompt(&path, &instruction);
-                        let sent = self
-                            .bridge
-                            .send(agent_bridge::UserInput::Chat(prompt));
-                        if sent {
-                            self.inline_edit_modal.status =
-                                Some("dispatched to agent (no runner configured)".into());
-                            crate::observability::tui_metrics::incr_tui_inline_edit_success();
-                        } else {
-                            self.inline_edit_modal.status =
-                                Some("agent busy  -  retry after it finishes".into());
-                            crate::observability::tui_metrics::incr_tui_inline_edit_failed();
-                        }
-                        self.inline_edit_modal.close();
-                    }
+                                    instruction: instruction_clone,
+                                })
+                                .await;
+                            return;
+                        };
+                        let outcome = inline_edit_modal::run_through_runner(
+                            runner.as_ref(),
+                            workspace_dir,
+                            target_path.clone(),
+                            instruction_clone,
+                        )
+                        .await;
+                        let msg = match outcome {
+                            Ok(success) => RunnerOutcomeMessage::Success(success),
+                            Err(err) => RunnerOutcomeMessage::Failure {
+                                path: target_path,
+                                error: err.to_string(),
+                            },
+                        };
+                        let _ = tx.send(msg).await;
+                    });
+                    self.inline_edit_modal.submitting = true;
+                    self.inline_edit_modal.status =
+                        Some("running inline-edit runner...".into());
                 }
             }
             self.mark_dirty();
@@ -1444,7 +1614,30 @@ impl App {
                 self.chat_input
                     .insert_at(self.chat_cursor, c.encode_utf8(&mut encoded));
                 self.set_chat_cursor(self.chat_cursor + 1);
+                self.vim_state.cursor_pos = self.chat_cursor;
                 self.typing_run = true;
+            }
+            VimAction::ReplaceChar(c) => {
+                self.push_undo_snapshot();
+                let char_count = self.chat_input.char_count();
+                if self.chat_cursor < char_count {
+                    self.chat_input
+                        .delete_range(self.chat_cursor, self.chat_cursor + 1);
+                }
+                let mut encoded = [0u8; 4];
+                self.chat_input
+                    .insert_at(self.chat_cursor, c.encode_utf8(&mut encoded));
+                self.set_chat_cursor(self.chat_cursor + 1);
+                self.vim_state.cursor_pos = self.chat_cursor;
+            }
+            VimAction::Backspace => {
+                if self.chat_cursor > 0 {
+                    self.push_undo_snapshot();
+                    self.chat_input
+                        .delete_range(self.chat_cursor - 1, self.chat_cursor);
+                    self.set_chat_cursor(self.chat_cursor - 1);
+                    self.vim_state.cursor_pos = self.chat_cursor;
+                }
             }
             VimAction::CursorMove(char_pos) => {
                 self.set_chat_cursor(char_pos);
@@ -1473,6 +1666,10 @@ impl App {
                         "Cancelling current turn\u{2026}".into(),
                     ));
                 }
+            }
+            VimAction::Notice(text) => {
+                self.chat_messages
+                    .push(ChatMessage::with_role_now("system", text));
             }
             VimAction::YankRange(start_char, end_char) => {
                 let char_count = self.chat_input.char_count();
@@ -1564,7 +1761,10 @@ impl App {
                 let max = self.filtered_palette_commands().len().saturating_sub(1);
                 self.command_palette_selected = (self.command_palette_selected + 1).min(max);
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
                 self.command_palette_filter.push(c);
                 self.command_palette_selected = 0;
             }
@@ -1624,6 +1824,17 @@ impl App {
             let parts: Vec<&str> = cmd.split_whitespace().collect();
             let name = parts.first().unwrap_or(&"").to_string();
             let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+            if name == "resume" {
+                if let Some(id) = args.first().filter(|id| id.as_str() != "list") {
+                    let id = id.clone();
+                    self.chat_messages.push(ChatMessage::with_role_now(
+                        "system",
+                        format!("/resume {id}"),
+                    ));
+                    self.resume_session_from_disk(&id);
+                    return;
+                }
+            }
             self.chat_messages.push(ChatMessage::with_role_now(
                 "system",
                 format!("/{name} {}", args.join(" ")),
@@ -1644,13 +1855,83 @@ impl App {
                 "user",
                 msg.clone(),
             ));
-            if !self.bridge.send(agent_bridge::UserInput::Chat(msg.clone())) {
+            if self.bridge.send(agent_bridge::UserInput::Chat(msg.clone())) {
+                self.bridge.is_busy = true;
+            } else {
                 self.chat_messages.push(ChatMessage::with_role_now(
                     "system",
                     "Failed to deliver your message to the agent (channel unavailable). Your text has been restored  -  please retry.".into(),
                 ));
                 self.chat_input = crate::editor_core::TextBuffer::from_text(&msg);
                 self.set_chat_cursor(self.chat_input.char_count());
+            }
+        }
+    }
+
+    fn resume_session_from_disk(&mut self, id: &str) {
+        if self.bridge.is_busy {
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                "Agent is busy  -  cancel the current turn before resuming a session.".into(),
+            ));
+            return;
+        }
+        if self.resume_in_progress {
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                "A session resume is already in progress  -  please wait.".into(),
+            ));
+            return;
+        }
+        self.resume_in_progress = true;
+        self.chat_messages.push(ChatMessage::with_role_now(
+            "system",
+            format!("Loading session '{id}' in the background\u{2026}"),
+        ));
+        let workspace_root = self.config.workspace_dir.clone();
+        let id = id.to_string();
+        let tx = self.resume_outcome_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let outcome = load_session_for_resume(&workspace_root, &id);
+            let _ = tx.blocking_send(outcome);
+        });
+    }
+
+    fn drain_resume_outcomes(&mut self) {
+        loop {
+            match self.resume_outcome_rx.try_recv() {
+                Ok(ResumeOutcome::Loaded { id, messages, turns }) => {
+                    self.resume_in_progress = false;
+                    if self
+                        .bridge
+                        .send(agent_bridge::UserInput::ClearAndSeedHistory {
+                            messages: messages.clone(),
+                        })
+                    {
+                        for m in &messages {
+                            let role = if m.role == "user" { "user" } else { "assistant" };
+                            self.chat_messages
+                                .push(ChatMessage::with_role_now(role, m.content.clone()));
+                        }
+                        self.chat_messages.push(ChatMessage::with_role_now(
+                            "system",
+                            format!("Resumed session {id} ({turns} turns restored)"),
+                        ));
+                    } else {
+                        self.chat_messages.push(ChatMessage::with_role_now(
+                            "error",
+                            "Failed to deliver restored history to the agent (channel unavailable). Please retry.".into(),
+                        ));
+                    }
+                    self.mark_dirty();
+                }
+                Ok(ResumeOutcome::Failed { id: _, error }) => {
+                    self.resume_in_progress = false;
+                    self.chat_messages
+                        .push(ChatMessage::with_role_now("error", error));
+                    self.mark_dirty();
+                }
+                Err(_) => break,
             }
         }
     }
@@ -1775,6 +2056,7 @@ impl App {
         self.drain_agent_events();
         self.drain_inline_edit_outcomes();
         self.drain_revert_hunk_outcomes();
+        self.drain_resume_outcomes();
         self.sync_from_services();
     }
 
@@ -1837,11 +2119,14 @@ impl App {
                         success.additions,
                         success.deletions,
                         Some(success.diff.clone()),
-                        success.checkpoint_id.clone(),
+                        success
+                            .edit_batch_id
+                            .clone()
+                            .or_else(|| success.checkpoint_id.clone()),
                         ts,
                     );
                     let summary = format!(
-                        "inline-edit ready for review: {path_display} (+{add} / -{del})",
+                        "inline-edit applied: {path_display} (+{add} / -{del})",
                         add = success.additions,
                         del = success.deletions,
                     );
@@ -1882,6 +2167,22 @@ impl App {
                     self.inline_edit_modal.status =
                         Some(format!("{summary} (Esc to cancel, Enter to retry)"));
                     crate::observability::tui_metrics::incr_tui_inline_edit_failed();
+                    self.mark_dirty();
+                }
+                Ok(RunnerOutcomeMessage::NoRunner { path, instruction }) => {
+                    let prompt = inline_edit_modal::build_agent_prompt(&path, &instruction);
+                    let sent = self.bridge.send(agent_bridge::UserInput::Chat(prompt));
+                    self.inline_edit_modal.submitting = false;
+                    if sent {
+                        self.inline_edit_modal.status =
+                            Some("dispatched to agent (no runner configured)".into());
+                        crate::observability::tui_metrics::incr_tui_inline_edit_success();
+                    } else {
+                        self.inline_edit_modal.status =
+                            Some("agent busy  -  retry after it finishes".into());
+                        crate::observability::tui_metrics::incr_tui_inline_edit_failed();
+                    }
+                    self.inline_edit_modal.close();
                     self.mark_dirty();
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -1964,9 +2265,10 @@ impl App {
                     let prefix = if success { "✓" } else { "✗" };
                     self.event_entries
                         .push(format!("[{ts}] tool_result: {prefix} {id}"));
+                    let display_output = truncate_for_chat_display(&output);
                     self.chat_messages.push(ChatMessage::from_parts(
                         "tool",
-                        format!("{prefix} [{id}] {output}"),
+                        format!("{prefix} [{id}] {display_output}"),
                         ts.clone(),
                     ));
                 }
@@ -2023,6 +2325,8 @@ impl App {
                     self.streaming_buffer.clear();
                     self.reasoning_buffer.clear();
                     self.stream_finalized = true;
+                    self.pending_approvals.clear();
+                    self.pending_questions.clear();
                     self.chat_messages
                         .push(ChatMessage::from_parts("error", e, ts.clone()));
                 }
@@ -2036,12 +2340,22 @@ impl App {
                         .push(format!("[{ts}] mode_changed: {mode_name}"));
                 }
                 agent_bridge::AgentEvent::StreamChunk(chunk) => {
+                    if self.stream_finalized && self.bridge.is_busy {
+                        self.stream_finalized = false;
+                        self.streaming_buffer.clear();
+                        self.reasoning_buffer.clear();
+                    }
                     if !self.stream_finalized {
                         self.streaming_buffer.push_str(&chunk);
                     }
                 }
                 agent_bridge::AgentEvent::ThinkingChunk(delta) => {
                     self.event_entries.push(format!("[{ts}] thinking_chunk"));
+                    if self.stream_finalized && self.bridge.is_busy {
+                        self.stream_finalized = false;
+                        self.streaming_buffer.clear();
+                        self.reasoning_buffer.clear();
+                    }
                     if !self.stream_finalized {
                         self.reasoning_buffer.push_str(&delta);
                     }
@@ -2085,23 +2399,30 @@ impl App {
                         }
                     }
                     if let Some(diff_text) = diff {
+                        // Build the whole (capped) diff as a SINGLE chat message.
+                        // Pushing one message per line previously bumped the render
+                        // content-version ~31 times per edit, forcing that many full
+                        // chat-line rebuilds on the next frame.
                         let max_lines = 30;
                         let total_lines = diff_text.lines().count();
+                        let mut block = String::new();
                         for (i, line) in diff_text.lines().enumerate() {
                             if i >= max_lines {
-                                self.chat_messages.push(ChatMessage::from_parts(
-                                    "tool",
-                                    format!(
-                                        "  ... ({} more lines)",
-                                        total_lines - max_lines
-                                    ),
-                                    ts.clone(),
+                                block.push_str(&format!(
+                                    "  ... ({} more lines)",
+                                    total_lines - max_lines
                                 ));
                                 break;
                             }
+                            if i > 0 {
+                                block.push('\n');
+                            }
+                            block.push_str(&format!("  {line}"));
+                        }
+                        if !block.is_empty() {
                             self.chat_messages.push(ChatMessage::from_parts(
                                 "tool",
-                                format!("  {line}"),
+                                block,
                                 ts.clone(),
                             ));
                         }
@@ -2206,12 +2527,31 @@ impl App {
                     ));
                 }
                 agent_bridge::AgentEvent::BackgroundShellChunk { id, line, .. } => {
-
-                    self.chat_messages.push(ChatMessage::from_parts(
-                        "system",
-                        format!("[bg:{id}] {line}"),
-                        ts.clone(),
-                    ));
+                    let prefix = format!("[bg:{id}]");
+                    let coalesced = if let Some(last) = self.chat_messages.last_mut() {
+                        if last.role == "system"
+                            && last.content.starts_with(&prefix)
+                            && last.content.len() < 64 * 1024
+                        {
+                            last.content.push('\n');
+                            last.content.push_str(&prefix);
+                            last.content.push(' ');
+                            last.content.push_str(&line);
+                            last.mark_content_dirty();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !coalesced {
+                        self.chat_messages.push(ChatMessage::from_parts(
+                            "system",
+                            format!("{prefix} {line}"),
+                            ts.clone(),
+                        ));
+                    }
                 }
                 agent_bridge::AgentEvent::SubagentChildEvent {
                     agent_id,
@@ -2245,6 +2585,15 @@ impl App {
                     ));
                 }
             }
+        }
+        self.trim_event_entries();
+    }
+
+    fn trim_event_entries(&mut self) {
+        const MAX_EVENT_ENTRIES: usize = 2000;
+        if self.event_entries.len() > MAX_EVENT_ENTRIES {
+            let excess = self.event_entries.len() - MAX_EVENT_ENTRIES;
+            self.event_entries.drain(..excess);
         }
     }
 
@@ -2755,7 +3104,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        "─".repeat(w as usize - 2),
+        "─".repeat((w as usize).saturating_sub(2)),
         theme::dim(),
     )));
 
@@ -2951,6 +3300,20 @@ fn build_chat_lines(messages: &[ChatMessage]) -> Vec<Line<'static>> {
                 chat::render_cache::render_message_cached(&m.highlighted_cache, &m.content);
 
             lines.extend(highlighted.iter().cloned());
+        } else if m.content.contains('\n') {
+            let mut segments = m.content.split('\n');
+            let mut spans = header;
+            spans.push(Span::styled(
+                segments.next().unwrap_or_default().to_string(),
+                theme::normal(),
+            ));
+            lines.push(Line::from(spans));
+            for segment in segments {
+                lines.push(Line::from(Span::styled(
+                    segment.to_string(),
+                    theme::normal(),
+                )));
+            }
         } else {
             let mut spans = header;
             spans.push(Span::styled(m.content.clone(), theme::normal()));
@@ -2981,7 +3344,14 @@ fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
     out
 }
 
+const MAX_CHAT_MESSAGES: usize = 2000;
+
 fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.chat_messages.len() > MAX_CHAT_MESSAGES {
+        let overflow = app.chat_messages.len() - MAX_CHAT_MESSAGES;
+        app.chat_messages.drain(..overflow);
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
@@ -3046,18 +3416,43 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let cached_len = app.chat_render_cache.lines().len();
-    let total = cached_len + live_lines.len();
     let view_height = (chunks[0].height as usize).saturating_sub(2);
+    let inner_width = (chunks[0].width as usize).saturating_sub(2).max(1);
+    app.chat_render_cache.ensure_visual_metrics(inner_width);
+    let cached_visual_total = app.chat_render_cache.cached_visual_total();
+    let live_rows: Vec<usize> = live_lines
+        .iter()
+        .map(|line| chat::render_cache::wrapped_row_count(line, inner_width))
+        .collect();
+    let live_visual_total: usize = live_rows.iter().sum();
+    let total_visual = cached_visual_total + live_visual_total;
     app.chat_render_cache
-        .record_scroll_bounds(total, view_height);
-    if app.chat_scroll_offset > total.saturating_sub(view_height) {
-        app.chat_scroll_offset = total.saturating_sub(view_height);
+        .record_scroll_bounds(total_visual, view_height);
+    if app.chat_scroll_offset > total_visual.saturating_sub(view_height) {
+        app.chat_scroll_offset = total_visual.saturating_sub(view_height);
     }
-    let keep = if app.chat_scroll_offset > 0 && total > app.chat_scroll_offset {
-        total - app.chat_scroll_offset
+    let range_end = total_visual.saturating_sub(app.chat_scroll_offset);
+    let range_start = range_end.saturating_sub(view_height);
+
+    let (first_idx, first_start) = if range_start < cached_visual_total {
+        let prefix = app.chat_render_cache.visual_prefix();
+        let idx = prefix
+            .partition_point(|&p| p <= range_start)
+            .saturating_sub(1);
+        (idx, prefix.get(idx).copied().unwrap_or(0))
     } else {
-        total
+        let mut acc = cached_visual_total;
+        let mut idx = cached_len;
+        for rows in &live_rows {
+            if acc + rows > range_start {
+                break;
+            }
+            acc += rows;
+            idx += 1;
+        }
+        (idx, acc)
     };
+    let skip_rows = range_start.saturating_sub(first_start);
 
     let viewport_hash = {
         use std::hash::{Hash, Hasher};
@@ -3065,7 +3460,9 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         vh.write_u64(lines_fp);
         vh.write_usize(app.chat_scroll_offset);
         vh.write_u16(chunks[0].height);
-        vh.write_usize(keep);
+        vh.write_usize(inner_width);
+        vh.write_usize(range_start);
+        vh.write_usize(range_end);
         for line in &live_lines {
             for span in &line.spans {
                 span.content.hash(&mut vh);
@@ -3075,21 +3472,27 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if !app.chat_render_cache.viewport_match(viewport_hash) {
-        let end = keep;
-        let start = end.saturating_sub(view_height);
         let cached = app.chat_render_cache.lines();
-        let mut visible_messages: Vec<Line<'static>> = Vec::with_capacity(end - start);
-        for idx in start..end {
-            if idx < cached_len {
-                if let Some(line) = cached.get(idx) {
-                    visible_messages.push(line.clone());
+        let total_line_count = cached_len + live_lines.len();
+        let needed_rows = skip_rows + view_height;
+        let mut rows_acc = 0usize;
+        let mut visible_messages: Vec<Line<'static>> = Vec::new();
+        let mut idx = first_idx;
+        while idx < total_line_count && rows_acc < needed_rows {
+            let line = if idx < cached_len {
+                match cached.get(idx) {
+                    Some(line) => line.clone(),
+                    None => break,
                 }
             } else {
-                let live_idx = idx - cached_len;
-                if let Some(line) = live_lines.get(live_idx) {
-                    visible_messages.push(line.clone());
+                match live_lines.get(idx - cached_len) {
+                    Some(line) => line.clone(),
+                    None => break,
                 }
-            }
+            };
+            rows_acc += chat::render_cache::wrapped_row_count(&line, inner_width);
+            visible_messages.push(line);
+            idx += 1;
         }
         app.chat_render_cache
             .store_viewport(viewport_hash, visible_messages);
@@ -3109,15 +3512,12 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 .title(" Conversation ")
                 .title_style(theme::title()),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((skip_rows.min(u16::MAX as usize) as u16, 0));
     f.render_widget(messages_block, chunks[0]);
 
-    let first_visible_idx = app
-        .chat_messages
-        .len()
-        .saturating_sub(visible_len.saturating_add(app.chat_scroll_offset));
     app.chat_render_cache
-        .record_render(viewport_hash, first_visible_idx, chunks[0].height);
+        .record_render(viewport_hash, first_idx, chunks[0].height);
     crate::observability::tui_metrics::add_tui_chat_lines_rendered(visible_len as u64);
 
     let input_title = if app.bridge.is_busy {
@@ -3546,10 +3946,13 @@ pub async fn run_tui_standalone() -> anyhow::Result<()> {
 }
 
 pub async fn run_tui_standalone_with_opts(legacy: bool) -> anyhow::Result<()> {
-    let config = crate::Config::load_or_init().await?;
+    let mut config = crate::Config::load_or_init().await?;
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    crate::bootstrap::init_state(cwd);
+    crate::bootstrap::init_state(cwd.clone());
+    if !cwd.as_os_str().is_empty() {
+        config.workspace_dir = cwd;
+    }
 
     let svc_cfg = crate::services::container::ServiceContainerConfig::default();
     let _ = crate::services::init_services(svc_cfg);
@@ -3670,9 +4073,14 @@ async fn run_event_driven_loop(
     let mut last_second = Instant::now();
     let animation_period = Duration::from_millis(100);
     let mut last_animation = Instant::now();
+    let min_stream_frame_interval = Duration::from_millis(33);
+    let mut last_draw = Instant::now() - min_stream_frame_interval;
+    let mut bridge_disconnected = false;
 
     loop {
-        if app.dirty {
+        let throttle_streaming =
+            app.bridge.is_busy && last_draw.elapsed() < min_stream_frame_interval;
+        if app.dirty && !throttle_streaming {
             if app.partial_redraw_pending && app.active_tab == Tab::Chat {
 
                 terminal.draw(|f| draw_chat_partial(f, app))?;
@@ -3681,6 +4089,7 @@ async fn run_event_driven_loop(
             }
             app.dirty = false;
             app.partial_redraw_pending = false;
+            last_draw = Instant::now();
             tui_metrics::incr_tui_frame_draws();
             if let Some(started) = app.pending_delta_started_at.take() {
                 let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -3715,7 +4124,7 @@ async fn run_event_driven_loop(
                     }
                 }
             }
-            maybe_agent = app.bridge.receiver.recv() => {
+            maybe_agent = app.bridge.receiver.recv(), if !bridge_disconnected => {
                 match maybe_agent {
                     Some(ev) => {
                         tui_metrics::incr_tui_session_deltas();
@@ -3732,7 +4141,8 @@ async fn run_event_driven_loop(
                             agent_bridge::AgentEvent::Done
                             | agent_bridge::AgentEvent::Error(_) => app.bridge.is_busy = false,
                             agent_bridge::AgentEvent::Thinking
-                            | agent_bridge::AgentEvent::ThinkingChunk(_) => {
+                            | agent_bridge::AgentEvent::ThinkingChunk(_)
+                            | agent_bridge::AgentEvent::StreamChunk(_) => {
                                 app.bridge.is_busy = true;
                             }
                             _ => {}
@@ -3756,7 +4166,8 @@ async fn run_event_driven_loop(
                                     app.bridge.is_busy = false;
                                 }
                                 agent_bridge::AgentEvent::Thinking
-                                | agent_bridge::AgentEvent::ThinkingChunk(_) => {
+                                | agent_bridge::AgentEvent::ThinkingChunk(_)
+                                | agent_bridge::AgentEvent::StreamChunk(_) => {
                                     app.bridge.is_busy = true;
                                 }
                                 _ => {}
@@ -3778,13 +4189,14 @@ async fn run_event_driven_loop(
                     }
                     None => {
 
+                        bridge_disconnected = true;
+                        app.bridge.is_busy = false;
                         app.chat_messages.push(ChatMessage::with_role_now(
                             "error",
-                            "agent bridge disconnected; press Ctrl+Q to exit".into(),
+                            "agent bridge disconnected; the agent can no longer respond. Press Ctrl+Q to exit.".into(),
                         ));
                         app.partial_redraw_pending = false;
                         app.mark_dirty();
-                        break;
                     }
                 }
             }
@@ -3906,7 +4318,14 @@ fn handle_crossterm_event(
     ev: Event,
 ) -> anyhow::Result<()> {
     match ev {
-        Event::Key(key) => app.handle_key(key),
+        Event::Key(key) => {
+            if matches!(
+                key.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            ) {
+                app.handle_key(key);
+            }
+        }
         Event::Paste(text) => app.handle_paste(text),
         Event::Mouse(mouse) => match mouse.kind {
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {

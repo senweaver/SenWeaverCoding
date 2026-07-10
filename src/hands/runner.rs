@@ -20,6 +20,15 @@ use super::{load_hand_context, load_hands, save_hand_context};
 const COMPONENT: &str = "hands";
 const MIN_POLL_SECONDS: u64 = 5;
 const MAX_FINDING_CHARS: usize = 4_000;
+const FAILURE_BACKOFF_BASE_SECS: u64 = 60;
+const FAILURE_BACKOFF_MAX_SECS: u64 = 6 * 3600;
+
+fn failure_backoff_secs(consecutive_failures: u32) -> u64 {
+    let exponent = consecutive_failures.saturating_sub(1).min(16);
+    FAILURE_BACKOFF_BASE_SECS
+        .saturating_mul(1u64 << exponent)
+        .min(FAILURE_BACKOFF_MAX_SECS)
+}
 
 pub fn resolve_hands_dir(config: &Config) -> PathBuf {
     if let Some(dir) = config
@@ -100,7 +109,19 @@ pub async fn process_due_hands(config: &Config, security: &SecurityPolicy) {
         let due = match ctx.last_run {
             None => true,
             Some(last) => match next_run_for_schedule(&hand.schedule, last) {
-                Ok(next) => next <= now,
+                Ok(next) => {
+                    let mut next = next;
+                    if ctx.consecutive_failures > 0 {
+                        let backoff = chrono::Duration::seconds(
+                            failure_backoff_secs(ctx.consecutive_failures) as i64,
+                        );
+                        let earliest = last + backoff;
+                        if earliest > next {
+                            next = earliest;
+                        }
+                    }
+                    next <= now
+                }
                 Err(e) => {
                     tracing::warn!(hand = %hand.name, error = %e, "Hands worker: invalid schedule");
                     false
@@ -164,7 +185,10 @@ async fn run_due_hand(
     effective_config.workspace_dir = config.workspace_dir.clone();
 
     let started = Instant::now();
-    let run_result = Box::pin(crate::agent::run(
+    // Bound each hand run so one hung provider call cannot freeze the sequential
+    // hands processing loop indefinitely.
+    const HAND_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+    let run_fut = Box::pin(crate::agent::run(
         effective_config,
         Some(prompt),
         None,
@@ -175,8 +199,15 @@ async fn run_due_hand(
         None,
         hand.allowed_tools.clone(),
         None,
-    ))
-    .await;
+    ));
+    let run_result = match tokio::time::timeout(HAND_RUN_TIMEOUT, run_fut).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow::anyhow!(
+            "hand '{}' exceeded {}s wall-clock budget and was abandoned",
+            hand.name,
+            HAND_RUN_TIMEOUT.as_secs()
+        )),
+    };
     let duration = started.elapsed();
     let finished_at = Utc::now();
 

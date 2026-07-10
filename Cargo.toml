@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [lints.rust]
 unsafe_code = "allow"
@@ -199,6 +199,8 @@ quick-xml = { version = "0.40.1", optional = true }
 rust_xlsxwriter = { version = "0.95", optional = true }
 lopdf = { version = "0.41", optional = true }
 printpdf = { version = "0.9", default-features = false, optional = true }
+ttf-parser = { version = "0.25", optional = true }
+subsetter = { version = "0.2", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 nusb = { version = "0.2", default-features = false, optional = true }
@@ -210,14 +212,12 @@ pdf-extract = { version = "0.10", optional = true }
 extism = { version = "1.20", optional = true }
 wasmi = { version = "0.42", optional = true }
 
-ratatui = { version = "0.29", optional = true, default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.29", optional = true, default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 crossterm = { version = "0.28", optional = true }
 
 syntect = { version = "5.0", optional = true }
 
 ropey = "1.6"
-
-tantivy = { version = "0.22", optional = true }
 
 docx-rs = { version = "0.4", optional = true }
 
@@ -238,6 +238,8 @@ streaming-iterator = { version = "0.1", optional = true }
 
 cpal = { version = "0.15", optional = true }
 
+rumqttc = { version = "0.24", optional = true }
+
 qrcode = { version = "0.14", optional = true }
 
 wa-rs = { version = "0.2", optional = true, default-features = false, features = ["tokio-transport", "ureq-client", "tokio-native"] }
@@ -248,7 +250,7 @@ wa-rs-ureq-http = { version = "0.2", optional = true }
 wa-rs-tokio-transport = { version = "0.2", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"], optional = true }
+windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"], optional = true }
 windows-sys = { workspace = true }
 winreg = "0.55"
 
@@ -265,6 +267,7 @@ default = [
     "skill-creation",
     "fs-watch",
     "sandbox",
+    "sandbox-windows-job",
     "lsp-push-diagnostics",
     "tool-image",
     "tool-utility-misc",
@@ -296,7 +299,6 @@ code-intel-go = ["dep:tree-sitter-go"]
 code-intel-java = ["dep:tree-sitter-java"]
 code-intel-c = ["dep:tree-sitter-c"]
 code-intel-cpp = ["dep:tree-sitter-cpp"]
-code-search = ["dep:tantivy"]
 channel-nostr = ["dep:nostr-sdk"]
 hardware = ["nusb", "tokio-serial"]
 channel-matrix = ["dep:matrix-sdk"]
@@ -325,7 +327,8 @@ probe = ["dep:probe-rs"]
 rag-pdf = ["dep:pdf-extract"]
 skill-creation = []
 fs-watch = ["dep:notify"]
-vector-index-sqlite = []
+rusqlite-load-extension = ["rusqlite/load_extension"]
+vector-index-sqlite = ["rusqlite-load-extension"]
 vector-index-hnsw = []
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
 voice-wake = ["dep:cpal"]
@@ -333,7 +336,7 @@ plugins-wasm = ["dep:extism"]
 runtime-wasm = ["dep:wasmi"]
 webauthn = []
 crdt-coordination = []
-computer-use = ["dep:enigo", "dep:xcap"]
+computer-use = ["dep:enigo", "dep:xcap", "dep:windows"]
 lsp-push-diagnostics = []
 evals-swebench-docker = []
 ci-all = [
@@ -384,6 +387,7 @@ channels-lite = [
 code-intel-extra = ["code-intel-go", "code-intel-java", "code-intel-c", "code-intel-cpp"]
 tool-cron = []
 tool-sop = []
+sop-mqtt = ["dep:rumqttc", "tool-sop"]
 tool-team = []
 tool-cloud-ops = []
 tool-reports = []
@@ -396,8 +400,8 @@ tool-image = []
 tool-search-broad = []
 tool-workspace-deep = []
 tool-curator = ["dep:docx-rs"]
-office-docs = ["dep:calamine", "dep:quick-xml", "dep:rust_xlsxwriter", "dep:lopdf", "dep:printpdf", "rag-pdf"]
-extras = ["tool-cron", "tool-sop", "tool-team", "tool-cloud-ops", "tool-reports", "tool-linkedin", "tool-pushover", "tool-search-social", "tool-productivity", "tool-utility-misc", "tool-image", "tool-search-broad", "tool-workspace-deep", "tool-curator", "office-docs", "computer-use"]
+office-docs = ["dep:calamine", "dep:quick-xml", "dep:rust_xlsxwriter", "dep:lopdf", "dep:printpdf", "dep:ttf-parser", "dep:subsetter", "rag-pdf"]
+extras = ["tool-cron", "tool-sop", "sop-mqtt", "tool-team", "tool-cloud-ops", "tool-reports", "tool-linkedin", "tool-pushover", "tool-search-social", "tool-productivity", "tool-utility-misc", "tool-image", "tool-search-broad", "tool-workspace-deep", "tool-curator", "office-docs", "computer-use"]
 
 [profile.dev]
 incremental = true

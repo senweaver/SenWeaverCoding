@@ -129,6 +129,9 @@ impl VectorCodeIndex {
         if self.embedder.dimensions() == 0 {
             return Ok(Vec::new());
         }
+        if self.chunks.lock().await.is_empty() {
+            return Ok(Vec::new());
+        }
         let qvec = self.embedder.embed_one(query).await?;
         if qvec.is_empty() {
             return Ok(Vec::new());

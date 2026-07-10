@@ -449,9 +449,17 @@ pub async fn handle_ws_lan(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if state.pairing.require_pairing() {
+    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/lan") {
+        return reject;
+    }
+    if state.exposed || state.pairing.require_pairing() {
         let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
+        let authed = if state.exposed {
+            state.pairing.is_authenticated_strict(token)
+        } else {
+            state.pairing.is_authenticated(token)
+        };
+        if !authed {
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }
     }

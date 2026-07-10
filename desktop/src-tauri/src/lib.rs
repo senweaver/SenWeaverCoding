@@ -52,9 +52,7 @@ pub(crate) fn warn_emit_failure(
     }
 }
 
-pub(crate) fn kill_gateway_child() {
-    let pid_opt = GATEWAY_CHILD_PID.lock().take();
-    let Some(pid) = pid_opt else { return };
+fn terminate_gateway_pid(pid: u32) {
     tracing::info!("[sen-desktop] terminating isolated gateway child pid={pid}");
     #[cfg(windows)]
     {
@@ -68,6 +66,30 @@ pub(crate) fn kill_gateway_child() {
             libc::kill(pid as i32, libc::SIGKILL);
         }
     }
+}
+
+pub(crate) fn kill_gateway_child() {
+    let pid_opt = GATEWAY_CHILD_PID.lock().take();
+    let Some(pid) = pid_opt else { return };
+    terminate_gateway_pid(pid);
+}
+
+pub(crate) fn kill_gateway_child_pid(pid: u32) {
+    {
+        let mut slot = GATEWAY_CHILD_PID.lock();
+        if *slot == Some(pid) {
+            *slot = None;
+        } else {
+            // The global slot points at a different (newer) child spawned by a
+            // concurrent bootstrap; only terminate the pid we own, never the
+            // newer one, and leave the slot intact.
+            tracing::warn!(
+                "[sen-desktop] kill_gateway_child_pid({pid}) but global slot holds {:?}; terminating only our own pid",
+                *slot
+            );
+        }
+    }
+    terminate_gateway_pid(pid);
 }
 
 fn locate_sen_binary() -> Option<PathBuf> {
@@ -190,7 +212,7 @@ fn try_start_isolated_gateway(
             Ok(url.to_string())
         }
         Err(err) => {
-            kill_gateway_child();
+            kill_gateway_child_pid(pid);
             if let Some(early_err) = gateway_exit.lock().clone() {
                 Err(format!("{err}; gateway exit detail: {early_err}"))
             } else {
@@ -673,9 +695,10 @@ async fn restart_embedded_gateway(
 }
 
 async fn stop_running_gateway_instance() {
-    if senweavercoding::gateway::request_embedded_shutdown() {
+    let requested = senweavercoding::gateway::request_embedded_shutdown();
+    if requested || senweavercoding::gateway::is_running() {
         tracing::info!(
-            "[sen-desktop] restart: shutdown requested for the embedded gateway; waiting for it to stop"
+            "[sen-desktop] restart: shutdown requested for the embedded gateway (immediate={requested}); waiting for it to stop"
         );
         let stopped =
             senweavercoding::gateway::wait_embedded_stopped(Duration::from_secs(10)).await;
@@ -693,9 +716,10 @@ async fn stop_running_gateway_instance() {
 }
 
 fn stop_running_gateway_instance_blocking() {
-    if senweavercoding::gateway::request_embedded_shutdown() {
+    let requested = senweavercoding::gateway::request_embedded_shutdown();
+    if requested || senweavercoding::gateway::is_running() {
         tracing::info!(
-            "[sen-desktop] auto-restart: shutdown requested for the embedded gateway; waiting for it to stop"
+            "[sen-desktop] auto-restart: shutdown requested for the embedded gateway (immediate={requested}); waiting for it to stop"
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stopped = false;
@@ -772,19 +796,18 @@ async fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
 static FRONTEND_READY_SIGNALED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-struct MainWindowHandle(tauri::WebviewWindow);
+const MAIN_WINDOW_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=document-user-activation-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
+
+static MAIN_WINDOW_REBUILD_FAILURES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[tauri::command]
-fn signal_frontend_ready(
-    main: State<'_, MainWindowHandle>,
-    handle: AppHandle,
-) -> Result<(), String> {
-    FRONTEND_READY_SIGNALED.store(true, std::sync::atomic::Ordering::SeqCst);
-    let win = handle
-        .get_webview_window("main")
-        .or_else(|| handle.webview_windows().into_values().next())
-        .unwrap_or_else(|| main.0.clone());
-    show_main_window_now(&win);
+fn signal_frontend_ready(handle: AppHandle) -> Result<(), String> {
+    tracing::info!("[sen-desktop] signal_frontend_ready invoked; revealing main window");
+    let first = !FRONTEND_READY_SIGNALED.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if first {
+        show_and_focus_main_window(&handle);
+    }
     Ok(())
 }
 
@@ -807,17 +830,12 @@ fn quit_app(app: AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
-fn force_show_foreground_window(window: &tauri::WebviewWindow) {
-    use windows_sys::Win32::Foundation::HWND;
+fn force_show_foreground_window(raw: windows_sys::Win32::Foundation::HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST,
         HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW,
     };
 
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
-    let raw = hwnd.0 as HWND;
     if raw.is_null() {
         return;
     }
@@ -854,47 +872,178 @@ fn force_show_foreground_window(window: &tauri::WebviewWindow) {
     reapply_chrome_styles(raw);
 }
 
+fn hide_minimal_window(app: &AppHandle) {
+    if let Some(minimal) = app.get_webview_window("minimal") {
+        if minimal.is_visible().unwrap_or(false) {
+            let _ = minimal.hide();
+        }
+    }
+    if let Some(input) = app.get_webview_window("minimal-input") {
+        if input.is_visible().unwrap_or(false) {
+            let _ = input.hide();
+        }
+    }
+}
+
+// Rebuilds the "main" window from scratch, mirroring the config in
+// tauri.conf.json. This is the recovery path for the case where the config
+// window failed to register (or was destroyed) and is therefore absent from
+// the runtime window map. MUST be called on the main thread.
+fn build_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("SenWeaverCoding")
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(480.0, 360.0)
+        .center()
+        .resizable(true)
+        .decorations(false)
+        .shadow(false)
+        .transparent(true)
+        .accept_first_mouse(true)
+        .visible(false)
+        .additional_browser_args(MAIN_WINDOW_BROWSER_ARGS);
+
+    match builder.build() {
+        Ok(win) => {
+            tracing::warn!(
+                "[sen-desktop] reveal main: 'main' window was absent from the window map; rebuilt it from scratch"
+            );
+            if let Err(err) = win.set_resizable(true) {
+                tracing::debug!("[sen-desktop] rebuilt main set_resizable failed: {err}");
+            }
+            #[cfg(target_os = "windows")]
+            disable_window_focus_border(&win);
+            schedule_frontend_ready_watchdog(win.clone());
+            Some(win)
+        }
+        Err(err) => {
+            warn_emit_failure(
+                &MAIN_WINDOW_REBUILD_FAILURES,
+                "rebuild main window",
+                &err,
+            );
+            None
+        }
+    }
+}
+
+// Returns the live "main" window, recreating it only if it is truly gone.
+//
+// Crucially this uses the *window* registry (`get_window`) rather than
+// `get_webview_window`: once the embedded-browser dock attaches a child webview
+// to the main window (`browser_dock::add_child`), the window is no longer a
+// simple 1:1 `WebviewWindow`, so `get_webview_window("main")` returns `None`
+// even though the window is alive and well. `get_window("main")` keeps working,
+// and every method used for revealing (`show`/`set_focus`/`unminimize`/`hwnd`)
+// is available on `Window`.
+//
+// MUST be called on the main thread because window creation is main-thread-only.
+fn ensure_main_window(app: &AppHandle) -> Option<tauri::Window> {
+    if let Some(win) = app.get_window("main") {
+        return Some(win);
+    }
+    build_main_window(app);
+    app.get_window("main")
+}
+
 fn show_and_focus_main_window(app: &AppHandle) {
-    let win = app
-        .get_webview_window("main")
-        .or_else(|| app.webview_windows().into_values().next())
-        .or_else(|| app.try_state::<MainWindowHandle>().map(|h| h.inner().0.clone()));
-    let Some(win) = win else {
-        tracing::warn!("[sen-desktop] tray reveal: no main window handle available");
-        return;
-    };
+    let app = app.clone();
+    let dispatched = app.clone().run_on_main_thread(move || {
+        let webview_labels: Vec<String> = app.webview_windows().keys().cloned().collect();
+        let window_labels: Vec<String> = app.windows().keys().cloned().collect();
+        let Some(win) = ensure_main_window(&app) else {
+            tracing::error!(
+                "[sen-desktop] reveal main: could not obtain or rebuild the 'main' window (windows={window_labels:?} webviews={webview_labels:?})"
+            );
+            return;
+        };
+        tracing::info!(
+            "[sen-desktop] reveal main: target={:?} windows={:?} webviews={:?}",
+            win.label(),
+            window_labels,
+            webview_labels
+        );
 
-    #[cfg(target_os = "windows")]
-    force_show_foreground_window(&win);
-
-    let win_main = win.clone();
-    let dispatched = app.run_on_main_thread(move || {
-        if win_main.is_minimized().unwrap_or(false) {
-            let _ = win_main.unminimize();
+        if win.is_minimized().unwrap_or(false) {
+            let _ = win.unminimize();
         }
-        if let Err(err) = win_main.show() {
-            tracing::warn!("[sen-desktop] tray reveal show() failed: {err}");
+        if let Err(err) = win.show() {
+            tracing::warn!("[sen-desktop] reveal main show() failed: {err}");
         }
-        let _ = win_main.set_focus();
+        let _ = win.set_focus();
         #[cfg(target_os = "windows")]
-        force_show_foreground_window(&win_main);
+        if let Ok(hwnd) = win.hwnd() {
+            use windows_sys::Win32::Foundation::HWND;
+            let raw = hwnd.0 as HWND;
+            force_show_foreground_window(raw);
+            reapply_chrome_styles(raw);
+        }
+        hide_minimal_window(&app);
+        tracing::info!(
+            "[sen-desktop] reveal main (main-thread): label={:?} visible={:?} minimized={:?} pos={:?} size={:?} scale={:?}",
+            win.label(),
+            win.is_visible(),
+            win.is_minimized(),
+            win.outer_position().ok(),
+            win.outer_size().ok(),
+            win.scale_factor().ok(),
+        );
     });
     if let Err(err) = dispatched {
-        tracing::warn!("[sen-desktop] tray reveal run_on_main_thread failed: {err}");
-        let _ = win.show();
-        let _ = win.set_focus();
+        tracing::warn!("[sen-desktop] reveal main run_on_main_thread failed: {err}");
     }
 }
 
 const TRAY_QUIT_EVENT: &str = "tray://quit-requested";
+const TRAY_COMPUTER_STOP_EVENT: &str = "minimal://computer-stop";
+
+struct TrayMenuItems {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    stop_computer: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+#[tauri::command]
+fn set_tray_labels(
+    state: tauri::State<'_, TrayMenuItems>,
+    show: String,
+    stop_computer: String,
+    quit: String,
+) -> Result<(), String> {
+    if !show.trim().is_empty() {
+        state.show.set_text(show).map_err(|e| e.to_string())?;
+    }
+    if !stop_computer.trim().is_empty() {
+        state
+            .stop_computer
+            .set_text(stop_computer)
+            .map_err(|e| e.to_string())?;
+    }
+    if !quit.trim().is_empty() {
+        state.quit.set_text(quit).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let show_item = MenuItem::with_id(app, "tray_show", "显示主窗口", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "tray_quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    // Initial labels are English (the app's primary locale); the front-end pushes
+    // localized labels via `set_tray_labels` on boot and whenever the UI locale
+    // changes, so the tray stays in sync with the in-app language.
+    let show_item = MenuItem::with_id(app, "tray_show", "Show main window", true, None::<&str>)?;
+    let stop_computer_item =
+        MenuItem::with_id(app, "tray_stop_computer", "Stop computer control", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &stop_computer_item, &quit_item])?;
+    app.manage(TrayMenuItems {
+        show: show_item.clone(),
+        stop_computer: stop_computer_item.clone(),
+        quit: quit_item.clone(),
+    });
 
     let mut builder = TrayIconBuilder::with_id("sen-main-tray")
         .tooltip("SenWeaverCoding")
@@ -902,6 +1051,11 @@ fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "tray_show" => show_and_focus_main_window(app),
+            "tray_stop_computer" => {
+                if let Err(err) = app.emit(TRAY_COMPUTER_STOP_EVENT, ()) {
+                    tracing::warn!("[sen-desktop] emit {TRAY_COMPUTER_STOP_EVENT} failed: {err}");
+                }
+            }
             "tray_quit" => {
                 if let Err(err) = app.emit(TRAY_QUIT_EVENT, ()) {
                     tracing::warn!("[sen-desktop] emit {TRAY_QUIT_EVENT} failed: {err}");
@@ -962,8 +1116,14 @@ fn show_main_window_now(window: &tauri::WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
         use windows_sys::Win32::Foundation::HWND;
         let raw = hwnd.0 as HWND;
+        force_show_foreground_window(raw);
         reapply_chrome_styles(raw);
     }
+
+    tracing::info!(
+        "[sen-desktop] show_main_window_now: visible={:?}",
+        window.is_visible()
+    );
 }
 
 fn schedule_frontend_ready_watchdog(window: tauri::WebviewWindow) {
@@ -1263,6 +1423,250 @@ fn read_local_image_data_url_blocking(path: String) -> Result<LocalImageData, St
     })
 }
 
+const MINIMAL_INPUT_HIDDEN_EVENT: &str = "minimal://input-hidden";
+
+#[cfg(target_os = "windows")]
+static MINIMAL_INPUT_WATCHING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn hide_minimal_input_and_notify(app: &AppHandle) {
+    if let Some(input) = app.get_webview_window("minimal-input") {
+        if input.is_visible().unwrap_or(false) {
+            let _ = input.hide();
+        }
+    }
+    let _ = app.emit(MINIMAL_INPUT_HIDDEN_EVENT, ());
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_minimal_input_foreground_watch(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    if MINIMAL_INPUT_WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetForegroundWindow, GA_ROOT,
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            let Some(input) = app.get_webview_window("minimal-input") else {
+                break;
+            };
+            if !input.is_visible().unwrap_or(false) {
+                break;
+            }
+            let input_hwnd = match input.hwnd() {
+                Ok(h) => h.0 as HWND,
+                Err(_) => break,
+            };
+            let card_hwnd = app
+                .get_webview_window("minimal")
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as HWND)
+                .unwrap_or(std::ptr::null_mut());
+            let fg_root = unsafe {
+                let fg = GetForegroundWindow();
+                if fg.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    GetAncestor(fg, GA_ROOT)
+                }
+            };
+            let inside = !fg_root.is_null()
+                && (fg_root == input_hwnd || (!card_hwnd.is_null() && fg_root == card_hwnd));
+            if !inside {
+                hide_minimal_input_and_notify(&app);
+                break;
+            }
+        }
+        MINIMAL_INPUT_WATCHING.store(false, Ordering::SeqCst);
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn force_activate_window(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        let this_thread = GetCurrentThreadId();
+        let mut fg_thread = 0u32;
+        let mut attached = false;
+        if !fg.is_null() && fg != hwnd {
+            fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+            if fg_thread != 0 && fg_thread != this_thread {
+                attached = AttachThreadInput(fg_thread, this_thread, 1) != 0;
+            }
+        }
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        if attached {
+            AttachThreadInput(fg_thread, this_thread, 0);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn disable_show_transitions(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+
+    const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
+    if hwnd.is_null() {
+        return;
+    }
+    let value: i32 = 1;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            (&value as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[tauri::command]
+fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let card = app
+        .get_webview_window("minimal")
+        .ok_or_else(|| "minimal window missing".to_string())?;
+    let input = app
+        .get_webview_window("minimal-input")
+        .ok_or_else(|| "minimal-input window missing".to_string())?;
+
+    if input.is_visible().unwrap_or(false) {
+        hide_minimal_input_and_notify(&app);
+        return Ok(());
+    }
+
+    let scale = card.scale_factor().map_err(|e| e.to_string())?;
+    let card_pos = card.outer_position().map_err(|e| e.to_string())?;
+    let card_size = card.outer_size().map_err(|e| e.to_string())?;
+
+    let new_w = ((width * scale).round() as i32).max(1);
+    let new_h = ((height * scale).round() as i32).max(1);
+    let overlap = (14.0 * scale).round() as i32;
+    let x = card_pos.x + card_size.width as i32 - new_w;
+    let y = card_pos.y + overlap - new_h;
+
+    input
+        .set_size(tauri::PhysicalSize::new(new_w as u32, new_h as u32))
+        .map_err(|e| e.to_string())?;
+    input
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = input.hwnd() {
+        use windows_sys::Win32::Foundation::HWND;
+        let raw = hwnd.0 as HWND;
+        disable_show_transitions(raw);
+        reapply_chrome_styles(raw);
+    }
+
+    input.show().map_err(|e| e.to_string())?;
+
+    let input_focus = input.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        let _ = input_focus.set_focus();
+        #[cfg(target_os = "windows")]
+        if let Ok(hwnd) = input_focus.hwnd() {
+            force_activate_window(hwnd.0 as windows_sys::Win32::Foundation::HWND);
+        }
+    });
+    if dispatched.is_err() {
+        let _ = input.set_focus();
+    }
+
+    #[cfg(target_os = "windows")]
+    spawn_minimal_input_foreground_watch(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn minimal_input_hide(app: AppHandle) -> Result<(), String> {
+    hide_minimal_input_and_notify(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn minimal_resize_anchored(
+    window: tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let new_w = (width * scale).round() as i32;
+    let new_h = (height * scale).round() as i32;
+    if new_w <= 0 || new_h <= 0 {
+        return Err(format!("invalid target size: {width}x{height}"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::{HWND, RECT};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetWindowRect, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER,
+        };
+
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let raw = hwnd.0 as HWND;
+        if raw.is_null() {
+            return Err("window handle unavailable".to_string());
+        }
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe {
+            if GetWindowRect(raw, &mut rect) == 0 {
+                return Err("GetWindowRect failed".to_string());
+            }
+            SetWindowPos(
+                raw,
+                HWND_TOP,
+                rect.right - new_w,
+                rect.bottom - new_h,
+                new_w,
+                new_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let pos = window.outer_position().map_err(|e| e.to_string())?;
+        let size = window.outer_size().map_err(|e| e.to_string())?;
+        let x = pos.x + size.width as i32 - new_w;
+        let y = pos.y + size.height as i32 - new_h;
+        window
+            .set_size(tauri::PhysicalSize::new(new_w as u32, new_h as u32))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition::new(x, y))
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
 pub fn run() {
     let log_dir = sen_log_dir();
     bootstrap_diag::install_tracing(log_dir.as_deref());
@@ -1294,8 +1698,12 @@ pub fn run() {
             prepare_for_update_install,
             signal_frontend_ready,
             quit_app,
+            set_tray_labels,
             reveal_in_explorer,
             read_local_image_data_url,
+            minimal_resize_anchored,
+            minimal_input_show,
+            minimal_input_hide,
             curator_render_docx_with_diagrams,
             terminal::terminal_spawn,
             terminal::terminal_write,
@@ -1336,6 +1744,12 @@ pub fn run() {
     let app_build = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         builder
         .setup(|app| {
+            let initial_labels: Vec<String> =
+                app.webview_windows().keys().cloned().collect();
+            tracing::info!(
+                "[sen-desktop] setup: config-created windows = {initial_labels:?}"
+            );
+
             if let Some(main) = app.get_webview_window("main") {
                 if let Err(err) = main.set_resizable(true) {
                     tracing::debug!("[sen-desktop] set_resizable(true) failed: {err}");
@@ -1344,8 +1758,28 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 disable_window_focus_border(&main);
 
-                app.manage(MainWindowHandle(main.clone()));
                 schedule_frontend_ready_watchdog(main.clone());
+            } else {
+                tracing::error!(
+                    "[sen-desktop] setup: the 'main' window is MISSING from the config-created \
+                     window map (labels={initial_labels:?}); it will be rebuilt on first reveal"
+                );
+            }
+
+            if let Some(minimal) = app.get_webview_window("minimal") {
+                let _ = minimal.hide();
+                #[cfg(target_os = "windows")]
+                disable_window_focus_border(&minimal);
+            }
+
+            if let Some(minimal_input) = app.get_webview_window("minimal-input") {
+                let _ = minimal_input.hide();
+                #[cfg(target_os = "windows")]
+                disable_window_focus_border(&minimal_input);
+                #[cfg(target_os = "windows")]
+                if let Ok(hwnd) = minimal_input.hwnd() {
+                    disable_show_transitions(hwnd.0 as windows_sys::Win32::Foundation::HWND);
+                }
             }
 
             browser_dock::install_into(app.handle());

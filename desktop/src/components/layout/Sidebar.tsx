@@ -25,8 +25,6 @@ import { useLanStore } from '../../stores/lanStore'
 import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import { UserPanel } from '../lan/UserPanel'
-import { GroupsPanel } from '../lanGroup/GroupsPanel'
-import { SharePanel } from '../lanShare/SharePanel'
 import { useFileDragStore } from '../../stores/fileDragStore'
 import { SESSION_REF_PREFIX } from '../chat/composerRefs'
 
@@ -69,12 +67,7 @@ export function Sidebar() {
   const lanInit = useLanStore((s) => s.init)
   const toggleLanPanel = useLanStore((s) => s.togglePanel)
   const lanGroupInit = useLanGroupStore((s) => s.init)
-  const lanGroupUnread = useLanGroupStore((s) => s.unread)
-  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
-  const toggleLanGroupPanel = useLanGroupStore((s) => s.togglePanel)
   const lanShareInit = useLanShareStore((s) => s.init)
-  const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
-  const toggleLanSharePanel = useLanShareStore((s) => s.togglePanel)
   useEffect(() => {
     void lanInit()
     void lanGroupInit()
@@ -88,7 +81,6 @@ export function Sidebar() {
   const addToast = useUIStore((s) => s.addToast)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
-  const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const designerCanvasOpen = useDesignerCanvasStore((s) =>
     activeTabId ? s.panels[activeTabId]?.visible ?? false : false,
@@ -496,76 +488,7 @@ export function Sidebar() {
       data-state={sidebarOpen ? 'open' : 'closed'}
       aria-label="Sidebar"
     >
-      <div className="flex items-center justify-end gap-1 px-3 pb-2 pt-3">
-        <button
-          type="button"
-          data-lan-group-toggle
-          onClick={() => toggleLanGroupPanel()}
-          title={t('lanGroup.title')}
-          aria-label={t('lanGroup.title')}
-          aria-pressed={lanGroupPanelOpen}
-          className={
-            `relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
-              lanGroupPanelOpen
-                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
-                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
-            }`
-          }
-        >
-          <span className="material-symbols-outlined text-[16px]">groups</span>
-          {lanGroupUnread > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[9px] font-semibold text-white">
-              {lanGroupUnread > 99 ? '99+' : lanGroupUnread}
-            </span>
-          )}
-        </button>
-        <button
-          type="button"
-          data-lan-share-toggle
-          onClick={() => toggleLanSharePanel()}
-          title={t('lanShare.title')}
-          aria-label={t('lanShare.title')}
-          aria-pressed={lanSharePanelOpen}
-          className={
-            `relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
-              lanSharePanelOpen
-                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
-                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
-            }`
-          }
-        >
-          <span className="material-symbols-outlined text-[16px]">share</span>
-        </button>
-        <button
-          type="button"
-          data-template-library-toggle
-          onClick={() => useUIStore.getState().toggleTemplateLibrary()}
-          title={t('templateLibrary.open')}
-          aria-label={t('templateLibrary.open')}
-          aria-pressed={templateLibraryOpen}
-          className={
-            `relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
-              templateLibraryOpen
-                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
-                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
-            }`
-          }
-        >
-          <span className="material-symbols-outlined text-[16px]">dashboard_customize</span>
-        </button>
-        <a
-          href="https://github.com/senweaver/SenWeaverCoding"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-          title="GitHub"
-          data-tauri-drag-region
-        >
-          <GitHubIcon />
-        </a>
-      </div>
-
-      <div className={`px-3 pb-3 flex flex-col ${sidebarOpen ? 'gap-0.5' : 'items-center gap-2'}`}>
+      <div className={`px-3 pb-3 pt-3 flex flex-col ${sidebarOpen ? 'gap-0.5' : 'items-center gap-2'}`}>
         <NavItem
           active={false}
           collapsed={!sidebarOpen}
@@ -864,8 +787,6 @@ export function Sidebar() {
       </div>
 
       <UserPanel />
-      <GroupsPanel />
-      <SharePanel />
 
       {contextMenu && sidebarOpen && (
         <div
@@ -1125,18 +1046,6 @@ function TrashIcon() {
       <path d="M10 11v6" />
       <path d="M14 11v6" />
       <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
-    </svg>
-  )
-}
-
-function GitHubIcon() {
-  return (
-    <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"
-      />
     </svg>
   )
 }

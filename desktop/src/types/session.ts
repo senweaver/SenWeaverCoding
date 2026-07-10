@@ -28,6 +28,8 @@ export type MessageEntry = {
 
   tombstoned?: boolean
 
+  userMessageIndex?: number
+
   attachments?: Array<{
     type: 'file' | 'image'
     name?: string
@@ -35,6 +37,8 @@ export type MessageEntry = {
     data?: string
     mimeType?: string
   }>
+
+  displayContent?: string
 
   designRef?: string
   designRefName?: string

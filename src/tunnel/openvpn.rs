@@ -133,8 +133,11 @@ impl Tunnel for OpenVpnTunnel {
     }
 
     async fn health_check(&self) -> bool {
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        match guard.as_mut() {
+            Some(tp) => matches!(tp.child.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 
     fn public_url(&self) -> Option<String> {

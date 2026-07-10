@@ -233,10 +233,74 @@ impl SopCronCache {
             }
         }
 
-        info!("SopCronCache: cached {} cron schedule(s)", schedules.len());
+        debug!("SopCronCache: cached {} cron schedule(s)", schedules.len());
         Self { schedules }
     }
 
+}
+
+const SOP_MAINTENANCE_INTERVAL_SECS: u64 = 30;
+
+static SOP_MAINTENANCE_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn ensure_sop_maintenance(
+    engine: Arc<Mutex<SopEngine>>,
+    audit: Option<Arc<SopAuditLogger>>,
+    workspace_dir: std::path::PathBuf,
+) {
+    if SOP_MAINTENANCE_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let audit = audit.unwrap_or_else(|| {
+        Arc::new(SopAuditLogger::new(Arc::new(
+            crate::memory::none::NoneMemory::new(),
+        )))
+    });
+    crate::runtime::spawn_supervised("sop.maintenance", async move {
+        {
+            let mut eng = engine.lock();
+            if eng.sops().is_empty() {
+                eng.reload(&workspace_dir);
+            }
+        }
+        let mut last_cron_check = chrono::Utc::now();
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            SOP_MAINTENANCE_INTERVAL_SECS,
+        ));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+
+            let timeout_actions = engine.lock().check_approval_timeouts();
+            for action in &timeout_actions {
+                info!(
+                    "SOP maintenance: approval timeout advanced run {} ({})",
+                    extract_run_id_from_action(action),
+                    action_label(action),
+                );
+            }
+
+            let reaped = engine
+                .lock()
+                .reap_stale_runs(super::engine::SopEngine::MAX_RUN_LIFETIME_SECS);
+            for action in &reaped {
+                warn!(
+                    "SOP maintenance: reaped stale run {} ({})",
+                    extract_run_id_from_action(action),
+                    action_label(action),
+                );
+            }
+
+            let cache = SopCronCache::from_engine(&engine);
+            if cache.schedules.is_empty() {
+                continue;
+            }
+            let results =
+                check_sop_cron_triggers(&engine, &audit, &cache, &mut last_cron_check).await;
+            process_headless_results(&results);
+        }
+    });
 }
 
 pub async fn check_sop_cron_triggers(

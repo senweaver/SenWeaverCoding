@@ -299,22 +299,28 @@ impl AgentError {
 impl From<anyhow::Error> for AgentError {
 
     fn from(e: anyhow::Error) -> Self {
-        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-            return AgentError::Tool {
-                tool_name: "<unknown>".into(),
-                cause: crate::tools::ToolErrorCause::Io(std::io::Error::new(
-                    io_err.kind(),
-                    io_err.to_string(),
-                )),
-            };
+        match e.downcast::<std::io::Error>() {
+            Ok(io_err) => {
+                return AgentError::Tool {
+                    tool_name: "<unknown>".into(),
+                    cause: crate::tools::ToolErrorCause::Io(io_err),
+                };
+            }
+            Err(e) => {
+                if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
+                    return AgentError::Tool {
+                        tool_name: "<unknown>".into(),
+                        cause: crate::tools::ToolErrorCause::Timeout(
+                            std::time::Duration::from_secs(0),
+                        ),
+                    };
+                }
+                AgentError::Tool {
+                    tool_name: "<unknown>".into(),
+                    cause: crate::tools::ToolErrorCause::Unknown(e),
+                }
+            }
         }
-        if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
-            return AgentError::Tool {
-                tool_name: "<unknown>".into(),
-                cause: crate::tools::ToolErrorCause::Timeout(std::time::Duration::from_secs(0)),
-            };
-        }
-        AgentError::ToolDispatchFailed(e.to_string())
     }
 }
 

@@ -27,6 +27,37 @@ pub struct WorkerRunContext {
     pub parent_permission_mode: Option<String>,
 }
 
+struct WorkerFinalizeGuard {
+    supervisor: Arc<WorkerSupervisor>,
+    handle: Arc<WorkerHandle>,
+}
+
+impl Drop for WorkerFinalizeGuard {
+    fn drop(&mut self) {
+        if self.handle.result_snapshot().is_some() {
+            self.supervisor.unregister(&self.handle.worker_id);
+            return;
+        }
+        tracing::warn!(
+            worker_id = %self.handle.worker_id,
+            "worker task ended without finalizing (panic outside the turn); \
+             synthesizing failed result to release the session quota"
+        );
+        self.handle.set_status(WorkerStatus::Failed);
+        self.handle.mark_finished_now();
+        self.handle.complete(WorkerResult {
+            worker_id: self.handle.worker_id.clone(),
+            title: self.handle.title.clone(),
+            status: WorkerStatus::Failed,
+            output: String::new(),
+            error: Some("worker task aborted unexpectedly before completion".to_string()),
+            started_at: self.handle.started_at,
+            finished_at: self.handle.finished_at(),
+        });
+        self.supervisor.unregister(&self.handle.worker_id);
+    }
+}
+
 pub async fn run_worker(
     supervisor: Arc<WorkerSupervisor>,
     handle: Arc<WorkerHandle>,
@@ -34,7 +65,14 @@ pub async fn run_worker(
     parent_draft_tx: Option<mpsc::Sender<DraftEvent>>,
     ctx: WorkerRunContext,
 ) {
-    let workspace_root = supervisor.workspace_root().to_path_buf();
+    let _finalize_guard = WorkerFinalizeGuard {
+        supervisor: Arc::clone(&supervisor),
+        handle: Arc::clone(&handle),
+    };
+    // Use the parent-derived workspace root captured on the handle, not the global
+    // supervisor root (which is locked to the first session and would make workers
+    // from other workspaces write into the wrong `.sen/workers/`).
+    let workspace_root = handle.workspace_root.clone();
 
     let event_log = match WorkerEventLog::open(&workspace_root, &handle.worker_id) {
         Ok(log) => Some(Arc::new(log)),
@@ -110,12 +148,14 @@ pub async fn run_worker(
     let handle_for_bridge = Arc::clone(&handle);
     let parent_draft_for_bridge = parent_draft_tx.clone();
     let event_log_for_bridge = event_log.clone();
-    let bridge = crate::runtime::spawn_supervised("worker.event_bridge", async move {
+    let mut bridge = crate::runtime::spawn_supervised("worker.event_bridge", async move {
+        let mut tool_id_pairer = crate::session::FallbackToolIdPairer::default();
         while let Some(turn_event) = rx.recv().await {
             forward_turn_event_to_worker_session(
                 &handle_for_bridge,
                 event_log_for_bridge.as_deref(),
                 &turn_event,
+                &mut tool_id_pairer,
             );
 
             forward_turn_event_to_parent_summary(
@@ -172,10 +212,24 @@ pub async fn run_worker(
         )
     };
 
+    let wall_clock_secs = crate::util::get_runtime_var("SEN_WORKERS_TIMEOUT_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1800);
+    let wall_clock_timeout = async move {
+        if wall_clock_secs == 0 {
+            std::future::pending::<()>().await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(wall_clock_secs)).await;
+        }
+    };
+
     use futures_util::FutureExt as _;
     let result = tokio::select! {
         biased;
         _ = cancel_for_run.cancelled() => Err("worker cancelled by user".to_string()),
+        _ = wall_clock_timeout => Err(format!(
+            "worker exceeded its independent wall-clock budget of {wall_clock_secs}s and was cancelled (orphaned after parent turn ended?)"
+        )),
         outcome = std::panic::AssertUnwindSafe(run_future).catch_unwind() => match outcome {
             Ok(inner) => inner.map_err(|e| e.to_string()),
             Err(panic) => Err(format!(
@@ -185,7 +239,12 @@ pub async fn run_worker(
         },
     };
 
-    bridge.abort();
+    if tokio::time::timeout(std::time::Duration::from_secs(5), &mut bridge)
+        .await
+        .is_err()
+    {
+        bridge.abort();
+    }
 
     let (status, output, error_text) = match result {
         Ok(text) => (WorkerStatus::Completed, text, None),
@@ -265,9 +324,11 @@ async fn finalize_worker(
 
     emit_worker_lifecycle(handle, parent_draft_tx, summary_kind, event_log).await;
 
-    write_meta_safe(supervisor.workspace_root(), handle, spec);
+    write_meta_safe(&handle.workspace_root, handle, spec);
 
     handle.complete(result);
+
+    supervisor.unregister(&handle.worker_id);
 }
 
 enum WorkerLifecycle {
@@ -355,10 +416,11 @@ fn forward_turn_event_to_worker_session(
     handle: &WorkerHandle,
     event_log: Option<&WorkerEventLog>,
     event: &TurnEvent,
+    tool_id_pairer: &mut crate::session::FallbackToolIdPairer,
 ) {
     handle.publish_event(event.clone());
 
-    if let Some(sess_event) = turn_event_to_session_event(event.clone()) {
+    if let Some(sess_event) = turn_event_to_session_event(event.clone(), tool_id_pairer) {
         if let Some(log) = event_log {
             if let Err(err) = log.append(&sess_event) {
                 tracing::debug!(

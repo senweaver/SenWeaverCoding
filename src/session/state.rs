@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 
 const CONFLICT_JOURNAL_CAP: usize = 256;
 
+const REPLAY_BUFFER_CAP: usize = 1024;
+
 use crate::observability::session_write_mode_metrics;
 use crate::session::event::{SessionEvent, SessionEventKind};
 use crate::session::persistence::SessionEventLog;
@@ -336,7 +338,13 @@ pub struct SessionActor {
 
     replay_readonly: AtomicBool,
 
+    pending_replay: Mutex<std::collections::VecDeque<SessionEvent>>,
+
+    replay_dropped: AtomicU64,
+
     remote_versions: Mutex<HashMap<String, u64>>,
+
+    apply_serialize: Mutex<()>,
 }
 
 impl SessionActor {
@@ -357,7 +365,10 @@ impl SessionActor {
             conflict_journal: Mutex::new(Vec::new()),
             append_degraded: AtomicBool::new(false),
             replay_readonly: AtomicBool::new(false),
+            pending_replay: Mutex::new(std::collections::VecDeque::new()),
+            replay_dropped: AtomicU64::new(0),
             remote_versions: Mutex::new(HashMap::new()),
+            apply_serialize: Mutex::new(()),
         });
         register_session_actor(&id, &actor);
         actor
@@ -396,7 +407,10 @@ impl SessionActor {
             conflict_journal: Mutex::new(Vec::new()),
             append_degraded: AtomicBool::new(replay_degraded),
             replay_readonly: AtomicBool::new(replay_degraded),
+            pending_replay: Mutex::new(std::collections::VecDeque::new()),
+            replay_dropped: AtomicU64::new(0),
             remote_versions: Mutex::new(HashMap::new()),
+            apply_serialize: Mutex::new(()),
         });
         register_session_actor(&id, &actor);
         if actor.persistence_degraded() {
@@ -418,6 +432,32 @@ impl SessionActor {
         self.state.read().clone()
     }
 
+    pub fn version(&self) -> u64 {
+        self.state.read().version
+    }
+
+    pub fn turn_count(&self) -> usize {
+        self.state.read().turns.len()
+    }
+
+    pub fn last_turn_seq(&self) -> u64 {
+        self.state
+            .read()
+            .turns
+            .last()
+            .map(|t| t.seq)
+            .unwrap_or(0)
+    }
+
+    pub fn open_files(&self) -> Vec<(PathBuf, Option<DateTime<Utc>>)> {
+        self.state
+            .read()
+            .open_files
+            .iter()
+            .map(|(path, meta)| (path.clone(), meta.last_read_at))
+            .collect()
+    }
+
     pub fn turns_since(&self, since: u64) -> Vec<Turn> {
         self.state
             .read()
@@ -433,6 +473,11 @@ impl SessionActor {
     }
 
     fn apply_event(&self, evt: &SessionEvent, forward_transport: bool) -> SessionDelta {
+        // Serialize the whole (mutate in-memory state -> append to log) critical
+        // section so a concurrent apply (local bridge vs. RPC apply_remote) cannot
+        // interleave and land events in the log in a different order than memory,
+        // which would make replay reconstruct a different state.
+        let _apply_guard = self.apply_serialize.lock();
         let version;
         {
             let mut guard = self.state.write();
@@ -443,14 +488,24 @@ impl SessionActor {
 
         let seq = if read_only {
             version
+        } else if !self.drain_pending_replay() {
+            session_write_mode_metrics::incr_session_apply_failed();
+            self.buffer_unpersisted_event(evt);
+            version
         } else {
             match self.log.append(evt) {
                 Ok(seq) => {
                     session_write_mode_metrics::incr_session_event_persisted();
+                    if self.append_degraded.swap(false, Ordering::Relaxed) {
+                        tracing::info!(
+                            "session persistence recovered; event appends succeeding again"
+                        );
+                    }
                     seq
                 }
                 Err(err) => {
                     session_write_mode_metrics::incr_session_apply_failed();
+                    self.buffer_unpersisted_event(evt);
                     if self.append_degraded.swap(true, Ordering::Relaxed) {
                         tracing::warn!(
                             error = %err,
@@ -459,7 +514,7 @@ impl SessionActor {
                     } else {
                         tracing::error!(
                             error = %err,
-                            "failed to append session event to log; session persistence degraded (in-memory state and broadcast continue)"
+                            "failed to append session event to log; session persistence degraded (events buffered for replay, in-memory state and broadcast continue)"
                         );
                     }
                     version
@@ -492,6 +547,55 @@ impl SessionActor {
         delta
     }
 
+    fn buffer_unpersisted_event(&self, evt: &SessionEvent) {
+        let mut buf = self.pending_replay.lock();
+        if buf.len() >= REPLAY_BUFFER_CAP {
+            buf.pop_front();
+            let dropped = self.replay_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % 100 == 0 {
+                tracing::warn!(
+                    dropped,
+                    "session replay buffer full; oldest unpersisted events are being dropped"
+                );
+            }
+        }
+        buf.push_back(evt.clone());
+    }
+
+    fn drain_pending_replay(&self) -> bool {
+        let mut buf = self.pending_replay.lock();
+        if buf.is_empty() {
+            return true;
+        }
+        let mut replayed = 0usize;
+        while let Some(evt) = buf.front() {
+            match self.log.append(evt) {
+                Ok(_) => {
+                    session_write_mode_metrics::incr_session_event_persisted();
+                    buf.pop_front();
+                    replayed += 1;
+                }
+                Err(_) => {
+                    if replayed > 0 {
+                        tracing::info!(
+                            replayed,
+                            remaining = buf.len(),
+                            "partially replayed buffered session events before writer stalled again"
+                        );
+                    }
+                    return false;
+                }
+            }
+        }
+        if replayed > 0 {
+            tracing::info!(
+                replayed,
+                "replayed buffered session events after persistence recovered"
+            );
+        }
+        true
+    }
+
     pub fn flush(&self) -> std::io::Result<()> {
         if self.replay_readonly.load(Ordering::Relaxed) {
             return Err(std::io::Error::new(
@@ -499,6 +603,7 @@ impl SessionActor {
                 "session replay failed during open; persistence is read-only to avoid clobbering on-disk history",
             ));
         }
+        self.drain_pending_replay();
         let guard = self.state.read();
         self.log.write_snapshot(&guard)
     }
@@ -594,6 +699,19 @@ impl Drop for SessionActor {
                 session_id = %state.id,
                 "skip final snapshot: session in replay-readonly mode to avoid overwriting on-disk history"
             );
+        } else if !self.drain_pending_replay() {
+            tracing::warn!(
+                session_id = %state.id,
+                remaining = self.pending_replay.lock().len(),
+                "unpersisted session events could not be replayed before drop"
+            );
+            if let Err(err) = self.log.write_snapshot(&state) {
+                tracing::warn!(
+                    session_id = %state.id,
+                    error = %err,
+                    "final session snapshot failed during drop"
+                );
+            }
         } else if let Err(err) = self.log.write_snapshot(&state) {
             tracing::warn!(
                 session_id = %state.id,

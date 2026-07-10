@@ -121,7 +121,17 @@ impl TaskQueueWorker {
             }),
         );
 
-        let result = (self.executor)(task).await;
+        use futures_util::FutureExt as _;
+        let result = match std::panic::AssertUnwindSafe((self.executor)(task))
+            .catch_unwind()
+            .await
+        {
+            Ok(result) => result,
+            Err(panic) => Err(format!(
+                "task executor panicked: {}",
+                crate::util::describe_panic(&*panic)
+            )),
+        };
 
         match result {
             Ok(output) => {

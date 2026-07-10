@@ -2,8 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { useLanStore } from '../../stores/lanStore'
 import { useLanGroupStore, type GroupTab } from '../../stores/lanGroupStore'
@@ -25,7 +24,6 @@ const TABS: { id: GroupTab; label: TranslationKey; icon: string }[] = [
 
 export function GroupsPanel() {
   const t = useTranslation()
-  const panelOpen = useLanGroupStore((s) => s.panelOpen)
   const closePanel = useLanGroupStore((s) => s.closePanel)
   const groups = useLanGroupStore((s) => s.groups)
   const activeGroupId = useLanGroupStore((s) => s.activeGroupId)
@@ -38,33 +36,17 @@ export function GroupsPanel() {
   const lanRunning = useLanStore((s) => s.identity?.running ?? false)
   const setDiscovery = useLanStore((s) => s.setDiscovery)
 
-  const panelRef = useRef<HTMLDivElement>(null)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
 
   useEffect(() => {
-    if (!panelOpen) return
-    const handlePointerDown = (event: PointerEvent) => {
-        const target = event.target as HTMLElement | null
-        if (!target) return
-        if (panelRef.current?.contains(target)) return
-        if (target.closest('[data-lan-group-toggle]')) return
-        if (target.closest('[data-app-titlebar]')) return
-        closePanel()
-    }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closePanel()
     }
-    document.addEventListener('pointerdown', handlePointerDown, true)
     document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown, true)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [panelOpen, closePanel])
-
-  if (!panelOpen) return null
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [closePanel])
 
   const snapshot = activeGroupId ? snapshots[activeGroupId] : undefined
 
@@ -78,23 +60,14 @@ export function GroupsPanel() {
     if (group) await selectGroup(group.id)
   }
 
-  return createPortal(
-      <div
-        ref={panelRef}
-        onMouseDown={(e) => e.stopPropagation()}
-        className="fixed left-3 z-50 flex w-[760px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-dropdown)]"
-        style={{
-          top: 'calc(var(--titlebar-height) + 52px)',
-          height: '80vh',
-          maxHeight: 'calc(100vh - var(--titlebar-height) - 64px)',
-        }}
-      >
-      <div className="flex items-center gap-2 border-b border-[var(--color-border)] p-3">
+  return (
+    <div className="relative flex h-full min-h-0 flex-col bg-[var(--color-surface)]">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
         <span className="material-symbols-outlined text-[20px] text-[var(--color-brand)]">
           groups
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+          <div className="truncate text-[15px] font-semibold text-[var(--color-text-primary)]">
             {t('lanGroup.title')}
           </div>
           <div className="truncate text-[11px] text-[var(--color-text-tertiary)]">
@@ -105,7 +78,7 @@ export function GroupsPanel() {
           type="button"
           title={t('common.close')}
           onClick={closePanel}
-          className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
         >
           <span className="material-symbols-outlined text-[18px]">close</span>
         </button>
@@ -290,8 +263,7 @@ export function GroupsPanel() {
       )}
 
       {pendingUploadPath && <PendingUploadDialog />}
-    </div>,
-    document.body,
+    </div>
   )
 }
 

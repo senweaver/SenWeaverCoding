@@ -177,6 +177,21 @@ pub enum ConfigChange {
     Hard,
 }
 
+struct RecentFocusView {
+    messages: Vec<crate::providers::traits::ChatMessage>,
+    leading_system_end: usize,
+    retained_summary: Option<String>,
+    dropped: Vec<crate::providers::traits::ChatMessage>,
+    dropped_turns: usize,
+}
+
+#[derive(Clone)]
+struct UnfinishedTask {
+    seq: u64,
+    request: String,
+    progress: String,
+}
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     tools: Vec<Box<dyn Tool>>,
@@ -248,6 +263,10 @@ pub struct Agent {
 
     plan_execution_armed: parking_lot::Mutex<Option<String>>,
 
+    resuming_from_ask: std::sync::atomic::AtomicBool,
+
+    rolling_summary: std::sync::Mutex<Option<(u64, usize, String)>>,
+
     hook_runner: Option<std::sync::Arc<crate::hooks::HotHookRunner>>,
 
     cached_tools_signature: u64,
@@ -255,6 +274,13 @@ pub struct Agent {
     plan_mode_flag: crate::tools::PlanModeFlag,
 
     last_turn_interrupted: bool,
+
+    unfinished_task: std::sync::Mutex<Option<UnfinishedTask>>,
+
+    pending_intent_decision:
+        std::sync::Mutex<Option<(String, crate::agent::intent::LlmIntentDecision)>>,
+
+    last_turn_resumed: bool,
 }
 
 pub struct AgentBuilder {
@@ -633,10 +659,15 @@ impl AgentBuilder {
             last_usage: None,
             desktop_security_policy: self.desktop_security_policy,
             plan_execution_armed: parking_lot::Mutex::new(None),
+            resuming_from_ask: std::sync::atomic::AtomicBool::new(false),
+            rolling_summary: std::sync::Mutex::new(None),
             hook_runner: self.hook_runner,
             cached_tools_signature: 0,
             plan_mode_flag: self.plan_mode_flag.unwrap_or_default(),
             last_turn_interrupted: false,
+            unfinished_task: std::sync::Mutex::new(None),
+            pending_intent_decision: std::sync::Mutex::new(None),
+            last_turn_resumed: false,
         })
     }
 
@@ -763,7 +794,10 @@ impl Agent {
             tokens_used: 0,
         });
 
-        self.apply_turn_preamble(user_message, &event_tx).await?;
+        if let Err(e) = self.apply_turn_preamble(user_message, &event_tx).await {
+            self.plan_execution_armed.lock().take();
+            return Err(e.into());
+        }
         self.apply_gui_model_switch(&event_tx).await;
         self.apply_bootstrap_model_override(&event_tx).await;
         let mut effective_model = self.classify_model(user_message);
@@ -774,15 +808,60 @@ impl Agent {
 
         let mut history_chat = self.tool_dispatcher.to_provider_messages(&self.history);
 
-        let mut plan_exec_focus_base_len: usize = 0;
-        let plan_exec_full_history: Option<Vec<crate::providers::traits::ChatMessage>> =
-            if armed_plan_path.is_some() {
+        let is_design_trigger = user_message
+            .trim_start()
+            .starts_with(crate::agent::designer::pipeline::DESIGN_TASK_PREFIX);
+
+        let plan_exec_mode = armed_plan_path.is_some();
+        let mut focus_base_len: usize = 0;
+        let full_history_for_merge: Option<Vec<crate::providers::traits::ChatMessage>> =
+            if plan_exec_mode {
                 let full = history_chat.clone();
                 history_chat = Self::focus_history_for_plan_execution(history_chat);
-                plan_exec_focus_base_len = history_chat.len();
+                focus_base_len = history_chat.len();
                 Some(full)
-            } else {
+            } else if is_design_trigger {
                 None
+            } else {
+                let min_turns = self.config.recent_turn_window;
+                let max_turns = self.config.recent_window_max_turns;
+                let ratio = self.config.recent_window_token_ratio;
+                match Self::focus_history_for_new_turn(
+                    &history_chat,
+                    &effective_model,
+                    min_turns,
+                    max_turns,
+                    ratio,
+                ) {
+                    Some(view) => {
+                        let full = history_chat.clone();
+                        let rolling = self
+                            .build_rolling_summary(
+                                &view.dropped,
+                                view.dropped_turns,
+                                &effective_model,
+                            )
+                            .await;
+                        let combined = match (view.retained_summary, rolling) {
+                            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+                            (Some(a), None) => Some(a),
+                            (None, Some(b)) => Some(b),
+                            (None, None) => None,
+                        };
+                        let mut messages = view.messages;
+                        if let Some(text) = combined {
+                            Self::fold_summary_into_system(
+                                &mut messages,
+                                view.leading_system_end,
+                                &text,
+                            );
+                        }
+                        history_chat = messages;
+                        focus_base_len = history_chat.len();
+                        Some(full)
+                    }
+                    None => None,
+                }
             };
 
         let cancel = self.cancel_signal.load_full().as_ref().clone();
@@ -860,10 +939,12 @@ impl Agent {
                             })
                             .await;
                         self.commit_interrupted_turn_history(
-                            plan_exec_full_history.clone(),
+                            full_history_for_merge.clone(),
                             history_chat.clone(),
-                            plan_exec_focus_base_len,
+                            focus_base_len,
                         );
+                        self.capture_unfinished_task();
+                        self.trim_history();
                         self.last_turn_interrupted = true;
                         return Err(AgentError::TurnCancelled);
                     }
@@ -875,24 +956,54 @@ impl Agent {
                         })
                         .await;
 
-                    if !is_transport_interruption {
-                        self.record_failed_turn_reinforcement(&msg);
+                    if is_transport_interruption {
+                        self.commit_interrupted_turn_history(
+                            full_history_for_merge.clone(),
+                            history_chat.clone(),
+                            focus_base_len,
+                        );
+                        self.capture_unfinished_task();
+                        self.trim_history();
+                        self.last_turn_interrupted = true;
+                        return Err(AgentError::StreamInterrupted(msg));
                     }
+                    self.record_failed_turn_reinforcement(&msg);
+                    let merged_interrupted = Self::merge_interrupted_flat(
+                        full_history_for_merge.clone(),
+                        history_chat.clone(),
+                        focus_base_len,
+                    );
+                    let mut interrupted_view: Vec<ConversationMessage> = Vec::new();
+                    Self::replace_history_from_flat(&mut interrupted_view, merged_interrupted);
+                    self.capture_unfinished_task_from(&interrupted_view);
                     self.rollback_failed_turn_history(failed_turn_rollback_len);
+                    self.trim_history();
+                    self.last_turn_interrupted = true;
                     return Err(AgentError::ToolDispatchFailed(msg));
                 }
             }
         };
 
-        if let Some(mut full) = plan_exec_full_history {
-            full.push(crate::providers::traits::ChatMessage::assistant(
-                final_text.clone(),
-            ));
+        if let Some(mut full) = full_history_for_merge {
+            if plan_exec_mode {
+                full.push(crate::providers::traits::ChatMessage::assistant(
+                    final_text.clone(),
+                ));
+            } else {
+                let new_turn_start = Self::new_turn_slice_start(&history_chat, focus_base_len);
+                if history_chat.len() > new_turn_start {
+                    full.extend(history_chat[new_turn_start..].iter().cloned());
+                }
+            }
             Self::replace_history_from_flat(&mut self.history, full);
         } else {
             Self::replace_history_from_flat(&mut self.history, history_chat);
         }
         self.trim_history();
+
+        if std::mem::take(&mut self.last_turn_resumed) {
+            self.clear_unfinished_task();
+        }
 
         crate::evolution::record_provider_model(
             Some(self.cached_provider.as_str()),
@@ -904,26 +1015,437 @@ impl Agent {
         Ok(final_text)
     }
 
+    fn new_turn_slice_start(
+        partial_history: &[crate::providers::traits::ChatMessage],
+        focus_base_len: usize,
+    ) -> usize {
+        partial_history
+            .iter()
+            .rposition(|m| {
+                Self::is_user_turn_boundary(m) && m.content.contains("[CURRENT REQUEST")
+            })
+            .map(|i| i + 1)
+            .unwrap_or_else(|| focus_base_len.min(partial_history.len()))
+    }
+
+    fn merge_interrupted_flat(
+        full_history: Option<Vec<crate::providers::traits::ChatMessage>>,
+        partial_history: Vec<crate::providers::traits::ChatMessage>,
+        focus_base_len: usize,
+    ) -> Vec<crate::providers::traits::ChatMessage> {
+        match full_history {
+            Some(mut full) => {
+                let new_turn_start = Self::new_turn_slice_start(&partial_history, focus_base_len);
+                if partial_history.len() > new_turn_start {
+                    full.extend(partial_history[new_turn_start..].iter().cloned());
+                }
+                full
+            }
+            None => partial_history,
+        }
+    }
+
     fn commit_interrupted_turn_history(
         &mut self,
         plan_exec_full_history: Option<Vec<crate::providers::traits::ChatMessage>>,
         partial_history: Vec<crate::providers::traits::ChatMessage>,
         plan_exec_focus_base_len: usize,
     ) {
-        match plan_exec_full_history {
-            Some(mut full) => {
-                if partial_history.len() > plan_exec_focus_base_len {
-                    full.extend(
-                        partial_history[plan_exec_focus_base_len..]
-                            .iter()
-                            .cloned(),
-                    );
-                }
-                Self::replace_history_from_flat(&mut self.history, full);
-            }
-            None => Self::replace_history_from_flat(&mut self.history, partial_history),
+        let merged = Self::merge_interrupted_flat(
+            plan_exec_full_history,
+            partial_history,
+            plan_exec_focus_base_len,
+        );
+        Self::replace_history_from_flat(&mut self.history, merged);
+        let has_unfinished = self.has_unfinished_task();
+        crate::agent::dangling_tool_repair::close_orphan_user_turns(
+            &mut self.history,
+            has_unfinished,
+        );
+    }
+
+    fn capture_unfinished_task(&self) {
+        self.capture_unfinished_task_from(&self.history);
+    }
+
+    fn capture_unfinished_task_from(&self, history: &[ConversationMessage]) {
+        let flat = self.tool_dispatcher.to_provider_messages(history);
+        let request = flat
+            .iter()
+            .rev()
+            .find(|m| Self::is_user_turn_boundary(m))
+            .map(|m| Self::extract_user_request_snippet(&m.content));
+        let Some(request) = request else {
+            return;
+        };
+        if request.trim().is_empty() {
+            return;
         }
-        crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+        let progress = Self::summarize_interrupted_progress(history);
+        if let Ok(mut guard) = self.unfinished_task.lock() {
+            let seq = guard.as_ref().map(|t| t.seq + 1).unwrap_or(1);
+            tracing::info!(
+                target: "agent.intent",
+                seq,
+                request = %request,
+                "captured most-recent unfinished task (overwrites any older one)"
+            );
+            *guard = Some(UnfinishedTask {
+                seq,
+                request,
+                progress,
+            });
+        }
+    }
+
+    fn last_user_boundary_index(history: &[ConversationMessage]) -> Option<usize> {
+        history.iter().rposition(|m| match m {
+            ConversationMessage::Chat(c) => {
+                if c.role != "user" {
+                    return false;
+                }
+                let trimmed = c.content.trim_start();
+                !trimmed.starts_with("[Tool results]") && !trimmed.starts_with("[Recovered")
+            }
+            _ => false,
+        })
+    }
+
+    fn tool_call_arg_snippet(arguments: &str) -> String {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+            for key in [
+                "query", "url", "path", "pattern", "command", "file_path", "name", "q",
+            ] {
+                if let Some(field) = value.get(key).and_then(|v| v.as_str()) {
+                    let field = field.trim();
+                    if !field.is_empty() {
+                        return format!("{key}={}", Self::truncate_snippet(field, 100));
+                    }
+                }
+            }
+        }
+        Self::truncate_snippet(arguments.trim(), 100)
+    }
+
+    fn summarize_interrupted_progress(history: &[ConversationMessage]) -> String {
+        let start = Self::last_user_boundary_index(history)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        let mut steps: Vec<(String, String)> = Vec::new();
+        let mut result_snippets: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut last_said = String::new();
+
+        for msg in &history[start.min(history.len())..] {
+            match msg {
+                ConversationMessage::AssistantToolCalls {
+                    text, tool_calls, ..
+                } => {
+                    if let Some(t) = text.as_deref() {
+                        let t = t.trim();
+                        if !t.is_empty()
+                            && !crate::agent::dangling_tool_repair::is_turn_close_note(t)
+                        {
+                            last_said = Self::truncate_snippet(t, 240);
+                        }
+                    }
+                    for call in tool_calls {
+                        let snippet = Self::tool_call_arg_snippet(&call.arguments);
+                        let desc = if snippet.is_empty() {
+                            format!("called {}", call.name)
+                        } else {
+                            format!("called {} ({snippet})", call.name)
+                        };
+                        steps.push((call.id.clone(), desc));
+                    }
+                }
+                ConversationMessage::ToolResults(rows) => {
+                    for row in rows {
+                        let flattened = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
+                        result_snippets.insert(
+                            row.tool_call_id.clone(),
+                            Self::truncate_snippet(&flattened, 120),
+                        );
+                    }
+                }
+                ConversationMessage::Chat(c) => {
+                    if c.role == "assistant" {
+                        let t = c.content.trim();
+                        if !t.is_empty()
+                            && !crate::agent::dangling_tool_repair::is_turn_close_note(t)
+                        {
+                            last_said = Self::truncate_snippet(t, 240);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut out = String::new();
+        if !steps.is_empty() {
+            let _ = std::fmt::Write::write_str(
+                &mut out,
+                "already executed (full results are in the transcript above; do NOT repeat these):\n",
+            );
+            for (id, desc) in steps.iter().take(20) {
+                match result_snippets.get(id) {
+                    Some(snippet) if !snippet.trim().is_empty() => {
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut out,
+                            format_args!("  - {desc} -> result: {snippet}\n"),
+                        );
+                    }
+                    Some(_) => {
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut out,
+                            format_args!("  - {desc} -> result returned\n"),
+                        );
+                    }
+                    None => {
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut out,
+                            format_args!("  - {desc} -> no result captured\n"),
+                        );
+                    }
+                }
+            }
+        }
+        if !last_said.trim().is_empty() {
+            let _ =
+                std::fmt::Write::write_fmt(&mut out, format_args!("last said: {last_said}\n"));
+        }
+        Self::truncate_snippet(out.trim_end(), 1200)
+    }
+
+    fn clear_unfinished_task(&self) {
+        if let Ok(mut guard) = self.unfinished_task.lock() {
+            *guard = None;
+        }
+    }
+
+    fn has_unfinished_task(&self) -> bool {
+        self.unfinished_task
+            .lock()
+            .ok()
+            .is_some_and(|g| g.is_some())
+    }
+
+    fn extract_user_request_snippet(envelope: &str) -> String {
+        let body = if let Some(idx) = envelope.find("[CURRENT REQUEST") {
+            let after = &envelope[idx..];
+            match after.find("]\n") {
+                Some(close) => &after[close + 2..],
+                None => after,
+            }
+        } else {
+            envelope
+        };
+        let body = body.split("\n\n[").next().unwrap_or(body);
+        Self::truncate_snippet(body.trim(), 400)
+    }
+
+    fn truncate_snippet(text: &str, max_chars: usize) -> String {
+        let trimmed = text.trim();
+        if trimmed.chars().count() <= max_chars {
+            return trimmed.to_string();
+        }
+        let truncated: String = trimmed.chars().take(max_chars).collect();
+        format!("{truncated}\u{2026}")
+    }
+
+    fn cap_memory_context(context: String) -> String {
+        const MAX_CONTEXT_CHARS: usize = 16_000;
+        if context.chars().count() <= MAX_CONTEXT_CHARS {
+            return context;
+        }
+        let original_chars = context.len();
+        let truncated: String = context.chars().take(MAX_CONTEXT_CHARS).collect();
+        tracing::warn!(
+            target: "agent.recent_window",
+            original_chars,
+            cap = MAX_CONTEXT_CHARS,
+            "memory recall context exceeded cap; truncated to keep the user envelope bounded"
+        );
+        format!("{truncated}\n[memory context truncated to {MAX_CONTEXT_CHARS} chars]\n")
+    }
+
+    fn unfinished_task_note(task: &UnfinishedTask) -> String {
+        let mut note = String::from(
+            "[UNFINISHED EARLIER TASK \u{2014} this is the MOST RECENT task in THIS session that was \
+             interrupted (stopped, cancelled, or errored) before it finished. It is the ONLY task a \
+             \"continue\" request should resume; ignore any older interrupted/unfinished tasks:\n  \
+             request: ",
+        );
+        note.push_str(&task.request);
+        if !task.progress.trim().is_empty() {
+            note.push_str("\n  ALREADY DONE (this is your real progress; the listed steps and their \
+                           results already exist in the transcript above):\n");
+            for line in task.progress.lines() {
+                note.push_str("  ");
+                note.push_str(line);
+                note.push('\n');
+            }
+        }
+        note.push_str(
+            "\nResume THIS task ONLY if the [CURRENT REQUEST] above explicitly asks to continue or \
+             finish it (e.g. \"继续\" / \"continue\" / \"接着\" / \"go on\") or clearly refers to it. \
+             When you resume, CONTINUE FROM WHERE IT STOPPED: build on the results already obtained \
+             above, do the NEXT step toward finishing the request, and do NOT re-issue the same \
+             tool calls already listed under ALREADY DONE or restart the task from the beginning. \
+             If the listed work is enough to answer, synthesize the final answer directly instead \
+             of searching again. Otherwise (the latest message is a greeting, small talk, or a new \
+             or unrelated request) follow [CURRENT REQUEST] literally and do NOT resume this task on \
+             your own. The full earlier transcript stays in memory and is available on demand via \
+             sessions_outline + sessions_history.]",
+        );
+        note
+    }
+
+    async fn analyze_intent_llm(
+        &self,
+        user_message: &str,
+    ) -> Option<crate::agent::intent::LlmIntentDecision> {
+        if !self.intent_analysis_config.enabled {
+            return None;
+        }
+        if user_message.trim().is_empty() {
+            return None;
+        }
+
+        let flat = self.tool_dispatcher.to_provider_messages(&self.history);
+        const RECENT_TAIL_MESSAGES: usize = 6;
+        let mut recent_tail: Vec<(String, String)> = Vec::new();
+        for m in flat.iter().rev() {
+            if recent_tail.len() >= RECENT_TAIL_MESSAGES {
+                break;
+            }
+            let role = m.role.as_str();
+            if role != "user" && role != "assistant" {
+                continue;
+            }
+            if m.content.trim().is_empty() {
+                continue;
+            }
+            if crate::agent::dangling_tool_repair::is_turn_close_note(&m.content) {
+                continue;
+            }
+            let text = if role == "user" {
+                if !Self::is_user_turn_boundary(m) {
+                    continue;
+                }
+                Self::extract_user_request_snippet(&m.content)
+            } else {
+                if m.content.contains("\"tool_calls\"") {
+                    continue;
+                }
+                Self::truncate_snippet(&m.content, 300)
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            recent_tail.push((role.to_string(), text));
+        }
+        recent_tail.reverse();
+
+        let candidate = self
+            .unfinished_task
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|t| (t.seq, t.request.clone(), t.progress.clone())));
+
+        let prompt = crate::agent::intent::build_intent_user_prompt(
+            user_message,
+            &recent_tail,
+            candidate
+                .as_ref()
+                .map(|(seq, request, digest)| (*seq, request.as_str(), digest.as_str())),
+        );
+
+        let intent_model = self
+            .intent_analysis_config
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&self.model_name);
+        let timeout = std::time::Duration::from_secs(20);
+        let raw = match tokio::time::timeout(
+            timeout,
+            self.provider.chat_with_system(
+                Some(crate::agent::intent::INTENT_SYSTEM_PROMPT),
+                &prompt,
+                intent_model,
+                0.0,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "agent.intent",
+                    error = %e,
+                    "llm intent analysis failed; falling back to heuristic classification"
+                );
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "agent.intent",
+                    "llm intent analysis timed out; falling back to heuristic classification"
+                );
+                return None;
+            }
+        };
+
+        match crate::agent::intent::parse_llm_intent_decision(&raw) {
+            Some(decision) => {
+                tracing::debug!(
+                    target: "agent.intent",
+                    decision = decision.decision.as_str(),
+                    resume_task_seq = ?decision.resume_task_seq,
+                    task_intent = decision.task_intent.as_str(),
+                    confidence = decision.confidence,
+                    reason = %decision.reason,
+                    "llm intent decision for turn"
+                );
+                Some(decision)
+            }
+            None => {
+                tracing::warn!(
+                    target: "agent.intent",
+                    raw = %Self::truncate_snippet(&raw, 200),
+                    "llm intent analysis returned unparseable output; falling back to heuristic"
+                );
+                None
+            }
+        }
+    }
+
+    pub async fn resolve_auto_coding_mode(
+        &self,
+        user_message: &str,
+    ) -> crate::agent::coding_mode::CodingMode {
+        if let Some(decision) = self.analyze_intent_llm(user_message).await {
+            let mode = decision.coding_mode();
+            if let Ok(mut guard) = self.pending_intent_decision.lock() {
+                *guard = Some((user_message.to_string(), decision));
+            }
+            return mode;
+        }
+        crate::agent::intent::auto_select_coding_mode(user_message)
+    }
+
+    fn take_pending_intent_decision(
+        &self,
+        user_message: &str,
+    ) -> Option<crate::agent::intent::LlmIntentDecision> {
+        let mut guard = self.pending_intent_decision.lock().ok()?;
+        match guard.take() {
+            Some((msg, decision)) if msg == user_message => Some(decision),
+            _ => None,
+        }
     }
 
     fn rollback_failed_turn_history(&mut self, rollback_len: usize) {
@@ -1079,6 +1601,11 @@ impl Agent {
         *self.plan_execution_armed.lock() = Some(plan_path.into());
     }
 
+    pub fn mark_resuming_from_ask(&self) {
+        self.resuming_from_ask
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn cancel_token(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.cancelled)
     }
@@ -1149,6 +1676,12 @@ impl Agent {
         };
 
         self.config.max_history_messages = config.agent.max_history_messages;
+        self.config.recent_turn_window = config.agent.recent_turn_window;
+        self.config.recent_window_max_turns = config.agent.recent_window_max_turns;
+        self.config.recent_window_token_ratio = config.agent.recent_window_token_ratio;
+        self.config.recent_window_summary_enabled = config.agent.recent_window_summary_enabled;
+        self.config.recent_window_summary_batch_turns = config.agent.recent_window_summary_batch_turns;
+        self.intent_analysis_config = config.intent_analysis.clone();
 
         let new_provider = config
             .default_provider
@@ -1344,6 +1877,10 @@ impl Agent {
                 chat.content = new_prompt;
             }
         }
+    }
+
+    pub fn tool_specs(&self) -> &[ToolSpec] {
+        &self.tool_specs
     }
 
     pub async fn execute_tool(
@@ -1765,6 +2302,318 @@ impl Agent {
         self.history.extend(expanded);
     }
 
+    fn is_user_turn_boundary(m: &crate::providers::traits::ChatMessage) -> bool {
+        if m.role != "user" {
+            return false;
+        }
+        let trimmed = m.content.trim_start();
+        !trimmed.starts_with("[Tool results]") && !trimmed.starts_with("[Recovered")
+    }
+
+    fn focus_history_for_new_turn(
+        history: &[crate::providers::traits::ChatMessage],
+        model: &str,
+        min_turns: usize,
+        max_turns: usize,
+        token_ratio: f64,
+    ) -> Option<RecentFocusView> {
+        let n = history.len();
+        let leading_system_end = history
+            .iter()
+            .position(|m| m.role != "system")
+            .unwrap_or(n);
+        let boundaries: Vec<usize> = history
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| Self::is_user_turn_boundary(m))
+            .map(|(i, _)| i)
+            .collect();
+        if boundaries.is_empty() {
+            return None;
+        }
+
+        let min_turns = min_turns.max(1);
+        let max_turns = max_turns.max(min_turns);
+        let window_tokens = crate::constants::api_limits::context_window_for_model(model) as f64;
+        let token_budget = (window_tokens * token_ratio.clamp(0.01, 1.0)).max(1.0) as usize;
+        let system_tokens =
+            crate::providers::traits::estimate_total_tokens(&history[..leading_system_end]);
+
+        let total_b = boundaries.len();
+        let current_start = boundaries[total_b - 1];
+
+        let (current_kept, current_dropped) =
+            Self::bound_current_turn(&history[current_start..], token_budget);
+        let mut acc_tokens = crate::providers::traits::estimate_total_tokens(&current_kept);
+        let mut chosen = total_b - 1;
+        let mut turns = 1usize;
+        let floor_cap = token_budget.saturating_mul(2);
+        for bi in (0..total_b - 1).rev() {
+            let turn_start = boundaries[bi];
+            let turn_end = boundaries[bi + 1];
+            let turn_tokens =
+                crate::providers::traits::estimate_total_tokens(&history[turn_start..turn_end]);
+            let next_turns = turns + 1;
+            if next_turns > max_turns {
+                break;
+            }
+            let prospective = acc_tokens + turn_tokens;
+            let within_budget = prospective <= token_budget;
+            let within_floor = next_turns <= min_turns && prospective <= floor_cap;
+            if !within_budget && !within_floor {
+                break;
+            }
+            chosen = bi;
+            acc_tokens = prospective;
+            turns = next_turns;
+        }
+
+        if let Some(note_pos) = history[..current_start].iter().rposition(|m| {
+            m.role == "assistant"
+                && crate::agent::dangling_tool_repair::is_turn_close_note(&m.content)
+        }) {
+            if let Some(interrupted_bi) = boundaries.iter().rposition(|&b| b < note_pos) {
+                if interrupted_bi < chosen {
+                    let pinned_tokens = crate::providers::traits::estimate_total_tokens(
+                        &history[boundaries[interrupted_bi]..current_start],
+                    );
+                    let current_kept_tokens =
+                        crate::providers::traits::estimate_total_tokens(&current_kept);
+                    let projected = system_tokens + pinned_tokens + current_kept_tokens;
+                    if projected <= floor_cap {
+                        chosen = interrupted_bi;
+                        turns = total_b - chosen;
+                        acc_tokens = pinned_tokens + current_kept_tokens;
+                        tracing::debug!(
+                            target: "agent.recent_window",
+                            interrupted_boundary = boundaries[chosen],
+                            "pinning most-recent interrupted turn into the focus window so its real \
+                             transcript stays visible for resume"
+                        );
+                    } else {
+                        tracing::debug!(
+                            target: "agent.recent_window",
+                            projected,
+                            cap = floor_cap,
+                            "interrupted turn too large to pin whole; relying on the captured \
+                             progress digest instead of forcing it into the window"
+                        );
+                    }
+                }
+            }
+        }
+
+        let start_idx = boundaries[chosen];
+        if start_idx <= leading_system_end && current_dropped.is_empty() {
+            return None;
+        }
+
+        let mut retained_summary_parts: Vec<String> = Vec::new();
+        let mut dropped: Vec<crate::providers::traits::ChatMessage> = Vec::new();
+        let mut dropped_turns = 0usize;
+        for m in &history[leading_system_end..start_idx] {
+            if m.content.trim_start().starts_with("[CONTEXT SUMMARY") {
+                retained_summary_parts.push(m.content.clone());
+            } else {
+                if Self::is_user_turn_boundary(m) {
+                    dropped_turns += 1;
+                }
+                dropped.push(m.clone());
+            }
+        }
+        let current_dropped_len = current_dropped.len();
+        dropped.extend(current_dropped);
+        let retained_summary = if retained_summary_parts.is_empty() {
+            None
+        } else {
+            Some(retained_summary_parts.join("\n\n"))
+        };
+
+        let mut messages: Vec<crate::providers::traits::ChatMessage> = Vec::with_capacity(
+            leading_system_end + (current_start - start_idx) + current_kept.len(),
+        );
+        messages.extend_from_slice(&history[..leading_system_end]);
+        messages.extend_from_slice(&history[start_idx..current_start]);
+        messages.extend(current_kept);
+
+        let chars_before: usize = history.iter().map(|m| m.content.len()).sum();
+        let chars_after: usize = messages.iter().map(|m| m.content.len()).sum();
+        Self::log_window_tail(&messages);
+        tracing::info!(
+            target: "agent.recent_window",
+            kept_turns = turns,
+            dropped_turns,
+            current_turn_dropped = current_dropped_len,
+            token_budget,
+            est_window_tokens = system_tokens + acc_tokens,
+            chars_before,
+            chars_after,
+            "focusing LLM context on leading system prompt + token-bounded recent turns; older \
+             history stays in memory/persistence and is available on demand via sessions tools"
+        );
+
+        Some(RecentFocusView {
+            messages,
+            leading_system_end,
+            retained_summary,
+            dropped,
+            dropped_turns,
+        })
+    }
+
+    fn bound_current_turn(
+        slice: &[crate::providers::traits::ChatMessage],
+        token_budget: usize,
+    ) -> (
+        Vec<crate::providers::traits::ChatMessage>,
+        Vec<crate::providers::traits::ChatMessage>,
+    ) {
+        if slice.len() <= 1
+            || crate::providers::traits::estimate_total_tokens(slice) <= token_budget
+        {
+            return (slice.to_vec(), Vec::new());
+        }
+        let head = slice[0].clone();
+        let head_tokens =
+            crate::providers::traits::estimate_total_tokens(std::slice::from_ref(&head));
+        let tail_budget = token_budget.saturating_sub(head_tokens);
+        let mut acc = 0usize;
+        let mut tail_start = slice.len();
+        for i in (1..slice.len()).rev() {
+            let t = crate::providers::traits::estimate_total_tokens(std::slice::from_ref(&slice[i]));
+            if acc + t > tail_budget && tail_start < slice.len() {
+                break;
+            }
+            acc += t;
+            tail_start = i;
+        }
+        let dropped: Vec<crate::providers::traits::ChatMessage> =
+            slice[1..tail_start].to_vec();
+        let mut kept = Vec::with_capacity(1 + (slice.len() - tail_start));
+        kept.push(head);
+        kept.extend_from_slice(&slice[tail_start..]);
+        (kept, dropped)
+    }
+
+    fn log_window_tail(messages: &[crate::providers::traits::ChatMessage]) {
+        if !tracing::enabled!(target: "agent.recent_window", tracing::Level::DEBUG) {
+            return;
+        }
+        let start = messages.len().saturating_sub(20);
+        for (offset, m) in messages[start..].iter().enumerate() {
+            let prefix: String = m.content.chars().take(60).collect();
+            tracing::debug!(
+                target: "agent.recent_window",
+                idx = start + offset,
+                role = %m.role,
+                len = m.content.len(),
+                prefix = %prefix.replace('\n', " "),
+                "window tail message"
+            );
+        }
+    }
+
+    fn fold_summary_into_system(
+        messages: &mut Vec<crate::providers::traits::ChatMessage>,
+        leading_system_end: usize,
+        text: &str,
+    ) {
+        let block = format!(
+            "[CONTEXT SUMMARY \u{2014} earlier conversation in this session, condensed for \
+             continuity. The full transcript stays in memory and is available on demand via \
+             sessions_outline + sessions_history.]\n{text}"
+        );
+        if leading_system_end > 0 {
+            if let Some(sys) = messages.get_mut(leading_system_end - 1) {
+                if !sys.content.trim_end().is_empty() {
+                    sys.content.push_str("\n\n");
+                }
+                sys.content.push_str(&block);
+                return;
+            }
+        }
+        messages.insert(0, crate::providers::traits::ChatMessage::system(block));
+    }
+
+    fn fingerprint_dropped_head(dropped: &[crate::providers::traits::ChatMessage]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let head = dropped.len().min(8);
+        head.hash(&mut hasher);
+        for m in &dropped[..head] {
+            m.role.hash(&mut hasher);
+            m.content.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    async fn build_rolling_summary(
+        &self,
+        dropped: &[crate::providers::traits::ChatMessage],
+        dropped_turns: usize,
+        model: &str,
+    ) -> Option<String> {
+        if !self.config.recent_window_summary_enabled || dropped.is_empty() || dropped_turns == 0 {
+            return None;
+        }
+        let batch = self.config.recent_window_summary_batch_turns.max(1);
+        let fingerprint = Self::fingerprint_dropped_head(dropped);
+        {
+            let guard = self
+                .rolling_summary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((fp, covered, text)) = guard.as_ref() {
+                if *fp == fingerprint
+                    && *covered <= dropped_turns
+                    && dropped_turns - *covered < batch
+                    && !text.is_empty()
+                {
+                    return Some(text.clone());
+                }
+            }
+        }
+        let source_budget = self.config.context_compression.source_max_chars.max(1);
+        let mut acc_chars = 0usize;
+        let mut slice_start = dropped.len();
+        for (i, m) in dropped.iter().enumerate().rev() {
+            acc_chars = acc_chars.saturating_add(m.content.len());
+            slice_start = i;
+            if acc_chars >= source_budget {
+                break;
+            }
+        }
+        let recent_dropped = &dropped[slice_start..];
+        let window = crate::constants::api_limits::context_window_for_model(model) as usize;
+        let compressor = crate::agent::context::compressor::ContextCompressor::new(
+            self.config.context_compression.clone(),
+            window,
+        );
+        match compressor
+            .summarize_messages(recent_dropped, self.provider.as_ref(), model)
+            .await
+        {
+            Ok(text) if !text.trim().is_empty() => {
+                let mut guard = self
+                    .rolling_summary
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *guard = Some((fingerprint, dropped_turns, text.clone()));
+                Some(text)
+            }
+            _ => {
+                let guard = self
+                    .rolling_summary
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard
+                    .as_ref()
+                    .filter(|(fp, _, _)| *fp == fingerprint)
+                    .map(|(_, _, t)| t.clone())
+            }
+        }
+    }
+
     fn focus_history_for_plan_execution(
         history: Vec<crate::providers::traits::ChatMessage>,
     ) -> Vec<crate::providers::traits::ChatMessage> {
@@ -1898,6 +2747,21 @@ impl Agent {
                 tracing::warn!(error = %err, "credential vault initialisation failed for agent session");
             }
         }
+
+        // Initialize the evolution engine for non-gateway paths too (CLI, daemon,
+        // headless). Previously it was only wired in the gateway, so experience
+        // injection / trajectory recording / reflection were silently no-ops in
+        // plain CLI sessions. `init_global` is idempotent (the gateway's richer
+        // setup, when present, just updates the config afterwards).
+        if config.evolution.enabled && crate::evolution::try_global().is_none() {
+            if let Err(err) = crate::evolution::init_global(
+                config.workspace_dir.clone(),
+                config.evolution.clone(),
+            ) {
+                tracing::warn!(error = %err, "evolution engine initialisation failed for agent session");
+            }
+        }
+
         let observer: Arc<dyn Observer> =
             Arc::from(observability::create_observer(&config.observability));
         let runtime: Arc<dyn runtime::RuntimeAdapter> =
@@ -2213,17 +3077,19 @@ impl Agent {
             other_messages.drain(0..drop_count);
         }
 
-        let mut total_chars: usize = system_messages.iter().map(|m| Self::msg_char_len(m)).sum();
-        let mut start = 0;
-        for (i, msg) in other_messages.iter().enumerate() {
-            total_chars += Self::msg_char_len(msg);
-            if total_chars > MAX_CHARS && i > 0 {
-                start = i;
+        let system_chars: usize = system_messages.iter().map(|m| Self::msg_char_len(m)).sum();
+        let mut acc = system_chars;
+        let mut keep_from = other_messages.len();
+        for i in (0..other_messages.len()).rev() {
+            let prospective = acc + Self::msg_char_len(&other_messages[i]);
+            if prospective > MAX_CHARS && keep_from < other_messages.len() {
                 break;
             }
+            acc = prospective;
+            keep_from = i;
         }
-        if start > 0 {
-            other_messages.drain(0..start);
+        if keep_from > 0 {
+            other_messages.drain(0..keep_from);
         }
 
         self.history = system_messages;
@@ -2495,15 +3361,12 @@ impl Agent {
         }
 
         if live_cfg.buddy.enabled {
-            let companion = crate::buddy::companion::Companion::new(live_cfg.buddy.clone());
-            if companion.is_enabled() {
-                prompt.push_str("\n\n");
-                prompt.push_str(&crate::buddy::prompt::buddy_system_prompt(
-                    &live_cfg.buddy.name,
-                    &live_cfg.buddy.personality,
-                    companion.mood(),
-                ));
-            }
+            prompt.push_str("\n\n");
+            prompt.push_str(&crate::buddy::prompt::buddy_system_prompt(
+                &live_cfg.buddy.name,
+                &live_cfg.buddy.personality,
+                crate::buddy::current_mood(&live_cfg.buddy),
+            ));
         }
 
         if let Some(theme) = crate::util::get_runtime_var("SEN_THEME") {
@@ -3016,10 +3879,16 @@ impl Agent {
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
 
         let current_request = format!(
-            "[CURRENT REQUEST - this is the user's latest message and the primary task to act \
-             on right now. Judge from the conversation context whether it asks to continue an \
-             earlier or interrupted request, or is a new request; act accordingly, and do not \
-             blindly resume an earlier request when the user has moved on.]\n{user_message}"
+            "[CURRENT REQUEST - the user's latest message; this is the ONLY thing you must act \
+             on right now. Take it literally and at face value. Continue or resume earlier / \
+             unfinished work ONLY when this message explicitly says so (e.g. \"继续\", \
+             \"continue\", \"接着\", \"go on\") or directly references that earlier task. If this \
+             message is a greeting (e.g. \"你好\", \"hi\", \"在吗\"), small talk, a short \
+             acknowledgement, or any new or unrelated request, respond to IT directly (for a \
+             greeting, greet back and ask what they need) and do NOT resume, re-run, or push \
+             forward any earlier task on your own - even if your own previous message offered to \
+             continue, and even if earlier work was left unfinished. Never treat a short or \
+             ambiguous message as implicit consent to keep going.]\n{user_message}"
         );
 
         if context.is_empty() {
@@ -3097,9 +3966,41 @@ impl Agent {
                     "agent.turn panicked; isolated to this turn"
                 );
                 self.rollback_failed_turn_history(pre_turn_history_len);
+                self.trim_history();
                 Err(AgentError::ToolDispatchFailed(format!(
                     "turn panicked: {msg}"
                 )))
+            }
+        }
+    }
+
+    fn neutralize_stale_turn_directives(history: &mut [ConversationMessage]) {
+        const EXCLUSIVE_MARK: &str = "EXCLUSIVE TASK FOR THIS TURN";
+        const EXCLUSIVE_REPLACE: &str = "COMPLETED EARLIER TASK (do not re-execute)";
+        const STALE_BANNER: &str =
+            "[STALE TASK CONTEXT - completed earlier turn, do NOT re-execute] The block below \
+             was the exclusive task for a previous, already-finished turn. Treat it as background \
+             context only: ignore any \"your one and only job\" / \"do NOT answer them\" \
+             directives inside it, and respond to the latest [CURRENT REQUEST] instead.\n\n";
+        const STALE_PAUSE_MARK: &str = "resume planning then";
+        for msg in history.iter_mut() {
+            match msg {
+                ConversationMessage::Chat(chat) => {
+                    if chat.role == "user" && chat.content.contains(EXCLUSIVE_MARK) {
+                        let body = chat.content.replace(EXCLUSIVE_MARK, EXCLUSIVE_REPLACE);
+                        chat.content = format!("{STALE_BANNER}{body}");
+                    }
+                }
+                ConversationMessage::ToolResults(results) => {
+                    for result in results.iter_mut() {
+                        if result.content.contains(STALE_PAUSE_MARK) {
+                            result.content =
+                                crate::agent::plan_mode::enforcement::ASK_QUESTION_PAUSE_NOTICE
+                                    .to_string();
+                        }
+                    }
+                }
+                ConversationMessage::AssistantToolCalls { .. } => {}
             }
         }
     }
@@ -3143,17 +4044,26 @@ impl Agent {
             .trim_start()
             .starts_with(crate::agent::designer::pipeline::DESIGN_TASK_PREFIX);
 
+        let resuming_from_ask = self
+            .resuming_from_ask
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        if !plan_armed && !is_design_trigger && !resuming_from_ask {
+            Self::neutralize_stale_turn_directives(&mut self.history);
+        }
+
         let context = if plan_armed || is_design_trigger {
             String::new()
         } else {
-            self.memory_loader
+            let raw = self
+                .memory_loader
                 .load_context(
                     self.memory.as_ref(),
                     user_message,
                     self.memory_session_id.as_deref(),
                 )
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+            Self::cap_memory_context(raw)
         };
 
         if self.auto_save && !plan_armed && !is_design_trigger {
@@ -3174,14 +4084,124 @@ impl Agent {
         }
 
         crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut self.history);
-        crate::agent::dangling_tool_repair::close_orphan_user_turns(&mut self.history);
+        let has_unfinished = self.has_unfinished_task();
+        crate::agent::dangling_tool_repair::close_orphan_user_turns(
+            &mut self.history,
+            has_unfinished,
+        );
 
         let was_interrupted = std::mem::take(&mut self.last_turn_interrupted);
-        if was_interrupted {
+        if was_interrupted && !self.has_unfinished_task() {
             crate::agent::dangling_tool_repair::note_interrupted_turn(&mut self.history);
         }
 
         let mut enriched = Self::build_user_envelope(user_message, &context);
+
+        if let Ok(guard) = self.unfinished_task.lock() {
+            if let Some(task) = guard.as_ref() {
+                tracing::debug!(
+                    target: "agent.intent",
+                    seq = task.seq,
+                    request = %task.request,
+                    "injecting most-recent unfinished-task note into the turn envelope"
+                );
+                enriched.push_str("\n\n");
+                enriched.push_str(&Self::unfinished_task_note(task));
+            }
+        }
+
+        self.last_turn_resumed = false;
+
+        let intent_pass_active =
+            self.intent_analysis_config.enabled && !plan_armed && !is_design_trigger;
+
+        let llm_decision = if intent_pass_active {
+            match self.take_pending_intent_decision(user_message) {
+                Some(decision) => Some(decision),
+                None => self.analyze_intent_llm(user_message).await,
+            }
+        } else {
+            None
+        };
+
+        if !intent_pass_active && !plan_armed && !is_design_trigger {
+            let resumed =
+                matches!(
+                    crate::agent::intent::classify_conversation_intent(user_message),
+                    crate::agent::intent::ConversationIntent::Continue
+                );
+            self.last_turn_resumed = self.has_unfinished_task() && resumed;
+        }
+
+        if intent_pass_active {
+            let has_unfinished = self.has_unfinished_task();
+            let effective_decision = llm_decision.as_ref().map(|decision| {
+                let mut effective = decision.clone();
+                if matches!(
+                    effective.decision,
+                    crate::agent::intent::IntentDecision::Resume
+                ) {
+                    let candidate_seq = self
+                        .unfinished_task
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|t| t.seq));
+                    if let Some(candidate_seq) = candidate_seq {
+                        let seq_ok = effective
+                            .resume_task_seq
+                            .is_none_or(|s| s == candidate_seq);
+                        if !seq_ok
+                            || effective.confidence < self.intent_analysis_config.min_confidence
+                        {
+                            tracing::debug!(
+                                target: "agent.intent",
+                                confidence = effective.confidence,
+                                resume_task_seq = ?effective.resume_task_seq,
+                                candidate_seq,
+                                "downgrading low-confidence or seq-mismatched resume decision to clarify"
+                            );
+                            effective.decision = crate::agent::intent::IntentDecision::Clarify;
+                        }
+                    }
+                }
+                effective
+            });
+            let (note, resumed) = match &effective_decision {
+                Some(decision) => {
+                    tracing::debug!(
+                        target: "agent.intent",
+                        decision = decision.decision.as_str(),
+                        resume_task_seq = ?decision.resume_task_seq,
+                        "injecting llm conversation-signal for this turn"
+                    );
+                    (
+                        crate::agent::intent::llm_conversation_signal_note(decision, has_unfinished),
+                        matches!(
+                            decision.decision,
+                            crate::agent::intent::IntentDecision::Resume
+                        ),
+                    )
+                }
+                None => {
+                    let conv_intent =
+                        crate::agent::intent::classify_conversation_intent(user_message);
+                    tracing::debug!(
+                        target: "agent.intent",
+                        conversation_intent = conv_intent.as_str(),
+                        "injecting heuristic conversation-signal for this turn (llm unavailable)"
+                    );
+                    (
+                        crate::agent::intent::conversation_signal_note(conv_intent, has_unfinished),
+                        matches!(conv_intent, crate::agent::intent::ConversationIntent::Continue),
+                    )
+                }
+            };
+            self.last_turn_resumed = has_unfinished && resumed;
+            if let Some(note) = note {
+                enriched.push_str("\n\n");
+                enriched.push_str(note);
+            }
+        }
 
         if let Some(svc) = crate::services::try_get_services() {
             let mode = crate::agent::coding_mode::active_coding_mode();
@@ -3212,34 +4232,41 @@ impl Agent {
             }
         }
 
-        if self.intent_analysis_config.enabled && !plan_armed && !is_design_trigger {
-            let analysis = crate::agent::intent::analyze_intent(user_message);
-            if analysis.is_confident(self.intent_analysis_config.min_confidence) {
-                tracing::debug!(
-                    target: "agent.intent",
-                    intent = analysis.intent.as_str(),
-                    confidence = analysis.confidence,
-                    "intent analysis result for turn"
-                );
-                if self.intent_analysis_config.enrich_preamble {
-                    if let Some(note) = analysis.intent_note() {
-                        enriched.push_str("\n\n");
-                        enriched.push_str(note);
+        if intent_pass_active {
+            let intent_note = match &llm_decision {
+                Some(decision)
+                    if decision.confidence >= self.intent_analysis_config.min_confidence =>
+                {
+                    decision.intent_note()
+                }
+                Some(_) => None,
+                None => {
+                    let analysis = crate::agent::intent::analyze_intent(user_message);
+                    if analysis.is_confident(self.intent_analysis_config.min_confidence) {
+                        analysis.intent_note()
+                    } else {
+                        None
                     }
                 }
-                if self.intent_analysis_config.enforce_plan_threshold
-                    && self.plan_mode_config.enabled
-                    && matches!(
-                        analysis.complexity,
-                        crate::agent::eval::ComplexityTier::Complex
-                    )
-                {
-                    enriched.push_str(&format!(
-                        "\n\nThis task likely requires more than {} steps. Create a structured \
-                         plan with the todo tool before executing, and update progress as you go.",
-                        self.plan_mode_config.auto_activate_threshold
-                    ));
+            };
+            if self.intent_analysis_config.enrich_preamble {
+                if let Some(note) = intent_note {
+                    enriched.push_str("\n\n");
+                    enriched.push_str(note);
                 }
+            }
+            if self.intent_analysis_config.enforce_plan_threshold
+                && self.plan_mode_config.enabled
+                && matches!(
+                    crate::agent::eval::estimate_complexity(user_message),
+                    crate::agent::eval::ComplexityTier::Complex
+                )
+            {
+                enriched.push_str(&format!(
+                    "\n\nThis task likely requires more than {} steps. Create a structured \
+                     plan with the todo tool before executing, and update progress as you go.",
+                    self.plan_mode_config.auto_activate_threshold
+                ));
             }
         }
 
@@ -3527,16 +4554,21 @@ impl crate::agent::loop_::traits::ResponseCacheHook for GuiHooksFromAgent {
             return None;
         }
         self.response_cache.as_ref().map(|_| {
-            let last_user = messages
+            // Key on the ENTIRE non-system conversation, not just the last user
+            // message: otherwise a repeated short prompt (e.g. "continue") in
+            // different contexts within the same session collides and returns a
+            // stale answer.
+            let conversation = messages
                 .iter()
-                .rfind(|m| m.role == "user")
-                .map(|m| m.content.as_str())
-                .unwrap_or("");
+                .filter(|m| m.role != "system")
+                .map(|m| format!("{}:{}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
             let system = messages
                 .iter()
                 .find(|m| m.role == "system")
                 .map(|m| m.content.as_str());
-            crate::memory::response_cache::ResponseCache::cache_key(model, system, last_user)
+            crate::memory::response_cache::ResponseCache::cache_key(model, system, &conversation)
         })
     }
 

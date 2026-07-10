@@ -20,7 +20,8 @@ impl LinqChannel {
             api_token,
             from_phone,
             allowed_senders,
-            client: reqwest::Client::new(),
+            client: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("channel.linq", 60, 15),
         }
     }
 

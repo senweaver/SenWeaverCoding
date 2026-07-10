@@ -9,7 +9,11 @@ import {
   type ComputerStatus,
   type ComputerStep,
 } from '../../stores/computerUseStore'
+import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
 import type { VisionModel } from '../../api/computer'
+import { enterMinimalMode } from '../../lib/minimalMode'
+import { RecorderPanel } from './RecorderPanel'
+import { SkillLibrary } from './SkillLibrary'
 
 type VisionProviderGroup = {
   providerId: string
@@ -109,20 +113,35 @@ export function ComputerUsePage() {
   const start = useComputerUseStore((s) => s.start)
   const stop = useComputerUseStore((s) => s.stop)
   const sendReply = useComputerUseStore((s) => s.sendReply)
+  const resetRun = useComputerUseStore((s) => s.reset)
 
   const [reply, setReply] = useState('')
+  const [showRecorder, setShowRecorder] = useState(false)
+  const [showSkills, setShowSkills] = useState(false)
 
   useEffect(() => {
     void loadModels()
   }, [loadModels])
 
+  const recorderStatus = useComputerRecorderStore((s) => s.status)
+  const recorderRecording = recorderStatus === 'recording'
+
   const busy = status === 'running' || status === 'thinking' || status === 'connecting'
+  const finishedRun =
+    steps.length > 0 &&
+    (status === 'finished' || status === 'stopped' || status === 'error')
   const noModels = modelsLoaded && models.length === 0
 
   const selectedStep: ComputerStep | null = useMemo(() => {
     if (selectedStepIndex === null) return steps.length > 0 ? steps[steps.length - 1] ?? null : null
     return steps[selectedStepIndex] ?? null
   }, [steps, selectedStepIndex])
+
+  const handleRun = () => {
+    if (!task.trim() || !provider || !model || busy || recorderRecording) return
+    start()
+    void enterMinimalMode('computer')
+  }
 
   const selectValue = provider && model ? `${provider}::${model}` : ''
 
@@ -146,7 +165,7 @@ export function ComputerUsePage() {
   }, [models])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--color-background)]">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--color-background)]">
       <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-[20px] text-[var(--color-brand)]">
@@ -160,6 +179,26 @@ export function ComputerUsePage() {
               {t('computerUse.subtitle')}
             </div>
           </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowRecorder(true)}
+            disabled={busy}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-red-500/50 hover:text-red-500 disabled:opacity-50"
+          >
+            <span className="material-symbols-outlined text-[15px]">fiber_manual_record</span>
+            {t('computerUse.record.button')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowSkills(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-brand)]"
+          >
+            <span className="material-symbols-outlined text-[15px]">auto_awesome_motion</span>
+            {t('computerUse.skills.button')}
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
@@ -228,6 +267,15 @@ export function ComputerUsePage() {
             )}
             {t(statusKey(status))}
           </span>
+          <button
+            type="button"
+            title={t('computerUse.minimize')}
+            aria-label={t('computerUse.minimize')}
+            onClick={() => void enterMinimalMode('computer')}
+            className="inline-flex items-center justify-center rounded-md border border-[var(--color-border)] px-2 py-1 text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+          >
+            <span className="material-symbols-outlined text-[16px]">picture_in_picture_alt</span>
+          </button>
         </div>
       </div>
 
@@ -342,6 +390,19 @@ export function ComputerUsePage() {
               </div>
             ) : (
               <div className="flex flex-col gap-2">
+                {finishedRun && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetRun()
+                      setTask('')
+                    }}
+                    className="flex items-center justify-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-[12px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-brand)]"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">restart_alt</span>
+                    {t('computerUse.newTask')}
+                  </button>
+                )}
                 <textarea
                   value={task}
                   onChange={(e) => setTask(e.target.value)}
@@ -351,7 +412,7 @@ export function ComputerUsePage() {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy) {
                       e.preventDefault()
-                      start()
+                      handleRun()
                     }
                   }}
                   className="resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-brand)] disabled:opacity-60"
@@ -368,8 +429,8 @@ export function ComputerUsePage() {
                 ) : (
                   <button
                     type="button"
-                    onClick={start}
-                    disabled={!task.trim() || !provider || !model}
+                    onClick={handleRun}
+                    disabled={!task.trim() || !provider || !model || recorderRecording}
                     className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
                     <span className="material-symbols-outlined text-[16px]">play_arrow</span>
@@ -397,7 +458,7 @@ export function ComputerUsePage() {
             {selectedStep && selectedStep.screenshotBase64 ? (
               <div className="relative inline-block max-h-full max-w-full">
                 <img
-                  src={`data:image/png;base64,${selectedStep.screenshotBase64}`}
+                  src={`data:${selectedStep.screenshotMime ?? 'image/png'};base64,${selectedStep.screenshotBase64}`}
                   alt={t('computerUse.screenshot')}
                   className="max-h-full max-w-full rounded-lg border border-[var(--color-border)] object-contain shadow-sm"
                 />
@@ -486,6 +547,9 @@ export function ComputerUsePage() {
           )}
         </div>
       </div>
+
+      {showRecorder && <RecorderPanel onClose={() => setShowRecorder(false)} />}
+      {showSkills && <SkillLibrary onClose={() => setShowSkills(false)} />}
     </div>
   )
 }

@@ -202,17 +202,37 @@ fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                 })
             }
             "apply" => {
-                let mut artifacts_pre: Vec<Artifact> = Vec::new();
-                for (rel, old, new) in &per_file {
+                // Capture every pre-image up front so a partial failure can be
+                // fully rolled back, and push the checkpoint before writing.
+                let artifacts_pre: Vec<Artifact> = per_file
+                    .iter()
+                    .map(|(rel, old, _)| Artifact::new(rel.to_string_lossy(), old.clone()))
+                    .collect();
+
+                let mut written: Vec<&PathBuf> = Vec::new();
+                for (rel, _old, new) in &per_file {
                     let abs = workspace.join(rel);
-                    artifacts_pre.push(Artifact::new(rel.to_string_lossy(), old.clone()));
-                    if let Err(e) = fs::write(&abs, new) {
+                    if let Err(e) = crate::util::atomic_write(&abs, new.as_bytes()) {
+                        // Roll back the files already written this batch.
+                        for done_rel in &written {
+                            if let Some((_, old, _)) =
+                                per_file.iter().find(|(r, _, _)| r == *done_rel)
+                            {
+                                let done_abs = workspace.join(done_rel);
+                                let _ = crate::util::atomic_write(&done_abs, old.as_bytes());
+                            }
+                        }
                         return Ok(ToolResult {
                             success: false,
                             output: String::new(),
-                            error: Some(format!("write failed for {}: {e}", abs.display())),
+                            error: Some(format!(
+                                "write failed for {} (rolled back {} already-written file(s)): {e}",
+                                abs.display(),
+                                written.len()
+                            )),
                         });
                     }
+                    written.push(rel);
                 }
 
                 let cp = Checkpoint::new(

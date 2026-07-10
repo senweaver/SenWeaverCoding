@@ -37,6 +37,7 @@ pub mod plugin_cmd;
 pub mod registry;
 pub mod resume;
 pub mod review;
+pub mod routines_cmd;
 pub mod session;
 pub mod skills_cmd;
 pub mod stats;

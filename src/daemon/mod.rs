@@ -39,7 +39,32 @@ async fn wait_for_shutdown_signal() -> Result<()> {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+
+        let mut ctrl_c = windows::ctrl_c()?;
+        let mut ctrl_break = windows::ctrl_break()?;
+        let mut ctrl_close = windows::ctrl_close()?;
+        let mut ctrl_shutdown = windows::ctrl_shutdown()?;
+
+        tokio::select! {
+            _ = ctrl_c.recv() => {
+                tracing::info!("Received Ctrl+C, shutting down...");
+            }
+            _ = ctrl_break.recv() => {
+                tracing::info!("Received Ctrl+Break, shutting down...");
+            }
+            _ = ctrl_close.recv() => {
+                tracing::info!("Received console close, shutting down...");
+            }
+            _ = ctrl_shutdown.recv() => {
+                tracing::info!("Received system shutdown, shutting down...");
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         tokio::signal::ctrl_c().await?;
         tracing::info!("Received Ctrl+C, shutting down...");
@@ -120,21 +145,34 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     }
 
     if config.rpc.enabled {
-        let rpc_config = config.clone();
-        handles.push(spawn_component_supervisor(
-            "rpc",
-            initial_backoff,
-            max_backoff,
-            move || {
-                let cfg = rpc_config.clone();
-                async move {
-                    let server: crate::rpc::RpcServer = crate::rpc::RpcServer::new(&cfg).await?;
-                    server.run().await
-                }
-            },
-        ));
+        let stdio_transport = matches!(
+            crate::rpc::server::build_transport(&config.rpc),
+            Ok(crate::rpc::RpcTransport::Stdio)
+        );
+        if stdio_transport {
+            crate::health::mark_component_disabled("rpc");
+            tracing::info!(
+                "RPC stdio transport is not usable under the daemon (stdin is detached); \
+                 configure rpc.unix_socket or rpc.http to serve RPC from the daemon"
+            );
+        } else {
+            let rpc_config = config.clone();
+            handles.push(spawn_component_supervisor(
+                "rpc",
+                initial_backoff,
+                max_backoff,
+                move || {
+                    let cfg = rpc_config.clone();
+                    async move {
+                        let server: crate::rpc::RpcServer =
+                            crate::rpc::RpcServer::new(&cfg).await?;
+                        server.run().await
+                    }
+                },
+            ));
+        }
     } else {
-        crate::health::mark_component_ok("rpc");
+        crate::health::mark_component_disabled("rpc");
     }
 
     {
@@ -150,7 +188,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
                 },
             ));
         } else {
-            crate::health::mark_component_ok("channels");
+            crate::health::mark_component_disabled("channels");
             tracing::info!("No real-time channels configured; channel supervisor disabled");
         }
     }
@@ -180,7 +218,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             },
         ));
     } else {
-        crate::health::mark_component_ok("hands");
+        crate::health::mark_component_disabled("hands");
     }
 
     if config.cron.enabled {
@@ -195,7 +233,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             },
         ));
     } else {
-        crate::health::mark_component_ok("scheduler");
+        crate::health::mark_component_disabled("scheduler");
         tracing::info!("Cron disabled; scheduler supervisor not started");
     }
 
@@ -287,16 +325,33 @@ where
         let max_backoff = max_backoff_secs.max(backoff);
 
         loop {
-            crate::health::mark_component_ok(name);
+            crate::health::mark_component_starting(name);
+            let ok_marker = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                crate::health::mark_component_ok(name);
+            });
             let started = std::time::Instant::now();
-            match run_component().await {
-                Ok(()) => {
+            use futures_util::FutureExt as _;
+            let outcome = std::panic::AssertUnwindSafe(run_component())
+                .catch_unwind()
+                .await;
+            ok_marker.abort();
+            match outcome {
+                Ok(Ok(())) => {
                     crate::health::mark_component_error(name, "component exited unexpectedly");
                     tracing::warn!("Daemon component '{name}' exited unexpectedly");
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     crate::health::mark_component_error(name, e.to_string());
                     tracing::error!("Daemon component '{name}' failed: {e}");
+                }
+                Err(panic) => {
+                    let msg = crate::util::describe_panic(&*panic);
+                    crate::health::mark_component_error(
+                        name,
+                        format!("component panicked: {msg}"),
+                    );
+                    tracing::error!("Daemon component '{name}' panicked: {msg}");
                 }
             }
 
@@ -320,11 +375,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
 
     let observer: std::sync::Arc<dyn crate::observability::Observer> =
         std::sync::Arc::from(crate::observability::create_observer(&config.observability));
-    let engine = HeartbeatEngine::new(
-        config.heartbeat.clone(),
-        config.workspace_dir.clone(),
-        observer,
-    );
+    let engine = HeartbeatEngine::new(config.workspace_dir.clone(), observer);
     let metrics = engine.metrics();
     let delivery = resolve_heartbeat_delivery(&config)?;
     let two_phase = config.heartbeat.decision_before_execute;
@@ -333,7 +384,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
 
     let deadman_timeout = config.heartbeat.deadman_timeout_minutes;
     if deadman_timeout > 0 {
-        let dm_metrics = Arc::clone(&metrics);
+        let dm_metrics = Arc::downgrade(&metrics);
         let dm_config = config.clone();
         let dm_delivery = delivery.clone();
         crate::runtime::spawn_supervised("daemon.deadman_watcher", async move {
@@ -341,6 +392,13 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             let timeout = chrono::Duration::minutes(i64::from(deadman_timeout));
             loop {
                 tokio::time::sleep(check_interval).await;
+                let Some(dm_metrics) = dm_metrics.upgrade() else {
+                    tracing::debug!(
+                        "heartbeat metrics dropped; deadman watcher exiting (a fresh watcher \
+                         starts with the next heartbeat worker)"
+                    );
+                    break;
+                };
                 let last_tick = dm_metrics.lock().last_tick_at;
                 if let Some(last) = last_tick {
                     if chrono::Utc::now() - last > timeout {
@@ -380,7 +438,9 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
         {
             let mut m = metrics.lock();
             m.uptime_secs = start_time.elapsed().as_secs();
+            m.last_tick_at = Some(chrono::Utc::now());
         }
+        engine.record_tick_event();
 
         let tick_start = std::time::Instant::now();
 
@@ -464,6 +524,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
 
         let mut tick_had_error = false;
         for task in &tasks_to_run {
+            metrics.lock().last_tick_at = Some(chrono::Utc::now());
             let task_start = std::time::Instant::now();
             let task_prompt = format!("[Heartbeat Task | {}] {}", task.priority, task.text);
             let prompt = match &session_context {
@@ -471,7 +532,15 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 None => task_prompt,
             };
             let temp = config.default_temperature;
-            match Box::pin(crate::agent::run(
+            // Bound each heartbeat task so a single hung provider call cannot
+            // freeze the whole periodic loop indefinitely (deadman only alerts, it
+            // does not unblock a stuck await).
+            let heartbeat_task_timeout = std::time::Duration::from_secs(
+                u64::from(config.heartbeat.deadman_timeout_minutes)
+                    .saturating_mul(60)
+                    .max(1800),
+            );
+            let run_fut = Box::pin(crate::agent::run(
                 config.clone(),
                 Some(prompt),
                 None,
@@ -482,9 +551,15 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 None,
                 None,
                 None,
-            ))
-            .await
-            {
+            ));
+            let run_result = match tokio::time::timeout(heartbeat_task_timeout, run_fut).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!(
+                    "heartbeat task exceeded {}s wall-clock budget and was abandoned",
+                    heartbeat_task_timeout.as_secs()
+                )),
+            };
+            match run_result {
                 Ok(output) => {
                     crate::health::mark_component_ok("heartbeat");
                     #[allow(clippy::cast_possible_truncation)]
@@ -540,6 +615,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                         config.heartbeat.max_run_history,
                     );
                     crate::health::mark_component_error("heartbeat", e.to_string());
+                    engine.record_error_event(&e.to_string());
                     tracing::warn!("Heartbeat task failed: {e}");
                 }
             }

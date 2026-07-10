@@ -45,7 +45,8 @@ impl JiraTool {
             email,
             api_token,
             allowed_actions,
-            http: Client::new(),
+            http: crate::services::proxy::runtime::ProxyRuntime::global()
+                .build_client_with_timeouts("tool.jira", timeout_secs.clamp(1, 600), 15),
             security,
             timeout_secs,
         }

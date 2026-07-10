@@ -9,6 +9,31 @@ use std::sync::Arc;
 
 const MAX_RESULTS: usize = 1000;
 
+const WALK_TIMEOUT_SECS: u64 = 10;
+
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    ".tox",
+    "__pycache__",
+    ".idea",
+    ".vscode",
+    ".next",
+];
+
+fn crosses_skip_dir(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| SKIP_DIRS.contains(&name))
+    })
+}
+
 pub struct GlobSearchTool {
     security: Arc<SecurityPolicy>,
 }
@@ -100,7 +125,11 @@ impl Tool for GlobSearchTool {
             .to_string();
 
         enum WalkOutcome {
-            Ok { results: Vec<String>, truncated: bool },
+            Ok {
+                results: Vec<String>,
+                truncated: bool,
+                timed_out: bool,
+            },
             InvalidPattern(String),
             BadWorkspace(String),
         }
@@ -116,13 +145,23 @@ impl Tool for GlobSearchTool {
                 Ok(p) => p,
                 Err(e) => return WalkOutcome::BadWorkspace(e.to_string()),
             };
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(WALK_TIMEOUT_SECS);
             let mut results = Vec::new();
             let mut truncated = false;
+            let mut timed_out = false;
             for entry in entries {
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    break;
+                }
                 let path = match entry {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
+                if crosses_skip_dir(&path) {
+                    continue;
+                }
                 let resolved = match std::fs::canonicalize(&path) {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -142,13 +181,21 @@ impl Tool for GlobSearchTool {
                 }
             }
             results.sort();
-            WalkOutcome::Ok { results, truncated }
+            WalkOutcome::Ok {
+                results,
+                truncated,
+                timed_out,
+            }
         })
         .await
         .map_err(|e| anyhow::anyhow!("glob_search join error: {e}"))?;
 
-        let (mut results, truncated) = match walk {
-            WalkOutcome::Ok { results, truncated } => (results, truncated),
+        let (mut results, truncated, timed_out) = match walk {
+            WalkOutcome::Ok {
+                results,
+                truncated,
+                timed_out,
+            } => (results, truncated, timed_out),
             WalkOutcome::InvalidPattern(e) => {
                 return Ok(ToolResult {
                     success: false,
@@ -167,7 +214,14 @@ impl Tool for GlobSearchTool {
         let _ = &mut results;
 
         let output = if results.is_empty() {
-            format!("No files matching pattern '{pattern}' found in workspace.")
+            if timed_out {
+                format!(
+                    "Search for pattern '{pattern}' timed out after {WALK_TIMEOUT_SECS}s \
+                     before finding any match. Narrow the pattern and retry."
+                )
+            } else {
+                format!("No files matching pattern '{pattern}' found in workspace.")
+            }
         } else {
             use std::fmt::Write;
 
@@ -204,6 +258,13 @@ impl Tool for GlobSearchTool {
                 let _ = write!(
                     buf,
                     "\n\n[Results truncated: showing first {MAX_RESULTS} of more matches]"
+                );
+            }
+            if timed_out {
+                let _ = write!(
+                    buf,
+                    "\n\n[Search stopped after {WALK_TIMEOUT_SECS}s; results may be incomplete. \
+                     Narrow the pattern for a full listing.]"
                 );
             }
             let _ = write!(buf, "\n\nTotal: {} files", results.len());

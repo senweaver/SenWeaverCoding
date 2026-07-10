@@ -16,8 +16,8 @@ use crate::agent::scheduler::SchedulableTask;
 use crate::agent::scheduler::runtime::TaskExecutor;
 use crate::agent::subagent_limiter::{PermitResult, SubagentLimiter};
 use crate::coordinator::delegation::{
-    MergeStrategy, MergedOutput, SubTaskResult, merge_results_structured,
-    merge_results_with_judge_structured,
+    DelegationPlan, MergeStrategy, MergedOutput, SubTask, SubTaskResult,
+    merge_results_structured, merge_results_with_judge_structured,
 };
 use crate::observability::coordination_metrics;
 
@@ -207,6 +207,23 @@ impl Tool for DelegateParallelTool {
 
         if args.tasks.is_empty() {
             return Ok(err_result("At least one task is required"));
+        }
+
+        let plan = DelegationPlan::new(
+            args.tasks
+                .iter()
+                .map(|t| SubTask {
+                    id: t.id.clone(),
+                    description: t.description.clone(),
+                    prompt: t.prompt.clone(),
+                    required_capability: t.capability.clone(),
+                    depends_on: t.depends_on.clone(),
+                })
+                .collect(),
+            args.merge_strategy,
+        );
+        if let Err(e) = plan.validate() {
+            return Ok(err_result(format!("Invalid delegation plan: {e}")));
         }
 
         let allow_fallback = args.allow_single_agent_fallback;

@@ -123,9 +123,18 @@ fn convert_binding(raw: KeyBindingToml) -> Result<KeyBinding, String> {
         "exit" | "quit" => KeyAction::Exit,
         "toggle_vim" => KeyAction::ToggleVim,
         "interrupt" => KeyAction::Interrupt,
-        "tab_complete" => KeyAction::TabComplete,
-        "voice_toggle" => KeyAction::VoiceToggle,
-        other => KeyAction::Custom(other.to_string()),
+        "tab_complete" | "voice_toggle" => {
+            return Err(format!(
+                "action '{}' has no TUI handler yet; binding for key '{}' ignored",
+                raw.action, raw.key
+            ));
+        }
+        other => {
+            return Err(format!(
+                "unknown action '{other}'; binding for key '{}' ignored",
+                raw.key
+            ));
+        }
     };
     Ok(KeyBinding {
         key: raw.key,

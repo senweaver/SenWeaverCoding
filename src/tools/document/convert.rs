@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 use super::super::traits::{Tool, ToolResult};
+use super::common::{is_table_row, is_table_separator, split_table_row};
 use super::xlsx::{self, XlsxSheet};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
@@ -31,19 +32,22 @@ impl Tool for DocumentConvertTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a real document file in a requested format from structured content you supply. \
-         This is the writer half of an AI-driven document conversion: first read the source with \
-         `file_read` (it extracts text/tables/headings from .docx/.pdf/.pptx/.xlsx), then map the \
-         content yourself into the structure below and call this tool to materialise the target file. \
-         Supported `target_format`: `xlsx` (styled Excel: bold header, borders, auto-fit columns, \
-         frozen header row, vertical merge of repeated values in hierarchy columns, live Excel \
-         formulas via cells starting with `=`, and per-column number formats), `csv`, \
-         `docx` (Word), `md`, `html`, `pdf`. For tabular targets (xlsx/csv) provide `sheets` with `columns` \
-         and `rows`; for prose targets (docx/md/html) provide `content_markdown` (or `sheets`, which \
-         are rendered as tables). Example: convert a Word feature spec into an Excel sheet with \
-         columns 序号/一级功能/二级功能/三级功能/功能描述, marking the hierarchy columns in \
-         `merge_columns` so equal consecutive values are merged vertically. The output file is \
-         written into the workspace and surfaced in the IDE."
+        "Convert or generate real document files: md/docx/pdf/html/xlsx/csv/txt in, and \
+         xlsx/csv/docx/md/html/pdf out. PREFERRED for file-to-file conversion (e.g. the user \
+         attached report.md and wants report.pdf): pass `source_path` + `target_format` + \
+         `output_path` in a SINGLE call - the tool reads the source itself (extracting \
+         text/tables from .docx/.pdf/.pptx/.xlsx/.html, parsing .csv/.tsv into tables, reading \
+         .md/.txt verbatim), so the full \
+         document is converted losslessly without copying its content through the conversation. \
+         Only supply `content_markdown` (prose) or `sheets` (tabular) when you are authoring new \
+         content or need to transform it first. PDF output embeds a system CJK font \
+         automatically, so Chinese/Japanese/Korean text renders correctly; `font_path` can \
+         override the font. Supported `target_format`: `xlsx` (styled Excel: bold header, \
+         borders, auto-fit columns, frozen header row, vertical merge via `merge_columns`, live \
+         formulas via cells starting with `=`, per-column number formats), `csv`, `docx` (Word), \
+         `md`, `html`, `pdf`. For xlsx/csv targets without `sheets`, tables are parsed from the \
+         (extracted) markdown. The output file is written into the workspace and surfaced in the \
+         IDE."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -61,7 +65,7 @@ impl Tool for DocumentConvertTool {
                 },
                 "font_path": {
                     "type": "string",
-                    "description": "Optional path to a .ttf/.otf font, embedded when target_format=pdf. Required to render CJK/non-Latin text in PDF output."
+                    "description": "Optional path to a .ttf/.otf/.ttc font embedded when target_format=pdf. Normally unnecessary: a system CJK font is discovered and embedded automatically for non-Latin text."
                 },
                 "title": {
                     "type": "string",
@@ -69,11 +73,11 @@ impl Tool for DocumentConvertTool {
                 },
                 "source_path": {
                     "type": "string",
-                    "description": "Optional path of the source document this was converted from (recorded for provenance only)."
+                    "description": "Path of the source document to convert. When `content_markdown` and `sheets` are omitted, the tool reads this file directly: .md/.markdown/.txt verbatim; .csv/.tsv parsed into tables; .html/.htm converted to markdown; .docx/.pdf/.pptx/.xlsx extracted to markdown. Preferred for file-to-file conversion."
                 },
                 "content_markdown": {
                     "type": "string",
-                    "description": "Markdown body for prose targets (docx/md/html). Supports headings, paragraphs, lists, tables, blockquotes and fenced code blocks."
+                    "description": "Markdown body for prose targets (docx/md/html/pdf). Supports headings, paragraphs, lists, tables, blockquotes and fenced code blocks. Omit when `source_path` should be read directly."
                 },
                 "sheets": {
                     "type": "array",
@@ -129,9 +133,15 @@ impl Tool for DocumentConvertTool {
             .map(|s| s.trim().to_ascii_lowercase())
             .ok_or_else(|| anyhow::anyhow!("Missing 'target_format' parameter"))?;
         let target_format = normalize_format(&target_format).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unsupported target_format '{target_format}'. Expected one of: xlsx, csv, docx, md, html."
-            )
+            if matches!(target_format.as_str(), "pptx" | "ppt" | "powerpoint") {
+                anyhow::anyhow!(
+                    "target_format 'pptx' is handled by the `presentation_create` tool; call it with the slide content instead."
+                )
+            } else {
+                anyhow::anyhow!(
+                    "Unsupported target_format '{target_format}'. Expected one of: xlsx, csv, docx, md, html, pdf."
+                )
+            }
         })?;
 
         let path = args
@@ -148,11 +158,54 @@ impl Tool for DocumentConvertTool {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let content_markdown = args
+        let mut content_markdown = args
             .get("content_markdown")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let sheets = parse_sheets(args.get("sheets"))?;
+        let mut sheets = parse_sheets(args.get("sheets"))?;
+
+        let source_path = args
+            .get("source_path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let has_inline_prose = content_markdown
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_inline_prose && sheets.is_empty() {
+            if let Some(src) = source_path.as_deref() {
+                match extract_source_markdown(&self.security, src).await {
+                    Ok(extracted) => content_markdown = Some(extracted),
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Failed to read source_path '{src}': {e}")),
+                        });
+                    }
+                }
+            }
+        }
+
+        if matches!(target_format, OutputFormat::Xlsx | OutputFormat::Csv) && sheets.is_empty() {
+            if let Some(md) = content_markdown.as_deref() {
+                sheets = markdown_tables_to_sheets(md);
+                if sheets.is_empty() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(
+                            "No tables found in the source content to export as xlsx/csv. \
+                             Provide 'sheets' explicitly or choose a prose target format."
+                                .into(),
+                        ),
+                    });
+                }
+            }
+        }
 
         match target_format {
             OutputFormat::Xlsx | OutputFormat::Csv => {
@@ -161,7 +214,7 @@ impl Tool for DocumentConvertTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!(
-                            "target_format '{}' requires non-empty 'sheets' (columns + rows).",
+                            "target_format '{}' requires non-empty 'sheets' (columns + rows), or a 'source_path' containing markdown tables.",
                             target_format.ext()
                         )),
                     });
@@ -177,7 +230,7 @@ impl Tool for DocumentConvertTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!(
-                            "target_format '{}' requires 'content_markdown' or 'sheets'.",
+                            "target_format '{}' requires 'source_path' (preferred for file-to-file conversion), 'content_markdown', or 'sheets'.",
                             target_format.ext()
                         )),
                     });
@@ -309,7 +362,7 @@ impl Tool for DocumentConvertTool {
             None
         };
 
-        let (rendered, render_note) = match render_output(
+        let (rendered, render_note, embedded_font) = match render_output(
             target_format,
             &sheets,
             content_markdown.as_deref(),
@@ -358,16 +411,539 @@ impl Tool for DocumentConvertTool {
         let note = render_note
             .map(|n| format!(" Note: {n}"))
             .unwrap_or_default();
+        let envelope = json!({
+            "path": resolved_target.display().to_string(),
+            "format": target_format.ext(),
+            "bytes": final_bytes.len(),
+            "source": source_path,
+            "font": embedded_font,
+        });
         Ok(ToolResult {
             success: true,
             output: format!(
-                "Wrote {} bytes to {path} ({} document).{summary}{note}",
+                "Wrote {} bytes to {path} ({} document).{summary}{note}\n===DOC_CONVERT==={envelope}",
                 final_bytes.len(),
                 target_format.ext()
             ),
             error: None,
         })
     }
+}
+
+async fn extract_source_markdown(
+    security: &SecurityPolicy,
+    source_path: &str,
+) -> Result<String, String> {
+    let resolved = super::common::resolve_read_source(security, source_path)?;
+    let ext = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "md" | "markdown" | "txt" => {
+            let bytes = tokio::fs::read(&resolved)
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        "csv" | "tsv" => {
+            let bytes = tokio::fs::read(&resolved)
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let delimiter = if ext == "tsv" { '\t' } else { ',' };
+            let table = csv_to_markdown_table(&text, delimiter);
+            if table.is_empty() {
+                Err("the CSV/TSV file contains no data rows".to_string())
+            } else {
+                Ok(table)
+            }
+        }
+        "html" | "htm" => {
+            let bytes = tokio::fs::read(&resolved)
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
+            let html = String::from_utf8_lossy(&bytes).into_owned();
+            let md = html_to_markdown(&html);
+            if md.trim().is_empty() {
+                Err("no readable text content found in the HTML file".to_string())
+            } else {
+                Ok(md)
+            }
+        }
+        "docx" | "pdf" | "pptx" | "xlsx" => {
+            let bytes = tokio::fs::read(&resolved)
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
+            let resolved_str = resolved.to_string_lossy();
+            let kind = crate::tools::file::office::detect_office_kind_by_ext(&resolved_str)
+                .ok_or_else(|| format!("unsupported office format '.{ext}'"))?;
+            let extracted = tokio::task::spawn_blocking(move || {
+                crate::tools::file::office::extract_office_text(kind, &bytes)
+            })
+            .await
+            .map_err(|e| format!("extraction task failed: {e}"))?
+            .map_err(|e| format!("extraction failed: {e}"))?;
+            match extracted.filter(|t| !t.trim().is_empty()) {
+                Some(text) => Ok(text),
+                None => Err(format!(
+                    "no text content could be extracted from '.{ext}' source (it may be a scanned/image-only document)"
+                )),
+            }
+        }
+        other => Err(format!(
+            "unsupported source format '.{other}'. Supported: md, markdown, txt, csv, tsv, html, docx, pdf, pptx, xlsx."
+        )),
+    }
+}
+
+fn parse_delimited_line(line: &str, delimiter: char) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    current.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                current.push(ch);
+            }
+        } else if ch == '"' && current.is_empty() {
+            in_quotes = true;
+        } else if ch == delimiter {
+            fields.push(std::mem::take(&mut current));
+        } else {
+            current.push(ch);
+        }
+    }
+    fields.push(current);
+    fields
+}
+
+fn csv_records(text: &str, delimiter: char) -> Vec<Vec<String>> {
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut pending = String::new();
+    for line in text.lines() {
+        let candidate = if pending.is_empty() {
+            line.to_string()
+        } else {
+            format!("{pending}\n{line}")
+        };
+        let quote_count = candidate.matches('"').count();
+        if quote_count % 2 == 1 {
+            pending = candidate;
+            continue;
+        }
+        pending = String::new();
+        if candidate.trim().is_empty() {
+            continue;
+        }
+        records.push(parse_delimited_line(&candidate, delimiter));
+    }
+    if !pending.trim().is_empty() {
+        records.push(parse_delimited_line(&pending, delimiter));
+    }
+    records
+}
+
+fn csv_to_markdown_table(text: &str, delimiter: char) -> String {
+    let records = csv_records(text, delimiter);
+    if records.is_empty() {
+        return String::new();
+    }
+    let col_count = records.iter().map(|r| r.len()).max().unwrap_or(0);
+    if col_count == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (idx, record) in records.iter().enumerate() {
+        let cells: Vec<String> = (0..col_count)
+            .map(|c| md_escape_cell(record.get(c).map(String::as_str).unwrap_or("")))
+            .collect();
+        out.push_str(&format!("| {} |\n", cells.join(" | ")));
+        if idx == 0 {
+            out.push_str(&format!("| {} |\n", vec!["---"; col_count].join(" | ")));
+        }
+    }
+    out
+}
+
+fn html_to_markdown(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_script = false;
+    let mut in_style = false;
+    let mut skip_head = false;
+    let mut pending_cells: Vec<String> = Vec::new();
+    let mut current_text = String::new();
+    let mut in_table_cell = false;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut in_table = false;
+    let mut list_ordered = false;
+    let mut list_counter = 0usize;
+
+    let flush_text = |buf: &mut String, out: &mut String| {
+        let text = decode_html_entities(buf.trim());
+        buf.clear();
+        if !text.is_empty() {
+            out.push_str(&text);
+        }
+    };
+
+    let mut rest = html;
+    loop {
+        let Some(lt) = rest.find('<') else {
+            if !in_script && !in_style && !skip_head {
+                current_text.push_str(rest);
+            }
+            break;
+        };
+        let (text_part, after_lt) = rest.split_at(lt);
+        if !in_script && !in_style && !skip_head {
+            current_text.push_str(text_part);
+        }
+        if after_lt.starts_with("<!--") {
+            match after_lt.find("-->") {
+                Some(end) => {
+                    rest = &after_lt[end + 3..];
+                    continue;
+                }
+                None => break,
+            }
+        }
+        let Some(gt) = after_lt.find('>') else {
+            break;
+        };
+        let tag_body = &after_lt[1..gt];
+        rest = &after_lt[gt + 1..];
+        let tag_lower = tag_body.trim().to_ascii_lowercase();
+        let tag_name: String = tag_lower
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        let is_closing = tag_lower.starts_with('/');
+
+        if in_table_cell
+            && matches!(
+                tag_name.as_str(),
+                "h1" | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "p"
+                    | "div"
+                    | "section"
+                    | "article"
+                    | "br"
+                    | "ul"
+                    | "ol"
+                    | "li"
+            )
+        {
+            current_text.push(' ');
+            continue;
+        }
+
+        match tag_name.as_str() {
+            "script" => in_script = !is_closing,
+            "style" => in_style = !is_closing,
+            "head" => skip_head = !is_closing,
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                flush_text(&mut current_text, &mut out);
+                if is_closing {
+                    out.push_str("\n\n");
+                } else {
+                    let level = tag_name[1..].parse::<usize>().unwrap_or(1);
+                    out.push_str(&format!("\n\n{} ", "#".repeat(level)));
+                }
+            }
+            "p" | "div" | "section" | "article" => {
+                flush_text(&mut current_text, &mut out);
+                out.push_str("\n\n");
+            }
+            "br" => {
+                flush_text(&mut current_text, &mut out);
+                out.push('\n');
+            }
+            "ul" => {
+                flush_text(&mut current_text, &mut out);
+                if !is_closing {
+                    list_ordered = false;
+                }
+                out.push('\n');
+            }
+            "ol" => {
+                flush_text(&mut current_text, &mut out);
+                if !is_closing {
+                    list_ordered = true;
+                    list_counter = 0;
+                }
+                out.push('\n');
+            }
+            "li" => {
+                flush_text(&mut current_text, &mut out);
+                if !is_closing {
+                    if list_ordered {
+                        list_counter += 1;
+                        out.push_str(&format!("\n{list_counter}. "));
+                    } else {
+                        out.push_str("\n- ");
+                    }
+                }
+            }
+            "table" => {
+                if is_closing {
+                    if in_table_cell {
+                        pending_cells.push(decode_html_entities(current_text.trim()));
+                        current_text.clear();
+                        in_table_cell = false;
+                    }
+                    if !pending_cells.is_empty() {
+                        table_rows.push(std::mem::take(&mut pending_cells));
+                    }
+                    if !table_rows.is_empty() {
+                        let col_count =
+                            table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
+                        out.push('\n');
+                        for (r, row) in table_rows.iter().enumerate() {
+                            let cells: Vec<String> = (0..col_count)
+                                .map(|c| {
+                                    md_escape_cell(
+                                        row.get(c).map(String::as_str).unwrap_or(""),
+                                    )
+                                })
+                                .collect();
+                            out.push_str(&format!("| {} |\n", cells.join(" | ")));
+                            if r == 0 {
+                                out.push_str(&format!(
+                                    "| {} |\n",
+                                    vec!["---"; col_count].join(" | ")
+                                ));
+                            }
+                        }
+                        out.push('\n');
+                        table_rows = Vec::new();
+                    }
+                    in_table = false;
+                } else {
+                    flush_text(&mut current_text, &mut out);
+                    in_table = true;
+                    table_rows = Vec::new();
+                    pending_cells = Vec::new();
+                }
+            }
+            "tr" => {
+                if in_table {
+                    if in_table_cell {
+                        pending_cells.push(decode_html_entities(current_text.trim()));
+                        current_text.clear();
+                        in_table_cell = false;
+                    }
+                    if is_closing && !pending_cells.is_empty() {
+                        table_rows.push(std::mem::take(&mut pending_cells));
+                    }
+                }
+            }
+            "td" | "th" => {
+                if in_table {
+                    if is_closing {
+                        pending_cells.push(decode_html_entities(current_text.trim()));
+                        current_text.clear();
+                        in_table_cell = false;
+                    } else {
+                        if in_table_cell {
+                            pending_cells.push(decode_html_entities(current_text.trim()));
+                        }
+                        current_text.clear();
+                        in_table_cell = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_text(&mut current_text, &mut out);
+
+    let mut cleaned = String::with_capacity(out.len());
+    let mut blank_run = 0usize;
+    for line in out.lines() {
+        let trimmed_end = line.trim_end();
+        if trimmed_end.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+            cleaned.push('\n');
+        } else {
+            blank_run = 0;
+            cleaned.push_str(trimmed_end);
+            cleaned.push('\n');
+        }
+    }
+    cleaned.trim().to_string()
+}
+
+fn decode_html_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '&' {
+            out.push(ch);
+            continue;
+        }
+        let mut entity = String::new();
+        let mut matched = false;
+        for _ in 0..10 {
+            match chars.peek() {
+                Some(&c) if c == ';' => {
+                    chars.next();
+                    matched = true;
+                    break;
+                }
+                Some(&c) if c.is_ascii_alphanumeric() || c == '#' => {
+                    entity.push(c);
+                    chars.next();
+                }
+                _ => break,
+            }
+        }
+        if !matched {
+            out.push('&');
+            out.push_str(&entity);
+            continue;
+        }
+        match entity.as_str() {
+            "amp" => out.push('&'),
+            "lt" => out.push('<'),
+            "gt" => out.push('>'),
+            "quot" => out.push('"'),
+            "apos" => out.push('\''),
+            "nbsp" => out.push(' '),
+            _ => {
+                if let Some(num) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                    if let Ok(cp) = u32::from_str_radix(num, 16) {
+                        if let Some(c) = char::from_u32(cp) {
+                            out.push(c);
+                            continue;
+                        }
+                    }
+                } else if let Some(num) = entity.strip_prefix('#') {
+                    if let Ok(cp) = num.parse::<u32>() {
+                        if let Some(c) = char::from_u32(cp) {
+                            out.push(c);
+                            continue;
+                        }
+                    }
+                }
+                out.push('&');
+                out.push_str(&entity);
+                out.push(';');
+            }
+        }
+    }
+    out
+}
+
+fn table_cell_value(text: &str) -> serde_json::Value {
+    let t = text.trim();
+    if t.is_empty() {
+        return serde_json::Value::String(String::new());
+    }
+    let numeric = t.replace(',', "");
+    if numeric.parse::<i64>().is_ok() || numeric.parse::<f64>().is_ok() {
+        if let Ok(i) = numeric.parse::<i64>() {
+            return serde_json::Value::from(i);
+        }
+        if let Ok(f) = numeric.parse::<f64>() {
+            if f.is_finite() {
+                return serde_json::Value::from(f);
+            }
+        }
+    }
+    serde_json::Value::String(t.replace("<br>", "\n"))
+}
+
+fn markdown_tables_to_sheets(markdown: &str) -> Vec<XlsxSheet> {
+    let lines: Vec<&str> = markdown.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let mut sheets: Vec<XlsxSheet> = Vec::new();
+    let mut last_heading: Option<String> = None;
+    let mut i = 0usize;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if let Some(rest) = trimmed
+            .strip_prefix("### ")
+            .or_else(|| trimmed.strip_prefix("## "))
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
+            let heading = rest.trim();
+            if !heading.is_empty() {
+                last_heading = Some(heading.to_string());
+            }
+            i += 1;
+            continue;
+        }
+        if is_table_row(lines[i]) && i + 1 < lines.len() && is_table_separator(lines[i + 1]) {
+            let columns: Vec<String> = split_table_row(lines[i]);
+            i += 2;
+            let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+            while i < lines.len() && is_table_row(lines[i]) {
+                rows.push(
+                    split_table_row(lines[i])
+                        .iter()
+                        .map(|c| table_cell_value(c))
+                        .collect(),
+                );
+                i += 1;
+            }
+            let base_name = last_heading
+                .take()
+                .map(|h| sanitize_sheet_name(&h))
+                .unwrap_or_else(|| format!("Sheet{}", sheets.len() + 1));
+            let mut name = base_name.clone();
+            let mut suffix = 2usize;
+            while sheets.iter().any(|s: &XlsxSheet| s.name == name) {
+                let tag = format!(" ({suffix})");
+                let keep = 31usize.saturating_sub(tag.chars().count());
+                name = format!(
+                    "{}{tag}",
+                    base_name.chars().take(keep).collect::<String>()
+                );
+                suffix += 1;
+            }
+            sheets.push(XlsxSheet {
+                name,
+                columns,
+                rows,
+                merge_columns: Vec::new(),
+                freeze_header: true,
+                column_widths: Vec::new(),
+                number_formats: Vec::new(),
+            });
+            continue;
+        }
+        i += 1;
+    }
+    sheets
+}
+
+fn sanitize_sheet_name(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '[' | ']' | ':' | '*' | '?' | '/' | '\\'))
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return "Sheet1".to_string();
+    }
+    trimmed.chars().take(31).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,35 +1109,35 @@ async fn render_output(
     title: Option<&str>,
     resolved_target: &std::path::Path,
     font_bytes: Option<Vec<u8>>,
-) -> anyhow::Result<(RenderedBytes, Option<String>)> {
+) -> anyhow::Result<(RenderedBytes, Option<String>, Option<String>)> {
     match format {
         OutputFormat::Xlsx => {
             let owned: Vec<XlsxSheet> = sheets.iter().map(clone_sheet).collect();
             let bytes = tokio::task::spawn_blocking(move || xlsx::write_workbook(&owned))
                 .await
                 .map_err(|e| anyhow::anyhow!("xlsx render task failed: {e}"))??;
-            Ok((RenderedBytes::InMemory(bytes), None))
+            Ok((RenderedBytes::InMemory(bytes), None, None))
         }
         OutputFormat::Csv => {
             let csv = sheet_to_csv(&sheets[0]);
             let mut bytes = Vec::with_capacity(csv.len() + 3);
             bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
             bytes.extend_from_slice(csv.as_bytes());
-            Ok((RenderedBytes::InMemory(bytes), None))
+            Ok((RenderedBytes::InMemory(bytes), None, None))
         }
         OutputFormat::Md => {
             let md = compose_markdown(content_markdown, sheets, title);
-            Ok((RenderedBytes::InMemory(md.into_bytes()), None))
+            Ok((RenderedBytes::InMemory(md.into_bytes()), None, None))
         }
         OutputFormat::Html => {
             let md = compose_markdown(content_markdown, sheets, title);
             let html = markdown_to_html_document(&md, title);
-            Ok((RenderedBytes::InMemory(html.into_bytes()), None))
+            Ok((RenderedBytes::InMemory(html.into_bytes()), None, None))
         }
         OutputFormat::Docx => {
             let md = compose_markdown(content_markdown, sheets, title);
             render_docx(md, resolved_target).await?;
-            Ok((RenderedBytes::WrittenByRenderer, None))
+            Ok((RenderedBytes::WrittenByRenderer, None, None))
         }
         OutputFormat::Pdf => {
             let md = compose_markdown(content_markdown, sheets, title);
@@ -571,7 +1147,11 @@ async fn render_output(
             })
             .await
             .map_err(|e| anyhow::anyhow!("pdf render task failed: {e}"))??;
-            Ok((RenderedBytes::InMemory(result.bytes), result.warning))
+            Ok((
+                RenderedBytes::InMemory(result.bytes),
+                result.warning,
+                result.embedded_font,
+            ))
         }
     }
 }
@@ -1004,26 +1584,4 @@ fn parse_inline_link(chars: &[char], start: usize) -> Option<(String, String, us
         return None;
     }
     Some((label, url.trim().to_string(), k + 1))
-}
-
-fn is_table_row(line: &str) -> bool {
-    let t = line.trim();
-    t.starts_with('|') && t.ends_with('|') && t.matches('|').count() >= 2
-}
-
-fn is_table_separator(line: &str) -> bool {
-    let t = line.trim();
-    if !is_table_row(t) {
-        return false;
-    }
-    let inner = t.trim_matches('|');
-    inner
-        .split('|')
-        .map(|c| c.trim())
-        .all(|cell| !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':' || c == ' '))
-}
-
-fn split_table_row(line: &str) -> Vec<String> {
-    let trimmed = line.trim().trim_matches('|');
-    trimmed.split('|').map(|c| c.trim().to_string()).collect()
 }

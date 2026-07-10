@@ -22,36 +22,33 @@ pub struct DatasheetChunk {
 
 pub type PinAliases = HashMap<String, u32>;
 
+fn line_starts_with_ignore_case(line: &str, prefix: &str) -> bool {
+    line.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
 fn parse_pin_aliases(content: &str) -> PinAliases {
     let mut aliases = PinAliases::new();
-    let content_lower = content.to_lowercase();
 
     let section_markers = ["## pin aliases", "## pin alias", "## pins"];
     let mut in_section = false;
-    let mut section_start = 0;
 
-    for marker in section_markers {
-        if let Some(pos) = content_lower.find(marker) {
-            in_section = true;
-            section_start = pos + marker.len();
-            break;
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+
+        if line_starts_with_ignore_case(line, "## ") {
+            if section_markers
+                .iter()
+                .any(|marker| line_starts_with_ignore_case(line, marker))
+            {
+                in_section = true;
+            } else if in_section {
+                break;
+            }
+            continue;
         }
-    }
 
-    if !in_section {
-        return aliases;
-    }
-
-    let rest = &content[section_start..];
-    let section_end = rest
-        .find("\n## ")
-        .map(|i| section_start + i)
-        .unwrap_or(content.len());
-    let section = &content[section_start..section_end];
-
-    for line in section.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+        if !in_section || line.is_empty() {
             continue;
         }
 

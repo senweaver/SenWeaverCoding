@@ -418,6 +418,38 @@ pub fn parse_proxy_enabled(raw: &str) -> Option<bool> {
     }
 }
 
+#[derive(Debug)]
+pub struct EnvOverrideBaseline {
+    pub pristine: toml::Value,
+    pub env_applied: toml::Value,
+}
+
+fn strip_env_overrides(
+    pristine: Option<&toml::Value>,
+    env_applied: Option<&toml::Value>,
+    current: toml::Value,
+) -> Option<toml::Value> {
+    if env_applied == Some(&current) {
+        return pristine.cloned();
+    }
+    match current {
+        toml::Value::Table(table) => {
+            let pristine_table = pristine.and_then(toml::Value::as_table);
+            let env_table = env_applied.and_then(toml::Value::as_table);
+            let mut out = toml::map::Map::with_capacity(table.len());
+            for (key, value) in table {
+                let sub_pristine = pristine_table.and_then(|t| t.get(&key));
+                let sub_env = env_table.and_then(|t| t.get(&key));
+                if let Some(kept) = strip_env_overrides(sub_pristine, sub_env, value) {
+                    out.insert(key, kept);
+                }
+            }
+            Some(toml::Value::Table(out))
+        }
+        other => Some(other),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
 
@@ -426,6 +458,10 @@ pub struct Config {
 
     #[serde(skip)]
     pub config_path: PathBuf,
+
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub env_override_baseline: Option<std::sync::Arc<EnvOverrideBaseline>>,
 
     #[serde(default)]
     pub api_key: Option<String>,
@@ -542,6 +578,9 @@ pub struct Config {
 
     #[serde(default)]
     pub memory: MemoryConfig,
+
+    #[serde(default)]
+    pub memory_runtime: crate::config::domain::MemoryRuntimeExtras,
 
     #[serde(default)]
     pub storage: StorageConfig,
@@ -1928,6 +1967,21 @@ pub struct AgentConfig {
     #[serde(default = "default_agent_max_history_messages")]
     pub max_history_messages: usize,
 
+    #[serde(default = "default_agent_recent_turn_window")]
+    pub recent_turn_window: usize,
+
+    #[serde(default = "default_agent_recent_window_max_turns")]
+    pub recent_window_max_turns: usize,
+
+    #[serde(default = "default_agent_recent_window_token_ratio")]
+    pub recent_window_token_ratio: f64,
+
+    #[serde(default = "default_true")]
+    pub recent_window_summary_enabled: bool,
+
+    #[serde(default = "default_agent_recent_window_summary_batch_turns")]
+    pub recent_window_summary_batch_turns: usize,
+
     #[serde(default = "default_agent_max_context_tokens")]
     pub max_context_tokens: usize,
 
@@ -2144,6 +2198,22 @@ fn default_agent_max_history_messages() -> usize {
     50
 }
 
+fn default_agent_recent_turn_window() -> usize {
+    3
+}
+
+fn default_agent_recent_window_max_turns() -> usize {
+    12
+}
+
+fn default_agent_recent_window_token_ratio() -> f64 {
+    0.25
+}
+
+fn default_agent_recent_window_summary_batch_turns() -> usize {
+    4
+}
+
 fn default_agent_max_context_tokens() -> usize {
     32_000
 }
@@ -2162,6 +2232,11 @@ impl Default for AgentConfig {
             compact_context: true,
             max_tool_iterations: default_agent_max_tool_iterations(),
             max_history_messages: default_agent_max_history_messages(),
+            recent_turn_window: default_agent_recent_turn_window(),
+            recent_window_max_turns: default_agent_recent_window_max_turns(),
+            recent_window_token_ratio: default_agent_recent_window_token_ratio(),
+            recent_window_summary_enabled: true,
+            recent_window_summary_batch_turns: default_agent_recent_window_summary_batch_turns(),
             max_context_tokens: default_agent_max_context_tokens(),
             parallel_tools: false,
             tool_dispatcher: default_agent_tool_dispatcher(),
@@ -3180,7 +3255,7 @@ pub struct PluginsConfig {
     #[serde(default = "default_plugins_dir")]
     pub plugins_dir: String,
 
-    #[serde(default)]
+    #[serde(default = "default_plugins_auto_discover")]
     pub auto_discover: bool,
 
     #[serde(default = "default_max_plugins")]
@@ -3221,12 +3296,16 @@ fn default_max_plugins() -> usize {
     50
 }
 
+fn default_plugins_auto_discover() -> bool {
+    true
+}
+
 impl Default for PluginsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             plugins_dir: default_plugins_dir(),
-            auto_discover: false,
+            auto_discover: default_plugins_auto_discover(),
             max_plugins: default_max_plugins(),
             security: PluginSecurityConfig::default(),
         }
@@ -3661,6 +3740,10 @@ pub use crate::config::domain::observability::ObservabilityConfig;
 pub struct HooksConfig {
 
     pub enabled: bool,
+
+    #[serde(default)]
+    pub allow_workspace_hooks: bool,
+
     #[serde(default)]
     pub builtin: BuiltinHooksConfig,
 }
@@ -3669,6 +3752,7 @@ impl Default for HooksConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            allow_workspace_hooks: false,
             builtin: BuiltinHooksConfig::default(),
         }
     }
@@ -3989,7 +4073,7 @@ pub use tunnel::{
 };
 
 mod sop;
-pub use sop::SopConfig;
+pub use sop::{MqttConfig, SopConfig};
 
 mod lsp;
 pub use lsp::{LspConfig, LspInstallState, LspServerEntry};
@@ -5561,6 +5645,7 @@ impl Default for Config {
         Self {
             workspace_dir: sen_dir.join("workspace"),
             config_path: sen_dir.join("config.toml"),
+            env_override_baseline: None,
             api_key: None,
             api_url: None,
             api_path: None,
@@ -5598,6 +5683,7 @@ impl Default for Config {
             cron: CronConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
+            memory_runtime: crate::config::domain::MemoryRuntimeExtras::default(),
             storage: StorageConfig::default(),
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
@@ -5992,6 +6078,35 @@ fn resolve_runtime_config_dirs_sync(
     )
 }
 
+pub fn sniff_gateway_isolated() -> bool {
+    let Ok((default_sen_dir, default_workspace_dir)) = default_config_and_workspace_dirs() else {
+        return false;
+    };
+    let (sen_dir, _workspace_dir) =
+        resolve_runtime_config_dirs_sync(&default_sen_dir, &default_workspace_dir);
+    let config_path = sen_dir.join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(&config_path) else {
+        return false;
+    };
+
+    #[derive(serde::Deserialize)]
+    struct GatewaySniff {
+        #[serde(default)]
+        isolated: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct RootSniff {
+        #[serde(default)]
+        gateway: Option<GatewaySniff>,
+    }
+
+    toml::from_str::<RootSniff>(&contents)
+        .ok()
+        .and_then(|root| root.gateway)
+        .map(|gateway| gateway.isolated)
+        .unwrap_or(false)
+}
+
 fn load_persisted_workspace_dirs_sync(default_config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let state_path = active_workspace_state_path(default_config_dir);
     if !state_path.exists() {
@@ -6344,7 +6459,7 @@ impl Config {
                         workspace_dir,
                         ..Config::default()
                     };
-                    config.apply_env_overrides();
+                    config.apply_env_overrides_tracked();
                     if let Err(verr) = config.validate() {
                         tracing::warn!(error = %verr, "Default config validation warning (non-fatal)");
                     }
@@ -6361,19 +6476,22 @@ impl Config {
                         .unwrap_or(0);
                     let backup_path =
                         config_path.with_extension(format!("toml.bak-{backup_suffix}"));
-                    let backup_msg = match fs::rename(&config_path, &backup_path).await {
-                        Ok(()) => {
-                            format!("backed up corrupted config to {}", backup_path.display())
+                    let backup_ok = match fs::rename(&config_path, &backup_path).await {
+                        Ok(()) => true,
+                        Err(rename_err) => {
+                            tracing::warn!(
+                                error = %rename_err,
+                                backup = %backup_path.display(),
+                                "could not back up corrupted config; leaving original in place"
+                            );
+                            false
                         }
-                        Err(rename_err) => format!(
-                            "could not back up corrupted config to {} ({rename_err}); leaving original in place",
-                            backup_path.display()
-                        ),
                     };
                     tracing::warn!(
                         error = %err,
                         path = %config_path.display(),
-                        "Failed to deserialize config file; {backup_msg}. \
+                        backup_created = backup_ok,
+                        "Failed to deserialize config file. \
                          Booting with defaults so the desktop can render Settings."
                     );
                     let mut config = Config {
@@ -6381,13 +6499,20 @@ impl Config {
                         workspace_dir: workspace_dir.clone(),
                         ..Config::default()
                     };
-                    if let Err(save_err) = config.save().await {
+                    if backup_ok {
+                        if let Err(save_err) = config.save().await {
+                            tracing::warn!(
+                                error = %save_err,
+                                "Could not persist replacement default config; running with in-memory defaults"
+                            );
+                        }
+                    } else {
                         tracing::warn!(
-                            error = %save_err,
-                            "Could not persist replacement default config; running with in-memory defaults"
+                            "corrupted config could not be backed up; refusing to overwrite it with defaults \
+                             (fix or remove the file manually to persist settings again)"
                         );
                     }
-                    config.apply_env_overrides();
+                    config.apply_env_overrides_tracked();
                     if let Err(verr) = config.validate() {
                         tracing::warn!(error = %verr, "Default config validation warning (non-fatal)");
                     }
@@ -6759,7 +6884,7 @@ impl Config {
                 decrypt_secret(&store, &mut config.jira.api_token, "config.jira.api_token")?;
             }
 
-            config.apply_env_overrides();
+            config.apply_env_overrides_tracked();
             if let Err(err) = config.validate() {
                 tracing::warn!(
                     error = %err,
@@ -6806,7 +6931,7 @@ impl Config {
                 let _ = fs::set_permissions(&config_path, Permissions::from_mode(0o600)).await;
             }
 
-            config.apply_env_overrides();
+            config.apply_env_overrides_tracked();
             if let Err(err) = config.validate() {
                 tracing::warn!(
                     error = %err,
@@ -6881,7 +7006,7 @@ impl Config {
         config.cost.merge_default_prices();
         config.migrate_legacy_low_caps();
 
-        config.apply_env_overrides();
+        config.apply_env_overrides_tracked();
         if let Err(e) = config.validate() {
             tracing::warn!("Config validation failed: {}", e);
         }
@@ -7646,6 +7771,35 @@ impl Config {
         Ok(())
     }
 
+    pub fn apply_env_overrides_tracked(&mut self) {
+        let pristine = match toml::Value::try_from(&*self) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to capture pre-env config baseline; env overrides may be persisted by save()"
+                );
+                self.apply_env_overrides();
+                return;
+            }
+        };
+        self.apply_env_overrides();
+        match toml::Value::try_from(&*self) {
+            Ok(env_applied) => {
+                self.env_override_baseline = Some(std::sync::Arc::new(EnvOverrideBaseline {
+                    pristine,
+                    env_applied,
+                }));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to capture post-env config baseline; env overrides may be persisted by save()"
+                );
+            }
+        }
+    }
+
     pub fn apply_env_overrides(&mut self) {
 
         if self.default_provider.is_none() {
@@ -8062,6 +8216,34 @@ impl Config {
     pub async fn save(&self) -> Result<()> {
 
         let mut config_to_save = self.clone();
+        if let Some(baseline) = self.env_override_baseline.clone() {
+            match toml::Value::try_from(&config_to_save) {
+                Ok(current) => {
+                    if let Some(disk_form) = strip_env_overrides(
+                        Some(&baseline.pristine),
+                        Some(&baseline.env_applied),
+                        current,
+                    ) {
+                        match disk_form.try_into::<Config>() {
+                            Ok(mut rebuilt) => {
+                                rebuilt.workspace_dir = config_to_save.workspace_dir.clone();
+                                rebuilt.config_path = config_to_save.config_path.clone();
+                                rebuilt.env_override_baseline = Some(baseline);
+                                config_to_save = rebuilt;
+                            }
+                            Err(err) => tracing::warn!(
+                                error = %err,
+                                "failed to rebuild disk-form config after stripping env overrides; saving in-memory form"
+                            ),
+                        }
+                    }
+                }
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "failed to serialize config for env-override stripping; saving in-memory form"
+                ),
+            }
+        }
         let config_path = self.resolve_config_path_for_save().await?;
         let sen_dir = config_path
             .parent()

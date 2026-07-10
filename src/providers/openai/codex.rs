@@ -257,6 +257,36 @@ fn build_responses_input(messages: &[ChatMessage]) -> (String, Vec<ResponsesInpu
                     }],
                 });
             }
+            "tool" => {
+                let (tool_call_id, tool_content) =
+                    match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        Ok(value) => {
+                            let id = value
+                                .get("tool_call_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToString::to_string);
+                            let content = value
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| msg.content.clone());
+                            (id, content)
+                        }
+                        Err(_) => (None, msg.content.clone()),
+                    };
+                let label = match tool_call_id {
+                    Some(id) => format!("[tool result for call {id}]"),
+                    None => "[tool result]".to_string(),
+                };
+                input.push(ResponsesInput {
+                    role: "user".to_string(),
+                    content: vec![ResponsesInputContent {
+                        kind: "input_text".to_string(),
+                        text: Some(format!("{label}\n{tool_content}")),
+                        image_url: None,
+                    }],
+                });
+            }
             _ => {}
         }
     }
@@ -720,8 +750,17 @@ impl Provider for OpenAiCodexProvider {
         _temperature: f64,
     ) -> anyhow::Result<String> {
 
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+
         let config = crate::config::MultimodalConfig::default();
-        let prepared = crate::multimodal::prepare_messages_for_provider(messages, &config).await?;
+        let prepared =
+            crate::multimodal::prepare_messages_for_provider(&sanitized, &config).await?;
 
         let (instructions, input) = build_responses_input(&prepared.messages);
         self.send_responses_request(input, instructions, model)

@@ -38,6 +38,7 @@ import { MemoryOtherHeader, MemoryOtherDetail } from './MemoryOtherToolView'
 import { IntegrationHeader, IntegrationDetail } from './IntegrationToolView'
 import { OpsHeader, OpsDetail } from './OpsToolView'
 import { HardwareHeader, HardwareDetail } from './HardwareToolView'
+import { DocumentHeader, DocumentDetail } from './DocumentToolView'
 
 type Renderer = {
   Header: ComponentType<ToolViewProps>
@@ -138,17 +139,30 @@ export function ToolCard({
   const t = useTranslation()
   const category = getToolCategory(toolName)
   const isSpawnWorkers = toolName === 'spawn_workers'
+  const isDocumentConvert = toolName === 'document_convert'
   const renderer: Renderer = isSpawnWorkers
     ? {
         Header: SpawnWorkersHeader,
         Detail: SpawnWorkersDetail,
         alwaysExpandable: true,
       }
-    : RENDERERS[category]
-  const icon = isSpawnWorkers ? 'smart_toy' : getCategoryIcon(category)
+    : isDocumentConvert
+      ? {
+          Header: DocumentHeader,
+          Detail: DocumentDetail,
+          alwaysExpandable: true,
+        }
+      : RENDERERS[category]
+  const icon = isSpawnWorkers
+    ? 'smart_toy'
+    : isDocumentConvert
+      ? 'swap_horiz'
+      : getCategoryIcon(category)
   const verb = isSpawnWorkers
     ? t('chat.workers.spawnVerb') || 'spawned'
-    : t(VERB_KEYS[category])
+    : isDocumentConvert
+      ? t('tool.verb.converted')
+      : t(VERB_KEYS[category])
   const modeBadge = compact ? null : getModeBadge(useSettingsStore.getState().codingMode)
   const expandable =
     renderer.alwaysExpandable === true ||

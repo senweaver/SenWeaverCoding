@@ -35,7 +35,7 @@ pub trait McpTransportConn: Send + Sync {
 pub struct StdioTransport {
     _child: Child,
     stdin: tokio::process::ChildStdin,
-    stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    stdout: BufReader<tokio::process::ChildStdout>,
 }
 
 impl StdioTransport {
@@ -58,12 +58,12 @@ impl StdioTransport {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("no stdout on MCP server `{}`", config.name))?;
-        let stdout_lines = BufReader::new(stdout).lines();
+        let stdout = BufReader::new(stdout);
 
         Ok(Self {
             _child: child,
             stdin,
-            stdout_lines,
+            stdout,
         })
     }
 
@@ -81,15 +81,37 @@ impl StdioTransport {
     }
 
     async fn recv_raw(&mut self) -> Result<String> {
-        let line = self
-            .stdout_lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("MCP server closed stdout"))?;
-        if line.len() > MAX_LINE_BYTES {
-            bail!("MCP response too large: {} bytes", line.len());
+        // Read a line while enforcing the size cap incrementally, so a server that
+        // streams bytes without a newline cannot grow the buffer without bound.
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            let available = self.stdout.fill_buf().await?;
+            if available.is_empty() {
+                if buf.is_empty() {
+                    bail!("MCP server closed stdout");
+                }
+                break;
+            }
+            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                buf.extend_from_slice(&available[..pos]);
+                let consumed = pos + 1;
+                self.stdout.consume(consumed);
+                break;
+            }
+            let n = available.len();
+            buf.extend_from_slice(available);
+            self.stdout.consume(n);
+            if buf.len() > MAX_LINE_BYTES {
+                bail!(
+                    "MCP response too large: exceeded {} bytes before newline",
+                    MAX_LINE_BYTES
+                );
+            }
         }
-        Ok(line)
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        String::from_utf8(buf).context("MCP response was not valid UTF-8")
     }
 }
 
@@ -106,6 +128,7 @@ impl McpTransportConn for StdioTransport {
                 error: None,
             });
         }
+        let expected_id = request.id.clone();
         let deadline = std::time::Instant::now() + Duration::from_secs(RECV_TIMEOUT_SECS);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -121,6 +144,15 @@ impl McpTransportConn for StdioTransport {
 
                 tracing::debug!(
                     "MCP stdio: skipping server notification while waiting for response"
+                );
+                continue;
+            }
+            if resp.id != expected_id {
+                tracing::debug!(
+                    "MCP stdio: discarding stale response with id {:?} while waiting for id {:?} \
+                     (likely left over from a previously timed-out call)",
+                    resp.id,
+                    expected_id
                 );
                 continue;
             }

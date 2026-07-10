@@ -53,12 +53,31 @@ impl Tunnel for TailscaleTunnel {
                 .to_string()
         };
 
-        let child = crate::util::hidden_async_command("tailscale")
+        let mut child = crate::util::hidden_async_command("tailscale")
             .args([subcommand, &local_port.to_string()])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+
+        if let Some(stdout) = child.stdout.take() {
+            crate::runtime::spawn_supervised("tunnel.tailscale.stdout_drain", async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "tunnel.tailscale", "{line}");
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            crate::runtime::spawn_supervised("tunnel.tailscale.stderr_drain", async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "tunnel.tailscale", "{line}");
+                }
+            });
+        }
 
         let public_url = format!("https://{hostname}:{local_port}");
 
@@ -84,8 +103,11 @@ impl Tunnel for TailscaleTunnel {
     }
 
     async fn health_check(&self) -> bool {
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        match guard.as_mut() {
+            Some(tp) => matches!(tp.child.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 
     fn public_url(&self) -> Option<String> {

@@ -130,6 +130,7 @@ pub struct LanTransport {
     inbound: Arc<DashMap<String, InboundHandle>>,
     finished: Arc<DashMap<String, ()>>,
     listen_port: AtomicU16,
+    accept_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl LanTransport {
@@ -159,6 +160,7 @@ impl LanTransport {
             inbound: Arc::new(DashMap::new()),
             finished: Arc::new(DashMap::new()),
             listen_port: AtomicU16::new(0),
+            accept_task: parking_lot::Mutex::new(None),
         }
     }
 
@@ -220,7 +222,7 @@ impl LanTransport {
         self.listen_port.store(actual, Ordering::Relaxed);
 
         let this = Arc::clone(self);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
@@ -238,10 +240,16 @@ impl LanTransport {
                 }
             }
         });
+        if let Some(old) = self.accept_task.lock().replace(handle) {
+            old.abort();
+        }
         Ok(actual)
     }
 
     pub fn shutdown(&self) {
+        if let Some(task) = self.accept_task.lock().take() {
+            task.abort();
+        }
         self.links.clear();
         self.inbound.clear();
         self.finished.clear();
@@ -252,7 +260,12 @@ impl LanTransport {
         stream.set_nodelay(true).ok();
         let (mut read_half, mut write_half) = stream.into_split();
 
-        let hello_bytes = read_frame(&mut read_half, 64 * 1024).await?;
+        let hello_bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            read_frame(&mut read_half, 64 * 1024),
+        )
+        .await
+        .map_err(|_| anyhow!("inbound peer did not send hello within 10s"))??;
         let peer_hello: Hello =
             serde_json::from_slice(&hello_bytes).context("parsing peer hello")?;
 
@@ -343,7 +356,12 @@ impl LanTransport {
 
         let our_hello = self.build_hello();
         write_frame(&mut write_half, &serde_json::to_vec(&our_hello)?).await?;
-        let hello_bytes = read_frame(&mut read_half, 64 * 1024).await?;
+        let hello_bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            read_frame(&mut read_half, 64 * 1024),
+        )
+        .await
+        .map_err(|_| anyhow!("peer did not send hello within 10s"))??;
         let peer_hello: Hello =
             serde_json::from_slice(&hello_bytes).context("parsing peer hello")?;
 

@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { getBaseUrl } from '../api/client'
 import { listVisionModels, stopComputerRun, type VisionModel } from '../api/computer'
+import { localizeComputerMessage } from '../lib/computerMessages'
 
 const SELECTION_KEY = 'sen-computer-selection'
 const PARAMS_KEY = 'sen-computer-params'
@@ -26,6 +27,7 @@ export type ComputerStep = {
   elementDescription?: string
   value?: string
   screenshotBase64: string
+  screenshotMime?: string
   targetXNorm?: number
   targetYNorm?: number
   toXNorm?: number
@@ -37,6 +39,13 @@ export type ComputerStep = {
 
 type StoredSelection = { provider: string; model: string }
 type StoredParams = { maxSteps: number; stepDelayMs: number }
+
+export type StartOptions = {
+  skill?: string
+  replayRecording?: string
+  taskOverride?: string
+  smart?: boolean
+}
 
 function loadSelection(): StoredSelection | null {
   try {
@@ -86,7 +95,7 @@ type ComputerUseStore = {
   setStepDelayMs: (value: number) => void
   setTask: (task: string) => void
   selectStep: (index: number | null) => void
-  start: () => void
+  start: (options?: StartOptions) => void
   stop: () => void
   sendReply: (text: string) => void
   reset: () => void
@@ -147,6 +156,12 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         const preferred = models.find((m) => m.recommended) ?? models[0]
         if (!hasSelection && preferred) {
           set({ provider: preferred.provider, model: preferred.model })
+          try {
+            localStorage.setItem(
+              SELECTION_KEY,
+              JSON.stringify({ provider: preferred.provider, model: preferred.model }),
+            )
+          } catch {  }
         }
       } catch (err) {
         set({
@@ -189,9 +204,12 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
 
     selectStep: (index) => set({ selectedStepIndex: index }),
 
-    start: () => {
+    start: (options) => {
       const { task, provider, model, maxSteps, stepDelayMs, status } = get()
-      if (!task.trim() || !provider || !model) return
+      const isReplay = Boolean(options?.replayRecording)
+      const isSkill = Boolean(options?.skill)
+      if (!isReplay && (!provider || !model)) return
+      if (!isReplay && !isSkill && !task.trim()) return
       if (status === 'running' || status === 'thinking' || status === 'connecting') return
 
       closeSocket()
@@ -221,14 +239,37 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       ws.onopen = () => {
         if (socket !== ws) return
         set({ status: 'running' })
+        if (isReplay) {
+          const smart = Boolean(options?.smart) && Boolean(provider && model)
+          ws.send(
+            JSON.stringify({
+              type: 'start',
+              mode: 'replay',
+              recording: options?.replayRecording,
+              ...(smart
+                ? {
+                    smart: true,
+                    provider: provider ?? undefined,
+                    model: model ?? undefined,
+                  }
+                : {}),
+            }),
+          )
+          return
+        }
+        const effectiveTask = isSkill
+          ? (options?.taskOverride ?? '').trim() ||
+            'Run the recorded skill as described using the recorded steps.'
+          : task.trim()
         ws.send(
           JSON.stringify({
             type: 'start',
-            task: task.trim(),
+            task: effectiveTask,
             provider,
             model,
             maxSteps,
             stepDelayMs,
+            ...(isSkill ? { skill: options?.skill } : {}),
           }),
         )
       }
@@ -252,7 +293,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         if (socket !== ws) return
         socket = null
         const current = get().status
-        if (!isTerminal(current) && current !== 'call_user') {
+        if (!isTerminal(current)) {
           set({ status: 'stopped' })
         }
       }
@@ -273,8 +314,13 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
     sendReply: (text) => {
       const trimmed = text.trim()
       if (!trimmed) return
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        set({ status: 'stopped', error: 'connection lost; the run was cancelled' })
+        closeSocket()
+        return
+      }
       try {
-        socket?.send(JSON.stringify({ type: 'user_reply', text: trimmed }))
+        socket.send(JSON.stringify({ type: 'user_reply', text: trimmed }))
         set({ status: 'running' })
       } catch {  }
     },
@@ -302,7 +348,9 @@ function handleEvent(
   switch (type) {
     case 'status': {
       const status = (payload.status as ComputerStatus) ?? 'running'
-      const message = typeof payload.message === 'string' ? payload.message : null
+      const rawMessage = typeof payload.message === 'string' ? payload.message : null
+      const code = typeof payload.code === 'string' ? payload.code : null
+      const message = localizeComputerMessage(code, rawMessage)
       set({ status, statusMessage: message })
       if (isTerminal(status)) {
         closeSocket()
@@ -310,6 +358,7 @@ function handleEvent(
       break
     }
     case 'step': {
+      const MAX_FULL_SCREENSHOTS = 10
       const step: ComputerStep = {
         index: Number(payload.index ?? 0),
         thought: String(payload.thought ?? ''),
@@ -320,6 +369,8 @@ function handleEvent(
             : undefined,
         value: typeof payload.value === 'string' ? payload.value : undefined,
         screenshotBase64: String(payload.screenshot_base64 ?? ''),
+        screenshotMime:
+          typeof payload.screenshot_mime === 'string' ? payload.screenshot_mime : undefined,
         targetXNorm:
           typeof payload.target_x_norm === 'number' ? payload.target_x_norm : undefined,
         targetYNorm:
@@ -329,6 +380,13 @@ function handleEvent(
         confidence: typeof payload.confidence === 'number' ? payload.confidence : undefined,
       }
       const steps = [...get().steps, step]
+      const cutoff = steps.length - MAX_FULL_SCREENSHOTS
+      for (let i = 0; i < cutoff; i++) {
+        const existing = steps[i]
+        if (existing && existing.screenshotBase64) {
+          steps[i] = { ...existing, screenshotBase64: '' }
+        }
+      }
       set({ steps, selectedStepIndex: steps.length - 1 })
       break
     }
@@ -343,8 +401,9 @@ function handleEvent(
       break
     }
     case 'error': {
-      const message = typeof payload.message === 'string' ? payload.message : 'unknown error'
-      set({ error: message })
+      const rawMessage = typeof payload.message === 'string' ? payload.message : 'unknown error'
+      const code = typeof payload.code === 'string' ? payload.code : null
+      set({ error: localizeComputerMessage(code, rawMessage) })
       break
     }
     default:

@@ -457,11 +457,22 @@ async fn run_acceptance_check(
         cmd.current_dir(cwd);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn verify command `{verify_cmd}`: {e}"))?;
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        cmd.output(),
+    )
+    .await
+    {
+        Ok(result) => result
+            .map_err(|e| format!("failed to spawn verify command `{verify_cmd}`: {e}"))?,
+        Err(_) => {
+            return Err(format!(
+                "acceptance verify `{verify_cmd}` timed out after 120s and was terminated"
+            ));
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

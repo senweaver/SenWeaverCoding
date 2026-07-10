@@ -69,6 +69,24 @@ pub struct ChatRenderCache {
     total_lines: usize,
 
     view_height: usize,
+
+    wrap_width: usize,
+
+    visual_prefix: Vec<usize>,
+
+    visual_valid: bool,
+}
+
+pub fn wrapped_row_count(line: &Line<'_>, width: usize) -> usize {
+    let width = width.max(1);
+    if line.width() == 0 {
+        return 1;
+    }
+    let clamped = u16::try_from(width).unwrap_or(u16::MAX);
+    ratatui::widgets::Paragraph::new(line.clone())
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .line_count(clamped)
+        .max(1)
 }
 
 impl ChatRenderCache {
@@ -85,6 +103,35 @@ impl ChatRenderCache {
         self.lines_valid = true;
         self.lines = lines;
         self.viewport_valid = false;
+        self.visual_valid = false;
+    }
+
+    pub fn ensure_visual_metrics(&mut self, width: usize) {
+        let width = width.max(1);
+        if self.visual_valid
+            && self.wrap_width == width
+            && self.visual_prefix.len() == self.lines.len() + 1
+        {
+            return;
+        }
+        let mut prefix = Vec::with_capacity(self.lines.len() + 1);
+        let mut acc = 0usize;
+        prefix.push(0);
+        for line in &self.lines {
+            acc = acc.saturating_add(wrapped_row_count(line, width));
+            prefix.push(acc);
+        }
+        self.visual_prefix = prefix;
+        self.wrap_width = width;
+        self.visual_valid = true;
+    }
+
+    pub fn visual_prefix(&self) -> &[usize] {
+        &self.visual_prefix
+    }
+
+    pub fn cached_visual_total(&self) -> usize {
+        self.visual_prefix.last().copied().unwrap_or(0)
     }
 
     pub fn lines(&self) -> &[Line<'static>] {

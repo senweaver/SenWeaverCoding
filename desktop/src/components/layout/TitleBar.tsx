@@ -15,12 +15,12 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
-import { useSessionStore } from '../../stores/sessionStore'
-import { useTabStore } from '../../stores/tabStore'
-import { focusSession } from '../../lib/focusSession'
 import { useUIStore } from '../../stores/uiStore'
 import { useUpdateStore } from '../../stores/updateStore'
-import { performSafeExit } from '../../lib/appClose'
+import { useLanGroupStore } from '../../stores/lanGroupStore'
+import { useLanShareStore } from '../../stores/lanShareStore'
+import { enterMinimalMode } from '../../lib/minimalMode'
+import { useComputerUseStore } from '../../stores/computerUseStore'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 const isMacOSEnv =
@@ -59,23 +59,18 @@ function applyZoomPct(pct: number): void {
 
 export function TitleBar() {
   const t = useTranslation()
-  const addToast = useUIStore((s) => s.addToast)
-  const sidebarOpen = useUIStore((s) => s.sidebarOpen)
-  const rightSidebarOpen = useUIStore((s) => s.rightSidebarOpen)
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
-  const toggleRightSidebar = useUIStore((s) => s.toggleRightSidebar)
+  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
+  const lanGroupUnread = useLanGroupStore((s) => s.unread)
+  const toggleLanGroupPanel = useLanGroupStore((s) => s.togglePanel)
+  const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
+  const toggleLanSharePanel = useLanShareStore((s) => s.togglePanel)
+  const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
 
-  type MenuId = 'file' | 'edit' | 'view' | 'help'
+  type MenuId = 'help'
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null)
 
-  const fileBtnRef = useRef<HTMLButtonElement>(null)
-  const editBtnRef = useRef<HTMLButtonElement>(null)
-  const viewBtnRef = useRef<HTMLButtonElement>(null)
   const helpBtnRef = useRef<HTMLButtonElement>(null)
 
-  const filePanelRef = useRef<HTMLDivElement>(null)
-  const editPanelRef = useRef<HTMLDivElement>(null)
-  const viewPanelRef = useRef<HTMLDivElement>(null)
   const helpPanelRef = useRef<HTMLDivElement>(null)
 
   const showMacTrafficLights = isTauri && isMacOSEnv
@@ -115,14 +110,8 @@ export function TitleBar() {
     if (!openMenu) return
     const onPointerDown = (e: MouseEvent) => {
       const node = e.target as Node
-      const panels = [filePanelRef, editPanelRef, viewPanelRef, helpPanelRef]
-      const triggers = [fileBtnRef, editBtnRef, viewBtnRef, helpBtnRef]
-      for (const p of panels) {
-        if (p.current?.contains(node)) return
-      }
-      for (const r of triggers) {
-        if (r.current?.contains(node)) return
-      }
+      if (helpPanelRef.current?.contains(node)) return
+      if (helpBtnRef.current?.contains(node)) return
       setOpenMenu(null)
     }
     document.addEventListener('mousedown', onPointerDown)
@@ -131,63 +120,6 @@ export function TitleBar() {
 
   const toggle = (id: MenuId) => {
     setOpenMenu((prev) => (prev === id ? null : id))
-  }
-
-  const openSettings = () => {
-    closeAll()
-    useUIStore.getState().toggleSettingsOverlay()
-  }
-
-  const newSession = async () => {
-    closeAll()
-    try {
-      const currentTabId = useTabStore.getState().activeTabId
-      const workDir = useSessionStore.getState().resolveWorkDirForNewSessionTab(currentTabId)
-      const sessionId = await useSessionStore.getState().createSession(workDir)
-      useTabStore.getState().openTab(sessionId, t('menu.file.newSession'))
-      focusSession(sessionId)
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : t('sidebar.sessionListFailed'),
-      })
-    }
-  }
-
-  const openWorkspaceFolder = async () => {
-    closeAll()
-    if (!isTauri) {
-      addToast({
-        type: 'error',
-        message: t('menu.file.workspaceUnavailable'),
-      })
-      return
-    }
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: t('menu.file.openWorkspaceFolder'),
-      })
-      const path = typeof selected === 'string' ? selected : Array.isArray(selected) ? selected[0] : null
-      if (!path) return
-      useSessionStore.getState().setUserPinnedSessionWorkDir(path)
-      const sessionId = await useSessionStore.getState().createSession(path)
-      useTabStore.getState().openTab(sessionId, t('menu.file.newSession'))
-      focusSession(sessionId)
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : t('sidebar.sessionListFailed'),
-      })
-    }
-  }
-
-  const quitApp = async () => {
-    closeAll()
-    if (!isTauri) return
-    await performSafeExit()
   }
 
   const checkForUpdatesMenu = () => {
@@ -218,58 +150,6 @@ export function TitleBar() {
     closeAll()
   }
 
-  const undo = () => {
-    closeAll()
-    try {
-      document.execCommand('undo')
-    } catch {
-
-    }
-  }
-  const redo = () => {
-    closeAll()
-    try {
-      document.execCommand('redo')
-    } catch {
-
-    }
-  }
-  const cut = () => {
-    closeAll()
-    try {
-      document.execCommand('cut')
-    } catch {
-
-    }
-  }
-  const copy = () => {
-    closeAll()
-    try {
-      document.execCommand('copy')
-    } catch {
-
-    }
-  }
-  const paste = () => {
-    closeAll()
-    try {
-      document.execCommand('paste')
-    } catch {
-
-    }
-  }
-  const selectAll = () => {
-    closeAll()
-    try {
-      document.execCommand('selectAll')
-    } catch {
-      const ae = document.activeElement
-      if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) {
-        ae.select()
-      }
-    }
-  }
-
   return (
     <div
       data-app-titlebar
@@ -284,9 +164,43 @@ export function TitleBar() {
       <div className="flex min-h-0 flex-1 items-center gap-1.5 px-2" data-tauri-drag-region>
         <img src="/app-icon.png" alt="" className="h-4 w-4 shrink-0" draggable={false} data-tauri-drag-region />
 
-        <MenuTrigger ref={fileBtnRef} label={t('menu.file')} isOpen={openMenu === 'file'} onToggle={() => toggle('file')} />
-        <MenuTrigger ref={editBtnRef} label={t('menu.edit')} isOpen={openMenu === 'edit'} onToggle={() => toggle('edit')} />
-        <MenuTrigger ref={viewBtnRef} label={t('menu.view')} isOpen={openMenu === 'view'} onToggle={() => toggle('view')} />
+        <PanelTrigger
+          label={t('lanGroup.title')}
+          active={lanGroupPanelOpen}
+          unread={lanGroupUnread}
+          onClick={() => {
+            closeAll()
+            if (!useLanGroupStore.getState().panelOpen) {
+              useLanShareStore.getState().closePanel()
+              useUIStore.getState().closeTemplateLibrary()
+            }
+            toggleLanGroupPanel()
+          }}
+        />
+        <PanelTrigger
+          label={t('lanShare.title')}
+          active={lanSharePanelOpen}
+          onClick={() => {
+            closeAll()
+            if (!useLanShareStore.getState().panelOpen) {
+              useLanGroupStore.getState().closePanel()
+              useUIStore.getState().closeTemplateLibrary()
+            }
+            toggleLanSharePanel()
+          }}
+        />
+        <PanelTrigger
+          label={t('templateLibrary.open')}
+          active={templateLibraryOpen}
+          onClick={() => {
+            closeAll()
+            if (!useUIStore.getState().templateLibraryOpen) {
+              useLanGroupStore.getState().closePanel()
+              useLanShareStore.getState().closePanel()
+            }
+            useUIStore.getState().toggleTemplateLibrary()
+          }}
+        />
         <MenuTrigger ref={helpBtnRef} label={t('menu.help')} isOpen={openMenu === 'help'} onToggle={() => toggle('help')} />
 
         <div className="min-w-8 flex-1" data-tauri-drag-region aria-hidden="true" />
@@ -294,47 +208,56 @@ export function TitleBar() {
 
       <ComputerModeToggle t={t} />
 
+      <MinimalModeButton t={t} />
+
       {showWindowsCaption && <WindowsCaptionButtons isMaximized={captionMaximized} t={t} />}
-
-      <AnchoredDropdown anchorRef={fileBtnRef} panelRef={filePanelRef} open={openMenu === 'file'}>
-        <MenuRow onClick={() => void newSession()}>{t('menu.file.newSession')}</MenuRow>
-        <MenuRow onClick={() => void openWorkspaceFolder()}>{t('menu.file.openWorkspaceFolder')}</MenuRow>
-        <MenuDivider />
-        <MenuRow onClick={openSettings}>{t('menu.file.settings')}</MenuRow>
-        <MenuDivider />
-        <MenuRow onClick={() => void quitApp()}>{t('menu.file.quit')}</MenuRow>
-      </AnchoredDropdown>
-
-      <AnchoredDropdown anchorRef={editBtnRef} panelRef={editPanelRef} open={openMenu === 'edit'}>
-        <MenuRow onClick={undo}>{t('menu.edit.undo')}</MenuRow>
-        <MenuRow onClick={redo}>{t('menu.edit.redo')}</MenuRow>
-        <MenuDivider />
-        <MenuRow onClick={cut}>{t('menu.edit.cut')}</MenuRow>
-        <MenuRow onClick={copy}>{t('menu.edit.copy')}</MenuRow>
-        <MenuRow onClick={paste}>{t('menu.edit.paste')}</MenuRow>
-        <MenuRow onClick={selectAll}>{t('menu.edit.selectAll')}</MenuRow>
-      </AnchoredDropdown>
-
-      <AnchoredDropdown anchorRef={viewBtnRef} panelRef={viewPanelRef} open={openMenu === 'view'}>
-        <MenuRow onClick={() => { toggleSidebar(); closeAll() }}>
-          {sidebarOpen ? t('menu.view.hideLeftSidebar') : t('menu.view.showLeftSidebar')}
-        </MenuRow>
-        <MenuRow onClick={() => { toggleRightSidebar(); closeAll() }}>
-          {rightSidebarOpen ? t('menu.view.hideRightSidebar') : t('menu.view.showRightSidebar')}
-        </MenuRow>
-        <MenuDivider />
-        <MenuRow onClick={zoomIn}>{t('menu.view.zoomIn')}</MenuRow>
-        <MenuRow onClick={zoomOut}>{t('menu.view.zoomOut')}</MenuRow>
-        <MenuRow onClick={zoomReset}>{t('menu.view.resetZoom')}</MenuRow>
-      </AnchoredDropdown>
 
       <AnchoredDropdown anchorRef={helpBtnRef} panelRef={helpPanelRef} open={openMenu === 'help'}>
         <MenuRow onClick={() => void openExternal(DOCS_URL)}>{t('menu.help.documentation')}</MenuRow>
         <MenuRow onClick={() => void openExternal(GITHUB_REPO_URL)}>{t('menu.help.github')}</MenuRow>
         <MenuDivider />
+        <MenuRow onClick={zoomIn}>{t('menu.help.zoomIn')}</MenuRow>
+        <MenuRow onClick={zoomOut}>{t('menu.help.zoomOut')}</MenuRow>
+        <MenuRow onClick={zoomReset}>{t('menu.help.resetZoom')}</MenuRow>
+        <MenuDivider />
         <MenuRow onClick={checkForUpdatesMenu}>{t('menu.help.checkForUpdates')}</MenuRow>
       </AnchoredDropdown>
     </div>
+  )
+}
+
+function PanelTrigger({
+  label,
+  active,
+  unread,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  unread?: number
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick()
+      }}
+      className={`relative rounded-[var(--radius-md)] px-1.5 py-0.5 text-[12px] leading-tight shadow-none transition-colors ${
+        active
+          ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-selected)]'
+          : 'bg-transparent text-[var(--color-text-secondary)] hover:bg-transparent hover:text-[var(--color-text-primary)]'
+      }`}
+    >
+      {label}
+      {unread != null && unread > 0 && (
+        <span className="absolute -right-1.5 -top-1 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[9px] font-semibold text-white">
+          {unread > 99 ? '99+' : unread}
+        </span>
+      )}
+    </button>
   )
 }
 
@@ -471,16 +394,32 @@ function MacTrafficLightsStrip({ t }: { t: T }) {
 
 function ComputerModeToggle({ t }: { t: T }) {
   const appMode = useUIStore((s) => s.appMode)
-  const toggleAppMode = useUIStore((s) => s.toggleAppMode)
+  const setAppMode = useUIStore((s) => s.setAppMode)
   const active = appMode === 'computer'
   const label = active ? t('titlebar.computerUse.exit') : t('titlebar.computerUse.enter')
+  const handleClick = () => {
+    if (active) {
+      const cu = useComputerUseStore.getState()
+      if (
+        cu.status === 'running' ||
+        cu.status === 'thinking' ||
+        cu.status === 'connecting' ||
+        cu.status === 'call_user'
+      ) {
+        cu.stop()
+      }
+      setAppMode('code')
+    } else {
+      setAppMode('computer')
+    }
+  }
   return (
     <button
       type="button"
       title={label}
       aria-label={label}
       aria-pressed={active}
-      onClick={() => toggleAppMode()}
+      onClick={handleClick}
       className={`inline-flex h-full shrink-0 items-center gap-1 px-3 text-[12px] transition-colors ${
         active
           ? 'bg-[var(--color-brand)]/12 text-[var(--color-brand)]'
@@ -488,6 +427,21 @@ function ComputerModeToggle({ t }: { t: T }) {
       }`}
     >
       <span className="material-symbols-outlined text-[18px]">desktop_windows</span>
+    </button>
+  )
+}
+
+function MinimalModeButton({ t }: { t: T }) {
+  const label = t('titlebar.minimal.enter')
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={() => void enterMinimalMode()}
+      className="inline-flex h-full shrink-0 items-center gap-1 px-3 text-[12px] text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+    >
+      <span className="material-symbols-outlined text-[18px]">picture_in_picture_alt</span>
     </button>
   )
 }

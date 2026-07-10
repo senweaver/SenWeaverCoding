@@ -29,14 +29,11 @@ static REGISTRY: std::sync::LazyLock<Mutex<Vec<TaskInfo>>> =
 pub struct TaskHandle {
 
     inner: Option<JoinHandle<()>>,
-
-    id: String,
 }
 
 impl TaskHandle {
 
     pub fn into_inner(mut self) -> JoinHandle<()> {
-        REGISTRY.lock().retain(|t| t.id != self.id);
         self.inner
             .take()
             .expect("TaskHandle::into_inner called twice")
@@ -53,7 +50,11 @@ impl TaskHandle {
     }
 }
 
-impl Drop for TaskHandle {
+struct RegistryCleanup {
+    id: String,
+}
+
+impl Drop for RegistryCleanup {
     fn drop(&mut self) {
         REGISTRY.lock().retain(|t| t.id != self.id);
     }
@@ -72,6 +73,7 @@ where
     let task_name = name.clone();
 
     let wrapped = async move {
+        let _cleanup = RegistryCleanup { id: registry_id };
         let _output = match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
             Ok(v) => v,
             Err(payload) => {
@@ -87,24 +89,19 @@ where
             }
         };
         tracing::debug!(target: "task.completed", task = %task_name, "task completed");
-
-        REGISTRY.lock().retain(|t| t.id != registry_id);
     };
 
     let inner = tokio::spawn(wrapped.instrument(span));
     let abort_handle = inner.abort_handle();
     let info = TaskInfo {
-        id: id.clone(),
+        id,
         name,
         spawned_at: Instant::now(),
         abort_handle,
     };
     REGISTRY.lock().push(info);
 
-    TaskHandle {
-        inner: Some(inner),
-        id,
-    }
+    TaskHandle { inner: Some(inner) }
 }
 
 pub fn spawn_supervised_restartable<F, Fut>(

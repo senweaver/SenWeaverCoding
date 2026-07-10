@@ -80,6 +80,7 @@ export function InlineUserMessageEditor({
     const refs: AttachmentRef[] = attachments.map((a) => ({
       type: a.type,
       name: a.name,
+      path: a.path,
       data: a.data,
       mimeType: a.mimeType,
     }))

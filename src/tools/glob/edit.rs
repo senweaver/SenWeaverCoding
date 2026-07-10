@@ -21,9 +21,10 @@ impl GlobEditTool {
     const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        let ops_applier = Arc::new(OpsApplier::default_for_shared_workspace(
-            security.workspace_root_handle(),
-        ));
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
         Self {
             security,
             ops_applier,

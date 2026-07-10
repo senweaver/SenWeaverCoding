@@ -103,10 +103,13 @@ impl LspManager {
 
     pub async fn reconcile(&self, config: &Config) {
         let lsp = &config.lsp;
-        let mut inner = self.inner.lock().await;
+        let prev_seen_map: HashMap<String, EntryFingerprint> = {
+            let inner = self.inner.lock().await;
+            inner.seen.clone()
+        };
 
         let mut next_seen: HashMap<String, EntryFingerprint> = HashMap::new();
-        let prev_seen: HashSet<String> = inner.seen.keys().cloned().collect();
+        let prev_seen: HashSet<String> = prev_seen_map.keys().cloned().collect();
         let workspace_root = self.workspace_root.read().clone();
 
         let mut live_mapping: HashMap<String, (String, String)> = HashMap::new();
@@ -120,7 +123,7 @@ impl LspManager {
             next_seen.insert(id.clone(), fp.clone());
 
             let want_running = lsp.enabled && entry.enabled && entry.resolved_command().is_some();
-            let prev_fp = inner.seen.get(&id).cloned();
+            let prev_fp = prev_seen_map.get(&id).cloned();
             let unchanged = prev_fp.as_ref().is_some_and(|p| *p == fp);
 
             if !want_running {
@@ -195,7 +198,7 @@ impl LspManager {
 
         let next_keys: HashSet<String> = next_seen.keys().cloned().collect();
         for stale_id in prev_seen.difference(&next_keys) {
-            let prev_fp = inner.seen.get(stale_id).cloned();
+            let prev_fp = prev_seen_map.get(stale_id).cloned();
             if let Some(fp) = prev_fp.as_ref() {
                 if !fp.language_id.is_empty() {
                     tracing::debug!(
@@ -220,7 +223,10 @@ impl LspManager {
             });
         }
 
-        inner.seen = next_seen;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.seen = next_seen;
+        }
         self.diagnostics_listener.replace_mapping(live_mapping);
     }
 

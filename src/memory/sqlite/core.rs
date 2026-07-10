@@ -8,7 +8,6 @@ use super::super::vector::{VectorIndex, build_default_backend};
 use crate::config::schema::SearchMode;
 use anyhow::Context;
 use async_trait::async_trait;
-use chrono::Local;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{Connection, params};
 use std::fmt::Write as _;
@@ -41,6 +40,10 @@ pub(crate) struct VecIndexCache {
     index: Option<Box<dyn VectorIndex>>,
 
     indexed_rows: i64,
+
+    indexed_max_rowid: i64,
+
+    rebuilding: bool,
 }
 
 impl VecIndexCache {
@@ -48,6 +51,8 @@ impl VecIndexCache {
         Self {
             index: None,
             indexed_rows: 0,
+            indexed_max_rowid: 0,
+            rebuilding: false,
         }
     }
 }
@@ -153,49 +158,71 @@ impl SqliteMemory {
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        // Track MAX(rowid) too: a delete + insert nets a zero count change but
+        // still advances the max rowid, so relying on the count alone left the
+        // index serving stale/removed candidates. Any rowid advance forces a
+        // rebuild regardless of the count-diff threshold.
+        let current_max_rowid: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(rowid), 0) FROM memories WHERE embedding IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         {
-            let cache = vec_index.read();
+            let mut cache = vec_index.write();
             if cache.index.is_some()
+                && current_max_rowid == cache.indexed_max_rowid
                 && (current_rows - cache.indexed_rows).abs() < VEC_INDEX_REBUILD_THRESHOLD
             {
                 return Ok(());
             }
+            if cache.rebuilding {
+                return Ok(());
+            }
+            cache.rebuilding = true;
         }
+
+        let rebuild = || -> anyhow::Result<(Box<dyn VectorIndex>, usize)> {
+            let mut backend = build_default_backend();
+            let mut stmt =
+                conn.prepare("SELECT id, embedding FROM memories WHERE embedding IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            })?;
+            let mut loaded = 0usize;
+            for row in rows {
+                let (id, blob) = row?;
+                let emb = vector::bytes_to_vec(&blob);
+                if !emb.is_empty() {
+                    backend.upsert(&id, &emb);
+                    loaded += 1;
+                }
+            }
+            Ok((backend, loaded))
+        };
+
+        let built = rebuild();
 
         let mut cache = vec_index.write();
-
-        if cache.index.is_some()
-            && (current_rows - cache.indexed_rows).abs() < VEC_INDEX_REBUILD_THRESHOLD
-        {
-            return Ok(());
-        }
-
-        let mut backend = build_default_backend();
-        let mut stmt =
-            conn.prepare("SELECT id, embedding FROM memories WHERE embedding IS NOT NULL")?;
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        })?;
-        let mut loaded = 0usize;
-        for row in rows {
-            let (id, blob) = row?;
-            let emb = vector::bytes_to_vec(&blob);
-            if !emb.is_empty() {
-                backend.upsert(&id, &emb);
-                loaded += 1;
+        cache.rebuilding = false;
+        match built {
+            Ok((backend, loaded)) => {
+                tracing::debug!(
+                    backend = backend.backend_name(),
+                    rows = loaded,
+                    "Rebuilt SqliteMemory vector index"
+                );
+                cache.index = Some(backend);
+                cache.indexed_rows = current_rows;
+                cache.indexed_max_rowid = current_max_rowid;
+                Ok(())
             }
+            Err(err) => Err(err),
         }
-        tracing::debug!(
-            backend = backend.backend_name(),
-            rows = loaded,
-            "Rebuilt SqliteMemory vector index"
-        );
-        cache.index = Some(backend);
-        cache.indexed_rows = current_rows;
-        Ok(())
     }
 
     fn open_connection(
@@ -606,6 +633,12 @@ impl SqliteMemory {
         }
     }
 
+    fn normalize_time_bound(value: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+            .unwrap_or_else(|_| value.to_string())
+    }
+
     fn content_hash(text: &str) -> String {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(text.as_bytes());
@@ -646,7 +679,7 @@ impl SqliteMemory {
         }
 
         let hash = Self::content_hash(text);
-        let now = Local::now().to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
 
         let conn = self.conn.clone();
         let hash_c = hash.clone();
@@ -833,8 +866,6 @@ impl SqliteMemory {
         category: Option<&str>,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
-        Self::ensure_vec_index_fresh(vec_index, conn)?;
-
         let overfetch = 8usize;
         let candidate_limit = limit.saturating_mul(overfetch).max(limit);
 
@@ -938,12 +969,12 @@ impl SqliteMemory {
             }
             if let Some(s) = since_ref {
                 let _ = write!(sql, " AND created_at >= ?{idx}");
-                param_values.push(Box::new(s.to_string()));
+                param_values.push(Box::new(Self::normalize_time_bound(s)));
                 idx += 1;
             }
             if let Some(u) = until_ref {
                 let _ = write!(sql, " AND created_at <= ?{idx}");
-                param_values.push(Box::new(u.to_string()));
+                param_values.push(Box::new(Self::normalize_time_bound(u)));
                 idx += 1;
             }
             let _ = write!(sql, " ORDER BY updated_at DESC LIMIT ?{idx}");
@@ -1020,7 +1051,7 @@ impl Memory for SqliteMemory {
             async move {
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     let conn = conn.lock();
-                    let now = Local::now().to_rfc3339();
+                    let now = chrono::Utc::now().to_rfc3339();
                     let cat = Self::category_to_str(&category);
                     let id = Uuid::new_v4().to_string();
 
@@ -1077,6 +1108,7 @@ impl Memory for SqliteMemory {
         };
 
         let conn = self.conn.clone();
+        let scan_conn = self.read_conn();
         let vec_index = self.vec_index.clone();
         let query = query.to_string();
         let sid = session_id.map(String::from);
@@ -1087,6 +1119,12 @@ impl Memory for SqliteMemory {
         let search_mode = effective_mode;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
+            if search_mode != SearchMode::Bm25 && query_embedding.is_some() {
+                let scan = scan_conn.lock();
+                if let Err(e) = Self::ensure_vec_index_fresh(&vec_index, &scan) {
+                    tracing::warn!("vector index refresh failed: {e}");
+                }
+            }
             let conn = conn.lock();
             let session_ref = sid.as_deref();
             let since_ref = since_owned.as_deref();
@@ -1255,10 +1293,10 @@ impl Memory for SqliteMemory {
                         param_values.push(Box::new(kw.clone()));
                     }
                     if let Some(s) = since_ref {
-                        param_values.push(Box::new(s.to_string()));
+                        param_values.push(Box::new(Self::normalize_time_bound(s)));
                     }
                     if let Some(u) = until_ref {
-                        param_values.push(Box::new(u.to_string()));
+                        param_values.push(Box::new(Self::normalize_time_bound(u)));
                     }
                     #[allow(clippy::cast_possible_wrap)]
                     param_values.push(Box::new(limit as i64));
@@ -1301,14 +1339,16 @@ impl Memory for SqliteMemory {
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
         let conn = self.conn.clone();
         let key = key.to_string();
+        // Scope reads to the current session plus global (session_id IS NULL)
+        // entries, preferring the session-specific row, so one session never reads
+        // another session's memory under the same key. Skip superseded rows.
+        let current_session = crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .filter(|s| !s.is_empty());
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
             let conn = conn.lock();
-            let mut stmt = conn.prepare(
-                "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by FROM memories WHERE key = ?1",
-            )?;
-
-            let mut rows = stmt.query_map(params![key], |row| {
+            let map_row = |row: &rusqlite::Row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
                     key: row.get(1)?,
@@ -1321,12 +1361,24 @@ impl Memory for SqliteMemory {
                     importance: row.get(7)?,
                     superseded_by: row.get(8)?,
                 })
-            })?;
-
-            match rows.next() {
-                Some(Ok(entry)) => Ok(Some(entry)),
-                _ => Ok(None),
-            }
+            };
+            let entry = if let Some(sid) = current_session {
+                let mut stmt = conn.prepare(
+                    "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by FROM memories \
+                     WHERE key = ?1 AND superseded_by IS NULL AND (session_id = ?2 OR session_id IS NULL) \
+                     ORDER BY (session_id IS NULL) ASC LIMIT 1",
+                )?;
+                let mut rows = stmt.query_map(params![key, sid], map_row)?;
+                rows.next().and_then(|r| r.ok())
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by FROM memories \
+                     WHERE key = ?1 AND superseded_by IS NULL LIMIT 1",
+                )?;
+                let mut rows = stmt.query_map(params![key], map_row)?;
+                rows.next().and_then(|r| r.ok())
+            };
+            Ok(entry)
         })
         .await?
     }
@@ -1410,10 +1462,27 @@ impl Memory for SqliteMemory {
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
         let conn = self.conn.clone();
         let key = key.to_string();
+        // Only delete within the current session's scope (plus global entries),
+        // never other sessions' memories under the same key.
+        let current_session = crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .filter(|s| !s.is_empty());
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let conn = conn.lock();
-            let affected = conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?;
+            let affected = if let Some(sid) = current_session {
+                // In-session delete stays isolated: only this session's entry (plus
+                // shared global entries), never another session's same-key memory.
+                conn.execute(
+                    "DELETE FROM memories WHERE key = ?1 AND (session_id = ?2 OR session_id IS NULL)",
+                    params![key, sid],
+                )?
+            } else {
+                // No ambient session (e.g. the explicit DELETE /api/memory/{key}
+                // admin endpoint): keep the original "delete this key everywhere"
+                // semantics.
+                conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?
+            };
             Ok(affected > 0)
         })
         .await?
@@ -1502,12 +1571,12 @@ impl Memory for SqliteMemory {
             }
             if let Some(ref since) = filter.since {
                 let _ = write!(sql, " AND created_at >= ?{idx}");
-                param_values.push(Box::new(since.clone()));
+                param_values.push(Box::new(Self::normalize_time_bound(since)));
                 idx += 1;
             }
             if let Some(ref until) = filter.until {
                 let _ = write!(sql, " AND created_at <= ?{idx}");
-                param_values.push(Box::new(until.clone()));
+                param_values.push(Box::new(Self::normalize_time_bound(until)));
                 let _ = idx;
             }
             sql.push_str(" ORDER BY created_at ASC");
@@ -1569,12 +1638,12 @@ impl Memory for SqliteMemory {
                 }
                 if let Some(ref s) = since_owned {
                     let _ = write!(sql, " AND created_at >= ?{idx}");
-                    param_values.push(Box::new(s.clone()));
+                    param_values.push(Box::new(Self::normalize_time_bound(s)));
                     idx += 1;
                 }
                 if let Some(ref s) = until_owned {
                     let _ = write!(sql, " AND created_at <= ?{idx}");
-                    param_values.push(Box::new(s.clone()));
+                    param_values.push(Box::new(Self::normalize_time_bound(s)));
                     let _ = idx;
                 }
                 sql.push_str(" ORDER BY updated_at DESC LIMIT ");
@@ -1643,7 +1712,7 @@ impl Memory for SqliteMemory {
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let conn = conn.lock();
-            let now = Local::now().to_rfc3339();
+            let now = chrono::Utc::now().to_rfc3339();
             let cat = Self::category_to_str(&category);
             let id = Uuid::new_v4().to_string();
 

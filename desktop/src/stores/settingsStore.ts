@@ -24,6 +24,24 @@ type PendingCodingModeTransition = {
 
 const LOCALE_STORAGE_KEY = 'sen-locale'
 
+export async function syncTrayLabels(locale: Locale): Promise<void> {
+  if (typeof window === 'undefined') return
+  if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window)) return
+  try {
+    const [{ invoke }, { translate }] = await Promise.all([
+      import('@tauri-apps/api/core'),
+      import('../i18n'),
+    ])
+    await invoke('set_tray_labels', {
+      show: translate(locale, 'tray.show'),
+      stopComputer: translate(locale, 'tray.stopComputerControl'),
+      quit: translate(locale, 'tray.quit'),
+    })
+  } catch {
+    // Tray label sync is best-effort (e.g. tray not yet initialized); ignore.
+  }
+}
+
 function getStoredLocale(): Locale {
   try {
     const stored = localStorage.getItem(LOCALE_STORAGE_KEY)
@@ -461,6 +479,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       .then(() => {
         set({ locale })
         try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch {  }
+        void syncTrayLabels(locale)
       })
   },
 

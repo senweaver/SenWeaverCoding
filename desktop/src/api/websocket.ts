@@ -27,6 +27,11 @@ const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'start_design_generation',
   'start_plan_execution',
   'set_debug_submode',
+  // Mode/config toggles must survive a reconnect: dropping them lets the backend
+  // diverge from the UI (e.g. plan mode silently lost -> write ops execute).
+  'set_permission_mode',
+  'set_coding_mode',
+  'set_pii_config',
 ])
 
 function isCriticalMessage(message: ClientMessage): boolean {

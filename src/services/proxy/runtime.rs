@@ -12,6 +12,8 @@ use crate::config::schema::{is_disallowed_custom_header, normalize_proxy_url_opt
 
 const FALLBACK_TIMEOUT_SECS: u64 = 120;
 const FALLBACK_CONNECT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_READ_IDLE_TIMEOUT_SECS: u64 = 300;
 
 fn timed_fallback_client(
     timeout_secs: Option<u64>,
@@ -160,18 +162,23 @@ impl ProxyRuntime {
         crate::services::proxy::registry::register(service_key);
         let ck = format!(
             "{}|{}",
-            cache_key(service_key, None, None),
+            cache_key(service_key, None, Some(DEFAULT_CONNECT_TIMEOUT_SECS)),
             self.proxy_fingerprint(service_key)
         );
         if let Some(c) = self.cached_client(&ck) {
             return c;
         }
+        let b = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+            .read_timeout(std::time::Duration::from_secs(DEFAULT_READ_IDLE_TIMEOUT_SECS))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30));
         let c = self
-            .apply_to_builder(reqwest::Client::builder(), service_key)
+            .apply_to_builder(b, service_key)
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(service_key, "Failed to build proxied client: {e}");
-                timed_fallback_client(None, None, false)
+                timed_fallback_client(None, Some(DEFAULT_CONNECT_TIMEOUT_SECS), false)
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -438,10 +445,14 @@ impl ProxyRuntime {
         let mut b = reqwest::Client::builder();
         if let Some(t) = timeout_secs {
             b = b.timeout(std::time::Duration::from_secs(t));
+        } else {
+            b = b.read_timeout(std::time::Duration::from_secs(
+                DEFAULT_READ_IDLE_TIMEOUT_SECS,
+            ));
         }
-        if let Some(ct) = connect_timeout_secs {
-            b = b.connect_timeout(std::time::Duration::from_secs(ct));
-        }
+        b = b.connect_timeout(std::time::Duration::from_secs(
+            connect_timeout_secs.unwrap_or(DEFAULT_CONNECT_TIMEOUT_SECS),
+        ));
         b = apply_explicit_proxy_to_builder(b, service_key, proxy_url);
         let c = b.build().unwrap_or_else(|e| {
             tracing::warn!(
@@ -465,9 +476,20 @@ impl ProxyRuntime {
         tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
     )> {
         let proxy_url = self.resolve_ws_proxy_url(service_key, ws_url, channel_proxy_url);
+        let connect_timeout = std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS);
         match proxy_url {
             None => {
-                let (stream, resp) = tokio_tungstenite::connect_async(ws_url).await?;
+                let (stream, resp) = tokio::time::timeout(
+                    connect_timeout,
+                    tokio_tungstenite::connect_async(ws_url),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "websocket connect to {ws_url} timed out after \
+                         {DEFAULT_CONNECT_TIMEOUT_SECS}s"
+                    )
+                })??;
                 let inner = stream.into_inner();
                 let boxed = BoxedIo(Box::new(inner));
                 let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
@@ -478,7 +500,14 @@ impl ProxyRuntime {
                 .await;
                 Ok((ws, resp))
             }
-            Some(p) => ws_connect_via_proxy(ws_url, &p).await,
+            Some(p) => tokio::time::timeout(connect_timeout, ws_connect_via_proxy(ws_url, &p))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "websocket connect to {ws_url} via proxy timed out after \
+                         {DEFAULT_CONNECT_TIMEOUT_SECS}s"
+                    )
+                })?,
         }
     }
 

@@ -3,14 +3,12 @@
 // Licensed under the MIT License.
 
 pub mod cli;
-pub mod init;
 pub mod mcp_server;
 pub mod sdk;
 pub mod sdk_types;
 pub mod session_driven;
 
 pub use cli::CliEntrypoint;
-pub use init::InitEntrypoint;
 pub use mcp_server::McpServerEntrypoint;
 pub use sdk::SdkEntrypoint;
 pub use sdk::SdkSession;

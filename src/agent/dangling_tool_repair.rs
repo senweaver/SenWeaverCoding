@@ -14,14 +14,17 @@ const SYNTHETIC_TOOL_REPLY: &str =
 const INTERRUPTED_TURN_NOTE: &str =
     "[System note: your MOST RECENT task - the user request immediately above this note - was \
      interrupted (cancelled, errored, or the app restarted) before it finished. This note refers \
-     ONLY to that single most-recent task. If the user's latest message asks to continue or finish \
-     it - whether explicitly (e.g. \"继续\" / \"continue\") or clearly implied by context - then \
-     resume THAT most-recent interrupted task and nothing else, picking up from where it stopped. \
-     Do NOT resume, restate, or merge in any OLDER interrupted, stopped, superseded, or \
+     ONLY to that single most-recent task. Resume it ONLY when the user's latest message \
+     EXPLICITLY asks to continue or finish it (e.g. \"继续\" / \"continue\" / \"接着\" / \"go on\") \
+     or directly references that task; in that case pick up from where it stopped and do NOT redo \
+     already-completed steps. If the latest message is anything else - a greeting (\"你好\" / \
+     \"hi\" / \"在吗\"), small talk, an acknowledgement, or a new or unrelated request - treat IT \
+     as the authoritative current request, answer it directly, and do NOT resume or re-run the \
+     interrupted task on your own. Never treat a short or ambiguous message as implicit consent to \
+     keep going. Never resume, restate, or merge in any OLDER interrupted, stopped, superseded, or \
      already-finished task from earlier in this conversation (including earlier design-task \
-     contracts and their artifacts) - those are done or abandoned. If the latest message is a \
-     different request, treat it as the current authoritative request instead. Always judge from \
-     context, anchored to the most recent task.]";
+     contracts and their artifacts) - those are done or abandoned. Judge strictly from the user's \
+     literal latest message.]";
 
 pub fn drop_payloadless_assistant_messages(history: &mut Vec<ConversationMessage>) {
     let before = history.len();
@@ -61,6 +64,14 @@ pub fn is_interrupted_turn_note(content: &str) -> bool {
     content == INTERRUPTED_TURN_NOTE
 }
 
+pub fn is_orphan_close_note(content: &str) -> bool {
+    content == ORPHAN_CLOSE_NOTE
+}
+
+pub fn is_turn_close_note(content: &str) -> bool {
+    is_interrupted_turn_note(content) || is_orphan_close_note(content)
+}
+
 pub fn tail_signals_interrupted_turn(history: &[ConversationMessage]) -> bool {
     match history.last() {
         Some(ConversationMessage::Chat(c)) if c.role == "user" => true,
@@ -89,18 +100,32 @@ pub fn note_interrupted_turn(history: &mut Vec<ConversationMessage>) {
     ));
 }
 
-pub fn close_orphan_user_turns(history: &mut Vec<ConversationMessage>) {
+const ORPHAN_CLOSE_NOTE: &str =
+    "[System note: the previous turn ended without an assistant reply (interrupted, cancelled, or \
+     the app restarted). Treat the latest [CURRENT REQUEST] below as the authoritative instruction \
+     for what to do now. Do not infer a task to resume from this note.]";
+
+pub fn close_orphan_user_turns(
+    history: &mut Vec<ConversationMessage>,
+    has_authoritative_unfinished: bool,
+) {
     let ends_with_user = matches!(
         history.last(),
         Some(ConversationMessage::Chat(c)) if c.role == "user"
     );
     if ends_with_user {
+        let note = if has_authoritative_unfinished {
+            ORPHAN_CLOSE_NOTE
+        } else {
+            INTERRUPTED_TURN_NOTE
+        };
         tracing::warn!(
             target: "agent.dangling_tool_repair",
+            neutral = has_authoritative_unfinished,
             "closing orphan user turn from an interrupted/crashed prior turn before new request"
         );
         history.push(ConversationMessage::Chat(
-            crate::providers::traits::ChatMessage::assistant(INTERRUPTED_TURN_NOTE),
+            crate::providers::traits::ChatMessage::assistant(note),
         ));
     }
 }

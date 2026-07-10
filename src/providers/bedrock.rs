@@ -532,11 +532,12 @@ impl BedrockProvider {
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    if system_blocks.is_empty() {
-                        system_blocks.push(SystemBlock::Text(TextBlock {
-                            text: msg.content.clone(),
-                        }));
-                    }
+                    // Concatenate every system message (join with a blank line) so
+                    // multi-part system prompts are preserved instead of silently
+                    // dropping all but the first block.
+                    system_blocks.push(SystemBlock::Text(TextBlock {
+                        text: msg.content.clone(),
+                    }));
                 }
                 "assistant" => {
                     if let Some(blocks) = Self::parse_assistant_tool_call_message(&msg.content) {

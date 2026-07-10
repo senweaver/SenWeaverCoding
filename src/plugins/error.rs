@@ -24,6 +24,9 @@ pub enum PluginError {
     #[error("plugin '{0}' is already loaded")]
     AlreadyLoaded(String),
 
+    #[error("plugin limit reached ({loaded}/{max}); raise plugins.max_plugins to load more")]
+    LimitReached { loaded: usize, max: usize },
+
     #[error("plugin capability not supported: {0}")]
     UnsupportedCapability(String),
 

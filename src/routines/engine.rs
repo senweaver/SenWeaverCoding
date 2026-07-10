@@ -189,3 +189,23 @@ pub fn load_routines(workspace_dir: &std::path::Path) -> Vec<Routine> {
     let path = workspace_dir.join("routines.toml");
     load_routines_from_file(&path)
 }
+
+pub fn save_routines_to_file(
+    path: &std::path::Path,
+    routines: &[Routine],
+) -> anyhow::Result<()> {
+    #[derive(Serialize)]
+    struct Manifest<'a> {
+        routines: &'a [Routine],
+    }
+    let content = toml::to_string_pretty(&Manifest { routines })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+pub fn save_routines(workspace_dir: &std::path::Path, routines: &[Routine]) -> anyhow::Result<()> {
+    save_routines_to_file(&workspace_dir.join("routines.toml"), routines)
+}

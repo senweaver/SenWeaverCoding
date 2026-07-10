@@ -155,6 +155,7 @@ pub fn is_file_mutation_tool(name: &str) -> bool {
             | "multi_edit"
             | "notebook_edit"
             | "patch_apply"
+            | "diff_apply"
             | "glob_edit"
             | "code_xfile_refactor"
             | "lsp_rename"
@@ -262,28 +263,16 @@ pub fn pre_turn_reminder(mode: CodingMode) -> Option<&'static str> {
         ),
         CodingMode::Agent => Some(
             "[Agent Reminder] You auto-approve all tool calls — every action is real. \
-             For each subtask: plan → execute → self-verify (run the relevant \
-             check/test command and confirm success) BEFORE moving on. For tasks \
+             Answer the user's CURRENT message; do NOT resume an earlier task, plan, or \
+             curator document unless THIS message asks for it. The mere presence of files \
+             on disk (e.g. `.senweavercoding/curators/<slug>/impl_blueprint.md`) is NOT a \
+             request — never start implementing a curator/blueprint/plan unless the user \
+             explicitly says so in this turn or a `[Curator build]` / `[Plan execution]` \
+             directive is present. For each subtask: plan → execute → self-verify (run the \
+             relevant check/test command and confirm success) BEFORE moving on. For tasks \
              touching 5+ files, run `code_to_spec(action=\"summarize\")` first to \
              build a spec map. For web-facing work, drive the embedded browser dock \
-             via the `browser` tool — the user sees the dock live. \
-             \n\n\
-             [Curator Handoff — CRITICAL] If the user has just clicked Build on a Curator \
-             document (the workspace contains a fresh `.senweavercoding/curators/<slug>/final.md` + \
-             `impl_blueprint.md`, or the user said \"implement the curator doc / build it / \
-             ship the report\"), `.senweavercoding/curators/<slug>/impl_blueprint.md` is the BINDING contract —\
-             read it FIRST via `file_read`, then read `final.md` and the entries in \
-             `sources.md` / `research_notes.md` for context. The implementation that lands \
-             this turn MUST mirror impl_blueprint.md verbatim: every module, every \
-             interface, every build & verification command stated in the blueprint must \
-             be honoured. Do NOT silently substitute a different design. If the blueprint \
-             is ambiguous or contradicts itself, surface that with `ask_question` BEFORE \
-             writing code; do not improvise an alternate spec. To drive the user's live \
-             progress bar, break the blueprint into concrete ordered steps with ONE \
-             `update_plan(action=\"set\")` call, then flip each step `in_progress`→`completed` \
-             via `update_plan(action=\"update\")` as you go (one at a time, never batched at \
-             the end). The final deliverable is a fully runnable engineering project that \
-             materialises the document.",
+             via the `browser` tool — the user sees the dock live.",
         ),
         CodingMode::Pair => Some(
             "[Pair Reminder] After every tool batch the runtime WILL pause and return \

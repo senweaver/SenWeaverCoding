@@ -318,7 +318,20 @@ impl AcpServer {
             let _ = result_tx.send(result);
         });
 
-        while let Some(event) = event_rx.recv().await {
+        const ACP_TURN_STALL_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(1800);
+        loop {
+            let event = match tokio::time::timeout(ACP_TURN_STALL_TIMEOUT, event_rx.recv()).await {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,
+                Err(_) => {
+                    warn!(
+                        "ACP session {session_id} produced no events for {}s; treating turn as stalled and unblocking the server",
+                        ACP_TURN_STALL_TIMEOUT.as_secs()
+                    );
+                    break;
+                }
+            };
             let notification = match &event {
                 TurnEvent::Chunk { delta } => JsonRpcNotification {
                     jsonrpc: "2.0",
@@ -650,17 +663,17 @@ impl AcpServer {
             }
         };
 
+        session.last_active = Instant::now();
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(sid, session);
+        }
+
         let result = result.map_err(|e| RpcError {
             code: INTERNAL_ERROR,
             message: format!("Agent turn failed: {e}"),
             data: None,
         })?;
-
-        {
-            session.last_active = Instant::now();
-            let mut sessions = self.sessions.lock().await;
-            sessions.insert(sid, session);
-        }
 
         Ok(serde_json::json!({
             "sessionId": session_id,

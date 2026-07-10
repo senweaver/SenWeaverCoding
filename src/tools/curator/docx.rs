@@ -1594,8 +1594,33 @@ fn is_table_separator(line: &str) -> bool {
 
 #[cfg(feature = "tool-curator")]
 fn split_table_row(line: &str) -> Vec<String> {
-    let trimmed = line.trim().trim_matches('|');
-    trimmed.split('|').map(|c| c.trim().to_string()).collect()
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    let mut cells: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut escaped = false;
+    for ch in t.chars() {
+        if escaped {
+            if ch != '|' && ch != '\\' {
+                cur.push('\\');
+            }
+            cur.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '|' {
+            cells.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    if escaped {
+        cur.push('\\');
+    }
+    cells.push(cur.trim().to_string());
+    cells
 }
 
 #[cfg(feature = "tool-curator")]

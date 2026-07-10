@@ -255,7 +255,7 @@ impl DelegationPlan {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet, VecDeque};
         let ids: HashSet<&str> = self.sub_tasks.iter().map(|t| t.id.as_str()).collect();
         if ids.len() != self.sub_tasks.len() {
             return Err("duplicate sub-task IDs".into());
@@ -266,6 +266,47 @@ impl DelegationPlan {
                     return Err(format!("unknown dependency '{}' in task '{}'", dep, t.id));
                 }
             }
+        }
+
+        let mut indegree: HashMap<&str, usize> = HashMap::new();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for t in &self.sub_tasks {
+            indegree.entry(t.id.as_str()).or_insert(0);
+            for dep in &t.depends_on {
+                *indegree.entry(t.id.as_str()).or_insert(0) += 1;
+                dependents.entry(dep.as_str()).or_default().push(t.id.as_str());
+            }
+        }
+        let mut queue: VecDeque<&str> = indegree
+            .iter()
+            .filter(|(_, deg)| **deg == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut resolved = 0usize;
+        while let Some(id) = queue.pop_front() {
+            resolved += 1;
+            if let Some(children) = dependents.get(id) {
+                for child in children {
+                    if let Some(deg) = indegree.get_mut(child) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+        if resolved != self.sub_tasks.len() {
+            let mut cyclic: Vec<&str> = indegree
+                .iter()
+                .filter(|(_, deg)| **deg > 0)
+                .map(|(id, _)| *id)
+                .collect();
+            cyclic.sort_unstable();
+            return Err(format!(
+                "dependency cycle detected involving tasks: {}",
+                cyclic.join(", ")
+            ));
         }
         Ok(())
     }

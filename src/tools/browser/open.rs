@@ -140,7 +140,7 @@ async fn launch_status(
         Ok(result) => result,
         Err(_) => {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "system browser launcher timed out after 15s",

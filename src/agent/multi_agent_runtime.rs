@@ -205,20 +205,29 @@ impl MultiAgentRuntime {
         }
     }
 
+    pub const STALE_RUNNING_TASK_MAX: std::time::Duration =
+        std::time::Duration::from_secs(30 * 60);
+
     pub fn maintenance(&self) -> MaintenanceReport {
         let supervisor_events = self.supervisor.health_check();
         let expired_tasks = self.task_queue.inner().expire_overdue();
+        let reclaimed_tasks = self
+            .task_queue
+            .inner()
+            .reclaim_stale_running(Self::STALE_RUNNING_TASK_MAX);
         let expired_entries = self.blackboard.inner().evict_expired();
         let (expired_locks, expired_barriers, expired_votes) = self.coordinator.maintenance();
 
         if !supervisor_events.is_empty()
             || expired_tasks > 0
+            || reclaimed_tasks > 0
             || expired_entries > 0
             || expired_locks > 0
         {
             debug!(
                 supervisor_events = supervisor_events.len(),
                 expired_tasks,
+                reclaimed_tasks,
                 expired_entries,
                 expired_locks,
                 expired_barriers,
@@ -230,6 +239,7 @@ impl MultiAgentRuntime {
         MaintenanceReport {
             supervisor_events_count: supervisor_events.len(),
             expired_tasks,
+            reclaimed_tasks,
             expired_entries,
             expired_locks,
             expired_barriers,
@@ -389,6 +399,7 @@ impl Default for MultiAgentRuntime {
 pub struct MaintenanceReport {
     pub supervisor_events_count: usize,
     pub expired_tasks: usize,
+    pub reclaimed_tasks: usize,
     pub expired_entries: usize,
     pub expired_locks: usize,
     pub expired_barriers: usize,

@@ -134,7 +134,16 @@ impl ToolOutputCompressor {
             }
         }
 
-        if self.config.json_compact && looks_like_json(&result) {
+        // Only compact JSON when the output is actually over budget. JSON-shaped
+        // tool output (http_request / web_fetch / MCP responses) is data the model
+        // must read verbatim; lossily truncating strings/arrays inside a normal-size
+        // payload silently corrupts it. Gate on max_chars so we only degrade when
+        // we would otherwise hard-truncate anyway.
+        if self.config.json_compact
+            && max_chars > 0
+            && result.len() > max_chars
+            && looks_like_json(&result)
+        {
             let before = result.len();
             result = compact_json(&result);
             if result.len() < before {

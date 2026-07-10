@@ -10,9 +10,13 @@ pub const ASK_QUESTION_WAIT_SENTINEL: &str = "__WAITING_FOR_USER_RESPONSE__";
 
 pub const ASK_QUESTION_PAUSE_NOTICE: &str =
     "User has been asked the clarifying question(s) above. \
-     The runtime will deliver the user's reply in the next turn. \
-     Stop here - do NOT call any other tool, do NOT draft a plan \
-     yet. Wait for the next user message and resume planning then.";
+     The runtime will deliver the user's next message in the following turn. \
+     Stop here for now - do NOT call any other tool and do NOT draft a plan yet. \
+     The next user message may be an answer to the question(s) above, or it may \
+     be a brand-new request: always treat the latest user message as \
+     authoritative. If it answers the question, continue from that answer; if it \
+     shifts to a new request, handle the new request directly. Do NOT ignore the \
+     latest input to force resumption of the previous task.";
 
 pub fn is_ask_question_pause(tool_name: &str, output: &str) -> bool {
     matches!(tool_name, "ask_question" | "AskQuestion") && output.trim() == ASK_QUESTION_WAIT_SENTINEL

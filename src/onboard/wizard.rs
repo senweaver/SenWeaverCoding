@@ -132,6 +132,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
     let config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
+        env_override_baseline: None,
         api_key: if api_key.is_empty() {
             None
         } else {
@@ -173,6 +174,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         cron: crate::config::CronConfig::default(),
         channels_config,
         memory: memory_config,
+        memory_runtime: crate::config::domain::MemoryRuntimeExtras::default(),
         storage: StorageConfig::default(),
         tunnel: tunnel_config,
         gateway: crate::config::GatewayConfig::default(),
@@ -598,6 +600,7 @@ async fn run_quick_setup_with_home(
     let config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
+        env_override_baseline: None,
         api_key: credential_override.map(|c| {
             let mut s = String::with_capacity(c.len());
             s.push_str(c);
@@ -639,6 +642,7 @@ async fn run_quick_setup_with_home(
         cron: crate::config::CronConfig::default(),
         channels_config: ChannelsConfig::default(),
         memory: memory_config,
+        memory_runtime: crate::config::domain::MemoryRuntimeExtras::default(),
         storage: StorageConfig::default(),
         tunnel: crate::config::TunnelConfig::default(),
         gateway: crate::config::GatewayConfig::default(),

@@ -31,7 +31,7 @@ impl TextBrowserTool {
         }
     }
 
-    fn validate_url(url: &str) -> anyhow::Result<String> {
+    async fn validate_url(url: &str) -> anyhow::Result<String> {
         let url = url.trim();
 
         if url.is_empty() {
@@ -45,6 +45,21 @@ impl TextBrowserTool {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             anyhow::bail!("Only http:// and https:// URLs are allowed");
         }
+
+        let host = crate::tools::web::fetch::extract_host(url)?;
+        if crate::tools::web::fetch::is_private_or_local_host(&host) {
+            anyhow::bail!(
+                "Blocked local/private host '{host}': text_browser only renders public web \
+                 pages. Use the `browser` or `web_fetch` tool (with allowed_private_hosts) for \
+                 local targets."
+            );
+        }
+        let host_for_dns = host.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::tools::web::fetch::validate_resolved_host_is_public(&host_for_dns)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("host validation task failed: {e}"))??;
 
         Ok(url.to_string())
     }
@@ -62,16 +77,21 @@ impl TextBrowserTool {
         }
     }
 
+    async fn probe_installed(binary: &str) -> bool {
+        let binary = binary.to_string();
+        match tokio::task::spawn_blocking(move || which::which(&binary).is_ok()).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "text browser probe task failed");
+                false
+            }
+        }
+    }
+
     async fn detect_browser() -> Option<String> {
         for browser in SUPPORTED_BROWSERS {
-            if let Ok(output) = crate::util::hidden_async_command("which")
-                .arg(browser)
-                .output()
-                .await
-            {
-                if output.status.success() {
-                    return Some((*browser).to_string());
-                }
+            if Self::probe_installed(browser).await {
+                return Some((*browser).to_string());
             }
         }
         None
@@ -88,13 +108,7 @@ impl TextBrowserTool {
                 );
             }
 
-            let installed = crate::util::hidden_async_command("which")
-                .arg(&browser)
-                .output()
-                .await
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !installed {
+            if !Self::probe_installed(&browser).await {
                 anyhow::bail!("Requested text browser '{browser}' is not installed");
             }
             return Ok(browser);
@@ -103,13 +117,7 @@ impl TextBrowserTool {
         if let Some(ref preferred) = self.preferred_browser {
             let preferred = preferred.trim().to_lowercase();
             if SUPPORTED_BROWSERS.contains(&preferred.as_str()) {
-                let installed = crate::util::hidden_async_command("which")
-                    .arg(&preferred)
-                    .output()
-                    .await
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if installed {
+                if Self::probe_installed(&preferred).await {
                     return Ok(preferred);
                 }
                 tracing::warn!(
@@ -184,7 +192,7 @@ impl Tool for TextBrowserTool {
             });
         }
 
-        let url = match Self::validate_url(url) {
+        let url = match Self::validate_url(url).await {
             Ok(v) => v,
             Err(e) => {
                 return Ok(ToolResult {

@@ -11,6 +11,8 @@ import {
   useWorkspaceQueueStore,
   workspaceKeyFor,
   tryDrainWorkspace,
+  takeLastDrainedItem,
+  requeueRejectedItem,
 } from './workspaceQueueStore'
 import { useSessionRunStateStore } from './sessionRunStateStore'
 import { useCLITaskStore } from './cliTaskStore'
@@ -22,6 +24,7 @@ import { useWorkersStore } from './workersStore'
 import { useBrowserPanelStore } from './browserPanelStore'
 import { useDesignerCanvasStore } from './designerCanvasStore'
 import { useLspStore } from './lspStore'
+import { useDebugStore } from './debugStore'
 import { useUIStore } from './uiStore'
 import { t } from '../i18n'
 import { isWindowBusy, onWindowIdle } from '../lib/windowBusy'
@@ -54,6 +57,7 @@ import type {
   AgentTimelineEntry,
   AttachmentRef,
   ChatState,
+  DesignGenerationOptions,
   PendingEdit,
   SubagentTimelineBucket,
   UIAttachment,
@@ -89,7 +93,6 @@ export type PerSessionState = {
   statusVerb: string
   slashCommands: Array<{ name: string; description: string }>
   agentTaskNotifications: Record<string, AgentTaskNotification>
-  elapsedTimer: ReturnType<typeof setInterval> | null
   composerPrefill?: {
     text: string
     attachments?: UIAttachment[]
@@ -196,7 +199,6 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   statusVerb: '',
   slashCommands: [],
   agentTaskNotifications: {},
-  elapsedTimer: null,
   composerPrefill: null,
   pendingRewind: null,
   pendingSendAfterRewind: null,
@@ -288,14 +290,7 @@ type ChatStore = {
     options?: {
       displayContent?: string
       __internalDrain?: boolean
-      designGeneration?: {
-        submode: string
-        params: Record<string, unknown>
-        refArtifact?: string
-        refArtifactName?: string
-        refElement?: string
-        refElementLabel?: string
-      }
+      designGeneration?: DesignGenerationOptions
     },
   ) => void
   respondToPermission: (
@@ -328,6 +323,7 @@ type ChatStore = {
   loadHistory: (sessionId: string) => Promise<void>
   reloadHistory: (sessionId: string) => Promise<void>
   loadOlderHistory: (sessionId: string) => Promise<void>
+  capMessageWindow: (sessionId: string) => void
   queueComposerPrefill: (
     sessionId: string,
     prefill: { text: string; attachments?: UIAttachment[] },
@@ -1178,6 +1174,18 @@ function updateWorkerSubagentTimeline(
   })
 }
 
+// Bounds on a single subagent timeline held in the store: a long-running
+// subagent streams text that merges into one growing entry, and its entry list
+// grows with every tool call. Cap both so a busy subagent can't pin unbounded
+// memory. Merged text keeps the most recent tail (the streaming frontier).
+const MAX_TIMELINE_ENTRY_CHARS = 100_000
+const MAX_TIMELINE_ENTRIES = 800
+
+function capTimelineText(text: string): string {
+  if (text.length <= MAX_TIMELINE_ENTRY_CHARS) return text
+  return `… [truncated]\n${text.slice(text.length - MAX_TIMELINE_ENTRY_CHARS)}`
+}
+
 function appendTimelineEntry(
   timeline: AgentTimeline,
   entry: AgentTimelineEntry,
@@ -1192,7 +1200,7 @@ function appendTimelineEntry(
   ) {
     const merged: AgentTimelineEntry = {
       kind: entry.kind,
-      text: `${last.text}${entry.text}`,
+      text: capTimelineText(`${last.text}${entry.text}`),
     }
     return {
       ...timeline,
@@ -1200,9 +1208,13 @@ function appendTimelineEntry(
       updatedAt: now,
     }
   }
+  const appended = [...entries, entry]
   return {
     ...timeline,
-    entries: [...entries, entry],
+    entries:
+      appended.length > MAX_TIMELINE_ENTRIES
+        ? appended.slice(appended.length - MAX_TIMELINE_ENTRIES)
+        : appended,
     updatedAt: now,
   }
 }
@@ -1317,9 +1329,9 @@ function emitNoModelWarning(sessionId?: string): void {
 }
 
 const pendingDeltaBySession = new Map<string, string>()
-const flushTimerBySession = new Map<string, number>()
+const flushTimerBySession = new Map<string, ScheduledFlushHandle>()
 const pendingThinkingBySession = new Map<string, string>()
-const thinkingFlushTimerBySession = new Map<string, number>()
+const thinkingFlushTimerBySession = new Map<string, ScheduledFlushHandle>()
 const pendingDeltaFirstAt = new Map<string, number>()
 const pendingThinkingFirstAt = new Map<string, number>()
 const lastStreamActivityAtBySession = new Map<string, number>()
@@ -1425,18 +1437,25 @@ function nowMs(): number {
   return Date.now()
 }
 
-function scheduleRafCallback(cb: () => void): number {
+type ScheduledFlushHandle = { kind: 'raf' | 'timeout'; id: number }
+
+function scheduleRafCallback(cb: () => void): ScheduledFlushHandle {
   if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-    return window.requestAnimationFrame(cb)
+    return { kind: 'raf', id: window.requestAnimationFrame(cb) }
   }
-  return setTimeout(cb, 16) as unknown as number
+  return { kind: 'timeout', id: setTimeout(cb, 16) as unknown as number }
 }
 
-function cancelScheduledFlush(id: number): void {
-  if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
-    window.cancelAnimationFrame(id)
+function cancelScheduledFlush(handle: ScheduledFlushHandle): void {
+  if (
+    handle.kind === 'raf' &&
+    typeof window !== 'undefined' &&
+    typeof window.cancelAnimationFrame === 'function'
+  ) {
+    window.cancelAnimationFrame(handle.id)
+  } else {
+    clearTimeout(handle.id as unknown as ReturnType<typeof setTimeout>)
   }
-  clearTimeout(id as unknown as ReturnType<typeof setTimeout>)
 }
 
 const pendingDesignCanvasReveal = new Set<string>()
@@ -1444,6 +1463,45 @@ const pendingDesignCanvasReveal = new Set<string>()
 function revealDesignCanvasIfPending(sessionId: string) {
   if (!pendingDesignCanvasReveal.delete(sessionId)) return
   useDesignerCanvasStore.getState().setVisible(sessionId, true)
+}
+
+const lastDirectSendBySession = new Map<
+  string,
+  {
+    content: string
+    attachments?: AttachmentRef[]
+    displayContent?: string
+    designGeneration?: DesignGenerationOptions
+    at: number
+  }
+>()
+const DIRECT_SEND_REQUEUE_WINDOW_MS = 30_000
+
+function takeLastDirectSend(sessionId: string) {
+  const entry = lastDirectSendBySession.get(sessionId)
+  if (!entry) return null
+  lastDirectSendBySession.delete(sessionId)
+  if (Date.now() - entry.at > DIRECT_SEND_REQUEUE_WINDOW_MS) return null
+  return entry
+}
+
+function designRefFieldsFrom(
+  designGeneration?: DesignGenerationOptions,
+): Partial<Extract<UIMessage, { type: 'user_text' }>> {
+  if (!designGeneration?.refArtifact) return {}
+  return {
+    designRef: designGeneration.refArtifact,
+    ...(designGeneration.refArtifactName
+      ? { designRefName: designGeneration.refArtifactName }
+      : {}),
+    ...(designGeneration.refElement
+      ? {
+          designRefElement: designGeneration.refElement,
+          designRefElementLabel:
+            designGeneration.refElementLabel ?? designGeneration.refElement,
+        }
+      : {}),
+  }
 }
 
 function consumePendingDelta(sessionId: string): string {
@@ -1762,6 +1820,29 @@ async function hydrateCumulativeTokensFromUsage(sessionId: string): Promise<void
 
 const HISTORY_PAGE_SIZE = 200
 
+// Upper bound on messages kept in memory for one session. Long-running sessions
+// would otherwise grow this array without bound. When exceeded (and only while the
+// user is pinned to the tail, at a turn boundary) the oldest messages are dropped
+// and history is marked pageable so scroll-up refetches them from the backend.
+// The MessageList keeps Virtuoso's firstItemIndex consistent with the front trim.
+export const MAX_IN_MEMORY_MESSAGES = 2500
+const MESSAGE_TRIM_CHUNK = 500
+
+// Cap the size of a single tool_result held in the store. The backend already
+// compresses tool output, but pathological results (huge file reads, dumps) can
+// still pin hundreds of KB per message across a long session. Truncating the
+// displayed copy past this point is harmless (tool cards are previewed/collapsed)
+// and bounds per-message memory. Non-string structured results are left intact.
+const MAX_TOOL_RESULT_CHARS = 200_000
+
+function capToolResultContent(content: unknown): unknown {
+  if (typeof content === 'string' && content.length > MAX_TOOL_RESULT_CHARS) {
+    const dropped = content.length - MAX_TOOL_RESULT_CHARS
+    return `${content.slice(0, MAX_TOOL_RESULT_CHARS)}\n… [truncated ${dropped} chars]`
+  }
+  return content
+}
+
 function stripAttachmentMarkersForDisplay(content: string): string {
   if (!content.includes('[IMAGE:') && !content.includes('[Attached file:')) return content
   const kept = content.split('\n').filter((line) => {
@@ -1783,6 +1864,7 @@ function mapPersistedAttachments(entry: MessageEntry): UIAttachment[] | undefine
     mapped.push({
       type,
       name: att.name || att.path || type,
+      ...(att.path ? { path: att.path } : {}),
       data: att.data,
       mimeType: att.mimeType,
     })
@@ -2175,7 +2257,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   disconnectSession: (sessionId) => {
     const session = get().sessions[sessionId]
-    if (session?.elapsedTimer) clearInterval(session.elapsedTimer)
     if (hasPendingDelta(sessionId)) {
       const text = consumePendingDelta(sessionId)
       set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({ streamingText: sess.streamingText + text })) }))
@@ -2207,7 +2288,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   suspendSession: (sessionId) => {
     const session = get().sessions[sessionId]
     if (!session) return
-    if (session.elapsedTimer) clearInterval(session.elapsedTimer)
     if (hasPendingDelta(sessionId)) {
       const text = consumePendingDelta(sessionId)
       set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({ streamingText: sess.streamingText + text })) }))
@@ -2228,7 +2308,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         activeThinkingContent: '',
         activeThinkingStartedAt: null,
         activeThinkingLastChunkAt: null,
-        elapsedTimer: null,
         statusVerb: '',
       })),
     }))
@@ -2275,6 +2354,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ? attachments.map((a) => ({
             type: a.type,
             name: a.name || a.path || a.mimeType || a.type,
+            ...(a.path ? { path: a.path } : {}),
             data: a.data,
             mimeType: a.mimeType,
           }))
@@ -2303,6 +2383,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                     attachments: uiAttachments,
                     timestamp: Date.now(),
                     pending: true,
+                    ...designRefFieldsFrom(options?.designGeneration),
                   },
                 ],
               },
@@ -2368,22 +2449,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content: userFacingContent,
         attachments: isMemberSession ? undefined : uiAttachments,
         timestamp: Date.now(),
-        ...(options?.designGeneration?.refArtifact
-          ? {
-              designRef: options.designGeneration.refArtifact,
-              ...(options.designGeneration.refArtifactName
-                ? { designRefName: options.designGeneration.refArtifactName }
-                : {}),
-              ...(options.designGeneration.refElement
-                ? {
-                    designRefElement: options.designGeneration.refElement,
-                    designRefElementLabel:
-                      options.designGeneration.refElementLabel ??
-                      options.designGeneration.refElement,
-                  }
-                : {}),
-            }
-          : {}),
+        ...designRefFieldsFrom(options?.designGeneration),
         ...(isMemberSession ? { pending: true } : {}),
       }
       const queuedIdx = options?.__internalDrain
@@ -2400,8 +2466,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         newMessages.push(userMessage)
       }
 
-      if (!isMemberSession && session.elapsedTimer) clearInterval(session.elapsedTimer)
-
       return {
         sessions: {
           ...s.sessions,
@@ -2413,7 +2477,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             elapsedSeconds: 0,
             streamingText: '',
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
-            elapsedTimer: null,
+            pendingPermission: null,
             connectionState: isMemberSession ? 'connected' : session.connectionState,
           },
         },
@@ -2460,18 +2524,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     queueSessionRuntimeSync(sessionId, { persist: false })
     if (options?.designGeneration) {
       pendingDesignCanvasReveal.add(sessionId)
+      if (!options.__internalDrain) {
+        lastDirectSendBySession.set(sessionId, {
+          content,
+          attachments,
+          displayContent: options.displayContent,
+          designGeneration: options.designGeneration,
+          at: Date.now(),
+        })
+      }
       wsManager.send(sessionId, {
         type: 'start_design_generation',
         submode: options.designGeneration.submode,
         params: options.designGeneration.params,
         brief: content,
+        attachments,
         refArtifact: options.designGeneration.refArtifact,
         refArtifactName: options.designGeneration.refArtifactName,
         refElement: options.designGeneration.refElement,
         refElementLabel: options.designGeneration.refElementLabel,
       })
     } else {
-      wsManager.send(sessionId, { type: 'user_message', content, attachments })
+      if (!options?.__internalDrain) {
+        lastDirectSendBySession.set(sessionId, {
+          content,
+          attachments,
+          displayContent: options?.displayContent,
+          at: Date.now(),
+        })
+      }
+      wsManager.send(sessionId, {
+        type: 'user_message',
+        content,
+        attachments,
+        ...(options?.displayContent?.trim()
+          ? { displayContent: options.displayContent.trim() }
+          : {}),
+      })
     }
   },
 
@@ -2684,7 +2773,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId]
       if (!session) return s
-      if (session.elapsedTimer) clearInterval(session.elapsedTimer)
       const sealedMessages = sealThinkingForSession(sessionId, session)
       const partialText = session.streamingText
       const committedMessages = resolveDanglingCuratorCards(
@@ -2708,7 +2796,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeToolUseId: null,
             activeToolName: null,
             activeTaskToolUseId: null,
-            elapsedTimer: null,
             pendingResourceWaits: [],
             providerRetry: null,
           },
@@ -2802,7 +2889,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => {
         const session = state.sessions[sessionId]
         if (!session) return state
-        if (session.elapsedTimer) clearInterval(session.elapsedTimer)
         return {
           sessions: updateSessionIn(state.sessions, sessionId, (s) => {
             const keepPermission =
@@ -2838,7 +2924,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               activeToolName: null,
               streamingText: '',
               pendingPermission: keepPermission ? s.pendingPermission : null,
-              elapsedTimer: null,
               statusVerb: keepPermission ? s.statusVerb : '',
               pendingRewind,
               historyLoaded: true,
@@ -2865,6 +2950,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         duration: 5000,
       })
     }
+  },
+
+  capMessageWindow: (sessionId) => {
+    set((state) => {
+      const session = state.sessions[sessionId]
+      if (!session) return state
+      // Never trim mid-pagination: it would fight loadOlderHistory's prepend.
+      if (session.historyLoadingOlder === true) return state
+      const len = session.messages.length
+      if (len <= MAX_IN_MEMORY_MESSAGES) return state
+      const dropCount = len - (MAX_IN_MEMORY_MESSAGES - MESSAGE_TRIM_CHUNK)
+      if (dropCount <= 0) return state
+      const trimmed = session.messages.slice(dropCount)
+      // Advance the backend pagination cursor by the number of client messages
+      // dropped. Client messages include UI-only cards (>= backend rows), so the
+      // cursor advances at least as far as the real backend delta: loadOlderHistory
+      // then refetches an overlapping window that id-dedup collapses (no gap).
+      return {
+        sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
+          messages: trimmed,
+          historyFirstIndex: (s.historyFirstIndex ?? 0) + dropCount,
+          historyHasMore: true,
+        })),
+      }
+    })
   },
 
   loadOlderHistory: async (sessionId) => {
@@ -2904,6 +3014,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           historyLoadingOlder: false,
         })),
       }))
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('chat.loadHistoryFailed'),
+        duration: 4000,
+      })
     }
   },
 
@@ -3310,12 +3425,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
           const preserveStreamingTurn = hasPendingStreamText && msg.state !== 'idle'
           const shouldFlush = hasPendingStreamText && msg.state === 'idle'
+          const keepPending = msg.state === 'idle' && !!session.pendingPermission
           const baseMessages =
             msg.state === 'idle'
               ? sealThinkingForSession(sessionId, session)
               : session.messages
           return {
-            chatState: preserveStreamingTurn ? 'streaming' : msg.state,
+            chatState: preserveStreamingTurn
+              ? 'streaming'
+              : keepPending
+                ? 'permission_pending'
+                : msg.state,
             ...(msg.verb && msg.verb !== 'Thinking' ? { statusVerb: msg.verb } : {}),
             ...(msg.tokens ? { tokenUsage: { ...session.tokenUsage, output_tokens: msg.tokens } } : {}),
             ...(msg.state === 'idle' ? {
@@ -3335,11 +3455,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         })
         if (msg.state === 'idle') {
-          const session = get().sessions[sessionId]
-          if (session?.elapsedTimer) {
-            clearInterval(session.elapsedTimer)
-            update(() => ({ elapsedTimer: null }))
-          }
           update((s) =>
             s.pendingPermission
               ? {}
@@ -3349,7 +3464,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           revealDesignCanvasIfPending(sessionId)
         }
 
-        useTabStore.getState().updateTabStatus(sessionId, msg.state === 'idle' ? 'idle' : 'running')
+        {
+          const sAfterStatus = get().sessions[sessionId]
+          const tabIsIdle = msg.state === 'idle' && !sAfterStatus?.pendingPermission
+          useTabStore.getState().updateTabStatus(sessionId, tabIsIdle ? 'idle' : 'running')
+        }
         break
 
       case 'content_start': {
@@ -3897,7 +4016,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 id: nextId(),
                 type: 'tool_result',
                 toolUseId: msg.toolUseId,
-                content: msg.content,
+                content: capToolResultContent(msg.content),
                 isError: msg.isError,
                 timestamp: Date.now(),
                 parentToolUseId: msg.parentToolUseId,
@@ -4000,7 +4119,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingLastChunkAt: null,
           }))
         }
-        if (session.elapsedTimer) clearInterval(session.elapsedTimer)
 
         const turnDelta =
           (msg.usage?.input_tokens ?? 0) +
@@ -4013,7 +4131,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           chatState: s.pendingPermission ? s.chatState : 'idle',
           messages: s.pendingPermission ? s.messages : resolveDanglingCuratorCards(s.messages),
           activeThinkingId: null,
-          elapsedTimer: null,
           pendingResourceWaits: [],
           providerRetry: null,
         }))
@@ -4187,13 +4304,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         } else {
           useTabStore.getState().updateTabStatus(sessionId, 'error')
         }
-        {
-          const session = get().sessions[sessionId]
-          if (session?.elapsedTimer) {
-            clearInterval(session.elapsedTimer)
-            update(() => ({ elapsedTimer: null }))
-          }
-        }
         revealDesignCanvasIfPending(sessionId)
         break
       }
@@ -4315,8 +4425,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
         }
         if (msg.subtype === 'ws_unreachable') {
-          const stuckSession = get().sessions[sessionId]
-          if (stuckSession?.elapsedTimer) clearInterval(stuckSession.elapsedTimer)
           update((s) => {
             const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
             const baseMessages = resolveDanglingCuratorCards(
@@ -4333,7 +4441,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               activeThinkingContent: '',
               activeThinkingStartedAt: null,
               activeThinkingLastChunkAt: null,
-              elapsedTimer: null,
               providerRetry: null,
             }
           })
@@ -4704,11 +4811,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               }
             }
             const sealed = sealThinkingForSession(sessionId, s)
+            let nextMessages: UIMessage[]
+            if (parentId && bucketExists) {
+              nextMessages = sealed
+            } else {
+              // Coalesce consecutive flat subagent chunks from the same agent into
+              // a single message so a streaming subagent does not grow the message
+              // array by one entry per token (which is O(n^2) to render).
+              const last = sealed[sealed.length - 1]
+              if (
+                last &&
+                last.type === 'subagent_chunk' &&
+                last.agentId === agentId &&
+                last.parentToolUseId === (parentId ?? undefined) &&
+                last.chunkKind === chunkKind
+              ) {
+                const merged: UIMessage = {
+                  ...last,
+                  delta: `${last.delta}${delta}`,
+                  timestamp: now,
+                }
+                nextMessages = [...sealed.slice(0, -1), merged]
+              } else {
+                nextMessages = [...sealed, flatMessage]
+              }
+            }
             return {
-              messages:
-                parentId && bucketExists
-                  ? sealed
-                  : [...sealed, flatMessage],
+              messages: nextMessages,
               subagentTimelines: nextTimelines,
             }
           })
@@ -4730,17 +4859,69 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         applyDebugPiiStatsDelta(update, msg as unknown as Record<string, unknown>)
         break
       }
+      case 'debug_submode_set': {
+        const m = msg as unknown as {
+          submode?: string
+          params?: Record<string, unknown>
+        }
+        if (m.submode) {
+          useDebugStore
+            .getState()
+            .applyServerConfirmed(sessionId, m.submode, m.params ?? {})
+        }
+        break
+      }
       case 'workspace_busy': {
+        const requeuedContent = (() => {
+          const drained = takeLastDrainedItem(sessionId)
+          if (drained) {
+            requeueRejectedItem(drained)
+            return (
+              drained.options?.displayContent?.trim() || drained.content.trim()
+            )
+          }
+          const direct = takeLastDirectSend(sessionId)
+          if (direct) {
+            useWorkspaceQueueStore
+              .getState()
+              .enqueue(sessionId, direct.content, direct.attachments, {
+                displayContent: direct.displayContent,
+                designGeneration: direct.designGeneration,
+              })
+            return direct.displayContent?.trim() || direct.content.trim()
+          }
+          return null
+        })()
         useUIStore.getState().addToast({
           type: 'warning',
           message: t('wsManager.workspaceBusyToast'),
           duration: 4000,
         })
-        update(() => ({
-          chatState: 'idle',
-          stopRequested: false,
-          statusVerb: '',
-        }))
+        update((session) => {
+          let messages = session.messages
+          if (requeuedContent) {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const m = messages[i]
+              if (
+                m &&
+                m.type === 'user_text' &&
+                m.content === requeuedContent &&
+                m.pending !== true
+              ) {
+                const next = messages.slice()
+                next[i] = { ...m, pending: true }
+                messages = next
+                break
+              }
+            }
+          }
+          return {
+            chatState: 'idle',
+            stopRequested: false,
+            statusVerb: '',
+            ...(messages !== session.messages ? { messages } : {}),
+          }
+        })
         break
       }
       case 'lsp_diagnostics':
@@ -5019,7 +5200,7 @@ export function mapHistoryMessagesToUiMessages(
           type: 'user_text',
           content: teammateContents.join('\n\n'),
           timestamp,
-          ...(tombstoned ? {} : { userMessageIndex: liveUserCount }),
+          ...(tombstoned ? {} : { userMessageIndex: msg.userMessageIndex ?? liveUserCount }),
           ...sup,
         })
         if (!tombstoned) liveUserCount++
@@ -5037,12 +5218,17 @@ export function mapHistoryMessagesToUiMessages(
         })
         continue
       }
-      const legacyBrief = extractDisplayBriefFromTaskEnvelope(msg.content)
+      const displayOverride = msg.displayContent?.trim()
+      const legacyBrief = displayOverride
+        ? null
+        : extractDisplayBriefFromTaskEnvelope(msg.content)
       const persistedAttachments = mapPersistedAttachments(msg)
       uiMessages.push({
         id: msg.id || nextId(),
         type: 'user_text',
-        content: legacyBrief ?? stripAttachmentMarkersForDisplay(msg.content),
+        content:
+          displayOverride ||
+          (legacyBrief ?? stripAttachmentMarkersForDisplay(msg.content)),
         timestamp,
         ...(persistedAttachments ? { attachments: persistedAttachments } : {}),
         ...(msg.designRef ? { designRef: msg.designRef } : {}),
@@ -5051,7 +5237,7 @@ export function mapHistoryMessagesToUiMessages(
         ...(msg.designRefElementLabel
           ? { designRefElementLabel: msg.designRefElementLabel }
           : {}),
-        ...(tombstoned ? {} : { userMessageIndex: liveUserCount }),
+        ...(tombstoned ? {} : { userMessageIndex: msg.userMessageIndex ?? liveUserCount }),
         ...sup,
       })
       if (!tombstoned) liveUserCount++
@@ -5345,7 +5531,7 @@ export function mapHistoryMessagesToUiMessages(
             content: joined,
             attachments: attachments.length > 0 ? attachments : undefined,
             timestamp,
-            ...(tombstoned ? {} : { userMessageIndex: liveUserCount }),
+            ...(tombstoned ? {} : { userMessageIndex: msg.userMessageIndex ?? liveUserCount }),
             ...sup,
           })
           if (!tombstoned) liveUserCount++
@@ -5362,15 +5548,15 @@ function applySupersededFromPendingRewind(
 ): UIMessage[] {
   if (!pendingRewind) return messages
   let anchorIdx = -1
-  let userCount = 0
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i]!
-    if (m.type === 'user_text') {
-      if (userCount === pendingRewind.userMessageIndex) {
-        anchorIdx = i
-        break
-      }
-      userCount++
+    if (
+      m.type === 'user_text' &&
+      typeof m.userMessageIndex === 'number' &&
+      m.userMessageIndex === pendingRewind.userMessageIndex
+    ) {
+      anchorIdx = i
+      break
     }
   }
   if (anchorIdx === -1) return messages

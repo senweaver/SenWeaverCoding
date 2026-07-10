@@ -470,6 +470,15 @@ impl PromptSection for ContextReferenceSection {
             out.push_str(
                 "Never bulk-load the entire session history.\n",
             );
+            if has_tool("sessions_outline") {
+                out.push_str(
+                    "- Only the most recent part of THIS conversation is kept in your context; earlier messages are not automatically included. When you need older context from the current chat (something the user mentioned earlier, a prior decision, an earlier task), do NOT assume it is in context and do NOT bulk-load: first call `sessions_outline` with no `session_id` (it defaults to the current conversation) to see a compact turn-by-turn map, pick the relevant turn(s), then call `sessions_history` with `offset` set to that turn's printed `#index` (and a small `limit`) to read exactly those messages in full.\n",
+                );
+            } else if sessions_history {
+                out.push_str(
+                    "- Only the most recent part of THIS conversation is kept in your context; earlier messages are not automatically included. When you need older context from the current chat, retrieve it on demand with `sessions_history` (no `session_id` defaults to the current conversation) using a small `limit`/`offset`; do not assume earlier turns are in context and do not bulk-load them.\n",
+                );
+            }
         }
 
         out.push_str(

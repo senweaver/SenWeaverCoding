@@ -33,6 +33,11 @@ pub async fn handle_ws_desktop(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(reject) =
+        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/{session_id}")
+    {
+        return reject;
+    }
     if state.exposed || state.pairing.require_pairing() {
         let token = super::extract_ws_token(&headers, None).unwrap_or("");
         let authed = if state.exposed {
@@ -66,8 +71,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let writer_handle = crate::runtime::spawn_supervised("ws_desktop.writer", async move {
         const COALESCE_WINDOW_MS: u64 = 24;
         const COALESCE_MAX_FRAMES: usize = 64;
-        const CONTENT_DELTA_PREFIX: &str = "{\"type\":\"content_delta\",\"text\":";
-        const THINKING_PREFIX: &str = "{\"type\":\"thinking\",\"text\":";
+        // NOTE: this build serializes `json!` objects via BTreeMap (serde_json
+        // without the `preserve_order` feature), so keys come out alphabetically:
+        // a content_delta frame is `{"text":"...","type":"content_delta"}`, NOT
+        // `{"type":...,"text":...}`. Match the actual on-wire shape (text prefix +
+        // type suffix) so the coalescing path is real instead of dead code. If key
+        // ordering ever changes, detection simply misses and frames are sent raw
+        // (the pre-fix behaviour), so this stays safe.
+        const TEXT_PREFIX: &str = "{\"text\":";
+        const CONTENT_DELTA_SUFFIX: &str = ",\"type\":\"content_delta\"}";
+        const THINKING_SUFFIX: &str = ",\"type\":\"thinking\"}";
         let mut delta_buf = String::new();
         let mut thinking_buf = String::new();
         loop {
@@ -121,13 +134,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             for f in frames.drain(..) {
                 match f {
                     OutboundFrame::Text(s) => {
-                        if let Some(rest) = s.strip_prefix(CONTENT_DELTA_PREFIX)
-                            && rest.ends_with('}')
+                        if let Some(mid) = s
+                            .strip_prefix(TEXT_PREFIX)
+                            .and_then(|r| r.strip_suffix(CONTENT_DELTA_SUFFIX))
                         {
-                            let body = &rest[..rest.len() - 1];
-                            if let Ok(text) =
-                                serde_json::from_str::<String>(body.trim_end_matches(','))
-                            {
+                            if let Ok(text) = serde_json::from_str::<String>(mid) {
                                 flush_buf!("thinking", thinking_buf);
                                 if send_failed {
                                     break;
@@ -136,13 +147,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 continue;
                             }
                         }
-                        if let Some(rest) = s.strip_prefix(THINKING_PREFIX)
-                            && rest.ends_with('}')
+                        if let Some(mid) = s
+                            .strip_prefix(TEXT_PREFIX)
+                            .and_then(|r| r.strip_suffix(THINKING_SUFFIX))
                         {
-                            let body = &rest[..rest.len() - 1];
-                            if let Ok(text) =
-                                serde_json::from_str::<String>(body.trim_end_matches(','))
-                            {
+                            if let Ok(text) = serde_json::from_str::<String>(mid) {
                                 flush_buf!("content_delta", delta_buf);
                                 if send_failed {
                                     break;
@@ -242,7 +251,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             );
         }
     }
-    state.live_config.store(config.clone());
+    state.push_live_config(config.clone());
     let mut agent = match crate::agent::Agent::from_config(
         &config,
         None,
@@ -384,6 +393,51 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let inbound_tx_gateway = inbound_tx.clone();
     let inbound_tx_resource = inbound_tx.clone();
 
+    let conn_token = tokio_util::sync::CancellationToken::new();
+    let last_activity =
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(desktop_now_unix_secs()));
+
+    // Re-attach to an in-flight turn: if this session is already running a turn
+    // (e.g. the previous socket dropped mid-turn and reconnected, or a second tab
+    // opened the same session), subscribe to that turn's live feed and pump its
+    // frames into this connection. Broadcast delivers only frames emitted after we
+    // subscribe, so they never duplicate the committed history the client reloads
+    // on connect. The forwarder exits when the turn ends (feed dropped -> Closed)
+    // or this connection goes away (conn_token cancelled).
+    if state.session_run_state.is_running(&session_id) {
+        if let Some(feed) = crate::session::get_turn_feed(&session_id) {
+            let mut rx = feed.subscribe();
+            let attach_outbound = outbound_tx.clone();
+            let attach_conn_token = conn_token.clone();
+            let _ = send_json(
+                &outbound_tx,
+                &serde_json::json!({ "type": "status", "state": "thinking" }),
+            )
+            .await;
+            crate::runtime::spawn_supervised("ws_desktop.turn_attach", async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = attach_conn_token.cancelled() => break,
+                        recv = rx.recv() => match recv {
+                            Ok(frame) => {
+                                if attach_outbound
+                                    .send(OutboundFrame::Text(frame))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        },
+                    }
+                }
+            });
+        }
+    }
+
     let cancel_signal_handle = agent.cancel_signal_handle();
     let cancelled_atomic = agent.cancel_token();
     let cancel_signal_for_reader = std::sync::Arc::clone(&cancel_signal_handle);
@@ -391,9 +445,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let control_tx_reader = control_tx.clone();
     let session_id_for_reader = session_id.clone();
     let connection_id_for_reader = connection_id.clone();
+    let live_config_for_reader = state.live_config.clone();
+    let conn_token_reader = conn_token.clone();
+    let last_activity_reader = std::sync::Arc::clone(&last_activity);
 
     let reader_handle = crate::runtime::spawn_supervised("ws_desktop.reader", async move {
         while let Some(frame) = receiver.next().await {
+            last_activity_reader.store(
+                desktop_now_unix_secs(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             match frame {
                 Ok(Message::Text(text)) => {
 
@@ -427,12 +488,34 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     if msg_type.as_str() == "ping" {
                         let _ = control_tx_reader
                             .try_send(OutboundFrame::Text(r#"{"type":"pong"}"#.to_string()));
+                        let buddy_cfg = live_config_for_reader.load().buddy.clone();
+                        if let Some((event, greeting)) =
+                            crate::buddy::idle_transition_event(&buddy_cfg)
+                        {
+                            let frame = serde_json::json!({
+                                "type": "buddy_event",
+                                "sessionId": session_id_for_reader,
+                                "event": event,
+                                "greeting": greeting,
+                                "showNotifications": buddy_cfg.show_notifications,
+                            });
+                            let _ = control_tx_reader
+                                .try_send(OutboundFrame::Text(frame.to_string()));
+                        }
                         continue;
                     }
                     if msg_type.as_str() == "stop_generation" {
                         cancelled_atomic_for_reader
                             .store(true, std::sync::atomic::Ordering::Relaxed);
                         cancel_signal_for_reader.load_full().cancel();
+                        // Also cancel via the session's live turn feed so a stop
+                        // arriving on a reconnected connection (whose own agent did
+                        // not start the in-flight turn) still stops the real turn.
+                        if let Some(feed) =
+                            crate::session::get_turn_feed(&session_id_for_reader)
+                        {
+                            feed.request_cancel();
+                        }
                         tracing::info!(
                             target: "agent_cancel",
                             "stop_generation received: cancel signal fired (reader-side)"
@@ -443,12 +526,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             Some(connection_id_for_reader.as_str()),
                         );
 
+                        // Default to cascading the stop to child workers: when the
+                        // user stops the parent turn, orphaned workers left running
+                        // keep burning tokens with no way to observe/stop them. Only
+                        // an explicit `cascade=false` keeps them alive.
                         let cascade_to_workers = parsed
                             .get("cascade")
                             .or_else(|| parsed.get("stopWorkers"))
                             .or_else(|| parsed.get("stop_workers"))
                             .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
+                            .unwrap_or(true);
                         if cascade_to_workers {
                             if let Some(sup) = crate::workers::supervisor::global_supervisor() {
                                 let cancelled = sup.cancel_for_parent(&session_id_for_reader);
@@ -457,7 +544,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                         target: "agent_cancel",
                                         parent_session = %session_id_for_reader,
                                         cancelled,
-                                        "cascading stop_generation to child workers (cascade requested)"
+                                        "cascading stop_generation to child workers"
                                     );
                                 }
                             }
@@ -599,6 +686,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 _ => {}
             }
         }
+
+        conn_token_reader.cancel();
 
         let grace_token = register_disconnect_grace(&session_id_for_reader);
         let grace_secs = DESKTOP_RECONNECT_GRACE_SECS;
@@ -749,6 +838,44 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         })
     };
 
+    let heartbeat_handle = {
+        let conn_token_ping = conn_token.clone();
+        let last_activity_ping = std::sync::Arc::clone(&last_activity);
+        crate::runtime::spawn_supervised("ws_desktop.heartbeat", async move {
+            let interval = std::time::Duration::from_secs(DESKTOP_WS_PING_INTERVAL_SECS);
+            let mut prev_tick = desktop_now_unix_secs();
+            loop {
+                tokio::select! {
+                    _ = conn_token_ping.cancelled() => break,
+                    _ = tokio::time::sleep(interval) => {}
+                }
+                let now = desktop_now_unix_secs();
+                // Detect a wall-clock jump (laptop suspend/resume): the tick took far
+                // longer than the sleep interval. Don't kill the connection on the
+                // first tick after a resume — reset the activity baseline and give
+                // the client a full ping cycle to resume its heartbeat first.
+                let since_prev_tick = now.saturating_sub(prev_tick);
+                prev_tick = now;
+                if since_prev_tick > DESKTOP_WS_PING_INTERVAL_SECS.saturating_mul(2) {
+                    last_activity_ping.store(now, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                let idle = now.saturating_sub(
+                    last_activity_ping.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                if idle >= DESKTOP_WS_IDLE_TIMEOUT_SECS {
+                    tracing::info!(
+                        target: "ws_desktop",
+                        idle_secs = idle,
+                        "desktop websocket idle beyond timeout (half-open?); cancelling connection so the session is not left stuck busy"
+                    );
+                    conn_token_ping.cancel();
+                    break;
+                }
+            }
+        })
+    };
+
     {
         let workspace_key_resync = crate::session::workspace_key_from_path(
             agent.current_workspace_dir(),
@@ -849,7 +976,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         }
     }
 
-    while let Some(parsed) = inbound_rx.recv().await {
+    let mut pending_ask_request_id: Option<String> = None;
+    loop {
+        let parsed = tokio::select! {
+            biased;
+            _ = conn_token.cancelled() => break,
+            frame = inbound_rx.recv() => match frame {
+                Some(p) => p,
+                None => break,
+            },
+        };
         if parsed.get("type").and_then(|v| v.as_str()) == Some("__invalid_json__") {
             let raw = parsed
                 .get("raw")
@@ -1348,6 +1484,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                let display_content = parsed
+                    .get("displayContent")
+                    .or_else(|| parsed.get("display_content"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
                 if raw_content.is_empty() && attachments.is_empty() {
                     send_error(&outbound_tx, "empty user_message.content", "EMPTY_CONTENT").await;
                     continue;
@@ -1377,7 +1520,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 if let Some(ref backend) = state.session_backend {
                     let backend_arc = std::sync::Arc::clone(backend);
                     let session_key_owned = session_key.clone();
-                    let user_msg = crate::providers::ChatMessage::user(&content);
+                    let mut user_msg = crate::providers::ChatMessage::user(&content);
+                    if let Some(ref display) = display_content {
+                        user_msg.metadata.insert(
+                            "display_content".to_string(),
+                            serde_json::Value::String(display.clone()),
+                        );
+                    }
                     match tokio::task::spawn_blocking(move || {
                         backend_arc.append(&session_key_owned, &user_msg)
                     })
@@ -1411,8 +1560,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     );
                 }
 
+                let is_ask_response = parsed
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "ask_response")
+                    .unwrap_or(false);
+                if is_ask_response {
+                    agent.mark_resuming_from_ask();
+                } else if let Some(stale) = pending_ask_request_id.take() {
+                    let _ = crate::approval::claim_pending_gateway_approval(&stale);
+                }
+
                 agent.reset_cancel();
-                run_turn(&state, &mut agent, &outbound_tx, &session_id, &session_key, &connection_id, &content).await;
+                pending_ask_request_id = run_turn(&state, &mut agent, &outbound_tx, &session_id, &session_key, &connection_id, &content).await;
             }
             "start_plan_execution" => {
 
@@ -1804,10 +1964,32 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     state.push_live_config(snap);
                 }
 
+                if state.session_run_state.is_running(&session_id) {
+                    let workspace_key = crate::session::workspace_key_from_path(
+                        agent.current_workspace_dir(),
+                        &session_id,
+                    );
+                    tracing::warn!(
+                        session_id = %session_id,
+                        workspace_key = %workspace_key,
+                        "start_plan_execution rejected: session already running",
+                    );
+                    let _ = send_json(
+                        &outbound_tx,
+                        &serde_json::json!({
+                            "type": "workspace_busy",
+                            "workspaceKey": workspace_key,
+                            "currentSessionId": session_id,
+                        }),
+                    )
+                    .await;
+                    continue;
+                }
+
                 agent.arm_plan_execution(plan_path.clone());
 
                 agent.reset_cancel();
-                run_turn(
+                pending_ask_request_id = run_turn(
                     &state,
                     &mut agent,
                     &outbound_tx,
@@ -1907,6 +2089,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
+                let attachments: Vec<serde_json::Value> = parsed
+                    .get("attachments")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
 
                 let designer_mode = crate::agent::coding_mode::CodingMode::Designer;
                 if let Some(svc) = crate::services::try_get_services() {
@@ -1956,7 +2143,43 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .filter(|s| !s.is_empty())
                     .is_none()
                     && crate::agent::designer::pipeline::is_continuation_brief(&brief);
-                let trigger_content = if brief_is_resume {
+                let (attachment_suffix, attachment_paths) = if attachments.is_empty() {
+                    (String::new(), Vec::new())
+                } else {
+                    let workspace = agent.current_workspace_dir().to_path_buf();
+                    match tokio::task::spawn_blocking(move || {
+                        enrich_content_with_attachments("", &attachments, &workspace)
+                    })
+                    .await
+                    {
+                        Ok(suffix) => {
+                            let (cleaned, image_paths) =
+                                crate::multimodal::parse_image_markers(&suffix);
+                            let mut paths = image_paths;
+                            for line in cleaned.lines() {
+                                if let Some(rest) =
+                                    line.trim().strip_prefix("[Attached file:")
+                                    && let Some(p) = rest.strip_suffix(']')
+                                {
+                                    let p = p.trim();
+                                    if !p.is_empty() {
+                                        paths.push(p.to_string());
+                                    }
+                                }
+                            }
+                            (suffix, paths)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "ws_desktop_attachments",
+                                error = %e,
+                                "design attachment enrichment task panicked; continuing without attachments"
+                            );
+                            (String::new(), Vec::new())
+                        }
+                    }
+                };
+                let mut trigger_content = if brief_is_resume {
                     crate::agent::designer::pipeline::build_design_resume_message(
                         &session_id,
                         &brief,
@@ -1973,11 +2196,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         &existing_decks,
                     )
                 };
+                if !attachment_suffix.is_empty() {
+                    if !attachment_paths.is_empty() {
+                        trigger_content.push_str(
+                            "\n\nUser-attached reference files (already saved to disk; \
+                             usable as tool inputs such as `media_generate source_image=...` \
+                             or `view_image`):",
+                        );
+                        for p in &attachment_paths {
+                            trigger_content.push_str(&format!("\n- {p}"));
+                        }
+                    }
+                    trigger_content.push_str(&attachment_suffix);
+                }
 
                 let persisted_user_text = if brief.trim().is_empty() {
                     trigger_content.clone()
                 } else {
-                    brief.clone()
+                    format!("{brief}{attachment_suffix}")
                 };
                 if let Some(ref backend) = state.session_backend {
                     let backend_arc = std::sync::Arc::clone(backend);
@@ -2029,7 +2265,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 }
 
                 agent.reset_cancel();
-                run_turn(
+                pending_ask_request_id = run_turn(
                     &state,
                     &mut agent,
                     &outbound_tx,
@@ -2051,7 +2287,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         }
     }
 
+    conn_token.cancel();
     reader_handle.abort();
+    heartbeat_handle.abort();
     lsp_forwarder.abort();
     gateway_event_forwarder.abort();
     resource_event_forwarder.abort();
@@ -2241,6 +2479,16 @@ pub fn desktop_runtime_state() -> &'static DesktopRuntimeState {
 
 const DESKTOP_RECONNECT_GRACE_SECS: u64 = 60;
 
+fn desktop_now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+const DESKTOP_WS_PING_INTERVAL_SECS: u64 = 30;
+const DESKTOP_WS_IDLE_TIMEOUT_SECS: u64 = 300;
+
 type DisconnectGraceToken = std::sync::Arc<tokio_util::sync::CancellationToken>;
 
 fn disconnect_grace_registry(
@@ -2326,7 +2574,10 @@ async fn send_error(outbound: &OutboundSender, message: &str, code: &str) {
 struct PersistJob {
     session_key: String,
     rows: Vec<crate::providers::ChatMessage>,
+    attempts: u32,
 }
+
+const MAX_PERSIST_RETRIES: u32 = 20;
 
 static PERSIST_PENDING: AtomicUsize = AtomicUsize::new(0);
 
@@ -2348,7 +2599,7 @@ pub(crate) async fn wait_persist_drained(deadline: std::time::Duration) -> bool 
     }
 }
 
-const PERSIST_QUEUE_CAPACITY: usize = 4096;
+const PERSIST_QUEUE_CAPACITY: usize = 16384;
 
 fn persist_sender(
     backend: &std::sync::Arc<dyn crate::channels::session::backend::SessionBackend>,
@@ -2356,68 +2607,114 @@ fn persist_sender(
     static SENDER: std::sync::OnceLock<mpsc::Sender<PersistJob>> =
         std::sync::OnceLock::new();
     SENDER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<PersistJob>(PERSIST_QUEUE_CAPACITY);
-        let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+        let (tx, mut rx) = mpsc::channel::<PersistJob>(PERSIST_QUEUE_CAPACITY);
         let backend = std::sync::Arc::clone(backend);
-        crate::runtime::spawn_supervised_restartable("ws_desktop.persist_worker", 3, move || {
-            let rx = std::sync::Arc::clone(&rx);
-            let backend = std::sync::Arc::clone(&backend);
-            async move {
-                let mut rx = rx.lock().await;
-                let mut retry_queue: std::collections::VecDeque<PersistJob> =
-                    std::collections::VecDeque::new();
-                loop {
-                    let job = if let Some(job) = retry_queue.pop_front() {
-                        job
-                    } else {
-                        match rx.recv().await {
-                            Some(job) => job,
-                            None => break,
-                        }
-                    };
+        crate::runtime::spawn_supervised("ws_desktop.persist_worker", async move {
+            let mut retry_queue: std::collections::VecDeque<(PersistJob, tokio::time::Instant)> =
+                std::collections::VecDeque::new();
+            let mut channel_open = true;
+            loop {
+                let now = tokio::time::Instant::now();
+                let due_now = retry_queue
+                    .front()
+                    .map(|(_, due)| *due <= now)
+                    .unwrap_or(false);
 
-                    let backend_for_write = std::sync::Arc::clone(&backend);
-                    let outcome = tokio::task::spawn_blocking(move || {
-                        let PersistJob { session_key, rows } = job;
-                        for (idx, msg) in rows.iter().enumerate() {
-                            if let Err(e) = backend_for_write.append(&session_key, msg) {
-                                let leftover = rows[idx..].to_vec();
-                                return Some((
-                                    PersistJob {
-                                        session_key,
-                                        rows: leftover,
-                                    },
-                                    e.to_string(),
-                                ));
+                let job = if due_now {
+                    match retry_queue.pop_front() {
+                        Some((job, _)) => job,
+                        None => continue,
+                    }
+                } else if let Some(due) = retry_queue.front().map(|(_, due)| *due) {
+                    // A retry is scheduled for later: keep draining fresh jobs in
+                    // the meantime so one failing batch never blocks all sessions.
+                    tokio::select! {
+                        biased;
+                        incoming = rx.recv(), if channel_open => match incoming {
+                            Some(job) => job,
+                            None => {
+                                channel_open = false;
+                                continue;
+                            }
+                        },
+                        _ = tokio::time::sleep_until(due) => {
+                            match retry_queue.pop_front() {
+                                Some((job, _)) => job,
+                                None => continue,
                             }
                         }
-                        None
-                    })
-                    .await;
+                    }
+                } else if channel_open {
+                    match rx.recv().await {
+                        Some(job) => job,
+                        None => break,
+                    }
+                } else {
+                    break;
+                };
 
-                    match outcome {
-                        Ok(None) => {
-                            PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+                let backend_for_write = std::sync::Arc::clone(&backend);
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let PersistJob {
+                        session_key,
+                        rows,
+                        attempts,
+                    } = job;
+                    for (idx, msg) in rows.iter().enumerate() {
+                        if let Err(e) = backend_for_write.append(&session_key, msg) {
+                            let leftover = rows[idx..].to_vec();
+                            return Some((
+                                PersistJob {
+                                    session_key,
+                                    rows: leftover,
+                                    attempts: attempts.saturating_add(1),
+                                },
+                                e.to_string(),
+                            ));
                         }
-                        Ok(Some((leftover_job, err))) => {
+                    }
+                    None
+                })
+                .await;
+
+                match outcome {
+                    Ok(None) => {
+                        PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    Ok(Some((leftover_job, err))) => {
+                        if leftover_job.attempts >= MAX_PERSIST_RETRIES {
+                            tracing::error!(
+                                target: "ws_desktop_persist",
+                                error = %err,
+                                session_key = %leftover_job.session_key,
+                                dropped_rows = leftover_job.rows.len(),
+                                attempts = leftover_job.attempts,
+                                "session persist append failed repeatedly; giving up on batch"
+                            );
+                            PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
+                        } else {
+                            let backoff_ms = (500u64 << leftover_job.attempts.min(6)).min(30_000);
                             tracing::warn!(
                                 target: "ws_desktop_persist",
                                 error = %err,
                                 session_key = %leftover_job.session_key,
                                 pending = leftover_job.rows.len(),
-                                "session persist append failed; retrying in background"
+                                attempts = leftover_job.attempts,
+                                backoff_ms,
+                                "session persist append failed; retrying in background without blocking other sessions"
                             );
-                            retry_queue.push_back(leftover_job);
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            let due = tokio::time::Instant::now()
+                                + std::time::Duration::from_millis(backoff_ms);
+                            retry_queue.push_back((leftover_job, due));
                         }
-                        Err(join_err) => {
-                            tracing::warn!(
-                                target: "ws_desktop_persist",
-                                error = %join_err,
-                                "session persist worker join error; dropping batch"
-                            );
-                            PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
-                        }
+                    }
+                    Err(join_err) => {
+                        tracing::warn!(
+                            target: "ws_desktop_persist",
+                            error = %join_err,
+                            "session persist worker join error; dropping batch"
+                        );
+                        PERSIST_PENDING.fetch_sub(1, Ordering::SeqCst);
                     }
                 }
             }
@@ -2442,6 +2739,7 @@ async fn enqueue_persist(
     let job = PersistJob {
         session_key: session_key.to_string(),
         rows,
+        attempts: 0,
     };
     let sender = persist_sender(backend);
     match sender.try_send(job) {
@@ -2926,15 +3224,22 @@ async fn run_turn(
     session_key: &str,
     connection_id: &str,
     content: &str,
-) {
+) -> Option<String> {
     use crate::agent::TurnEvent;
+    let mut pending_ask_request_id: Option<String> = None;
 
     let workspace_key = crate::session::workspace_key_from_path(
         agent.current_workspace_dir(),
         session_id,
     );
 
-    if state.session_run_state.is_running(session_id) {
+    // Acquire the run guard first; `guard()` atomically inserts and reports whether
+    // this call actually claimed the run. Two concurrent connections for the same
+    // session can both pass a plain is_running() check, but only one gets
+    // was_inserted==true — the loser must not proceed (avoids double-running a turn
+    // and interleaving writes to the same session history).
+    let _run_guard = state.session_run_state.guard(session_id.to_string());
+    if !_run_guard.was_inserted() {
         tracing::warn!(
             session_id,
             workspace_key = %workspace_key,
@@ -2949,10 +3254,45 @@ async fn run_turn(
             }),
         )
         .await;
-        return;
+        return None;
     }
 
-    let _run_guard = state.session_run_state.guard(session_id.to_string());
+    // Register a per-session live feed carrying this turn's outbound wire frames
+    // and its cancel handles, then tee every frame this turn emits into it. A
+    // reconnecting or second client attaches to the feed to follow the in-flight
+    // turn, and a `stop_generation` from any connection can cancel it. The feed is
+    // removed when the turn scope exits (RAII guard below).
+    let feed_for_pump = crate::session::register_turn_feed(
+        session_id,
+        agent.cancel_token(),
+        agent.cancel_signal_handle(),
+    );
+    let _turn_feed_guard = crate::session::TurnFeedGuard::new(session_id.to_string());
+
+    // Shadow `outbound` with a tee channel: everything this turn sends now flows
+    // through a pump that (a) publishes each text frame to the feed and (b)
+    // forwards it to the real connection sink, preserving order and backpressure.
+    // The early `workspace_busy` return above used the real sink and is not teed.
+    let (tee_tx, mut tee_rx) = mpsc::channel::<OutboundFrame>(1024);
+    let real_outbound = outbound.clone();
+    // The pump self-terminates when `tee_tx` drops at the end of the turn (recv
+    // returns None). We don't keep the handle: dropping it detaches (does not
+    // abort), so any buffered tail frames are still forwarded.
+    //
+    // Critically, the pump keeps publishing to the feed even after the original
+    // socket dies: `real_outbound.send` on a closed channel returns Err
+    // immediately (no block), so we forward best-effort and NEVER break on it.
+    // Breaking here would stop the feed the instant the starting connection
+    // dropped, defeating reconnect (a reattaching client would see nothing).
+    let _tee_pump = crate::runtime::spawn_supervised("ws_desktop.turn_tee", async move {
+        while let Some(frame) = tee_rx.recv().await {
+            if let OutboundFrame::Text(ref text) = frame {
+                feed_for_pump.publish(text);
+            }
+            let _ = real_outbound.send(frame).await;
+        }
+    });
+    let outbound: &OutboundSender = &tee_tx;
 
     let _ = send_json(
         outbound,
@@ -3014,7 +3354,7 @@ async fn run_turn(
         .map(|svc| svc.is_session_auto_coding_mode(&session_key))
         .unwrap_or(false);
     let turn_coding_mode = if session_is_auto {
-        let resolved = crate::agent::intent::auto_select_coding_mode(content);
+        let resolved = agent.resolve_auto_coding_mode(content).await;
         agent.set_coding_mode(resolved);
         let derived =
             crate::gateway::desktop_routes::derive_permission_from_coding(&resolved);
@@ -3507,6 +3847,13 @@ async fn run_turn(
                     input,
                     description,
                 } => {
+
+                    if matches!(
+                        tool_name.as_str(),
+                        "ask_question" | "ask_user" | "AskQuestion" | "AskUserQuestion"
+                    ) {
+                        pending_ask_request_id = Some(request_id.clone());
+                    }
 
                     let tool_use_id = tool_use_id_for_name
                         .get(&tool_name)
@@ -4025,6 +4372,8 @@ async fn run_turn(
             }
         }
     }
+
+    pending_ask_request_id
 }
 
 fn first_line(s: &str) -> &str {

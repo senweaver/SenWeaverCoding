@@ -21,6 +21,8 @@ const TOOL_NAME: &str = "spawn_workers";
 
 const DEFAULT_WORKERS_TIMEOUT_SECS: u64 = 1800;
 
+const MAX_WORKERS_PER_CALL: usize = crate::constants::system::MAX_CONCURRENT_SUBAGENTS as usize;
+
 #[derive(Debug, Deserialize)]
 struct SpawnArgs {
     #[serde(default)]
@@ -88,6 +90,7 @@ impl Tool for SpawnWorkersTool {
                 "tasks": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": MAX_WORKERS_PER_CALL,
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -149,6 +152,18 @@ impl Tool for SpawnWorkersTool {
             });
         }
 
+        if parsed.tasks.len() > MAX_WORKERS_PER_CALL {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "`tasks` exceeds the limit of {MAX_WORKERS_PER_CALL} workers per call ({} requested); \
+                     split the work into multiple spawn_workers calls",
+                    parsed.tasks.len()
+                )),
+            });
+        }
+
         let parent_ctx = current_session_context();
         let parent_session_id = parent_ctx
             .as_ref()
@@ -177,23 +192,35 @@ impl Tool for SpawnWorkersTool {
             parent_permission_mode: crate::gateway::ws::desktop::scoped_permission_mode_opt(),
         };
 
-        let mut handles = Vec::with_capacity(parsed.tasks.len());
-        for task in &parsed.tasks {
-            let title = task
-                .title
-                .clone()
-                .unwrap_or_else(|| derive_title(&task.prompt));
-            let spec = WorkerSpec {
-                parent_session_id: parent_session_id.clone(),
-                parent_tool_use_id: parent_tool_use_id.clone(),
-                title,
-                prompt: task.prompt.clone(),
-                context: task.context.clone(),
-                model: task.model.clone(),
-            };
-            let handle = supervisor.spawn(spec, parent_draft.clone(), run_ctx.clone());
-            handles.push(handle);
-        }
+        let specs: Vec<WorkerSpec> = parsed
+            .tasks
+            .iter()
+            .map(|task| {
+                let title = task
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| derive_title(&task.prompt));
+                WorkerSpec {
+                    parent_session_id: parent_session_id.clone(),
+                    parent_tool_use_id: parent_tool_use_id.clone(),
+                    title,
+                    prompt: task.prompt.clone(),
+                    context: task.context.clone(),
+                    model: task.model.clone(),
+                }
+            })
+            .collect();
+
+        let handles = match supervisor.admit_and_spawn_batch(specs, parent_draft.clone(), run_ctx) {
+            Ok(h) => h,
+            Err(err) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(err),
+                });
+            }
+        };
 
         let mut waits = Vec::with_capacity(handles.len());
         for h in &handles {

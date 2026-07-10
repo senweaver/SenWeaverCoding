@@ -100,7 +100,21 @@ pub trait SessionBackend: Send + Sync {
     fn count_user_messages(&self, session_key: &str) -> usize {
         self.load_with_tombstones(session_key)
             .iter()
-            .filter(|m| m.message.role == "user")
+            .filter(|m| {
+                m.message.role == "user" && m.tombstoned_at.is_none() && !m.hidden_for_ui
+            })
+            .count()
+    }
+
+    fn count_live_user_messages_before_id(&self, session_key: &str, before_id: i64) -> usize {
+        self.load_with_tombstones(session_key)
+            .iter()
+            .filter(|m| {
+                m.id < before_id
+                    && m.message.role == "user"
+                    && m.tombstoned_at.is_none()
+                    && !m.hidden_for_ui
+            })
             .count()
     }
 

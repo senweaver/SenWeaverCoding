@@ -60,7 +60,6 @@ pub mod thinking;
 pub mod token;
 pub mod tool_handler;
 pub mod web_search_url_guard;
-pub mod turn;
 
 pub mod turn_engine;
 pub mod user;

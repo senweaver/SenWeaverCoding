@@ -97,7 +97,20 @@ impl SymbolGraph {
     pub const SCHEMA_VERSION: u32 = 2;
 
     pub fn build(root: &Path) -> io::Result<Self> {
-        let files = walk_source_files(root)?;
+        const MAX_INDEXED_FILES: usize = 20_000;
+        const PROGRESS_LOG_EVERY: usize = 1_000;
+
+        let mut files = walk_source_files(root)?;
+        if files.len() > MAX_INDEXED_FILES {
+            tracing::warn!(
+                target: "code_intel",
+                total = files.len(),
+                cap = MAX_INDEXED_FILES,
+                "symbol graph: workspace exceeds file cap; indexing a truncated subset"
+            );
+            files.truncate(MAX_INDEXED_FILES);
+        }
+        let total_files = files.len();
         let mut graph = SymbolGraph {
             version: Self::SCHEMA_VERSION,
             ..Default::default()
@@ -106,7 +119,15 @@ impl SymbolGraph {
         let mut per_file: Vec<(PathBuf, String, Vec<OutlineEntry>)> = Vec::new();
         let mut test_syms: HashSet<SymbolId> = HashSet::new();
         let mut known_files: HashSet<PathBuf> = HashSet::new();
-        for file in files {
+        for (file_idx, file) in files.into_iter().enumerate() {
+            if file_idx > 0 && file_idx % PROGRESS_LOG_EVERY == 0 {
+                tracing::info!(
+                    target: "code_intel",
+                    processed = file_idx,
+                    total = total_files,
+                    "symbol graph build progress"
+                );
+            }
             let Ok(src) = fs::read_to_string(&file) else {
                 continue;
             };

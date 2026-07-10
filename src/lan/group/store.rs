@@ -830,6 +830,67 @@ fn guard_wins(
     }
 }
 
+fn active_member_count(conn: &Connection, group_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM group_members WHERE group_id = ?1 AND status = 'active'",
+        params![group_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+}
+
+fn member_role_in_tx(conn: &Connection, group_id: &str, user_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT role FROM group_members WHERE group_id = ?1 AND user_id = ?2 AND status = 'active'",
+        params![group_id, user_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+// A member-management op is authorized when the group is being created (no active
+// members yet = genesis/creator), when the author is an active owner, or when it
+// is a self-update that does not escalate the caller's own role. This blocks a LAN
+// peer from self-escalating to owner or removing/altering other members.
+fn membership_upsert_authorized(
+    conn: &Connection,
+    group_id: &str,
+    author: &str,
+    target_user: &str,
+    requested_role: &str,
+) -> bool {
+    if active_member_count(conn, group_id) == 0 {
+        return true;
+    }
+    if member_role_in_tx(conn, group_id, author).as_deref() == Some("owner") {
+        return true;
+    }
+    if author == target_user {
+        let current = member_role_in_tx(conn, group_id, author);
+        // Allow self nickname/no-op updates, but never a self-escalation to owner
+        // or to a role the caller does not already hold.
+        return requested_role != "owner" && current.as_deref() == Some(requested_role);
+    }
+    false
+}
+
+fn membership_remove_authorized(
+    conn: &Connection,
+    group_id: &str,
+    author: &str,
+    target_user: &str,
+) -> bool {
+    if member_role_in_tx(conn, group_id, author).as_deref() == Some("owner") {
+        return true;
+    }
+    author == target_user
+}
+
 fn apply_payload(conn: &Connection, op: &GroupOp, self_user_id: &str) -> Result<()> {
     let inc = (op.hlc.millis as i64, op.hlc.counter as i64, op.author.as_str());
     match &op.payload {
@@ -861,7 +922,17 @@ fn apply_payload(conn: &Connection, op: &GroupOp, self_user_id: &str) -> Result<
             nickname,
             role,
         } => {
-            if guard_wins(conn, "group_members", &op.group_id, "user_id", user_id, inc) {
+            if !membership_upsert_authorized(conn, &op.group_id, &op.author, user_id, role.as_str())
+            {
+                tracing::warn!(
+                    target: "lan.group",
+                    group = %op.group_id,
+                    author = %op.author,
+                    target = %user_id,
+                    role = %role.as_str(),
+                    "rejecting unauthorized MemberUpsert (author is not an owner / self-escalation)"
+                );
+            } else if guard_wins(conn, "group_members", &op.group_id, "user_id", user_id, inc) {
                 conn.execute(
                     "INSERT INTO group_members
                         (group_id, user_id, nickname, role, status, joined_at,
@@ -888,7 +959,15 @@ fn apply_payload(conn: &Connection, op: &GroupOp, self_user_id: &str) -> Result<
             }
         }
         GroupOpPayload::MemberRemove { user_id } => {
-            if guard_wins(conn, "group_members", &op.group_id, "user_id", user_id, inc) {
+            if !membership_remove_authorized(conn, &op.group_id, &op.author, user_id) {
+                tracing::warn!(
+                    target: "lan.group",
+                    group = %op.group_id,
+                    author = %op.author,
+                    target = %user_id,
+                    "rejecting unauthorized MemberRemove (author is not an owner and not self)"
+                );
+            } else if guard_wins(conn, "group_members", &op.group_id, "user_id", user_id, inc) {
                 conn.execute(
                     "INSERT INTO group_members
                         (group_id, user_id, status, lww_ms, lww_counter, lww_author)

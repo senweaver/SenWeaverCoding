@@ -2,12 +2,15 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use super::cache::{forget_state, load_state, store_state};
 use super::discover::{
@@ -75,6 +78,61 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn cancel_registry() -> &'static Mutex<HashMap<PathBuf, (u64, CancellationToken)>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, (u64, CancellationToken)>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_cancel_generation() -> u64 {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub struct CancelRegistration {
+    workspace: PathBuf,
+    generation: u64,
+    pub token: CancellationToken,
+}
+
+impl Drop for CancelRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut map) = cancel_registry().lock() {
+            if map
+                .get(&self.workspace)
+                .is_some_and(|(generation, _)| *generation == self.generation)
+            {
+                map.remove(&self.workspace);
+            }
+        }
+    }
+}
+
+pub fn register_cancel_token(workspace: &Path) -> CancelRegistration {
+    let token = CancellationToken::new();
+    let generation = next_cancel_generation();
+    if let Ok(mut map) = cancel_registry().lock() {
+        if let Some((_, previous)) = map.insert(workspace.to_path_buf(), (generation, token.clone()))
+        {
+            previous.cancel();
+        }
+    }
+    CancelRegistration {
+        workspace: workspace.to_path_buf(),
+        generation,
+        token,
+    }
+}
+
+pub fn cancel_workspace_tasks(workspace: &Path) -> bool {
+    if let Ok(mut map) = cancel_registry().lock() {
+        if let Some((_, token)) = map.remove(workspace) {
+            token.cancel();
+            return true;
+        }
+    }
+    false
 }
 
 pub fn status_for(workspace: &Path) -> PythonEnvState {
@@ -203,22 +261,24 @@ pub async fn create_venv(
 
     let mut fallback_used = false;
     let py_version_ref = resolved_version.as_deref();
+    let registration = register_cancel_token(workspace);
+    let cancel_token = registration.token.clone();
 
     let run_result = match chosen {
-        CreateTool::Uv => run_uv_venv(workspace, py_version_ref).await,
-        CreateTool::Venv => run_python_venv(workspace, py_version_ref).await,
+        CreateTool::Uv => run_uv_venv(workspace, py_version_ref, &cancel_token).await,
+        CreateTool::Venv => run_python_venv(workspace, py_version_ref, &cancel_token).await,
     };
 
     let final_result = match run_result {
         Ok(_) => Ok(()),
-        Err(err) if matches!(chosen, CreateTool::Uv) => {
+        Err(err) if matches!(chosen, CreateTool::Uv) && !cancel_token.is_cancelled() => {
             tracing::warn!(error = %err, "uv venv failed, falling back to python -m venv");
             publish(PythonEnvEvent::Progress {
                 workspace: workspace.to_path_buf(),
                 message: format!("uv failed: {err}; falling back to python -m venv"),
             });
             fallback_used = true;
-            run_python_venv(workspace, py_version_ref).await
+            run_python_venv(workspace, py_version_ref, &cancel_token).await
         }
         Err(err) => Err(err),
     };
@@ -253,7 +313,11 @@ pub async fn create_venv(
     })
 }
 
-async fn run_uv_venv(workspace: &Path, python_version: Option<&str>) -> Result<(), String> {
+async fn run_uv_venv(
+    workspace: &Path,
+    python_version: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> Result<(), String> {
     let mut cmd = hidden_async_command("uv");
     cmd.arg("venv").arg(".venv");
     if let Some(v) = python_version {
@@ -263,15 +327,19 @@ async fn run_uv_venv(workspace: &Path, python_version: Option<&str>) -> Result<(
         }
     }
     cmd.current_dir(workspace);
-    stream_to_events(workspace, cmd, "uv").await
+    stream_to_events(workspace, cmd, "uv", cancel_token).await
 }
 
-async fn run_python_venv(workspace: &Path, python_version: Option<&str>) -> Result<(), String> {
+async fn run_python_venv(
+    workspace: &Path,
+    python_version: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> Result<(), String> {
     let python_bin = resolve_system_python(python_version).await?;
     let mut cmd = hidden_async_command(python_bin.as_os_str());
     cmd.arg("-m").arg("venv").arg(".venv");
     cmd.current_dir(workspace);
-    stream_to_events(workspace, cmd, "venv").await
+    stream_to_events(workspace, cmd, "venv", cancel_token).await
 }
 
 async fn resolve_system_python(python_version: Option<&str>) -> Result<PathBuf, String> {
@@ -351,10 +419,19 @@ async fn which_first(prog: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-async fn stream_to_events(workspace: &Path, mut cmd: Command, tool: &str) -> Result<(), String> {
+const VENV_CREATE_TIMEOUT: Duration = Duration::from_secs(600);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(1800);
+
+async fn stream_to_events(
+    workspace: &Path,
+    mut cmd: Command,
+    tool: &str,
+    cancel_token: &CancellationToken,
+) -> Result<(), String> {
     use std::process::Stdio;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {tool}: {e}"))?;
@@ -390,10 +467,24 @@ async fn stream_to_events(workspace: &Path, mut cmd: Command, tool: &str) -> Res
             }
         }
     });
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("failed to await {tool}: {e}"))?;
+    let status = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            let _ = child.kill().await;
+            let _ = tokio::join!(stdout_task, stderr_task);
+            return Err(format!("{tool} was cancelled and terminated"));
+        }
+        waited = tokio::time::timeout(VENV_CREATE_TIMEOUT, child.wait()) => match waited {
+            Ok(result) => result.map_err(|e| format!("failed to await {tool}: {e}"))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = tokio::join!(stdout_task, stderr_task);
+                return Err(format!(
+                    "{tool} timed out after {}s and was terminated",
+                    VENV_CREATE_TIMEOUT.as_secs()
+                ));
+            }
+        }
+    };
     let _ = tokio::join!(stdout_task, stderr_task);
     if status.success() {
         Ok(())
@@ -495,11 +586,13 @@ pub async fn install_requirements(
 
     let state = load_state(workspace).unwrap_or_else(|| PythonEnvState::empty(workspace));
     let use_uv = matches!(state.tool, PythonInterpreterTool::Uv) || uv_available_sync();
+    let registration = register_cancel_token(workspace);
+    let cancel_token = registration.token.clone();
 
     let outcome = if use_uv {
-        run_uv_install(workspace, &req_path).await
+        run_uv_install(workspace, &req_path, &cancel_token).await
     } else {
-        run_pip_install(workspace, &state, &req_path).await
+        run_pip_install(workspace, &state, &req_path, &cancel_token).await
     };
 
     publish_install_done(workspace, &outcome);
@@ -514,17 +607,19 @@ pub async fn install_with_strategy(workspace: &Path) -> Result<String, String> {
         file: workspace.join(rec.target.clone().unwrap_or_default()),
     });
     let state = load_state(workspace).unwrap_or_else(|| PythonEnvState::empty(workspace));
+    let registration = register_cancel_token(workspace);
+    let cancel_token = registration.token.clone();
     let outcome = match rec.strategy {
-        InstallStrategy::UvSync => run_uv_sync(workspace).await,
-        InstallStrategy::UvPipEditable => run_uv_pip_editable(workspace).await,
-        InstallStrategy::PipEditable => run_pip_editable(workspace, &state).await,
+        InstallStrategy::UvSync => run_uv_sync(workspace, &cancel_token).await,
+        InstallStrategy::UvPipEditable => run_uv_pip_editable(workspace, &cancel_token).await,
+        InstallStrategy::PipEditable => run_pip_editable(workspace, &state, &cancel_token).await,
         InstallStrategy::UvPipRequirements => {
             let path = workspace.join(target_label.clone());
-            run_uv_install(workspace, &path).await
+            run_uv_install(workspace, &path, &cancel_token).await
         }
         InstallStrategy::PipRequirements => {
             let path = workspace.join(target_label.clone());
-            run_pip_install(workspace, &state, &path).await
+            run_pip_install(workspace, &state, &path, &cancel_token).await
         }
         InstallStrategy::None => Err("No installable manifest detected (requires uv.lock / pyproject.toml / requirements.txt)".to_string()),
     };
@@ -547,7 +642,10 @@ fn publish_install_done(workspace: &Path, outcome: &Result<String, String>) {
     }
 }
 
-async fn run_uv_sync(workspace: &Path) -> Result<String, String> {
+async fn run_uv_sync(
+    workspace: &Path,
+    cancel_token: &CancellationToken,
+) -> Result<String, String> {
     let mut cmd = hidden_async_command("uv");
     cmd.arg("sync").current_dir(workspace);
     let venv_dir = workspace.join(".venv");
@@ -555,10 +653,13 @@ async fn run_uv_sync(workspace: &Path) -> Result<String, String> {
         cmd.env("VIRTUAL_ENV", &venv_dir);
         cmd.env("UV_PROJECT_ENVIRONMENT", &venv_dir);
     }
-    stream_install(workspace, cmd, "uv sync").await
+    stream_install(workspace, cmd, "uv sync", cancel_token).await
 }
 
-async fn run_uv_pip_editable(workspace: &Path) -> Result<String, String> {
+async fn run_uv_pip_editable(
+    workspace: &Path,
+    cancel_token: &CancellationToken,
+) -> Result<String, String> {
     let mut cmd = hidden_async_command("uv");
     cmd.arg("pip").arg("install").arg("-e").arg(".");
     cmd.current_dir(workspace);
@@ -567,12 +668,13 @@ async fn run_uv_pip_editable(workspace: &Path) -> Result<String, String> {
         cmd.env("VIRTUAL_ENV", &venv_dir);
         cmd.env("UV_PROJECT_ENVIRONMENT", &venv_dir);
     }
-    stream_install(workspace, cmd, "uv pip install -e .").await
+    stream_install(workspace, cmd, "uv pip install -e .", cancel_token).await
 }
 
 async fn run_pip_editable(
     workspace: &Path,
     state: &PythonEnvState,
+    cancel_token: &CancellationToken,
 ) -> Result<String, String> {
     let interpreter = state
         .interpreter_path
@@ -586,10 +688,14 @@ async fn run_pip_editable(
         .arg("-e")
         .arg(".")
         .current_dir(workspace);
-    stream_install(workspace, cmd, "pip install -e .").await
+    stream_install(workspace, cmd, "pip install -e .", cancel_token).await
 }
 
-async fn run_uv_install(workspace: &Path, req: &Path) -> Result<String, String> {
+async fn run_uv_install(
+    workspace: &Path,
+    req: &Path,
+    cancel_token: &CancellationToken,
+) -> Result<String, String> {
     let mut cmd = hidden_async_command("uv");
     cmd.arg("pip")
         .arg("install")
@@ -601,13 +707,14 @@ async fn run_uv_install(workspace: &Path, req: &Path) -> Result<String, String> 
         cmd.env("VIRTUAL_ENV", &venv_dir);
         cmd.env("UV_PROJECT_ENVIRONMENT", &venv_dir);
     }
-    stream_install(workspace, cmd, "uv pip install").await
+    stream_install(workspace, cmd, "uv pip install", cancel_token).await
 }
 
 async fn run_pip_install(
     workspace: &Path,
     state: &PythonEnvState,
     req: &Path,
+    cancel_token: &CancellationToken,
 ) -> Result<String, String> {
     let interpreter = state
         .interpreter_path
@@ -617,13 +724,19 @@ async fn run_pip_install(
     let mut cmd = hidden_async_command(interpreter.as_os_str());
     cmd.arg("-m").arg("pip").arg("install").arg("-r").arg(req);
     cmd.current_dir(workspace);
-    stream_install(workspace, cmd, "pip install").await
+    stream_install(workspace, cmd, "pip install", cancel_token).await
 }
 
-async fn stream_install(workspace: &Path, mut cmd: Command, tool: &str) -> Result<String, String> {
+async fn stream_install(
+    workspace: &Path,
+    mut cmd: Command,
+    tool: &str,
+    cancel_token: &CancellationToken,
+) -> Result<String, String> {
     use std::process::Stdio;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {tool}: {e}"))?;
@@ -659,10 +772,24 @@ async fn stream_install(workspace: &Path, mut cmd: Command, tool: &str) -> Resul
             }
         }
     });
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("failed to await {tool}: {e}"))?;
+    let status = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            let _ = child.kill().await;
+            let _ = tokio::join!(stdout_task, stderr_task);
+            return Err(format!("{tool} was cancelled and terminated"));
+        }
+        waited = tokio::time::timeout(INSTALL_TIMEOUT, child.wait()) => match waited {
+            Ok(result) => result.map_err(|e| format!("failed to await {tool}: {e}"))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = tokio::join!(stdout_task, stderr_task);
+                return Err(format!(
+                    "{tool} timed out after {}s and was terminated",
+                    INSTALL_TIMEOUT.as_secs()
+                ));
+            }
+        }
+    };
     let _ = tokio::join!(stdout_task, stderr_task);
     if status.success() {
         Ok(format!("{tool} completed"))

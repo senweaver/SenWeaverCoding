@@ -121,10 +121,16 @@ impl WorkerHandle {
 
     pub fn wait(&self) -> oneshot::Receiver<WorkerResult> {
         let (tx, rx) = oneshot::channel();
-        if let Some(result) = self.result.lock().clone() {
-            let _ = tx.send(result);
-        } else {
-            self.waiters.lock().push(tx);
+        let result_guard = self.result.lock();
+        match result_guard.clone() {
+            Some(result) => {
+                drop(result_guard);
+                let _ = tx.send(result);
+            }
+            None => {
+                self.waiters.lock().push(tx);
+                drop(result_guard);
+            }
         }
         rx
     }

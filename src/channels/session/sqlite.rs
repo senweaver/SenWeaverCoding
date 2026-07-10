@@ -140,6 +140,17 @@ impl SqliteSessionBackend {
             );
         }
 
+        let has_metadata: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_metadata {
+            let _ = conn.execute("ALTER TABLE sessions ADD COLUMN metadata TEXT", []);
+        }
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS session_edit_batches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,16 +218,22 @@ impl SqliteSessionBackend {
     ) -> std::io::Result<()> {
         let conn = self.writer.lock();
         let now = Utc::now().to_rfc3339();
+        let metadata_json = if message.metadata.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&message.metadata).ok()
+        };
 
         conn.execute(
-            "INSERT INTO sessions (session_key, role, content, created_at, hidden_for_ui)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO sessions (session_key, role, content, created_at, hidden_for_ui, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 session_key,
                 message.role,
                 message.content,
                 now,
                 i32::from(hidden_for_ui),
+                metadata_json,
             ],
         )
         .map_err(std::io::Error::other)?;
@@ -313,6 +330,15 @@ impl SqliteSessionBackend {
         Ok(migrated)
     }
 
+    fn parse_metadata_cell(
+        raw: Option<String>,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        raw.as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    }
+
     fn delete_session_rows(conn: &Connection, session_key: &str) -> rusqlite::Result<()> {
         conn.execute(
             "DELETE FROM sessions WHERE session_key = ?1",
@@ -340,7 +366,7 @@ impl SessionBackend for SqliteSessionBackend {
 
         let mut stmt = match conn
             .prepare(
-                "SELECT role, content FROM sessions
+                "SELECT role, content, metadata FROM sessions
                  WHERE session_key = ?1
                    AND tombstoned_at IS NULL
                    AND COALESCE(hidden_for_ui, 0) = 0
@@ -352,10 +378,11 @@ impl SessionBackend for SqliteSessionBackend {
         };
 
         let rows = match stmt.query_map(params![session_key], |row| {
+            let metadata_raw: Option<String> = row.get(2).unwrap_or(None);
             Ok(ChatMessage {
                 role: row.get(0)?,
                 content: row.get(1)?,
-                metadata: Default::default(),
+                metadata: Self::parse_metadata_cell(metadata_raw),
             })
         }) {
             Ok(r) => r,
@@ -368,7 +395,7 @@ impl SessionBackend for SqliteSessionBackend {
     fn load_with_tombstones(&self, session_key: &str) -> Vec<LoadedMessage> {
         let conn = self.read_conn();
         let mut stmt = match conn.prepare(
-            "SELECT id, role, content, tombstoned_at, hidden_for_ui FROM sessions
+            "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata FROM sessions
              WHERE session_key = ?1 ORDER BY id ASC",
         ) {
             Ok(s) => s,
@@ -381,12 +408,13 @@ impl SessionBackend for SqliteSessionBackend {
             let content: String = row.get(2)?;
             let tombstoned_at: Option<String> = row.get(3)?;
             let hidden_for_ui: i64 = row.get(4).unwrap_or(0);
+            let metadata_raw: Option<String> = row.get(5).unwrap_or(None);
             Ok(LoadedMessage {
                 id,
                 message: ChatMessage {
                     role,
                     content,
-                    metadata: Default::default(),
+                    metadata: Self::parse_metadata_cell(metadata_raw),
                 },
                 tombstoned_at,
                 hidden_for_ui: hidden_for_ui != 0,
@@ -538,8 +566,28 @@ impl SessionBackend for SqliteSessionBackend {
     fn count_user_messages(&self, session_key: &str) -> usize {
         let conn = self.read_conn();
         conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE session_key = ?1 AND role = 'user'",
+            "SELECT COUNT(*) FROM sessions
+              WHERE session_key = ?1
+                AND role = 'user'
+                AND tombstoned_at IS NULL
+                AND COALESCE(hidden_for_ui, 0) = 0",
             params![session_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| usize::try_from(n).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    fn count_live_user_messages_before_id(&self, session_key: &str, before_id: i64) -> usize {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sessions
+              WHERE session_key = ?1
+                AND role = 'user'
+                AND tombstoned_at IS NULL
+                AND COALESCE(hidden_for_ui, 0) = 0
+                AND id < ?2",
+            params![session_key, before_id],
             |row| row.get::<_, i64>(0),
         )
         .map(|n| usize::try_from(n).unwrap_or(0))
@@ -560,8 +608,8 @@ impl SessionBackend for SqliteSessionBackend {
     fn load_tail(&self, session_key: &str, limit: usize) -> Vec<ChatMessage> {
         let conn = self.read_conn();
         let mut stmt = match conn.prepare(
-            "SELECT role, content FROM (
-                SELECT id, role, content FROM sessions
+            "SELECT role, content, metadata FROM (
+                SELECT id, role, content, metadata FROM sessions
                 WHERE session_key = ?1
                   AND tombstoned_at IS NULL
                   AND COALESCE(hidden_for_ui, 0) = 0
@@ -574,10 +622,11 @@ impl SessionBackend for SqliteSessionBackend {
 
         #[allow(clippy::cast_possible_wrap)]
         let rows = match stmt.query_map(params![session_key, limit as i64], |row| {
+            let metadata_raw: Option<String> = row.get(2).unwrap_or(None);
             Ok(ChatMessage {
                 role: row.get(0)?,
                 content: row.get(1)?,
-                metadata: Default::default(),
+                metadata: Self::parse_metadata_cell(metadata_raw),
             })
         }) {
             Ok(r) => r,
@@ -595,7 +644,7 @@ impl SessionBackend for SqliteSessionBackend {
     ) -> Vec<LoadedMessage> {
         let conn = self.read_conn();
         let mut stmt = match conn.prepare(
-            "SELECT id, role, content, tombstoned_at, hidden_for_ui FROM sessions
+            "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata FROM sessions
              WHERE session_key = ?1 ORDER BY id ASC LIMIT ?2 OFFSET ?3",
         ) {
             Ok(s) => s,
@@ -611,12 +660,13 @@ impl SessionBackend for SqliteSessionBackend {
                 let content: String = row.get(2)?;
                 let tombstoned_at: Option<String> = row.get(3)?;
                 let hidden_for_ui: i64 = row.get(4).unwrap_or(0);
+                let metadata_raw: Option<String> = row.get(5).unwrap_or(None);
                 Ok(LoadedMessage {
                     id,
                     message: ChatMessage {
                         role,
                         content,
-                        metadata: Default::default(),
+                        metadata: Self::parse_metadata_cell(metadata_raw),
                     },
                     tombstoned_at,
                     hidden_for_ui: hidden_for_ui != 0,

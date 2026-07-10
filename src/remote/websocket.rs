@@ -15,6 +15,9 @@ const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(2);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_BROADCAST_CAPACITY: usize = 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const CLIENT_PING_INTERVAL: Duration = Duration::from_secs(30);
 
 fn sign_timestamp(secret: &str) -> (String, String) {
     use hmac::{Hmac, Mac};
@@ -169,7 +172,18 @@ impl SessionWebSocket {
                                 request.headers_mut().insert("x-sen-signature", sig_v);
                             }
                         }
-                        tokio_tungstenite::connect_async(request).await
+                        match tokio::time::timeout(
+                            CONNECT_TIMEOUT,
+                            tokio_tungstenite::connect_async(request),
+                        )
+                        .await
+                        {
+                            Ok(inner) => inner.map_err(anyhow::Error::from),
+                            Err(_) => Err(anyhow::anyhow!(
+                                "connect timed out after {}s",
+                                CONNECT_TIMEOUT.as_secs()
+                            )),
+                        }
                     }
                     Err(e) => {
                         *self.state.write().await = WsState::Disconnected;
@@ -178,7 +192,20 @@ impl SessionWebSocket {
                     }
                 }
             }
-            _ => tokio_tungstenite::connect_async(&self.url).await,
+            _ => {
+                match tokio::time::timeout(
+                    CONNECT_TIMEOUT,
+                    tokio_tungstenite::connect_async(&self.url),
+                )
+                .await
+                {
+                    Ok(inner) => inner.map_err(anyhow::Error::from),
+                    Err(_) => Err(anyhow::anyhow!(
+                        "connect timed out after {}s",
+                        CONNECT_TIMEOUT.as_secs()
+                    )),
+                }
+            }
         };
         let ws_stream = match connect_result {
             Ok((stream, _)) => stream,
@@ -202,7 +229,23 @@ impl SessionWebSocket {
         let connecting_read = Arc::clone(&self.connecting_since);
         let url_read = self.url.clone();
         let reader = crate::runtime::spawn_supervised("remote.websocket.reader", async move {
-            while let Some(msg) = ws_stream_rx.next().await {
+            loop {
+                let next = match tokio::time::timeout(READ_IDLE_TIMEOUT, ws_stream_rx.next())
+                    .await
+                {
+                    Ok(item) => item,
+                    Err(_) => {
+                        tracing::warn!(
+                            url = %url_read,
+                            idle_secs = READ_IDLE_TIMEOUT.as_secs(),
+                            "WebSocket idle beyond limit; treating connection as dead"
+                        );
+                        break;
+                    }
+                };
+                let Some(msg) = next else {
+                    break;
+                };
                 if shutdown_read.load(Ordering::SeqCst) {
                     break;
                 }
@@ -257,18 +300,41 @@ impl SessionWebSocket {
         let connecting_write = Arc::clone(&self.connecting_since);
         let writer = crate::runtime::spawn_supervised("remote.websocket.writer", async move {
             let mut rx = out_rx.lock().await;
-            while let Some(payload) = rx.recv().await {
-                if shutdown_write.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Err(e) = ws_sink
-                    .send(tokio_tungstenite::tungstenite::Message::Text(
-                        payload.into(),
-                    ))
-                    .await
-                {
-                    tracing::warn!(error = %e, "WebSocket write error");
-                    break;
+            let mut ping = tokio::time::interval(CLIENT_PING_INTERVAL);
+            ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    maybe_payload = rx.recv() => {
+                        let Some(payload) = maybe_payload else {
+                            break;
+                        };
+                        if shutdown_write.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Err(e) = ws_sink
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                payload.into(),
+                            ))
+                            .await
+                        {
+                            tracing::warn!(error = %e, "WebSocket write error");
+                            break;
+                        }
+                    }
+                    _ = ping.tick() => {
+                        if shutdown_write.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Err(e) = ws_sink
+                            .send(tokio_tungstenite::tungstenite::Message::Ping(
+                                Vec::new().into(),
+                            ))
+                            .await
+                        {
+                            tracing::warn!(error = %e, "WebSocket ping failed");
+                            break;
+                        }
+                    }
                 }
             }
             let _ = ws_sink
@@ -287,7 +353,17 @@ impl SessionWebSocket {
         *self.reader_task.lock() = Some(reader);
         *self.writer_task.lock() = Some(writer);
 
-        *self.state.write().await = WsState::Connected;
+        {
+            let mut state = self.state.write().await;
+            if self.shutdown.load(Ordering::SeqCst)
+                || self.generation.load(Ordering::SeqCst) != generation
+            {
+                *state = WsState::Disconnected;
+                *self.connecting_since.lock() = None;
+                anyhow::bail!("WebSocket connection died during setup");
+            }
+            *state = WsState::Connected;
+        }
         *self.connecting_since.lock() = None;
         Ok(())
     }
@@ -342,7 +418,6 @@ impl SessionWebSocket {
                         if this.closed.load(Ordering::SeqCst) {
                             break;
                         }
-                        this.fail_inflight_outbox();
                         match this.connect().await {
                             Ok(()) => {
                                 backoff = RETRY_INITIAL_DELAY;
@@ -364,22 +439,6 @@ impl SessionWebSocket {
             tracing::info!(url = %this.url, "remote websocket supervisor stopped");
         });
         *self.supervisor_task.lock() = Some(handle);
-    }
-
-    fn fail_inflight_outbox(&self) {
-        if let Ok(mut rx) = self.out_rx.try_lock() {
-            let mut failed: u64 = 0;
-            while rx.try_recv().is_ok() {
-                failed += 1;
-            }
-            if failed > 0 {
-                tracing::warn!(
-                    url = %self.url,
-                    failed,
-                    "remote websocket reconnect: dropped in-flight outgoing messages"
-                );
-            }
-        }
     }
 
     pub async fn disconnect(&self) {

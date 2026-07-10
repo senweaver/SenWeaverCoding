@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
+import { confirmDialog } from '../../lib/dialogs'
 import { useLanStore } from '../../stores/lanStore'
 import { useLanGroupStore } from '../../stores/lanGroupStore'
 import type { LanGroupDocument, LanGroupSnapshot } from '../../types/lanGroup'
@@ -177,9 +178,11 @@ export function GroupDocuments({
                           <button
                             type="button"
                             onClick={() => {
-                              if (window.confirm(t('lanGroup.deleteDoc'))) {
-                                void removeDocument(groupId, doc.id)
-                              }
+                              void (async () => {
+                                if (await confirmDialog(t('lanGroup.deleteDoc'))) {
+                                  await removeDocument(groupId, doc.id)
+                                }
+                              })()
                             }}
                             className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-selected)] hover:text-[var(--color-error)]"
                           >

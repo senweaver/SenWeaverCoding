@@ -11,9 +11,6 @@ pub struct AgentRuntimeExtras {
     #[serde(default = "default_max_iterations")]
     pub max_tool_iterations: u32,
 
-    #[serde(default = "default_loop_detection_threshold")]
-    pub loop_detection_threshold: u32,
-
     #[serde(default = "default_parallel_tools")]
     pub parallel_tools_enabled: bool,
 
@@ -96,9 +93,6 @@ fn default_max_iterations() -> u32 {
 
     2000
 }
-fn default_loop_detection_threshold() -> u32 {
-    3
-}
 fn default_parallel_tools() -> bool {
     true
 }
@@ -128,7 +122,6 @@ impl Default for AgentRuntimeExtras {
     fn default() -> Self {
         Self {
             max_tool_iterations: default_max_iterations(),
-            loop_detection_threshold: default_loop_detection_threshold(),
             parallel_tools_enabled: default_parallel_tools(),
             per_turn_token_soft_cap: default_per_turn_token_soft_cap(),
             per_turn_token_hard_cap: default_per_turn_token_hard_cap(),
@@ -157,9 +150,6 @@ impl AgentRuntimeExtras {
                 "agent_runtime.max_tool_iterations > 10000 is almost certainly a misconfiguration"
                     .into(),
             );
-        }
-        if self.loop_detection_threshold == 0 {
-            errors.push("agent_runtime.loop_detection_threshold must be >= 1".into());
         }
         if self.per_turn_token_hard_cap < self.per_turn_token_soft_cap {
             errors.push(

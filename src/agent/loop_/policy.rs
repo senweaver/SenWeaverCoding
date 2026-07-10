@@ -336,7 +336,11 @@ impl<'a> PolicyBundle<'a> {
                         *queue = compacted;
                     }
 
-                    fn enqueue(queue: &mut VecDeque<TurnEvent>, event: TurnEvent) {
+                    fn enqueue(
+                        queue: &mut VecDeque<TurnEvent>,
+                        event: TurnEvent,
+                        dropped_total: &mut u64,
+                    ) {
                         match event {
                             TurnEvent::Chunk { delta } => {
                                 if let Some(TurnEvent::Chunk { delta: tail }) = queue.back_mut() {
@@ -359,11 +363,17 @@ impl<'a> PolicyBundle<'a> {
                         if queue.len() > MAX_BRIDGE_QUEUE_EVENTS {
                             compact_text_events(queue);
                             if queue.len() > MAX_BRIDGE_QUEUE_EVENTS {
+                                let overflow = queue.len() - MAX_BRIDGE_QUEUE_EVENTS;
+                                for _ in 0..overflow {
+                                    queue.pop_front();
+                                }
+                                *dropped_total += overflow as u64;
                                 tracing::warn!(
                                     target: "agent.event_bridge",
-                                    queue_len = queue.len(),
+                                    dropped = overflow,
+                                    dropped_total = *dropped_total,
                                     cap = MAX_BRIDGE_QUEUE_EVENTS,
-                                    "turn event bridge queue exceeds cap even after text compaction; event consumer is slow"
+                                    "turn event bridge queue exceeded cap after text compaction; dropped oldest events (consumer too slow)"
                                 );
                             }
                         }
@@ -371,6 +381,7 @@ impl<'a> PolicyBundle<'a> {
 
                     let mut queue: VecDeque<TurnEvent> = VecDeque::new();
                     let mut closed = false;
+                    let mut dropped_total: u64 = 0;
                     loop {
                         if queue.is_empty() {
                             if closed {
@@ -379,14 +390,14 @@ impl<'a> PolicyBundle<'a> {
                             match draft_rx.recv().await {
                                 Some(ev) => {
                                     if let Some(t) = crate::agent::event_sink::draft_to_turn(ev) {
-                                        enqueue(&mut queue, t);
+                                        enqueue(&mut queue, t, &mut dropped_total);
                                     }
                                 }
                                 None => break,
                             }
                             while let Ok(ev) = draft_rx.try_recv() {
                                 if let Some(t) = crate::agent::event_sink::draft_to_turn(ev) {
-                                    enqueue(&mut queue, t);
+                                    enqueue(&mut queue, t, &mut dropped_total);
                                 }
                             }
                         } else {
@@ -397,13 +408,13 @@ impl<'a> PolicyBundle<'a> {
                                             if let Some(t) =
                                                 crate::agent::event_sink::draft_to_turn(ev)
                                             {
-                                                enqueue(&mut queue, t);
+                                                enqueue(&mut queue, t, &mut dropped_total);
                                             }
                                             while let Ok(ev) = draft_rx.try_recv() {
                                                 if let Some(t) =
                                                     crate::agent::event_sink::draft_to_turn(ev)
                                                 {
-                                                    enqueue(&mut queue, t);
+                                                    enqueue(&mut queue, t, &mut dropped_total);
                                                 }
                                             }
                                         }

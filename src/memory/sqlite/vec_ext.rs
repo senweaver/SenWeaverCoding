@@ -61,8 +61,8 @@ pub fn try_load_sqlite_vec(conn: &rusqlite::Connection) -> Result<(), VecExtErro
     {
         use rusqlite::LoadExtensionGuard;
 
-        let _guard =
-            LoadExtensionGuard::new(conn).map_err(|e| VecExtError::Sqlite(e.to_string()))?;
+        let _guard = unsafe { LoadExtensionGuard::new(conn) }
+            .map_err(|e| VecExtError::Sqlite(e.to_string()))?;
 
         let paths = candidate_paths();
         let mut attempted = Vec::new();

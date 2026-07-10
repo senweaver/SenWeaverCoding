@@ -406,6 +406,8 @@ fn qwen_oauth_token_expired(credentials: &QwenOauthCredentials) -> bool {
     expiry_millis <= now_millis.saturating_add(30_000)
 }
 
+const OAUTH_REFRESH_FOREGROUND_WAIT_SECS: u64 = 3;
+
 fn run_blocking_oauth_refresh<T, F>(task: F) -> anyhow::Result<T>
 where
     T: Send + 'static,
@@ -414,12 +416,27 @@ where
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => match handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(task),
-            _ => std::thread::Builder::new()
-                .name("provider-oauth-refresh".to_string())
-                .spawn(task)
-                .map_err(|error| anyhow::anyhow!("failed to spawn OAuth refresh thread: {error}"))?
-                .join()
-                .map_err(|_| anyhow::anyhow!("OAuth refresh thread panicked"))?,
+            _ => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("provider-oauth-refresh".to_string())
+                    .spawn(move || {
+                        let _ = tx.send(task());
+                    })
+                    .map_err(|error| {
+                        anyhow::anyhow!("failed to spawn OAuth refresh thread: {error}")
+                    })?;
+                match rx.recv_timeout(std::time::Duration::from_secs(
+                    OAUTH_REFRESH_FOREGROUND_WAIT_SECS,
+                )) {
+                    Ok(result) => result,
+                    Err(_) => anyhow::bail!(
+                        "OAuth refresh still running in background after \
+                         {OAUTH_REFRESH_FOREGROUND_WAIT_SECS}s (current-thread runtime); \
+                         proceeding with cached credentials for this request"
+                    ),
+                }
+            }
         },
         Err(_) => task(),
     }
@@ -549,14 +566,16 @@ fn resolve_qwen_oauth_context(credential_override: Option<&str>) -> QwenOauthPro
         if should_refresh {
             if let Some(refresh_token) = refresh_token.clone() {
                 match run_blocking_oauth_refresh(move || {
-                    refresh_qwen_oauth_access_token(&refresh_token)
+                    let refreshed = refresh_qwen_oauth_access_token(&refresh_token)?;
+                    persist_qwen_oauth_credentials(&refreshed);
+                    Ok(refreshed)
                 }) {
                     Ok(refreshed) => {
-                        persist_qwen_oauth_credentials(&refreshed);
                         cached = Some(refreshed);
                     }
                     Err(error) => {
                         tracing::warn!(error = %error, "Qwen OAuth refresh failed");
+                        cached = read_qwen_oauth_cached_credentials().or(cached);
                     }
                 }
             }
@@ -1015,10 +1034,24 @@ pub async fn api_error_structured(
     response: reqwest::Response,
 ) -> ProviderError {
     let status = response.status();
+    // Preserve the server-provided Retry-After hint (seconds or HTTP date) so
+    // the reliability layer can honour it instead of always falling back to the
+    // local backoff schedule. reqwest drops headers once the body is consumed.
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
     let body = response
         .text()
         .await
         .unwrap_or_else(|_| "<failed to read provider error body>".to_string());
+    let body = match retry_after {
+        Some(value) => format!("Retry-After: {value}\n{body}"),
+        None => body,
+    };
     let sanitized = sanitize_api_error(&body);
     ProviderError::Http {
         provider: provider.to_string(),
@@ -1439,11 +1472,15 @@ pub fn create_provider_with_url_and_options(
 
             let api_url = env_url.as_deref().or(api_url);
 
-            Ok(Box::new(ollama::OllamaProvider::new_with_reasoning(
-                api_url,
-                key,
-                options.reasoning_enabled,
-            )))
+            let mut p =
+                ollama::OllamaProvider::new_with_reasoning(api_url, key, options.reasoning_enabled);
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
+            }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
+            Ok(Box::new(p))
         }
         "gemini" | "google" | "google-gemini" => {
             let state_dir = options.sen_dir.clone().unwrap_or_else(|| {
@@ -1461,9 +1498,27 @@ pub fn create_provider_with_url_and_options(
             if !options.extra_headers.is_empty() {
                 p = p.with_extra_headers(options.extra_headers.clone());
             }
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
+            }
+            if let Some(mt) = options.provider_max_tokens {
+                p = p.with_max_output_tokens(mt);
+            }
             Ok(Box::new(p))
         }
-        "telnyx" => Ok(Box::new(telnyx::TelnyxProvider::new(key))),
+        "telnyx" => {
+            let mut p = match api_url.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(base) => telnyx::TelnyxProvider::with_base_url(key, base),
+                None => telnyx::TelnyxProvider::new(key),
+            };
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
+            }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
+            Ok(Box::new(p))
+        }
 
         "senweaver" | "sw" => {
             let base = std::env::var("SENWEAVER_BASE_URL")
@@ -1569,12 +1624,19 @@ pub fn create_provider_with_url_and_options(
                 }
             };
             let api_version = std::env::var("AZURE_OPENAI_API_VERSION").ok();
-            Ok(Box::new(azure_openai::AzureOpenAiProvider::new(
+            let mut p = azure_openai::AzureOpenAiProvider::new(
                 key,
                 &resource,
                 &deployment,
                 api_version.as_deref(),
-            )))
+            );
+            if let Some(t) = options.provider_timeout_secs {
+                p = p.with_timeout_secs(t);
+            }
+            if !options.extra_headers.is_empty() {
+                p = p.with_extra_headers(options.extra_headers.clone());
+            }
+            Ok(Box::new(p))
         }
         "bedrock" | "aws-bedrock" => {
             let mut p = if let Some(api_key) = key {
@@ -1625,7 +1687,7 @@ pub fn create_provider_with_url_and_options(
             key,
             AuthStyle::Bearer,
         ))),
-        name if is_bailian_alias(name) => Ok(Box::new(
+        name if is_bailian_alias(name) => Ok(compat(
             OpenAiCompatibleProvider::new_with_user_agent_and_vision(
                 "Bailian",
                 BAILIAN_BASE_URL,
@@ -2290,7 +2352,6 @@ pub fn create_resilient_provider_with_options(
         reliability.provider_retries,
         reliability.provider_backoff_ms,
     )
-    .with_api_keys(reliability.api_keys.clone())
     .with_model_fallbacks(reliability.model_fallbacks.clone())
     .with_retry_caps(
         reliability.engine_overload_max_retries,

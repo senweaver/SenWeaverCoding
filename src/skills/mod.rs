@@ -96,6 +96,12 @@ fn default_version() -> String {
     "0.1.0".to_string()
 }
 
+fn is_computer_recording_dir(path: &Path) -> bool {
+    path.join("recording.json").is_file()
+        && !path.join("SKILL.md").is_file()
+        && !path.join("SKILL.toml").is_file()
+}
+
 fn warn_skipped_skill(path: &Path, summary: &str, allow_scripts: bool) {
     let scripts_blocked = summary.contains("script-like files are blocked");
     if scripts_blocked && !allow_scripts {
@@ -265,6 +271,10 @@ pub fn load_skills_from_directory(skills_dir: &Path, allow_scripts: bool) -> Vec
             if name.starts_with('.') {
                 continue;
             }
+        }
+
+        if is_computer_recording_dir(&path) {
+            continue;
         }
 
         match audit::audit_skill_directory_with_options(
@@ -1406,12 +1416,26 @@ fn install_clawhub_skill_source(
         anyhow::bail!("ClawhHub download failed (HTTP {})", resp.status());
     }
 
-    let bytes = resp.bytes()?.to_vec();
+    if let Some(len) = resp.content_length() {
+        if len > MAX_CLAWHUB_ZIP_BYTES {
+            anyhow::bail!(
+                "ClawhHub zip rejected: too large ({len} bytes > {MAX_CLAWHUB_ZIP_BYTES})"
+            );
+        }
+    }
+
+    let mut bytes: Vec<u8> = Vec::new();
+    {
+        use std::io::Read;
+        let limit = MAX_CLAWHUB_ZIP_BYTES.saturating_add(1);
+        let mut limited = resp.take(limit);
+        limited
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read zip body from {download_url}"))?;
+    }
     if bytes.len() as u64 > MAX_CLAWHUB_ZIP_BYTES {
         anyhow::bail!(
-            "ClawhHub zip rejected: too large ({} bytes > {})",
-            bytes.len(),
-            MAX_CLAWHUB_ZIP_BYTES
+            "ClawhHub zip rejected: too large (> {MAX_CLAWHUB_ZIP_BYTES} bytes)"
         );
     }
 

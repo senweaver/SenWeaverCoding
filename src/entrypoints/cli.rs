@@ -109,7 +109,13 @@ impl CliEntrypoint {
 
     pub async fn run(options: CliOptions) -> anyhow::Result<()> {
         let config = crate::Config::load_or_init().await?;
+        Self::run_with_config(options, config).await
+    }
 
+    pub async fn run_with_config(
+        options: CliOptions,
+        config: crate::Config,
+    ) -> anyhow::Result<()> {
         if options.dump_system_prompt {
             let cwd = resolve_cwd(&options);
             let files = crate::memdir::discover_memory_files(&cwd)
@@ -155,10 +161,8 @@ impl CliEntrypoint {
         {
             let metrics = crate::services::try_get_services().map(|s| s.agent_metrics.clone());
 
-            let (_handle, _token) = crate::memory::gc::spawn_memory_gc_task(
-                crate::config::domain::MemoryRuntimeExtras::default(),
-                metrics,
-            );
+            let (_handle, _token) =
+                crate::memory::gc::spawn_memory_gc_task(config.memory_runtime.clone(), metrics);
         }
 
         crate::bootstrap::get_state().write(|state| {
@@ -197,7 +201,7 @@ impl CliEntrypoint {
         }
 
         if options.remote {
-            return Self::run_remote(options).await;
+            return Self::run_remote(options, &config).await;
         }
 
         Self::run_interactive(options, config).await
@@ -278,11 +282,10 @@ impl CliEntrypoint {
         Ok(())
     }
 
-    async fn run_remote(options: CliOptions) -> anyhow::Result<()> {
+    async fn run_remote(options: CliOptions, config: &crate::Config) -> anyhow::Result<()> {
         use futures_util::{SinkExt, StreamExt};
         use std::io::Write as _;
 
-        let config = crate::Config::load_or_init().await?;
         let host = if config.gateway.host == "0.0.0.0" {
             "127.0.0.1".to_string()
         } else {
@@ -500,42 +503,30 @@ impl CliEntrypoint {
             .clone()
             .or_else(|| config.default_provider.clone())
             .unwrap_or_else(|| "openrouter".into());
-        let resolved_provider_name =
-            crate::providers::resolve_runtime_provider_name(&provider_name, &config);
         let model = match options.model.clone() {
             Some(m) if !m.trim().is_empty() => m,
             _ => crate::providers::resolve_default_model(&config)?,
         };
 
-        let provider = crate::providers::create_provider_with_url_async(
-            resolved_provider_name,
-            config.api_key.clone(),
-            config.api_url.clone(),
+        let cwd = resolve_cwd(&options);
+
+        let mut effective_config = config.clone();
+        effective_config.default_provider = Some(provider_name);
+        effective_config.default_model = Some(model);
+        effective_config.default_temperature = temperature;
+        effective_config.workspace_dir = cwd;
+
+        let agent = Agent::from_config(
+            &effective_config,
+            None,
+            Some(LiveConfig::new(config.clone())),
         )
         .await?;
 
-        let cwd = resolve_cwd(&options);
-        let security_policy = std::sync::Arc::new(crate::security::SecurityPolicy::from_config(
-            &config.autonomy,
-            &cwd,
-        ));
-        let agent = Agent::builder()
-            .provider(provider)
-            .tools(crate::tools::default_tools(security_policy))
-            .shared_config(LiveConfig::new(config.clone()))
-            .cached_provider_config(
-                provider_name.clone(),
-                config.api_key.clone().unwrap_or_default(),
-                config.api_url.clone().unwrap_or_default(),
-            )
-            .temperature(temperature)
-            .model_name(model)
-            .build()?;
-
         let agent = Arc::new(Mutex::new(agent));
 
-        tracing::info!("Starting session-driven interactive REPL");
-        run_session_driven(agent, "> ").await
+        tracing::info!("Starting session-driven interactive REPL with full tool surface");
+        run_session_driven(agent, "> ", options.prompt, options.resume).await
     }
 }
 

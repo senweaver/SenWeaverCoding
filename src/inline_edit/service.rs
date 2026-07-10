@@ -131,6 +131,10 @@ pub fn default_fast_refiner(config: &Config) -> Option<Arc<FastApplyRefiner>> {
     Some(tiered)
 }
 
+pub fn cached_runner() -> Option<Arc<InlineEditRunner>> {
+    cache().read().ok().and_then(|guard| guard.clone())
+}
+
 pub fn default_runner(config: &Config) -> Option<Arc<InlineEditRunner>> {
     if let Ok(guard) = cache().read()
         && let Some(existing) = guard.as_ref()

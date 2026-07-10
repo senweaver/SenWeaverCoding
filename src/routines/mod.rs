@@ -6,7 +6,7 @@ pub mod engine;
 pub mod event_matcher;
 pub use engine::{
     Routine, RoutineAction, RoutineDispatchResult, RoutinesEngine, load_routines,
-    load_routines_from_file,
+    load_routines_from_file, save_routines, save_routines_to_file,
 };
 pub use event_matcher::{EventPattern, MatchStrategy, RoutineEvent, matches, matches_any};
 
@@ -15,17 +15,53 @@ use std::sync::OnceLock;
 
 static ENGINE: OnceLock<Mutex<RoutinesEngine>> = OnceLock::new();
 
+fn routines_workspace_dir() -> std::path::PathBuf {
+    crate::services::try_get_services()
+        .map(|svc| svc.config().workspace_dir.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
 fn global_engine() -> &'static Mutex<RoutinesEngine> {
     ENGINE.get_or_init(|| {
-        let dir = crate::services::try_get_services()
-            .map(|svc| svc.config().workspace_dir.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let routines = load_routines(&dir);
+        let routines = load_routines(&routines_workspace_dir());
         if !routines.is_empty() {
             tracing::info!(count = routines.len(), "Loaded routines");
         }
         Mutex::new(RoutinesEngine::new(routines))
     })
+}
+
+pub fn list_routines() -> Vec<Routine> {
+    global_engine().lock().routines().to_vec()
+}
+
+pub fn add_routine(routine: Routine) -> anyhow::Result<()> {
+    let mut engine = global_engine().lock();
+    if engine.routines().iter().any(|r| r.name == routine.name) {
+        anyhow::bail!("routine '{}' already exists", routine.name);
+    }
+    engine.add_routine(routine);
+    save_routines(&routines_workspace_dir(), engine.routines())
+}
+
+pub fn remove_routine(name: &str) -> anyhow::Result<bool> {
+    let mut engine = global_engine().lock();
+    if !engine.remove_routine(name) {
+        return Ok(false);
+    }
+    save_routines(&routines_workspace_dir(), engine.routines())?;
+    Ok(true)
+}
+
+pub fn reload_routines() -> usize {
+    let routines = load_routines(&routines_workspace_dir());
+    let count = routines.len();
+    *global_engine().lock() = RoutinesEngine::new(routines);
+    count
+}
+
+pub fn reset_cooldowns() {
+    global_engine().lock().reset_cooldowns();
 }
 
 pub fn dispatch_event(source: &str, topic: &str, payload: Option<String>) {

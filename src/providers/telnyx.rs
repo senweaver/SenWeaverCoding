@@ -11,6 +11,10 @@ pub struct TelnyxProvider {
 
     api_key: Option<String>,
 
+    base_url: String,
+
+    extra_headers: std::collections::HashMap<String, String>,
+
     client: Client,
 }
 
@@ -18,21 +22,56 @@ impl TelnyxProvider {
 
     const BASE_URL: &'static str = "https://api.telnyx.com/v2/ai";
 
+    const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
     pub fn new(api_key: Option<&str>) -> Self {
+        Self::with_base_url(api_key, Self::BASE_URL)
+    }
+
+    pub fn with_base_url(api_key: Option<&str>, base_url: &str) -> Self {
         let resolved_key = resolve_telnyx_api_key(api_key);
+        let base_url = base_url.trim().trim_end_matches('/');
+        let base_url = if base_url.is_empty() {
+            Self::BASE_URL.to_string()
+        } else {
+            base_url.to_string()
+        };
         Self {
             api_key: resolved_key,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            base_url,
+            extra_headers: std::collections::HashMap::new(),
+            client: Self::build_client(Self::DEFAULT_TIMEOUT_SECS),
         }
     }
 
-    pub fn with_base_url(api_key: Option<&str>, _base_url: &str) -> Self {
+    fn build_client(timeout_secs: u64) -> Client {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| Client::new())
+    }
 
-        Self::new(api_key)
+    #[must_use]
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.client = Self::build_client(timeout_secs);
+        self
+    }
+
+    #[must_use]
+    pub fn with_extra_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    fn apply_extra_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in &self.extra_headers {
+            request = request.header(name, value);
+        }
+        request
     }
 
     pub async fn list_models(&self) -> anyhow::Result<Vec<String>> {
@@ -40,12 +79,11 @@ impl TelnyxProvider {
             anyhow::anyhow!("Telnyx API key not set. Set TELNYX_API_KEY environment variable.")
         })?;
 
-        let response = self
+        let request = self
             .client
-            .get(format!("{}/models", Self::BASE_URL))
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await?;
+            .get(format!("{}/models", self.base_url))
+            .header("Authorization", format!("Bearer {}", api_key));
+        let response = self.apply_extra_headers(request).send().await?;
 
         if !response.status().is_success() {
             let error = response.text().await?;
@@ -57,7 +95,7 @@ impl TelnyxProvider {
     }
 
     fn chat_url(&self) -> String {
-        format!("{}/chat/completions", Self::BASE_URL)
+        format!("{}/chat/completions", self.base_url)
     }
 }
 
@@ -120,7 +158,8 @@ struct Choice {
 
 #[derive(Debug, Deserialize)]
 struct ResponseMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[async_trait]
@@ -158,14 +197,13 @@ impl Provider for TelnyxProvider {
             temperature,
         };
 
-        let response = self
+        let http_request = self
             .client
             .post(self.chat_url())
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -180,7 +218,7 @@ impl Provider for TelnyxProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .ok_or_else(|| anyhow::anyhow!("No response from Telnyx"))
     }
 
@@ -219,14 +257,13 @@ impl Provider for TelnyxProvider {
             temperature,
         };
 
-        let response = self
+        let http_request = self
             .client
             .post(self.chat_url())
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -241,7 +278,7 @@ impl Provider for TelnyxProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .ok_or_else(|| anyhow::anyhow!("No response from Telnyx"))
     }
 
@@ -249,7 +286,7 @@ impl Provider for TelnyxProvider {
 
         let _ = self
             .client
-            .get(format!("{}/models", Self::BASE_URL))
+            .get(format!("{}/models", self.base_url))
             .send()
             .await;
         Ok(())

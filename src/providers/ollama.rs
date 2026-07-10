@@ -14,6 +14,8 @@ pub struct OllamaProvider {
     base_url: String,
     api_key: Option<String>,
     reasoning_enabled: Option<bool>,
+    timeout_secs: u64,
+    extra_headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,7 +143,21 @@ impl OllamaProvider {
             base_url: Self::normalize_base_url(base_url.unwrap_or("http://localhost:11434")),
             api_key,
             reasoning_enabled,
+            timeout_secs: 300,
+            extra_headers: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_extra_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     fn is_local_endpoint(&self) -> bool {
@@ -154,7 +170,7 @@ impl OllamaProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts("provider.ollama", 300, 10)
+            .build_client_with_timeouts("provider.ollama", self.timeout_secs, 10)
     }
 
     fn resolve_request_details(&self, model: &str) -> anyhow::Result<(String, bool)> {
@@ -259,18 +275,18 @@ impl OllamaProvider {
         None
     }
 
-    fn fallback_text_for_empty_content(model: &str, thinking: Option<&str>) -> String {
+    fn empty_content_error(model: &str, thinking: Option<&str>) -> anyhow::Error {
+        // Return a real error (not fabricated first-person text): a fake reply
+        // would suppress the reliable layer's retry/failover and pollute history.
         if let Some(thinking) = thinking.map(str::trim).filter(|value| !value.is_empty()) {
             let thinking_log_excerpt: String = thinking.chars().take(100).collect();
-            let thinking_reply_excerpt: String = thinking.chars().take(200).collect();
             tracing::warn!(
                 "Ollama returned empty content with only thinking for model '{}': '{}'. Model may have stopped prematurely.",
                 model,
                 thinking_log_excerpt
             );
-            return format!(
-                "I was thinking about this: {}... but I didn't complete my response. Could you try asking again?",
-                thinking_reply_excerpt
+            return anyhow::anyhow!(
+                "Ollama model '{model}' returned only reasoning with no answer content (stopped prematurely)"
             );
         }
 
@@ -278,8 +294,9 @@ impl OllamaProvider {
             "Ollama returned empty or whitespace content with no tool calls for model '{}'",
             model
         );
-        "I couldn't get a complete response from Ollama. Please try again or switch to a different model."
-            .to_string()
+        anyhow::anyhow!(
+            "Ollama model '{model}' returned empty content with no tool calls"
+        )
     }
 
     fn build_chat_request_with_think(
@@ -447,6 +464,10 @@ impl OllamaProvider {
         );
 
         let mut request_builder = self.http_client().post(&url).json(&request);
+
+        for (name, value) in &self.extra_headers {
+            request_builder = request_builder.header(name, value);
+        }
 
         if should_auth {
             if let Some(key) = self.api_key.as_ref() {
@@ -657,7 +678,7 @@ impl Provider for OllamaProvider {
             return Ok(content);
         }
 
-        Ok(Self::fallback_text_for_empty_content(
+        Err(Self::empty_content_error(
             &normalized_model,
             response.message.thinking.as_deref(),
         ))
@@ -705,7 +726,7 @@ impl Provider for OllamaProvider {
             return Ok(content);
         }
 
-        Ok(Self::fallback_text_for_empty_content(
+        Err(Self::empty_content_error(
             &normalized_model,
             response.message.thinking.as_deref(),
         ))
@@ -783,13 +804,11 @@ impl Provider for OllamaProvider {
             &response.message.content,
             response.message.thinking.as_deref(),
         );
-        let text = if let Some(content) = effective {
-            content
-        } else {
-            Self::fallback_text_for_empty_content(
+        let Some(text) = effective else {
+            return Err(Self::empty_content_error(
                 &normalized_model,
                 response.message.thinking.as_deref(),
-            )
+            ));
         };
         Ok(ChatResponse::text_only(Some(text), usage))
     }

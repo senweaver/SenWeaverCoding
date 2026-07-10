@@ -18,7 +18,7 @@ inventory::submit!(StaticSlashCommand {
 
 pub async fn handle_history(ctx: CommandContext) -> CommandResult {
     let subcmd = ctx.args.first().map(|s| s.as_str()).unwrap_or("list");
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = ctx.cwd.clone();
     let sessions_dir = cwd.join(".senweavercoding").join("sessions");
 
     match subcmd {
@@ -45,7 +45,7 @@ pub async fn handle_history(ctx: CommandContext) -> CommandResult {
         },
         "export" => {
             let output_path = ctx.args.get(1).map(PathBuf::from);
-            match export_history(&sessions_dir, output_path).await {
+            match export_history(&cwd, output_path).await {
                 Ok(path) => CommandResult::ok(format!("History exported to: {}", path.display())),
                 Err(e) => CommandResult::err(format!("Failed to export history: {e}")),
             }
@@ -81,14 +81,14 @@ async fn clear_history(sessions_dir: &std::path::Path) -> anyhow::Result<usize> 
 }
 
 async fn export_history(
-    sessions_dir: &std::path::Path,
+    workspace: &std::path::Path,
     output_path: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
-    if !sessions_dir.exists() {
+    if !workspace.join(".senweavercoding").join("sessions").exists() {
         anyhow::bail!("No sessions directory found.");
     }
 
-    let sessions = crate::cli::bg::list_sessions_sync(sessions_dir)?;
+    let sessions = crate::cli::bg::list_sessions_sync(workspace)?;
     if sessions.is_empty() {
         anyhow::bail!("No sessions to export.");
     }

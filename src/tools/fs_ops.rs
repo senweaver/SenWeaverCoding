@@ -354,6 +354,10 @@ impl Tool for DeletePathTool {
             });
         }
 
+        if let Some(r) = verify_resolved_path(&self.security, &full, path).await {
+            return Ok(r);
+        }
+
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,

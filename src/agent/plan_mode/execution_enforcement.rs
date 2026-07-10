@@ -144,6 +144,8 @@ pub struct PlanExecutionNudgeState {
 
     pub terminal_count: usize,
 
+    pub terminal_ids: std::collections::HashSet<String>,
+
     pub nudge_count: usize,
 
     pub unproductive_nudges: usize,
@@ -200,17 +202,29 @@ impl PlanExecutionNudgeState {
             "set" => {
                 if let Some(steps) = arguments.get("steps").and_then(|v| v.as_array()) {
                     self.total_steps = steps.len();
-                    let incoming_terminal = steps
-                        .iter()
-                        .filter(|s| {
-                            matches!(
-                                s.get("status").and_then(|v| v.as_str()),
-                                Some("completed") | Some("skipped")
-                            )
-                        })
-                        .count();
-                    let prior = self.terminal_count.min(self.total_steps);
-                    self.terminal_count = incoming_terminal.max(prior);
+                    // A `set` is the authoritative full plan snapshot and its steps
+                    // carry ids, so rebuild the terminal-id set directly from it.
+                    // This keeps the count exact even if the model later re-sends an
+                    // update for a step that was already terminal in this snapshot.
+                    let mut ids = std::collections::HashSet::new();
+                    let mut terminal_without_id = 0usize;
+                    for s in steps {
+                        let is_terminal = matches!(
+                            s.get("status").and_then(|v| v.as_str()),
+                            Some("completed") | Some("skipped")
+                        );
+                        if !is_terminal {
+                            continue;
+                        }
+                        match s.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                            Some(id) => {
+                                ids.insert(id.to_string());
+                            }
+                            None => terminal_without_id += 1,
+                        }
+                    }
+                    self.terminal_count = (ids.len() + terminal_without_id).min(self.total_steps);
+                    self.terminal_ids = ids;
                 }
             }
             "update" => {
@@ -218,8 +232,33 @@ impl PlanExecutionNudgeState {
                     .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if matches!(status, "completed" | "skipped") {
-                    self.terminal_count = self.terminal_count.saturating_add(1);
+                let step_id = arguments
+                    .get("step_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                let is_terminal = matches!(status, "completed" | "skipped");
+                match step_id {
+                    Some(id) => {
+                        // Track distinct terminal step ids so flipping the same
+                        // step completed -> in_progress -> completed (or re-sending
+                        // update on an already-completed step) can't inflate the
+                        // count past the real number of finished steps.
+                        if is_terminal {
+                            if self.terminal_ids.insert(id) {
+                                self.terminal_count = self.terminal_count.saturating_add(1);
+                            }
+                        } else if self.terminal_ids.remove(&id) {
+                            self.terminal_count = self.terminal_count.saturating_sub(1);
+                        }
+                    }
+                    None => {
+                        // No step id to dedupe against: keep the legacy behavior but
+                        // never let it exceed the known step total.
+                        if is_terminal && self.terminal_count < self.total_steps.max(1) {
+                            self.terminal_count = self.terminal_count.saturating_add(1);
+                        }
+                    }
                 }
             }
             "get" => {
@@ -248,7 +287,11 @@ impl PlanExecutionNudgeState {
                 }
                 if total > 0 {
                     self.total_steps = total;
-                    self.terminal_count = terminal;
+                    // `get` renders markdown checkboxes without step ids, so we can
+                    // only recover a terminal COUNT, not the id set. Preserve the
+                    // id-dedupe history and use the rendered count as a floor so a
+                    // later re-flip of an already-terminal id still can't inflate.
+                    self.terminal_count = terminal.max(self.terminal_ids.len()).min(total);
                 }
             }
             _ => {}

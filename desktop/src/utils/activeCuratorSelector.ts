@@ -96,11 +96,15 @@ export function selectCuratorCardExecutionState(
   return 'executing'
 }
 
-export function selectActiveExecutingCurator(
-  messages: UIMessage[] | undefined,
+type ActiveCuratorResult = { card: CuratorCardMsg; state: CuratorExecutionState } | null
+
+// Memoize by messages array reference (see activePlanSelector for rationale).
+const activeCuratorCache = new WeakMap<UIMessage[], Map<string, ActiveCuratorResult>>()
+
+function computeActiveExecutingCurator(
+  messages: UIMessage[],
   chatState?: ChatState,
-): { card: CuratorCardMsg; state: CuratorExecutionState } | null {
-  if (!messages) return null
+): ActiveCuratorResult {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (m && m.type === 'curator_card') {
@@ -112,4 +116,23 @@ export function selectActiveExecutingCurator(
     }
   }
   return null
+}
+
+export function selectActiveExecutingCurator(
+  messages: UIMessage[] | undefined,
+  chatState?: ChatState,
+): ActiveCuratorResult {
+  if (!messages) return null
+  const key = chatState ?? '__undef__'
+  let inner = activeCuratorCache.get(messages)
+  if (inner) {
+    const cached = inner.get(key)
+    if (cached !== undefined) return cached
+  } else {
+    inner = new Map()
+    activeCuratorCache.set(messages, inner)
+  }
+  const result = computeActiveExecutingCurator(messages, chatState)
+  inner.set(key, result)
+  return result
 }

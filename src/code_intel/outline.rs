@@ -167,24 +167,91 @@ pub fn locate_named_scope(
     scope_name: &str,
 ) -> Option<std::ops::Range<usize>> {
     let content = std::fs::read_to_string(path).ok()?;
-    let search = format!("fn {}", scope_name.trim_start_matches("fn "));
-    let start = content.find(&search)?;
+    locate_named_scope_in(&content, scope_name)
+}
 
+pub fn locate_named_scope_in(
+    content: &str,
+    scope_name: &str,
+) -> Option<std::ops::Range<usize>> {
+    let name = scope_name.trim_start_matches("fn ").trim();
+    if name.is_empty() {
+        return None;
+    }
+    let search = format!("fn {name}");
+    let bytes = content.as_bytes();
+
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+    // Find `fn NAME` at an identifier boundary on both sides so `fn run`
+    // cannot match `fn run_all` (or `hyphen run`-style substrings).
+    let mut search_from = 0usize;
+    let start = loop {
+        let rel = content[search_from..].find(&search)?;
+        let at = search_from + rel;
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let after = at + search.len();
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            break at;
+        }
+        search_from = at + 1;
+    };
+
+    // Brace-count with minimal string/char/comment awareness so a `{` inside
+    // a literal or comment cannot corrupt the scope boundary.
     let mut depth = 0usize;
     let mut end = start;
-    let bytes = content.as_bytes();
-    for (i, b) in bytes.iter().enumerate().skip(start) {
-        match *b {
-            b'{' => depth += 1,
+    let mut i = start;
+    let mut saw_open = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => break,
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'\'' => {
+                // Char literal or lifetime; skip a short span conservatively.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                    i += 3;
+                } else if i + 2 < bytes.len() && bytes[i + 2] == b'\'' {
+                    i += 2;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'{' => {
+                depth += 1;
+                saw_open = true;
+            }
             b'}' => {
                 depth = depth.saturating_sub(1);
-                if depth == 0 && i > start {
+                if depth == 0 && saw_open {
                     end = i + 1;
                     break;
                 }
             }
             _ => {}
         }
+        i += 1;
     }
     if end > start {
         Some(start..end)

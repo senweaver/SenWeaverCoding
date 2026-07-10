@@ -443,7 +443,8 @@ const TabItem = forwardRef<HTMLDivElement, {
   const queuedCount = useQueueLengthForSession(tab.type === 'session' ? tab.sessionId : null)
   const awaitingApproval = useChatStore((s) =>
     tab.type === 'session'
-      ? s.sessions[tab.sessionId]?.chatState === 'permission_pending'
+      ? s.sessions[tab.sessionId]?.chatState === 'permission_pending' ||
+        !!s.sessions[tab.sessionId]?.pendingPermission
       : false,
   )
   const isRunning = tab.type === 'session' && (tab.status === 'running' || sessionRunning)

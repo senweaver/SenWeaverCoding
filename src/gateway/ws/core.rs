@@ -58,9 +58,16 @@ pub struct ApprovalRespondBody {
 }
 
 pub async fn handle_approval_respond(
+    State(state): State<AppState>,
     Path(approval_id): Path<String>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<ApprovalRespondBody>,
 ) -> impl IntoResponse {
+    if let Err(err) = crate::gateway::api::require_auth_with_peer(&state, &headers, Some(peer)) {
+        return err.into_response();
+    }
+
     let decision = body.decision.to_ascii_lowercase();
     if !matches!(decision.as_str(), "yes" | "always" | "no") {
         return (
@@ -119,6 +126,57 @@ const WS_PROTOCOL: &str = "sen.v1";
 
 const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
 
+const MAX_WS_CHAT_CONNECTIONS: usize = 64;
+
+const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+const PENDING_INBOUND_MAX: usize = 256;
+
+static ACTIVE_WS_CHAT_CONNECTIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct WsConnectionSlot;
+
+impl WsConnectionSlot {
+    fn try_acquire() -> Option<Self> {
+        let acquired = ACTIVE_WS_CHAT_CONNECTIONS
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |current| {
+                    if current >= MAX_WS_CHAT_CONNECTIONS {
+                        None
+                    } else {
+                        Some(current + 1)
+                    }
+                },
+            )
+            .is_ok();
+        if acquired { Some(Self) } else { None }
+    }
+}
+
+impl Drop for WsConnectionSlot {
+    fn drop(&mut self) {
+        ACTIVE_WS_CHAT_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn buffer_pending_inbound(pending_inbound: &mut std::collections::VecDeque<String>, text: String) {
+    if pending_inbound.len() >= PENDING_INBOUND_MAX {
+        tracing::warn!(
+            "gateway ws: pending inbound buffer full ({PENDING_INBOUND_MAX}); dropping oldest \
+             buffered message"
+        );
+        pending_inbound.pop_front();
+    }
+    pending_inbound.push_back(text);
+}
+
 #[derive(Deserialize)]
 pub struct WsQuery {
     pub token: Option<String>,
@@ -175,6 +233,10 @@ pub async fn handle_ws_chat(
         "WebSocket chat upgrade requested"
     );
 
+    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/chat") {
+        return reject;
+    }
+
     if state.exposed || state.pairing.require_pairing() {
         let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
         let authed = if state.exposed {
@@ -217,6 +279,26 @@ async fn handle_socket(
     session_name: Option<String>,
 ) {
     let (mut sender, mut receiver) = socket.split();
+
+    let Some(_connection_slot) = WsConnectionSlot::try_acquire() else {
+        tracing::warn!(
+            "gateway ws: rejecting chat connection; {MAX_WS_CHAT_CONNECTIONS} connections \
+             already active"
+        );
+        let err = serde_json::json!({
+            "type": "error",
+            "message": "Too many concurrent connections; try again later",
+            "code": "TOO_MANY_CONNECTIONS"
+        });
+        let _ = sender.send(Message::Text(err.to_string().into())).await;
+        let _ = sender
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1013,
+                reason: axum::extract::ws::Utf8Bytes::from_static("too many connections"),
+            })))
+            .await;
+        return;
+    };
 
     tracing::info!("WebSocket socket upgraded, session_id={:?}", session_id);
 
@@ -336,7 +418,23 @@ async fn handle_socket(
     let mut first_msg_fallback: Option<String> = None;
     let mut pending_inbound: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
-    if let Some(first) = receiver.next().await {
+    let first_frame = match tokio::time::timeout(WS_HANDSHAKE_TIMEOUT, receiver.next()).await {
+        Ok(frame) => frame,
+        Err(_) => {
+            tracing::info!(
+                "gateway ws: no client frame within {}s of connect; closing idle handshake",
+                WS_HANDSHAKE_TIMEOUT.as_secs()
+            );
+            let _ = sender
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1002,
+                    reason: axum::extract::ws::Utf8Bytes::from_static("handshake timeout"),
+                })))
+                .await;
+            return;
+        }
+    };
+    if let Some(first) = first_frame {
         match first {
             Ok(Message::Text(text)) => {
                 if let Ok(cp) = serde_json::from_str::<ConnectParams>(&text) {
@@ -428,14 +526,55 @@ async fn handle_socket(
         }
     }
 
+    let mut ping_ticker = tokio::time::interval(WS_PING_INTERVAL);
+    ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_inbound_at = tokio::time::Instant::now();
+
     loop {
         let msg = if let Some(buffered) = pending_inbound.pop_front() {
             buffered
         } else {
-            match receiver.next().await {
-                Some(Ok(Message::Text(text))) => text.to_string(),
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(_)) => continue,
+            'recv: loop {
+                tokio::select! {
+                    incoming = receiver.next() => {
+                        match incoming {
+                            Some(Ok(Message::Text(text))) => {
+                                last_inbound_at = tokio::time::Instant::now();
+                                break 'recv text.to_string();
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                            Some(Ok(_)) => {
+                                last_inbound_at = tokio::time::Instant::now();
+                                continue;
+                            }
+                        }
+                    }
+                    _ = ping_ticker.tick() => {
+                        if last_inbound_at.elapsed() >= WS_IDLE_TIMEOUT {
+                            tracing::info!(
+                                "gateway ws: no client traffic for {}s; closing half-open \
+                                 connection",
+                                WS_IDLE_TIMEOUT.as_secs()
+                            );
+                            let _ = sender
+                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                    code: 1001,
+                                    reason: axum::extract::ws::Utf8Bytes::from_static(
+                                        "idle timeout",
+                                    ),
+                                })))
+                                .await;
+                            return;
+                        }
+                        if sender
+                            .send(Message::Ping(Vec::new().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
             }
         };
 
@@ -509,6 +648,7 @@ async fn handle_socket(
             &session_key,
         )
         .await;
+        last_inbound_at = tokio::time::Instant::now();
     }
 }
 
@@ -798,7 +938,7 @@ async fn process_chat_message(
             loop {
                 match receiver.next().await {
                     Some(Ok(Message::Text(text))) => {
-                        pending_inbound.push_back(text.to_string());
+                        buffer_pending_inbound(pending_inbound, text.to_string());
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                     Some(Ok(_)) => continue,

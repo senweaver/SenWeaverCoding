@@ -68,6 +68,14 @@ impl Tunnel for CloudflareTunnel {
             .stderr
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture cloudflared stderr"))?;
+        if let Some(stdout) = child.stdout.take() {
+            crate::runtime::spawn_supervised("tunnel.cloudflare.stdout_drain", async move {
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "tunnel.cloudflare", "{line}");
+                }
+            });
+        }
 
         let mut reader = tokio::io::BufReader::new(stderr).lines();
         let mut public_url = String::new();
@@ -96,6 +104,12 @@ impl Tunnel for CloudflareTunnel {
             bail!("cloudflared did not produce a public URL within 30s. Is the token valid?");
         }
 
+        crate::runtime::spawn_supervised("tunnel.cloudflare.stderr_drain", async move {
+            while let Ok(Some(line)) = reader.next_line().await {
+                tracing::debug!(target: "tunnel.cloudflare", "{line}");
+            }
+        });
+
         let mut guard = self.proc.lock().await;
         *guard = Some(TunnelProcess {
             child,
@@ -110,8 +124,11 @@ impl Tunnel for CloudflareTunnel {
     }
 
     async fn health_check(&self) -> bool {
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        match guard.as_mut() {
+            Some(tp) => matches!(tp.child.try_wait(), Ok(None)),
+            None => false,
+        }
     }
 
     fn public_url(&self) -> Option<String> {

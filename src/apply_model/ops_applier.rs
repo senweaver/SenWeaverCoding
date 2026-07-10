@@ -235,7 +235,12 @@ struct PreImage {
 
     bytes: Option<Vec<u8>>,
 
+    #[serde(default)]
     rename_target_bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    rename_from: Option<PathBuf>,
+    #[serde(default)]
+    rename_from_bytes: Option<Vec<u8>>,
     sha256: Option<String>,
     mtime_ms: Option<u64>,
 }
@@ -268,6 +273,7 @@ struct JournalFooter {
 
 pub struct OpsApplier {
     workspace_root: Arc<RwLock<PathBuf>>,
+    allowed_roots: Vec<PathBuf>,
     lock_provider: Arc<dyn LockProvider>,
     validator: Arc<dyn BatchValidator>,
     apply_opts: ApplyOptions,
@@ -312,6 +318,7 @@ impl OpsApplier {
     pub fn default_for_shared_workspace(workspace_root: Arc<RwLock<PathBuf>>) -> Self {
         Self {
             workspace_root,
+            allowed_roots: Vec::new(),
             lock_provider: Arc::new(NoopLockProvider),
             validator: Arc::new(NoopBatchValidator),
             apply_opts: ApplyOptions::default(),
@@ -320,6 +327,15 @@ impl OpsApplier {
             lsp_notify: None,
             edit_history: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_allowed_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.allowed_roots = roots
+            .into_iter()
+            .map(|root| std::fs::canonicalize(&root).unwrap_or(root))
+            .collect();
+        self
     }
 
     #[must_use]
@@ -384,9 +400,10 @@ impl OpsApplier {
             // Precondition checks read files from disk; run them on the blocking pool so the
             // async worker thread (and the agent loop sharing it) is never stalled per edit.
             let batch_for_validate = batch.clone();
+            let allowed_roots = self.allowed_roots.clone();
             let validate = tokio::task::spawn_blocking(move || -> Result<(), ApplyBatchError> {
                 for op in &batch_for_validate.ops {
-                    op.validate_preconditions(&ws)?;
+                    op.validate_preconditions_with_roots(&ws, &allowed_roots)?;
                 }
                 Ok(())
             })
@@ -465,22 +482,24 @@ impl OpsApplier {
                     });
                     if batch.atomic {
 
-                        if let Err(rb) = restore_pre_images(&pre_images) {
-                            self.append_footer(
-                                journal_path.as_deref(),
+                        if let Err(rb) = restore_pre_images_async(&pre_images).await {
+                            self.finalize_journal_async(
+                                journal_path.clone(),
                                 JournalStatus::RolledBack,
                                 true,
-                            );
+                            )
+                            .await;
                             return Err(ApplyBatchError::RollbackFailed {
                                 primary: msg,
                                 rollback: rb.to_string(),
                             });
                         }
-                        self.append_footer(
-                            journal_path.as_deref(),
+                        self.finalize_journal_async(
+                            journal_path.clone(),
                             JournalStatus::RolledBack,
                             false,
-                        );
+                        )
+                        .await;
                         return Err(err);
                     }
                     degraded = true;
@@ -490,22 +509,24 @@ impl OpsApplier {
 
         if let Err(verr) = self.validator.validate(&batch, &preview).await {
             if batch.atomic {
-                if let Err(rb) = restore_pre_images(&pre_images) {
-                    self.append_footer(
-                        journal_path.as_deref(),
+                if let Err(rb) = restore_pre_images_async(&pre_images).await {
+                    self.finalize_journal_async(
+                        journal_path.clone(),
                         JournalStatus::RolledBack,
                         true,
-                    );
+                    )
+                    .await;
                     return Err(ApplyBatchError::RollbackFailed {
                         primary: verr.to_string(),
                         rollback: rb.to_string(),
                     });
                 }
-                self.append_footer(
-                    journal_path.as_deref(),
+                self.finalize_journal_async(
+                    journal_path.clone(),
                     JournalStatus::RolledBack,
                     false,
-                );
+                )
+                .await;
                 return Err(verr.into());
             }
             degraded = true;
@@ -521,12 +542,13 @@ impl OpsApplier {
                     let report = validate_bytes(&text);
                     if !report.is_ok() {
                         if batch.atomic {
-                            let _ = restore_pre_images(&pre_images);
-                            self.append_footer(
-                                journal_path.as_deref(),
+                            let _ = restore_pre_images_async(&pre_images).await;
+                            self.finalize_journal_async(
+                                journal_path.clone(),
                                 JournalStatus::RolledBack,
                                 false,
-                            );
+                            )
+                            .await;
                             return Err(ApplyBatchError::Validator(
                                 BatchValidatorError::Rejected(format!(
                                     "{}: {}",
@@ -639,7 +661,7 @@ impl OpsApplier {
     ) -> Result<BatchPreview, ApplyBatchError> {
         let ws = self.workspace_snapshot();
         for op in &batch.ops {
-            op.validate_preconditions(&ws)?;
+            op.validate_preconditions_with_roots(&ws, &self.allowed_roots)?;
         }
         self.build_preview(batch).await
     }
@@ -669,14 +691,16 @@ impl OpsApplier {
 
             for record in records.into_iter().rev() {
                 if let Some(pre) = &record.pre_image {
+                    // restore_one now fully undoes renames (restores `from`, and
+                    // restores/removes `to`), so no extra remove_file is needed.
                     restore_one(pre).map_err(|source| RollbackError::Io {
                         path: pre.path.clone(),
                         source,
                     })?;
-                }
-                if let EditOp::RenameFile { from, .. } = &record.op {
-                    let _ = std::fs::remove_file(record.op.primary_path());
-                    let _ = from;
+                } else if let EditOp::RenameFile { from, to, .. } = &record.op {
+                    // Legacy journals without a captured pre-image: best-effort undo
+                    // by moving `to` back to `from`.
+                    let _ = std::fs::rename(to, from);
                 }
             }
 
@@ -1172,11 +1196,6 @@ impl OpsApplier {
         }
     }
 
-    fn append_footer(&self, path: Option<&Path>, status: JournalStatus, degraded: bool) {
-        let Some(path) = path else { return };
-        append_footer_to_path(path, status, degraded);
-    }
-
     /// Write the journal footer (when present) and rotate old journals entirely on the blocking
     /// pool, keeping the async worker thread free on the per-edit success path.
     async fn finalize_journal_async(
@@ -1428,17 +1447,22 @@ fn capture_pre_images(
                 format!("{:x}", hasher.finalize())
             });
 
-            let rename_target_bytes = if let EditOp::RenameFile { to, .. } = op {
-                std::fs::read(to).ok()
+            // For a rename, `path` is the destination (`to`). To be able to fully
+            // undo it we must also capture the SOURCE (`from`) content, otherwise a
+            // rollback deletes `to` and loses the file entirely.
+            let (rename_from, rename_from_bytes) = if let EditOp::RenameFile { from, .. } = op {
+                (Some(from.clone()), std::fs::read(from).ok())
             } else {
-                None
+                (None, None)
             };
             map.insert(
                 path.clone(),
                 PreImage {
                     path,
                     bytes,
-                    rename_target_bytes,
+                    rename_target_bytes: None,
+                    rename_from,
+                    rename_from_bytes,
                     sha256,
                     mtime_ms,
                 },
@@ -1502,20 +1526,41 @@ fn restore_pre_images(map: &BTreeMap<PathBuf, PreImage>) -> Result<(), std::io::
     Ok(())
 }
 
-fn restore_one(pre: &PreImage) -> Result<(), std::io::Error> {
-    match &pre.bytes {
+async fn restore_pre_images_async(
+    map: &BTreeMap<PathBuf, PreImage>,
+) -> Result<(), std::io::Error> {
+    let cloned = map.clone();
+    match tokio::task::spawn_blocking(move || restore_pre_images(&cloned)).await {
+        Ok(result) => result,
+        Err(join_err) => Err(std::io::Error::other(format!(
+            "rollback task failed to join: {join_err}"
+        ))),
+    }
+}
+
+fn restore_path_bytes(path: &Path, bytes: &Option<Vec<u8>>) -> Result<(), std::io::Error> {
+    match bytes {
         Some(bytes) => {
-            if let Some(parent) = pre.path.parent() {
+            if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            atomic_write(&pre.path, bytes)
+            atomic_write(path, bytes)
         }
-        None => match std::fs::remove_file(&pre.path) {
+        None => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         },
     }
+}
+
+fn restore_one(pre: &PreImage) -> Result<(), std::io::Error> {
+    // Undo a rename by first restoring the source file's captured content, then
+    // restoring (or removing) the destination to its pre-rename state.
+    if let Some(from) = &pre.rename_from {
+        restore_path_bytes(from, &pre.rename_from_bytes)?;
+    }
+    restore_path_bytes(&pre.path, &pre.bytes)
 }
 
 fn render_minimal_unified_diff(path: &Path, before: &str, after: &str) -> String {

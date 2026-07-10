@@ -8,21 +8,69 @@ import 'katex/dist/katex.min.css'
 let bootCompleted = false
 let revealRequested = false
 
+function currentWindowLabelSync(): string | null {
+  try {
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: unknown } } }
+    }).__TAURI_INTERNALS__
+    const label = internals?.metadata?.currentWindow?.label
+    return typeof label === 'string' ? label : null
+  } catch {
+    return null
+  }
+}
+
+type MinimalWindowKind = 'minimal' | 'minimal-input' | null
+
+// Detects the minimal floating windows without depending on any single fragile
+// signal: a query param (reliably preserved by Tauri), the URL hash, and the
+// Tauri window label read straight from injected internals.
+function minimalWindowKindSync(): MinimalWindowKind {
+  try {
+    const hash = window.location.hash.replace(/^#/, '').split('?')[0]
+    if (hash === 'minimal-input') return 'minimal-input'
+    if (hash === 'minimal') return 'minimal'
+  } catch {
+  }
+  const label = currentWindowLabelSync()
+  if (label === 'minimal-input') return 'minimal-input'
+  if (label === 'minimal') return 'minimal'
+  try {
+    if (/(?:^|[?&])minimal=1(?:&|$)/.test(window.location.search)) return 'minimal'
+  } catch {
+  }
+  return null
+}
+
+function isMinimalContextSync(): boolean {
+  return minimalWindowKindSync() !== null
+}
+
+async function showCurrentWindow() {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    await win.show()
+    await win.setFocus()
+  } catch {
+  }
+}
+
 function revealWindowNow() {
   if (revealRequested) return
   revealRequested = true
   void (async () => {
+    // The minimal floating window must reveal ITSELF; it must never invoke the
+    // main window's frontend-ready path (that shows the "main" window).
+    if (isMinimalContextSync()) {
+      await showCurrentWindow()
+      return
+    }
     try {
       const { invoke } = await import('@tauri-apps/api/core')
       await invoke('signal_frontend_ready')
     } catch {
-      try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window')
-        const win = getCurrentWindow()
-        await win.show()
-        await win.setFocus()
-      } catch {
-      }
+      await showCurrentWindow()
     }
   })()
 }
@@ -63,6 +111,20 @@ function paintBootError(label: string, message: string, stack?: string) {
   btn.onclick = () => window.location.reload()
   wrap.appendChild(btn)
   root.appendChild(wrap)
+  // Surface the real failure to the main window (which stays visible) so the
+  // user isn't left staring at an invisible/blank minimal window. The minimal
+  // window must NOT reveal itself here: it is a hidden, always-on-top card that
+  // should only ever appear when the user explicitly enters minimal mode.
+  if (isMinimalContextSync()) {
+    void (async () => {
+      try {
+        const { emit } = await import('@tauri-apps/api/event')
+        await emit('minimal://error', `${label}: ${message}`)
+      } catch {
+      }
+    })()
+    return
+  }
   revealWindowNow()
 }
 
@@ -79,6 +141,15 @@ function reportRuntimeError(label: string, message: string, stack?: string) {
       new CustomEvent('app:runtime-error', { detail: { label, message, stack } }),
     )
   } catch {
+  }
+  if (isMinimalContextSync()) {
+    void (async () => {
+      try {
+        const { emit } = await import('@tauri-apps/api/event')
+        await emit('minimal://error', `${label}: ${message}`)
+      } catch {
+      }
+    })()
   }
 }
 
@@ -112,13 +183,39 @@ function storedLocale(): 'en' | 'zh' {
   return 'zh'
 }
 
+// The minimal floating windows are identified without relying on any single
+// fragile signal. The synchronous checks (query param / hash / injected label)
+// cover every real case; the async getCurrentWindow() label is a last resort.
+async function detectMinimalWindowKind(): Promise<MinimalWindowKind> {
+  const sync = minimalWindowKindSync()
+  if (sync) return sync
+  try {
+    if (
+      typeof window !== 'undefined' &&
+      ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+    ) {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window')
+      const label = getCurrentWindow().label
+      if (label === 'minimal-input') return 'minimal-input'
+      if (label === 'minimal') return 'minimal'
+    }
+  } catch {
+  }
+  return null
+}
+
 async function boot() {
   try {
-    const [{ default: React }, { default: ReactDOM }, appModule, uiModule, boundaryModule, i18nModule] =
+    const minimalKind = await detectMinimalWindowKind()
+    const [{ default: React }, { default: ReactDOM }, rootModule, uiModule, boundaryModule, i18nModule] =
       await Promise.all([
         import('react'),
         import('react-dom/client'),
-        import('./App'),
+        minimalKind === 'minimal-input'
+          ? import('./MinimalInputWindow')
+          : minimalKind === 'minimal'
+            ? import('./MinimalApp')
+            : import('./App'),
         import('./stores/uiStore'),
         import('./components/layout/AppErrorBoundary'),
         import('./i18n'),
@@ -130,6 +227,12 @@ async function boot() {
       paintBootError('missing-root', '#root element missing in index.html')
       return
     }
+    const RootComponent =
+      minimalKind === 'minimal-input'
+        ? (rootModule as typeof import('./MinimalInputWindow')).MinimalInputWindow
+        : minimalKind === 'minimal'
+          ? (rootModule as typeof import('./MinimalApp')).MinimalApp
+          : (rootModule as typeof import('./App')).App
     ReactDOM.createRoot(root).render(
       React.createElement(
         React.StrictMode,
@@ -137,16 +240,22 @@ async function boot() {
         React.createElement(
           boundaryModule.AppErrorBoundary,
           null,
-          React.createElement(appModule.App),
+          React.createElement(RootComponent),
         ),
       ),
     )
     bootCompleted = true
-    // The window starts hidden, so requestAnimationFrame-based reveals never
-    // fire (the WebView pauses rAF while occluded). Use a timer instead: the
-    // initial React mount has already committed real content into #root by the
-    // time this runs, so revealing here shows the app, never the boot placeholder.
-    setTimeout(() => revealWindowNow(), 0)
+    // The minimal windows are persistent config windows that MUST stay hidden at
+    // startup; they are only revealed when the user enters minimal mode. So they
+    // do NOT self-reveal here. Only the main window uses the frontend-ready
+    // reveal path (which shows the "main" window specifically).
+    if (!minimalKind) {
+      // The window starts hidden, so requestAnimationFrame-based reveals never
+      // fire (the WebView pauses rAF while occluded). Use a timer instead: the
+      // initial React mount has already committed real content into #root by the
+      // time this runs, so revealing here shows the app, never the boot placeholder.
+      setTimeout(() => revealWindowNow(), 0)
+    }
   } catch (err) {
     paintBootError(
       'module-load',

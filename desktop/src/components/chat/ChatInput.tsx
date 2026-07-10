@@ -65,17 +65,22 @@ type Attachment = {
   mimeType?: string
   previewUrl?: string
   data?: string
+  path?: string
 }
 
 
 type ChatInputProps = {
   variant?: 'default' | 'hero'
+  // When provided, message dispatch is delegated to this callback instead of the
+  // local chat store (used by the minimal floating window to forward the send to
+  // the main window, which owns the authoritative session/WebSocket).
+  onSubmit?: ReturnType<typeof useChatStore.getState>['sendMessage']
 }
 
 const EMPTY_DOCK_TABS: BrowserDockTabInfo[] = []
 const EMPTY_SLASH_COMMANDS: Array<{ name: string; description: string }> = []
 
-export function ChatInput({ variant = 'default' }: ChatInputProps) {
+export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   const t = useTranslation()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -99,7 +104,8 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const composerRootRef = useRef<HTMLDivElement>(null)
   const composerCardRef = useRef<HTMLDivElement>(null)
-  const sendMessage = useChatStore((s) => s.sendMessage)
+  const storeSendMessage = useChatStore((s) => s.sendMessage)
+  const sendMessage = onSubmit ?? storeSendMessage
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessionView = useChatStore(
@@ -201,7 +207,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
   const isMemberSession = !!memberInfo
   const fileDragActive = useFileDragStore((s) => s.payload != null)
   const fileDragOverComposer = useFileDragStore((s) => s.activeZoneId === 'chat-composer')
-  const isActive = chatState !== 'idle'
+  const isActive = chatState !== 'idle' || !!sessionView.pendingPermission
   const hasModel = useMemo(() => {
     if (isMemberSession) return true
     if (
@@ -500,6 +506,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
         attachments: attachments.map((att) => ({
           type: att.type,
           name: att.name,
+          path: att.path,
           data: att.data,
           mimeType: att.mimeType,
         })),
@@ -513,7 +520,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
         composerRef.current?.setValue(draft.text ?? '')
         setAttachments(
           (draft.attachments ?? [])
-            .filter((a) => a.type === 'image' || a.data)
+            .filter((a) => a.type === 'image' || a.data || a.path)
             .map((a, index) => ({
               id: `draft-${next}-${index}-${Date.now()}`,
               name: a.name,
@@ -521,6 +528,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
               mimeType: a.mimeType,
               previewUrl: a.type === 'image' ? a.data : undefined,
               data: a.data,
+              path: a.path,
             })),
         )
         setSlashMenuOpen(!!draft.slashMenuOpen)
@@ -716,7 +724,10 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     setInput(composerPrefill.text)
     setAttachments(
       (composerPrefill.attachments ?? [])
-        .filter((attachment) => attachment.type === 'image' || attachment.data)
+        .filter(
+          (attachment) =>
+            attachment.type === 'image' || attachment.data || attachment.path,
+        )
         .map((attachment, index) => ({
           id: `rewind-prefill-${composerPrefill.nonce}-${index}`,
           name: attachment.name,
@@ -724,6 +735,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           mimeType: attachment.mimeType,
           previewUrl: attachment.type === 'image' ? attachment.data : undefined,
           data: attachment.data,
+          path: attachment.path,
         })),
     )
     setSlashMenuOpen(false)
@@ -956,6 +968,13 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
           refElement: designRefElement?.id,
           refElementLabel: designRefElement?.label,
         }
+        const designAttachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
+          type: attachment.type,
+          name: attachment.name,
+          path: attachment.path,
+          data: attachment.data,
+          mimeType: attachment.mimeType,
+        }))
         setInput('')
         composerRef.current?.clear()
         setAttachments([])
@@ -965,7 +984,12 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
         setFileSearchOpen(false)
         setLocalSlashPanel(null)
         useChatStore.getState().clearComposerDraft(activeTabId)
-        sendMessage(activeTabId, text, undefined, { designGeneration })
+        sendMessage(
+          activeTabId,
+          text,
+          designAttachmentPayload.length > 0 ? designAttachmentPayload : undefined,
+          { designGeneration },
+        )
         return
       }
     }
@@ -1001,6 +1025,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
     const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
       type: attachment.type,
       name: attachment.name,
+      path: attachment.path,
       data: attachment.data,
       mimeType: attachment.mimeType,
     }))

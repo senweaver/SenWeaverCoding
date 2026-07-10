@@ -3477,10 +3477,12 @@ fn plugin_to_summary(
 }
 
 #[cfg(feature = "plugins-wasm")]
-fn collect_plugins() -> Vec<crate::plugins::PluginInfo> {
+fn collect_plugins(
+    plugins: &crate::config::schema::PluginsConfig,
+) -> Vec<crate::plugins::PluginInfo> {
     use crate::plugins::host::PluginHost;
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    match PluginHost::new(&workspace) {
+    match PluginHost::from_plugins_config(&workspace, plugins) {
         Ok(host) => host.list_plugins(),
         Err(_) => Vec::new(),
     }
@@ -3500,9 +3502,10 @@ pub async fn handle_plugins_list(
     }
     #[cfg(feature = "plugins-wasm")]
     {
-        let globally_enabled = state.live_config.load().plugins.enabled;
+        let live = state.live_config.load();
+        let globally_enabled = live.plugins.enabled;
         let install_path = plugin_install_path();
-        let plugins = collect_plugins();
+        let plugins = collect_plugins(&live.plugins);
         let plugins_json: Vec<serde_json::Value> = plugins
             .iter()
             .map(|info| plugin_to_summary(info, globally_enabled, &install_path))
@@ -3559,9 +3562,10 @@ pub async fn handle_plugins_detail(
     }
     #[cfg(feature = "plugins-wasm")]
     {
-        let globally_enabled = state.live_config.load().plugins.enabled;
+        let live = state.live_config.load();
+        let globally_enabled = live.plugins.enabled;
         let install_path = plugin_install_path();
-        let plugins = collect_plugins();
+        let plugins = collect_plugins(&live.plugins);
         let Some(info) = plugins.into_iter().find(|p| p.name == q.id) else {
             return (
                 StatusCode::NOT_FOUND,
@@ -3661,8 +3665,9 @@ pub async fn handle_plugins_uninstall(
     {
         use crate::plugins::host::PluginHost;
         let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match PluginHost::new(&workspace) {
-            Ok(mut host) => match host.uninstall(&body.id) {
+        let plugins_config = state.live_config.load().plugins.clone();
+        match PluginHost::from_plugins_config(&workspace, &plugins_config) {
+            Ok(mut host) => match host.remove(&body.id) {
                 Ok(_) => {
                     plugins_enabled_map().write().remove(&body.id);
                     let _ = &state;
@@ -3706,8 +3711,9 @@ pub async fn handle_plugins_reload(
     }
     #[cfg(feature = "plugins-wasm")]
     {
-        let globally_enabled = state.live_config.load().plugins.enabled;
-        let plugins = collect_plugins();
+        let live = state.live_config.load();
+        let globally_enabled = live.plugins.enabled;
+        let plugins = collect_plugins(&live.plugins);
         let enabled_count = plugins
             .iter()
             .filter(|p: &&crate::plugins::PluginInfo| {
@@ -8409,12 +8415,7 @@ pub async fn handle_lsp_notify(
         .into_response();
     };
 
-    let version = body.version.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(1)
-    });
+    let version = body.version.unwrap_or(0);
 
     let result: anyhow::Result<()> = match body.method.as_str() {
         "didOpen" => {
@@ -8588,14 +8589,7 @@ pub async fn handle_lsp_request(
     };
     drop(snapshot);
     if let Some(text) = body.text.as_deref() {
-
-        let version = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(1);
-        let _ = svc
-            .change_text_document(&path, &language, text, version)
-            .await;
+        let _ = svc.change_text_document(&path, &language, text, 0).await;
     }
 
     let lsp_method = match body.method.as_str() {

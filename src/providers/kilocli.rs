@@ -49,17 +49,30 @@ impl KiloCliProvider {
             .any(|v| (temperature - v).abs() < TEMP_EPSILON)
     }
 
-    fn validate_temperature(temperature: f64) -> anyhow::Result<()> {
+    fn validate_temperature(temperature: f64) -> anyhow::Result<f64> {
         if !temperature.is_finite() {
             anyhow::bail!("KiloCLI provider received non-finite temperature value");
         }
-        if !Self::supports_temperature(temperature) {
-            anyhow::bail!(
-                "temperature unsupported by KiloCLI: {temperature}. \
-                 Supported values: 0.7 or 1.0"
-            );
+        if Self::supports_temperature(temperature) {
+            return Ok(temperature);
         }
-        Ok(())
+        let clamped = *KILO_CLI_SUPPORTED_TEMPERATURES
+            .iter()
+            .min_by(|a, b| {
+                (temperature - **a)
+                    .abs()
+                    .partial_cmp(&(temperature - **b).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("KiloCLI provider has no supported temperatures configured")
+            })?;
+        tracing::debug!(
+            requested = temperature,
+            clamped = clamped,
+            "Clamped unsupported temperature to nearest KiloCLI value"
+        );
+        Ok(clamped)
     }
 
     fn redact_stderr(stderr: &[u8]) -> String {
