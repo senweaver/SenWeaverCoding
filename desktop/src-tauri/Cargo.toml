@@ -45,7 +45,7 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
     "computer-use",
 ] }
 
-tauri = { version = "2.11", features = ["unstable", "image-png", "tray-icon"] }
+tauri = { version = "2.11", features = ["unstable", "image-png", "tray-icon", "macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"

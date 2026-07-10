@@ -265,6 +265,7 @@ fn hex_encode(data: &[u8]) -> String {
     s
 }
 
+#[cfg(windows)]
 fn build_windows_icacls_grant_arg(username: &str) -> Option<String> {
     let normalized = username.trim();
     if normalized.is_empty() {
