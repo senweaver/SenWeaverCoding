@@ -62,8 +62,10 @@ fn resolve_workspace(arg: Option<&str>) -> PathBuf {
 }
 
 fn load_or_build_graph(root: &std::path::Path) -> std::io::Result<SymbolGraph> {
-    if let Some(g) = SymbolGraph::load(root)? {
-        return Ok(g);
+    if let Some(writer) =
+        crate::code_intel::symbol_graph::incremental::get_or_build_writer(root)
+    {
+        return Ok(writer.graph().read().clone());
     }
     let g = SymbolGraph::build(root)?;
     let _ = g.persist(root);

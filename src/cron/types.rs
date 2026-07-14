@@ -31,6 +31,7 @@ pub enum JobType {
     #[default]
     Shell,
     Agent,
+    Computer,
 }
 
 impl From<JobType> for &'static str {
@@ -38,6 +39,7 @@ impl From<JobType> for &'static str {
         match value {
             JobType::Shell => "shell",
             JobType::Agent => "agent",
+            JobType::Computer => "computer",
         }
     }
 }
@@ -49,11 +51,55 @@ impl TryFrom<&str> for JobType {
         match value.to_lowercase().as_str() {
             "shell" => Ok(JobType::Shell),
             "agent" => Ok(JobType::Agent),
+            "computer" => Ok(JobType::Computer),
             _ => Err(format!(
-                "Invalid job type '{}'. Expected one of: 'shell', 'agent'",
+                "Invalid job type '{}'. Expected one of: 'shell', 'agent', 'computer'",
                 value
             )),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputerJobMode {
+    #[default]
+    Replay,
+    Agent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComputerJobSpec {
+    #[serde(default)]
+    pub mode: ComputerJobMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub smart: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_delay_ms: Option<u64>,
+}
+
+impl ComputerJobSpec {
+    pub fn parse(command: &str) -> Result<Self, String> {
+        serde_json::from_str(command)
+            .map_err(|e| format!("invalid computer job spec: {e}"))
+    }
+
+    pub fn encode(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| format!("failed to encode computer job spec: {e}"))
     }
 }
 

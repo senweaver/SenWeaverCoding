@@ -19,6 +19,41 @@ use tokio::sync::mpsc;
 const GW_SESSION_PREFIX: &str = "gw_";
 const DESKTOP_INBOUND_CAPACITY: usize = 4096;
 
+// Admission cap: each desktop connection builds a full Agent (tools, memory,
+// MCP), so an unbounded number of sockets is a real resource-exhaustion vector.
+// Overridable via SEN_MAX_DESKTOP_CONNECTIONS.
+const DEFAULT_MAX_DESKTOP_CONNECTIONS: usize = 64;
+
+static DESKTOP_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn max_desktop_connections() -> usize {
+    crate::util::get_runtime_var("SEN_MAX_DESKTOP_CONNECTIONS")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MAX_DESKTOP_CONNECTIONS)
+}
+
+// RAII guard so the slot is always released on any disconnect path.
+struct DesktopConnectionGuard;
+
+impl DesktopConnectionGuard {
+    fn try_acquire() -> Option<Self> {
+        let cap = max_desktop_connections();
+        let prev = DESKTOP_CONNECTION_COUNT.fetch_add(1, Ordering::AcqRel);
+        if prev >= cap {
+            DESKTOP_CONNECTION_COUNT.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for DesktopConnectionGuard {
+    fn drop(&mut self) {
+        DESKTOP_CONNECTION_COUNT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[derive(Debug)]
 enum OutboundFrame {
     Text(String),
@@ -54,11 +89,29 @@ pub async fn handle_ws_desktop(
         }
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, session_id))
+    let Some(conn_guard) = DesktopConnectionGuard::try_acquire() else {
+        tracing::warn!(
+            target: "ws_desktop",
+            cap = max_desktop_connections(),
+            "desktop connection cap reached; rejecting new /ws connection"
+        );
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Too many active sessions  - close a session tab or raise SEN_MAX_DESKTOP_CONNECTIONS",
+        )
+            .into_response();
+    };
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, session_id, conn_guard))
         .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    session_id: String,
+    _conn_guard: DesktopConnectionGuard,
+) {
     abort_disconnect_grace(&session_id);
     let (mut sink, mut receiver) = socket.split();
 
@@ -310,6 +363,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             let trimmed = dir.trim();
             if !trimmed.is_empty() {
                 agent.set_session_workspace_dir(std::path::PathBuf::from(trimmed));
+                crate::security::sandbox::register_workspace_root_for_session(
+                    &session_id,
+                    std::path::Path::new(trimmed),
+                );
             }
         }
     }
@@ -605,6 +662,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                     .get("toolName")
                                     .and_then(|v| v.as_str())
                                     .map(str::to_string);
+                                crate::approval::record_session_decision_delivery(
+                                    request_id,
+                                    if allowed { "yes" } else { "no" },
+                                );
                                 let evt = crate::session::SessionEvent::new(
                                     crate::session::SessionEventKind::ApprovalResponded {
                                         id: request_id.to_string(),
@@ -771,10 +832,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         if !is_forwardable {
                             continue;
                         }
-                        let session_scoped = payload_type == "task_update"
-                            || payload.get("subtype").and_then(|v| v.as_str())
-                                == Some("task_notification");
-                        if session_scoped {
+                        // Any event carrying a sessionId is delivered only to
+                        // that session's socket; events without one stay
+                        // broadcast. Prevents cross-session usage/notification
+                        // leaks between parallel tabs.
+                        {
                             let target = payload
                                 .get("sessionId")
                                 .and_then(|v| v.as_str())
@@ -1314,6 +1376,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         .or_else(|| parsed.get("updated_input"))
                         .filter(|v| !v.is_null())
                         .cloned();
+                    crate::approval::record_session_decision_delivery(
+                        request_id,
+                        if allowed { "yes" } else { "no" },
+                    );
                     let evt = crate::session::SessionEvent::new(
                         crate::session::SessionEventKind::ApprovalResponded {
                             id: request_id.to_string(),
@@ -2302,6 +2368,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         svc.clear_session_debug(&session_key);
     }
     desktop_runtime_state().clear_session_permission_mode(&session_key);
+    crate::security::sandbox::unregister_session_workspace_root(&session_id);
 
     let _ = crate::services::governance::credential_vault::purge_session_ephemeral(&session_key);
     if let Some(ctl) = crate::tools::browser::dock_controller() {

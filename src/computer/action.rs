@@ -84,6 +84,8 @@ pub struct PlannedAction {
     pub start_box: Option<Vec<f64>>,
     #[serde(default)]
     pub end_box: Option<Vec<f64>>,
+    #[serde(default)]
+    pub display: Option<usize>,
 }
 
 pub fn parse_planned_action(raw_text: &str) -> Result<PlannedAction> {
@@ -139,6 +141,13 @@ pub fn parse_planned_action(raw_text: &str) -> Result<PlannedAction> {
     let end_box = parse_number_array(value.get("end_box"))
         .or_else(|| parse_number_array(value.get("to_box")));
 
+    let display = value
+        .get("display")
+        .or_else(|| value.get("monitor"))
+        .or_else(|| value.get("screen"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as usize);
+
     Ok(PlannedAction {
         thought,
         action,
@@ -148,6 +157,7 @@ pub fn parse_planned_action(raw_text: &str) -> Result<PlannedAction> {
         to_element_description,
         start_box,
         end_box,
+        display,
     })
 }
 

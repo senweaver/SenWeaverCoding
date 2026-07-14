@@ -131,20 +131,65 @@ fn extract_reminder_marker(msg: &str) -> Option<&str> {
 pub fn replace_or_push_system_reminder(history: &mut Vec<ChatMessage>, msg: String) {
     if let Some(marker) = extract_reminder_marker(&msg) {
         let marker_owned = marker.to_string();
-        history.retain(|m| {
-            !(m.role == "system" && m.content.trim_start().starts_with(&marker_owned))
-        });
+        // Update the existing reminder in place rather than remove-and-append.
+        // Keeping its position stable preserves the byte-identical message
+        // prefix that OpenAI-compatible providers rely on for prompt caching;
+        // reordering it to the tail every turn silently busted the cache.
+        if let Some(slot) = history.iter_mut().find(|m| {
+            m.role == "system" && m.content.trim_start().starts_with(&marker_owned)
+        }) {
+            if slot.content != msg {
+                slot.content = msg;
+            }
+            return;
+        }
     }
     history.push(ChatMessage::system(msg));
 }
 
+// Removes any system reminder carrying the given marker prefix (e.g.
+// "[Context Budget]"). Used to retract a reminder once its condition no longer
+// holds so a stale, misleading banner does not linger in the transcript.
+pub fn remove_system_reminder(history: &mut Vec<ChatMessage>, marker_prefix: &str) -> bool {
+    let before = history.len();
+    history.retain(|m| {
+        !(m.role == "system" && m.content.trim_start().starts_with(marker_prefix))
+    });
+    history.len() != before
+}
+
+pub const CONTEXT_BUDGET_MARKER: &str = "[Context Budget]";
+
+// Emits a budget reminder once context occupancy crosses a discrete tier.
+// The tier label (not a raw percentage) keeps the message byte-stable within a
+// tier so it does not bust the provider prompt cache every single turn while
+// occupancy inches up; it only changes text at 75% -> 90% -> 97% crossings.
 pub fn build_context_budget_message(
     mode: CodingMode,
-    _history: &[ChatMessage],
-    _max_context_tokens: usize,
+    history: &[ChatMessage],
+    max_context_tokens: usize,
 ) -> Option<String> {
-    let _ = mode;
-    None
+    if max_context_tokens == 0 {
+        return None;
+    }
+    let used = crate::providers::traits::estimate_total_tokens(history);
+    let ratio = used as f64 / max_context_tokens as f64;
+    let tier = if ratio >= 0.97 {
+        "over 97%"
+    } else if ratio >= 0.90 {
+        "over 90%"
+    } else if ratio >= 0.75 {
+        "over 75%"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{CONTEXT_BUDGET_MARKER} Context window is {tier} full ({} mode). Be economical: \
+         avoid re-reading files you have already seen, prefer targeted searches over \
+         whole-file reads, and keep tool outputs small. Automatic compaction will summarize \
+         older turns if the window fills.",
+        mode.label()
+    ))
 }
 
 pub fn is_file_mutation_tool(name: &str) -> bool {

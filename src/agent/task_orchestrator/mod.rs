@@ -3,5 +3,4 @@
 // Licensed under the MIT License.
 
 pub mod queue;
-pub mod router;
 pub mod worker;

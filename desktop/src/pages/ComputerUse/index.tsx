@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import {
   useComputerUseStore,
@@ -10,8 +10,14 @@ import {
   type ComputerStep,
 } from '../../stores/computerUseStore'
 import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
-import type { VisionModel } from '../../api/computer'
+import { draftPlan, type VisionModel } from '../../api/computer'
 import { enterMinimalMode } from '../../lib/minimalMode'
+import {
+  clipboardImageFiles,
+  fileToAttachment,
+  toComputerAttachments,
+  type LocalAttachment,
+} from '../../lib/computerAttachments'
 import { RecorderPanel } from './RecorderPanel'
 import { SkillLibrary } from './SkillLibrary'
 
@@ -103,6 +109,7 @@ export function ComputerUsePage() {
   const error = useComputerUseStore((s) => s.error)
   const steps = useComputerUseStore((s) => s.steps)
   const selectedStepIndex = useComputerUseStore((s) => s.selectedStepIndex)
+  const pendingSteer = useComputerUseStore((s) => s.pendingSteer)
 
   const loadModels = useComputerUseStore((s) => s.loadModels)
   const setSelection = useComputerUseStore((s) => s.setSelection)
@@ -110,7 +117,7 @@ export function ComputerUsePage() {
   const setStepDelayMs = useComputerUseStore((s) => s.setStepDelayMs)
   const setTask = useComputerUseStore((s) => s.setTask)
   const selectStep = useComputerUseStore((s) => s.selectStep)
-  const start = useComputerUseStore((s) => s.start)
+  const send = useComputerUseStore((s) => s.send)
   const stop = useComputerUseStore((s) => s.stop)
   const sendReply = useComputerUseStore((s) => s.sendReply)
   const resetRun = useComputerUseStore((s) => s.reset)
@@ -118,6 +125,10 @@ export function ComputerUsePage() {
   const [reply, setReply] = useState('')
   const [showRecorder, setShowRecorder] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
+  const [attachments, setAttachments] = useState<LocalAttachment[]>([])
+  const [draftBusy, setDraftBusy] = useState(false)
+  const [draftError, setDraftError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     void loadModels()
@@ -137,10 +148,67 @@ export function ComputerUsePage() {
     return steps[selectedStepIndex] ?? null
   }, [steps, selectedStepIndex])
 
-  const handleRun = () => {
-    if (!task.trim() || !provider || !model || busy || recorderRecording) return
-    start()
+  const addFiles = async (files: File[]) => {
+    for (const file of files) {
+      const attachment = await fileToAttachment(file)
+      if (attachment) {
+        setAttachments((prev) => [...prev, attachment])
+      } else {
+        setDraftError(t('computerUse.attachmentRejected'))
+      }
+    }
+  }
+
+  const handlePaste = (event: React.ClipboardEvent) => {
+    const files = clipboardImageFiles(event)
+    if (files.length === 0) return
+    event.preventDefault()
+    void addFiles(files)
+  }
+
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id))
+  }
+
+  const handleSend = () => {
+    if (recorderRecording) return
+    setDraftError(null)
+    const text = task.trim()
+    const hasAttachments = attachments.length > 0
+    if (busy) {
+      if (!text && !hasAttachments) return
+      const ok = send(text, hasAttachments ? toComputerAttachments(attachments) : undefined)
+      if (ok) {
+        setTask('')
+        setAttachments([])
+      }
+      return
+    }
+    if (!text || !provider || !model) return
+    send(text, hasAttachments ? toComputerAttachments(attachments) : undefined)
+    setAttachments([])
     void enterMinimalMode('computer')
+  }
+
+  const handleDraftPlan = async () => {
+    if (draftBusy || busy || recorderRecording) return
+    if (!provider || !model) return
+    if (!task.trim() && attachments.length === 0) return
+    setDraftBusy(true)
+    setDraftError(null)
+    try {
+      const steps = await draftPlan(
+        task.trim(),
+        toComputerAttachments(attachments),
+        provider,
+        model,
+      )
+      if (steps.trim()) setTask(steps.trim())
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDraftBusy(false)
+    }
   }
 
   const selectValue = provider && model ? `${provider}::${model}` : ''
@@ -298,8 +366,27 @@ export function ComputerUsePage() {
               <ol className="flex flex-col gap-2">
                 {steps.map((step, idx) => {
                   const active = (selectedStepIndex ?? steps.length - 1) === idx
+                  if (step.kind === 'user_update') {
+                    return (
+                      <li key={step.uid}>
+                        <div className="w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+                          <div className="mb-1 flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                              <span className="material-symbols-outlined text-[13px]">
+                                record_voice_over
+                              </span>
+                              {t('computerUse.userUpdate')}
+                            </span>
+                          </div>
+                          <p className="text-[12px] leading-snug text-[var(--color-text-primary)]">
+                            {step.thought}
+                          </p>
+                        </div>
+                      </li>
+                    )
+                  }
                   return (
-                    <li key={step.index}>
+                    <li key={step.uid}>
                       <button
                         type="button"
                         onClick={() => selectStep(idx)}
@@ -403,39 +490,136 @@ export function ComputerUsePage() {
                     {t('computerUse.newTask')}
                   </button>
                 )}
+                {attachments.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {attachments.map((a) => (
+                      <span
+                        key={a.id}
+                        className="inline-flex max-w-[180px] items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]"
+                      >
+                        <span className="material-symbols-outlined text-[12px]">
+                          {a.dataBase64 ? 'image' : 'description'}
+                        </span>
+                        <span className="truncate">{a.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(a.id)}
+                          className="inline-flex items-center justify-center text-[var(--color-text-tertiary)] hover:text-red-500"
+                          aria-label={t('common.delete')}
+                        >
+                          <span className="material-symbols-outlined text-[12px]">close</span>
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   value={task}
                   onChange={(e) => setTask(e.target.value)}
-                  placeholder={t('computerUse.taskPlaceholder')}
+                  onPaste={handlePaste}
+                  placeholder={
+                    busy ? t('computerUse.steerPlaceholder') : t('computerUse.taskPlaceholder')
+                  }
                   rows={3}
-                  disabled={busy}
+                  disabled={recorderRecording}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy) {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                       e.preventDefault()
-                      handleRun()
+                      handleSend()
                     }
                   }}
                   className="resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-brand)] disabled:opacity-60"
                 />
-                {busy ? (
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.log,.yaml,.yml"
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files ?? [])
+                    e.target.value = ''
+                    void addFiles(files)
+                  }}
+                />
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={stop}
-                    className="flex items-center justify-center gap-1.5 rounded-lg bg-red-500 px-3 py-2 text-[12px] font-semibold text-white transition-opacity hover:opacity-90"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={recorderRecording}
+                    title={t('computerUse.attach')}
+                    aria-label={t('computerUse.attach')}
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-brand)] disabled:opacity-50"
                   >
-                    <span className="material-symbols-outlined text-[16px]">stop</span>
-                    {t('computerUse.stop')}
+                    <span className="material-symbols-outlined text-[16px]">attach_file</span>
                   </button>
-                ) : (
                   <button
                     type="button"
-                    onClick={handleRun}
-                    disabled={!task.trim() || !provider || !model || recorderRecording}
-                    className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    onClick={() => void handleDraftPlan()}
+                    disabled={
+                      busy ||
+                      draftBusy ||
+                      recorderRecording ||
+                      !provider ||
+                      !model ||
+                      (!task.trim() && attachments.length === 0)
+                    }
+                    title={t('computerUse.generateStepsHint')}
+                    className="inline-flex h-8 shrink-0 items-center gap-1 rounded-lg border border-[var(--color-border)] px-2.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-brand)] disabled:opacity-50"
                   >
-                    <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                    {t('computerUse.run')}
+                    {draftBusy ? (
+                      <span className="material-symbols-outlined animate-spin text-[14px]">
+                        progress_activity
+                      </span>
+                    ) : (
+                      <span className="material-symbols-outlined text-[14px]">
+                        format_list_numbered
+                      </span>
+                    )}
+                    {draftBusy
+                      ? t('computerUse.generatingSteps')
+                      : t('computerUse.generateSteps')}
                   </button>
+                  {busy ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleSend}
+                        disabled={!task.trim() && attachments.length === 0}
+                        className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">send</span>
+                        {t('computerUse.sendSteer')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={stop}
+                        className="flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-red-500 px-3 text-[12px] font-semibold text-white transition-opacity hover:opacity-90"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">stop</span>
+                        {t('computerUse.stop')}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      disabled={!task.trim() || !provider || !model || recorderRecording}
+                      className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                      {t('computerUse.run')}
+                    </button>
+                  )}
+                </div>
+                {pendingSteer && busy && (
+                  <p className="flex items-start gap-1 text-[10px] leading-snug text-amber-600 dark:text-amber-400">
+                    <span className="material-symbols-outlined text-[13px]">schedule_send</span>
+                    {t('computerUse.steerPending')}
+                  </p>
+                )}
+                {draftError && (
+                  <p className="text-[10px] leading-snug text-red-500">{draftError}</p>
                 )}
                 <p className="flex items-start gap-1 text-[10px] leading-snug text-[var(--color-text-tertiary)]">
                   <span className="material-symbols-outlined text-[13px] text-amber-500">

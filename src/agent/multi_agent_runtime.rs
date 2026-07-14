@@ -15,7 +15,6 @@ use super::scheduler::runtime::{SchedulerSpanContext, TaskExecutor, TaskSchedule
 use super::subagent_limiter::{SubagentLimitConfig, SubagentLimiter};
 use super::supervisor::{Supervisor, SupervisorConfig, SupervisorHandle};
 use super::task_orchestrator::queue::{TaskQueue, TaskQueueHandle};
-use super::task_orchestrator::router::{RoutingDecision, Task, TaskRouter, TaskRouterConfig};
 use crate::error::SenError;
 use crate::memory::blackboard::{Blackboard, BlackboardHandle};
 
@@ -26,7 +25,6 @@ pub struct MultiAgentRuntime {
     pub task_queue: TaskQueueHandle,
     pub coordinator: CoordinatorHandle,
     pub blackboard: BlackboardHandle,
-    pub task_router: Arc<TaskRouter>,
 
     pub subagent_limiter: Arc<SubagentLimiter>,
 }
@@ -55,10 +53,6 @@ impl MultiAgentRuntime {
             journal_dir,
             session_id.as_ref(),
         ));
-        let task_router = Arc::new(TaskRouter::new(
-            registry.clone(),
-            TaskRouterConfig::default(),
-        ));
         let subagent_limiter = Arc::new(SubagentLimiter::new(
             &SubagentLimitConfig::default(),
         ));
@@ -68,8 +62,7 @@ impl MultiAgentRuntime {
                 let _ = supervisor
                     .inner()
                     .spawn_health_subscriber(&svc.health_broadcaster);
-                let _ = task_router.spawn_health_subscriber(&svc.health_broadcaster);
-                debug!("Multi-agent runtime: provider health subscribers attached");
+                debug!("Multi-agent runtime: provider health subscriber attached");
             } else {
                 debug!(
                     "Multi-agent runtime: services not initialized; provider health subscribers not attached"
@@ -87,7 +80,6 @@ impl MultiAgentRuntime {
             task_queue,
             coordinator,
             blackboard,
-            task_router,
             subagent_limiter,
         }
     }
@@ -183,28 +175,6 @@ impl MultiAgentRuntime {
         self.subagent_limiter.cancel_subtree(agent_id)
     }
 
-    pub async fn route_task(&self, task: Task) -> Result<RoutingDecision, String> {
-        match self.task_router.route(&task).await {
-            Ok(decision) => {
-                tracing::debug!(
-                    agent_id = %decision.agent_id,
-                    confidence = decision.confidence,
-                    "Task {} routed to agent",
-                    task.id
-                );
-                Ok(decision)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Task routing failed for task {}",
-                    task.id
-                );
-                Err(format!("Task routing failed: {}", e))
-            }
-        }
-    }
-
     pub const STALE_RUNNING_TASK_MAX: std::time::Duration =
         std::time::Duration::from_secs(30 * 60);
 
@@ -266,46 +236,6 @@ impl MultiAgentRuntime {
     pub fn shutdown(&self) {
         info!("Multi-agent runtime shutting down");
         self.supervisor.shutdown_all();
-    }
-
-    pub async fn run_parallel<F, Fut>(
-        &self,
-        tasks: Vec<F>,
-        strategy: crate::agent::parallel_executor::AggregationStrategy,
-        max_concurrent: usize,
-        timeout_secs: Option<u64>,
-    ) -> Result<Vec<crate::agent::parallel_executor::TaskOutput>, SenError>
-    where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = crate::agent::parallel_executor::TaskOutput>
-            + Send
-            + 'static,
-    {
-        use crate::agent::parallel_executor::{ExecutorConfig, ParallelExecutor, Priority};
-
-        if tasks.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let executor = ParallelExecutor::new(ExecutorConfig {
-            max_concurrent: max_concurrent.max(1),
-            queue_capacity: tasks.len().max(8) * 2,
-            default_timeout_secs: timeout_secs,
-            fairness_enabled: true,
-        });
-
-        let mut handles = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            let h = executor
-                .submit(task, Priority::NORMAL, timeout_secs)
-                .await?;
-            handles.push(h);
-        }
-
-        let agg = executor
-            .aggregate_results(handles, strategy, timeout_secs)
-            .await?;
-        Ok(agg.succeeded)
     }
 
     pub async fn submit_task_graph(
@@ -379,10 +309,6 @@ impl MultiAgentRuntime {
                 "multi_agent_runtime",
                 "task_results",
             );
-
-            if let Some(agent_id) = outcome.assigned_agent.as_deref() {
-                self.task_router.record_outcome(agent_id, outcome.success);
-            }
         }
 
         Ok(outcomes)

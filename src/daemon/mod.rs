@@ -326,16 +326,17 @@ where
 
         loop {
             crate::health::mark_component_starting(name);
-            let ok_marker = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                crate::health::mark_component_ok(name);
-            });
             let started = std::time::Instant::now();
             use futures_util::FutureExt as _;
-            let outcome = std::panic::AssertUnwindSafe(run_component())
-                .catch_unwind()
-                .await;
-            ok_marker.abort();
+            let mut run_fut = std::pin::pin!(std::panic::AssertUnwindSafe(run_component()).catch_unwind());
+            let outcome = tokio::select! {
+                biased;
+                outcome = &mut run_fut => outcome,
+                () = tokio::time::sleep(Duration::from_secs(60)) => {
+                    crate::health::mark_component_ok(name);
+                    run_fut.await
+                }
+            };
             match outcome {
                 Ok(Ok(())) => {
                     crate::health::mark_component_error(name, "component exited unexpectedly");

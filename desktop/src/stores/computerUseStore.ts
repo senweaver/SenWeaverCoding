@@ -21,6 +21,8 @@ export type ComputerStatus =
   | 'stopped'
 
 export type ComputerStep = {
+  uid: number
+  kind: 'action' | 'user_update'
   index: number
   thought: string
   actionType: string
@@ -37,6 +39,13 @@ export type ComputerStep = {
   resultMessage?: string
 }
 
+export type ComputerAttachment = {
+  name: string
+  mime: string
+  dataBase64?: string
+  text?: string
+}
+
 type StoredSelection = { provider: string; model: string }
 type StoredParams = { maxSteps: number; stepDelayMs: number }
 
@@ -45,6 +54,8 @@ export type StartOptions = {
   replayRecording?: string
   taskOverride?: string
   smart?: boolean
+  attachments?: ComputerAttachment[]
+  repeat?: { count: number; intervalMs: number }
 }
 
 function loadSelection(): StoredSelection | null {
@@ -88,6 +99,7 @@ type ComputerUseStore = {
   error: string | null
   steps: ComputerStep[]
   selectedStepIndex: number | null
+  pendingSteer: string | null
 
   loadModels: () => Promise<void>
   setSelection: (provider: string, model: string) => void
@@ -96,6 +108,8 @@ type ComputerUseStore = {
   setTask: (task: string) => void
   selectStep: (index: number | null) => void
   start: (options?: StartOptions) => void
+  send: (text: string, attachments?: ComputerAttachment[]) => boolean
+  steer: (text: string, attachments?: ComputerAttachment[]) => boolean
   stop: () => void
   sendReply: (text: string) => void
   reset: () => void
@@ -103,6 +117,8 @@ type ComputerUseStore = {
 
 let socket: WebSocket | null = null
 let activeRunId: string | null = null
+let nextStepUid = 1
+let queuedSteer: { text: string; attachments?: ComputerAttachment[] } | null = null
 
 function closeSocket() {
   if (socket) {
@@ -115,6 +131,7 @@ function closeSocket() {
     } catch {  }
     socket = null
   }
+  queuedSteer = null
 }
 
 function genRunId(): string {
@@ -128,6 +145,19 @@ function genRunId(): string {
 
 const isTerminal = (status: ComputerStatus) =>
   status === 'finished' || status === 'error' || status === 'stopped'
+
+const isBusy = (status: ComputerStatus) =>
+  status === 'running' || status === 'thinking' || status === 'connecting'
+
+function wireAttachments(attachments?: ComputerAttachment[]) {
+  if (!attachments || attachments.length === 0) return undefined
+  return attachments.map((a) => ({
+    name: a.name,
+    mime: a.mime,
+    ...(a.dataBase64 ? { data_base64: a.dataBase64 } : {}),
+    ...(a.text ? { text: a.text } : {}),
+  }))
+}
 
 export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
   const initialSelection = loadSelection()
@@ -145,6 +175,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
     error: null,
     steps: [],
     selectedStepIndex: null,
+    pendingSteer: null,
 
     loadModels: async () => {
       try {
@@ -165,7 +196,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         }
       } catch (err) {
         set({
-          modelsLoaded: true,
+          modelsLoaded: false,
           error: err instanceof Error ? err.message : 'failed to load vision models',
         })
       }
@@ -210,7 +241,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       const isSkill = Boolean(options?.skill)
       if (!isReplay && (!provider || !model)) return
       if (!isReplay && !isSkill && !task.trim()) return
-      if (status === 'running' || status === 'thinking' || status === 'connecting') return
+      if (isBusy(status)) return
 
       closeSocket()
       const runId = genRunId()
@@ -221,6 +252,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         error: null,
         steps: [],
         selectedStepIndex: null,
+        pendingSteer: null,
       })
 
       const wsUrl = `${getBaseUrl().replace(/^http/, 'ws')}/ws/computer/${runId}`
@@ -239,6 +271,12 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       ws.onopen = () => {
         if (socket !== ws) return
         set({ status: 'running' })
+        const flushSteer = () => {
+          if (!queuedSteer) return
+          const pending = queuedSteer
+          queuedSteer = null
+          get().steer(pending.text, pending.attachments)
+        }
         if (isReplay) {
           const smart = Boolean(options?.smart) && Boolean(provider && model)
           ws.send(
@@ -246,15 +284,17 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
               type: 'start',
               mode: 'replay',
               recording: options?.replayRecording,
-              ...(smart
+              ...(options?.repeat ? { repeat: options.repeat } : {}),
+              ...(smart || provider
                 ? {
-                    smart: true,
                     provider: provider ?? undefined,
                     model: model ?? undefined,
                   }
                 : {}),
+              ...(smart ? { smart: true } : {}),
             }),
           )
+          flushSteer()
           return
         }
         const effectiveTask = isSkill
@@ -270,8 +310,12 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
             maxSteps,
             stepDelayMs,
             ...(isSkill ? { skill: options?.skill } : {}),
+            ...(options?.attachments
+              ? { attachments: wireAttachments(options.attachments) }
+              : {}),
           }),
         )
+        flushSteer()
       }
 
       ws.onmessage = (event) => {
@@ -294,9 +338,68 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         socket = null
         const current = get().status
         if (!isTerminal(current)) {
-          set({ status: 'stopped' })
+          set({ status: 'stopped', pendingSteer: null })
         }
       }
+    },
+
+    steer: (text, attachments) => {
+      const trimmed = text.trim()
+      if (!trimmed && (!attachments || attachments.length === 0)) return false
+      if (socket && socket.readyState === WebSocket.CONNECTING) {
+        queuedSteer = { text: trimmed, attachments }
+        set({ pendingSteer: trimmed || null })
+        return true
+      }
+      if (!socket || socket.readyState !== WebSocket.OPEN) return false
+      try {
+        socket.send(
+          JSON.stringify({
+            type: 'steer',
+            text: trimmed,
+            provider: get().provider ?? undefined,
+            model: get().model ?? undefined,
+            ...(attachments ? { attachments: wireAttachments(attachments) } : {}),
+          }),
+        )
+        set({ pendingSteer: trimmed || null })
+        return true
+      } catch {
+        return false
+      }
+    },
+
+    send: (text, attachments) => {
+      const state = get()
+      const trimmed = text.trim()
+      if (!trimmed && (!attachments || attachments.length === 0)) return false
+      if (state.status === 'call_user') {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          set({ status: 'stopped', error: 'connection lost; the run was cancelled' })
+          closeSocket()
+          return false
+        }
+        try {
+          socket.send(
+            JSON.stringify({
+              type: 'user_reply',
+              text: trimmed,
+              ...(attachments ? { attachments: wireAttachments(attachments) } : {}),
+            }),
+          )
+          set({ status: 'running', pendingSteer: trimmed || null })
+          return true
+        } catch {
+          return false
+        }
+      }
+      if (isBusy(state.status)) {
+        return get().steer(trimmed, attachments)
+      }
+      if (!trimmed) return false
+      set({ task: trimmed })
+      get().start({ attachments })
+      return true
     },
 
     stop: () => {
@@ -307,7 +410,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       if (runId) {
         void stopComputerRun(runId).catch(() => {})
       }
-      set({ status: 'stopped' })
+      set({ status: 'stopped', pendingSteer: null })
       closeSocket()
     },
 
@@ -334,6 +437,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         error: null,
         steps: [],
         selectedStepIndex: null,
+        pendingSteer: null,
       })
     },
   }
@@ -353,6 +457,7 @@ function handleEvent(
       const message = localizeComputerMessage(code, rawMessage)
       set({ status, statusMessage: message })
       if (isTerminal(status)) {
+        set({ pendingSteer: null })
         closeSocket()
       }
       break
@@ -360,6 +465,8 @@ function handleEvent(
     case 'step': {
       const MAX_FULL_SCREENSHOTS = 10
       const step: ComputerStep = {
+        uid: nextStepUid++,
+        kind: 'action',
         index: Number(payload.index ?? 0),
         thought: String(payload.thought ?? ''),
         actionType: String(payload.action_type ?? ''),
@@ -380,23 +487,48 @@ function handleEvent(
         confidence: typeof payload.confidence === 'number' ? payload.confidence : undefined,
       }
       const steps = [...get().steps, step]
-      const cutoff = steps.length - MAX_FULL_SCREENSHOTS
-      for (let i = 0; i < cutoff; i++) {
+      let withShots = 0
+      for (let i = steps.length - 1; i >= 0; i--) {
         const existing = steps[i]
-        if (existing && existing.screenshotBase64) {
+        if (!existing || !existing.screenshotBase64) continue
+        withShots += 1
+        if (withShots > MAX_FULL_SCREENSHOTS) {
           steps[i] = { ...existing, screenshotBase64: '' }
         }
       }
       set({ steps, selectedStepIndex: steps.length - 1 })
       break
     }
+    case 'user_update': {
+      const text = typeof payload.text === 'string' ? payload.text : ''
+      if (!text) {
+        set({ pendingSteer: null })
+        break
+      }
+      const step: ComputerStep = {
+        uid: nextStepUid++,
+        kind: 'user_update',
+        index: Number(payload.index ?? 0),
+        thought: text,
+        actionType: 'user_update',
+        screenshotBase64: '',
+      }
+      const steps = [...get().steps, step]
+      set({ steps, pendingSteer: null })
+      break
+    }
     case 'action_result': {
       const index = Number(payload.index ?? -1)
       const success = Boolean(payload.success)
       const message = typeof payload.message === 'string' ? payload.message : undefined
-      const steps = get().steps.map((s) =>
-        s.index === index ? { ...s, success, resultMessage: message } : s,
-      )
+      const steps = [...get().steps]
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i]
+        if (s && s.kind === 'action' && s.index === index && s.success === undefined) {
+          steps[i] = { ...s, success, resultMessage: message }
+          break
+        }
+      }
       set({ steps })
       break
     }

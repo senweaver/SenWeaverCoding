@@ -336,12 +336,11 @@ impl Tool for PatchApplyTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a unified diff patch to files, including creating new files \
-         (`--- /dev/null`) and deleting files (`+++ /dev/null`). Supports \
-         viewing patch statistics, dry-run mode, and applying patches. By \
-         default the entire patch is applied atomically: any hunk failure \
-         rolls back the rest. Pass atomic=false to keep partial successes \
-         (the result will be marked degraded=true)."
+        "Apply ONE multi-file unified diff patch (full `---`/`+++` headers), including \
+         creating files (`--- /dev/null`) and deleting files (`+++ /dev/null`). Supports \
+         stats/preview/dry-run. Atomic by default: any hunk failure rolls back everything \
+         (atomic=false keeps partial successes, marked degraded). Use when you already hold \
+         a complete patch; for targeted string edits prefer file_edit/multi_edit."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

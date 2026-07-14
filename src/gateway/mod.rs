@@ -381,7 +381,13 @@ pub struct AppState {
 impl AppState {
 
     pub fn push_live_config(&self, snapshot: Config) {
-        self.live_config.store(snapshot);
+        if let Err(err) = self.live_config.store_validated(snapshot) {
+            tracing::warn!(
+                target: "gateway.config",
+                error = %err,
+                "rejecting live config push that failed validation"
+            );
+        }
     }
 
     pub fn current_provider(&self) -> Arc<dyn Provider> {
@@ -448,26 +454,19 @@ fn build_runtime_provider_from_cfg(cfg: &Config) -> Option<(Arc<dyn Provider>, S
                 resolved_default_provider = %resolved_default_provider,
                 error = %err,
                 "gateway runtime hot-reload: failed to build provider for new config; \
-                 falling back to placeholder openrouter so the desktop shell stays alive. \
-                 The user can re-check their Provider settings."
+                 installing UnconfiguredProvider so the desktop shell stays alive with \
+                 an honest setup-mode error on chat attempts"
             );
-            match providers::create_resilient_provider_with_options(
-                "openrouter",
-                None,
-                None,
-                &Default::default(),
-                &provider_runtime_options,
-            ) {
-                Ok(p) => Arc::from(p),
-                Err(inner) => {
-                    tracing::error!(
-                        error = %inner,
-                        "gateway runtime hot-reload: placeholder provider build failed; \
-                         keeping previous provider Arc to avoid breaking in-flight requests"
-                    );
-                    return None;
-                }
-            }
+            push_startup_warning(
+                "provider_unconfigured",
+                format!(
+                    "default provider '{resolved_default_provider}' failed to build: {err}. \
+                     Configure Settings → Providers before chatting."
+                ),
+            );
+            Arc::from(providers::unconfigured::UnconfiguredProvider::new(format!(
+                "hot-reload build failed for '{resolved_default_provider}': {err}"
+            )))
         }
     };
 
@@ -808,19 +807,19 @@ async fn run_gateway_inner(
                     resolved_default_provider = %resolved_default_provider,
                     error = %err,
                     "gateway startup: failed to instantiate default provider; \
-                     starting in degraded mode with a placeholder provider so the desktop \
-                     shell can render Provider settings page"
+                     starting in setup mode with UnconfiguredProvider so the desktop \
+                     shell can render Provider settings without a fake OpenRouter backend"
                 );
-                Arc::from(
-                    providers::create_resilient_provider_with_options_async(
-                        "openrouter".to_string(),
-                        None,
-                        None,
-                        Default::default(),
-                        provider_runtime_options.clone(),
-                    )
-                    .await?,
-                )
+                push_startup_warning(
+                    "provider_unconfigured",
+                    format!(
+                        "default provider '{resolved_default_provider}' failed to start: {err}. \
+                         Configure Settings → Providers before chatting."
+                    ),
+                );
+                Arc::from(providers::unconfigured::UnconfiguredProvider::new(format!(
+                    "startup build failed for '{resolved_default_provider}': {err}"
+                ))) as Arc<dyn Provider>
             }
         };
     let provider: Arc<parking_lot::RwLock<Arc<dyn Provider>>> =
@@ -1561,6 +1560,11 @@ async fn run_gateway_inner(
         )
         .route("/api/computer/stop", post(computer::handle_stop))
         .route(
+            "/api/computer/plan-draft",
+            post(computer::handle_plan_draft)
+                .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024)),
+        )
+        .route(
             "/ws/computer-record/{rec_id}",
             get(computer::record::handle_ws_record),
         )
@@ -1571,6 +1575,11 @@ async fn run_gateway_inner(
         .route(
             "/api/computer/recordings/{name}",
             axum::routing::delete(computer::record::handle_delete_recording),
+        )
+        .route(
+            "/api/computer/recordings/{name}/steps",
+            get(computer::record::handle_get_recording_steps)
+                .put(computer::record::handle_put_recording_steps),
         )
         .route(
             "/api/computer/recordings/{name}/generate",
@@ -3946,9 +3955,25 @@ async fn handle_admin_paircode_new(
     }
 }
 
-async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
+async fn handle_pair_code(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
     let require = state.pairing.require_pairing();
     let is_paired = state.pairing.is_paired();
+
+    // The pairing code is a bootstrap secret: only hand it out to loopback
+    // callers. A remote client on an exposed gateway must not be able to fetch
+    // the one-time code and pair itself, which would defeat pairing entirely.
+    if !peer.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "pairing code is only available to local (loopback) clients",
+            })),
+        );
+    }
 
     let code = if require && !is_paired {
         state.pairing.pairing_code()

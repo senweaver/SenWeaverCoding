@@ -18,6 +18,8 @@ use crate::config::Config;
 const MAX_STEP_DELAY_MS: u64 = 10_000;
 const DEFAULT_SCROLL_AMOUNT: i32 = 3;
 const REPLAY_INITIAL_SETTLE_MS: u64 = 800;
+const MAX_REPEAT_COUNT: u32 = 100;
+const MAX_REPEAT_INTERVAL_MS: u64 = 3_600_000;
 const SMART_DELAY_CAP_MS: u64 = 2_000;
 const SMART_MAX_RECOVERIES_PER_STEP: u32 = 3;
 const SMART_RECOVERY_SETTLE_MS: u64 = 700;
@@ -26,8 +28,33 @@ const SMART_GROUNDING_TIMEOUT_MS: u64 = 60_000;
 const REFERENCE_CROP_PX: u32 = 480;
 const SKILL_CONTEXT_MAX_CHARS: usize = 2_000;
 
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayRepeat {
+    pub count: u32,
+    pub interval_ms: u64,
+}
+
+impl Default for ReplayRepeat {
+    fn default() -> Self {
+        Self {
+            count: 1,
+            interval_ms: 0,
+        }
+    }
+}
+
+impl ReplayRepeat {
+    pub fn clamped(self) -> Self {
+        Self {
+            count: self.count.clamp(1, MAX_REPEAT_COUNT),
+            interval_ms: self.interval_ms.min(MAX_REPEAT_INTERVAL_MS),
+        }
+    }
+}
+
 pub async fn replay_recording(
     manifest: RecordingManifest,
+    repeat: ReplayRepeat,
     cancel: CancellationToken,
     event_tx: UnboundedSender<ComputerEvent>,
 ) {
@@ -54,6 +81,45 @@ pub async fn replay_recording(
             }
         };
 
+    let repeat = repeat.clamped();
+    let mut ui_index: u32 = 0;
+
+    for iteration in 0..repeat.count {
+        if repeat.count > 1 {
+            emit(ComputerEvent::status_code(
+                RunStatus::Running,
+                "replay_iteration",
+                format!("replay run {}/{}", iteration + 1, repeat.count),
+            ));
+        }
+        if replay_steps_once(&manifest, &cancel, &emit, &mut ui_index)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if iteration + 1 < repeat.count && repeat.interval_ms > 0 {
+            sleep_or_cancel(&cancel, repeat.interval_ms).await;
+            if cancel.is_cancelled() {
+                emit(ComputerEvent::status(RunStatus::Stopped, None));
+                return;
+            }
+        }
+    }
+
+    emit(ComputerEvent::status_code(
+        RunStatus::Finished,
+        "replay_completed",
+        "replay completed",
+    ));
+}
+
+async fn replay_steps_once(
+    manifest: &RecordingManifest,
+    cancel: &CancellationToken,
+    emit: &impl Fn(ComputerEvent),
+    ui_index: &mut u32,
+) -> Result<(), ()> {
     emit(ComputerEvent::status_code(
         RunStatus::Running,
         "replaying_steps",
@@ -65,25 +131,26 @@ pub async fn replay_recording(
         _ => (manifest.display_w.max(1), manifest.display_h.max(1)),
     };
 
-    sleep_or_cancel(&cancel, REPLAY_INITIAL_SETTLE_MS).await;
+    sleep_or_cancel(cancel, REPLAY_INITIAL_SETTLE_MS).await;
 
     for step in &manifest.steps {
         if cancel.is_cancelled() {
             emit(ComputerEvent::status(RunStatus::Stopped, None));
-            return;
+            return Err(());
         }
 
-        sleep_or_cancel(&cancel, step.delay_ms.min(MAX_STEP_DELAY_MS)).await;
+        sleep_or_cancel(cancel, step.delay_ms.min(MAX_STEP_DELAY_MS)).await;
         if cancel.is_cancelled() {
             emit(ComputerEvent::status(RunStatus::Stopped, None));
-            return;
+            return Err(());
         }
 
         let screenshot_base64 = capture::capture_preview_jpeg().await.unwrap_or_default();
 
+        let index = *ui_index;
         emit(ComputerEvent::Step {
             step: ComputerStepEvent {
-                index: step.index,
+                index,
                 thought: step
                     .element_description
                     .clone()
@@ -101,17 +168,17 @@ pub async fn replay_recording(
             },
         });
 
-        match execute_step(step, display_w, display_h, &cancel).await {
+        match execute_step(step, display_w, display_h, cancel).await {
             Ok(()) => {
                 emit(ComputerEvent::ActionResult {
-                    index: step.index,
+                    index,
                     success: true,
                     message: None,
                 });
             }
             Err(err) => {
                 emit(ComputerEvent::ActionResult {
-                    index: step.index,
+                    index,
                     success: false,
                     message: Some(err.to_string()),
                 });
@@ -120,16 +187,12 @@ pub async fn replay_recording(
                     "replay_step_failed",
                     format!("replay stopped at step {}: {err}", step.index),
                 ));
-                return;
+                return Err(());
             }
         }
+        *ui_index += 1;
     }
-
-    emit(ComputerEvent::status_code(
-        RunStatus::Finished,
-        "replay_completed",
-        "replay completed",
-    ));
+    Ok(())
 }
 
 async fn execute_step(
@@ -444,6 +507,7 @@ pub async fn replay_recording_smart(
     config: Config,
     provider: String,
     model: String,
+    repeat: ReplayRepeat,
     cancel: CancellationToken,
     event_tx: UnboundedSender<ComputerEvent>,
 ) {
@@ -483,10 +547,60 @@ pub async fn replay_recording_smart(
     };
 
     let skill_context = load_skill_context(&recording_dir).await;
+    let repeat = repeat.clamped();
+    let mut ui_index: u32 = 0;
+
+    for iteration in 0..repeat.count {
+        if repeat.count > 1 {
+            emit(ComputerEvent::status_code(
+                RunStatus::Running,
+                "replay_iteration",
+                format!("replay run {}/{}", iteration + 1, repeat.count),
+            ));
+        }
+        if replay_smart_steps_once(
+            &manifest,
+            &recording_dir,
+            &client,
+            skill_context.as_deref(),
+            &cancel,
+            &emit,
+            &mut ui_index,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        if iteration + 1 < repeat.count && repeat.interval_ms > 0 {
+            sleep_or_cancel(&cancel, repeat.interval_ms).await;
+            if cancel.is_cancelled() {
+                emit(ComputerEvent::status(RunStatus::Stopped, None));
+                return;
+            }
+        }
+    }
+
+    emit(ComputerEvent::status_code(
+        RunStatus::Finished,
+        "smart_replay_completed",
+        "smart replay completed",
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replay_smart_steps_once(
+    manifest: &RecordingManifest,
+    recording_dir: &Path,
+    client: &VisionClient,
+    skill_context: Option<&str>,
+    cancel: &CancellationToken,
+    emit: &impl Fn(ComputerEvent),
+    ui_index: &mut u32,
+) -> Result<(), ()> {
     let total = manifest.steps.len();
     let call_budget = (total as u32) * 4 + 8;
     let mut calls_used: u32 = 0;
-    let mut ui_index: u32 = 0;
 
     emit(ComputerEvent::status_code(
         RunStatus::Running,
@@ -499,28 +613,28 @@ pub async fn replay_recording_smart(
         _ => (manifest.display_w.max(1), manifest.display_h.max(1)),
     };
 
-    sleep_or_cancel(&cancel, REPLAY_INITIAL_SETTLE_MS).await;
+    sleep_or_cancel(cancel, REPLAY_INITIAL_SETTLE_MS).await;
 
     for step in &manifest.steps {
         if cancel.is_cancelled() {
             emit(ComputerEvent::status(RunStatus::Stopped, None));
-            return;
+            return Err(());
         }
 
-        sleep_or_cancel(&cancel, step.delay_ms.min(SMART_DELAY_CAP_MS)).await;
+        sleep_or_cancel(cancel, step.delay_ms.min(SMART_DELAY_CAP_MS)).await;
         if cancel.is_cancelled() {
             emit(ComputerEvent::status(RunStatus::Stopped, None));
-            return;
+            return Err(());
         }
 
         if !step_needs_grounding(&step.action_type) {
             let screenshot_base64 = capture::capture_primary()
                 .await
-                .map(|s| s.png_base64)
+                .map(|s| s.display_jpeg_base64)
                 .unwrap_or_default();
             emit(ComputerEvent::Step {
                 step: ComputerStepEvent {
-                    index: ui_index,
+                    index: *ui_index,
                     thought: format!(
                         "Replaying recorded {} action (step {} of {total})",
                         step.action_type,
@@ -530,7 +644,7 @@ pub async fn replay_recording_smart(
                     element_description: step.element_description.clone(),
                     value: step.value.clone(),
                     screenshot_base64,
-                    screenshot_mime: "image/png",
+                    screenshot_mime: "image/jpeg",
                     target_x_norm: step.x_norm,
                     target_y_norm: step.y_norm,
                     to_x_norm: step.to_x_norm,
@@ -538,17 +652,17 @@ pub async fn replay_recording_smart(
                     confidence: None,
                 },
             });
-            match execute_step(step, display_w, display_h, &cancel).await {
+            match execute_step(step, display_w, display_h, cancel).await {
                 Ok(()) => {
                     emit(ComputerEvent::ActionResult {
-                        index: ui_index,
+                        index: *ui_index,
                         success: true,
                         message: None,
                     });
                 }
                 Err(err) => {
                     emit(ComputerEvent::ActionResult {
-                        index: ui_index,
+                        index: *ui_index,
                         success: false,
                         message: Some(err.to_string()),
                     });
@@ -560,22 +674,22 @@ pub async fn replay_recording_smart(
                             step.index + 1
                         ),
                     ));
-                    return;
+                    return Err(());
                 }
             }
-            ui_index += 1;
+            *ui_index += 1;
             continue;
         }
 
-        let reference = load_reference_crop(&recording_dir, step).await;
-        let step_text = describe_step(step, total, skill_context.as_deref());
+        let reference = load_reference_crop(recording_dir, step).await;
+        let step_text = describe_step(step, total, skill_context);
         let step_monitor_id = step.monitor.map(|m| m.id);
         let mut recoveries: u32 = 0;
 
         loop {
             if cancel.is_cancelled() {
                 emit(ComputerEvent::status(RunStatus::Stopped, None));
-                return;
+                return Err(());
             }
             if calls_used >= call_budget {
                 emit(ComputerEvent::status_code(
@@ -586,7 +700,7 @@ pub async fn replay_recording_smart(
                         step.index + 1
                     ),
                 ));
-                return;
+                return Err(());
             }
 
             let capture_result = match step_monitor_id {
@@ -601,7 +715,7 @@ pub async fn replay_recording_smart(
                         "capture_failed",
                         format!("screen capture failed: {err}"),
                     ));
-                    return;
+                    return Err(());
                 }
             };
             let monitor = screen.monitor;
@@ -633,7 +747,7 @@ pub async fn replay_recording_smart(
             let locate_result = tokio::select! {
                 () = cancel.cancelled() => {
                     emit(ComputerEvent::status(RunStatus::Stopped, None));
-                    return;
+                    return Err(());
                 }
                 outcome = tokio::time::timeout(
                     std::time::Duration::from_millis(SMART_GROUNDING_TIMEOUT_MS),
@@ -658,10 +772,10 @@ pub async fn replay_recording_smart(
                                 step.index + 1
                             ),
                         ));
-                        return;
+                        return Err(());
                     }
                     recoveries += 1;
-                    sleep_or_cancel(&cancel, SMART_RECOVERY_SETTLE_MS).await;
+                    sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
                     continue;
                 }
             };
@@ -681,7 +795,7 @@ pub async fn replay_recording_smart(
                                     step.index + 1
                                 ),
                             ));
-                            return;
+                            return Err(());
                         }
                         recoveries += 1;
                         continue;
@@ -703,13 +817,13 @@ pub async fn replay_recording_smart(
                     };
                     emit(ComputerEvent::Step {
                         step: ComputerStepEvent {
-                            index: ui_index,
+                            index: *ui_index,
                             thought,
                             action_type: step.action_type.clone(),
                             element_description: step.element_description.clone(),
                             value: step.value.clone(),
-                            screenshot_base64: screen.png_base64.clone(),
-                            screenshot_mime: "image/png",
+                            screenshot_base64: screen.display_jpeg_base64.clone(),
+                            screenshot_mime: "image/jpeg",
                             target_x_norm: Some(x_norm),
                             target_y_norm: Some(y_norm),
                             to_x_norm: to_norm.map(|t| t.0),
@@ -727,22 +841,22 @@ pub async fn replay_recording_smart(
                         step.amount,
                         display_w,
                         display_h,
-                        &cancel,
+                        cancel,
                     )
                     .await;
                     match outcome {
                         Ok(()) => {
                             emit(ComputerEvent::ActionResult {
-                                index: ui_index,
+                                index: *ui_index,
                                 success: true,
                                 message: None,
                             });
-                            ui_index += 1;
+                            *ui_index += 1;
                             break;
                         }
                         Err(err) => {
                             emit(ComputerEvent::ActionResult {
-                                index: ui_index,
+                                index: *ui_index,
                                 success: false,
                                 message: Some(err.to_string()),
                             });
@@ -754,7 +868,7 @@ pub async fn replay_recording_smart(
                                     step.index + 1
                                 ),
                             ));
-                            return;
+                            return Err(());
                         }
                     }
                 }
@@ -769,11 +883,11 @@ pub async fn replay_recording_smart(
                                 step.index + 1
                             ),
                         ));
-                        return;
+                        return Err(());
                     }
                     recoveries += 1;
                     let Some(recovery) = location.recovery else {
-                        sleep_or_cancel(&cancel, SMART_RECOVERY_SETTLE_MS).await;
+                        sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
                         continue;
                     };
                     let thought = if location.thought.is_empty() {
@@ -783,13 +897,13 @@ pub async fn replay_recording_smart(
                     };
                     emit(ComputerEvent::Step {
                         step: ComputerStepEvent {
-                            index: ui_index,
+                            index: *ui_index,
                             thought,
                             action_type: recovery.action.clone(),
                             element_description: None,
                             value: recovery.value.clone(),
-                            screenshot_base64: screen.png_base64.clone(),
-                            screenshot_mime: "image/png",
+                            screenshot_base64: screen.display_jpeg_base64.clone(),
+                            screenshot_mime: "image/jpeg",
                             target_x_norm: recovery.target.map(|t| t.0),
                             target_y_norm: recovery.target.map(|t| t.1),
                             to_x_norm: recovery.to_target.map(|t| t.0),
@@ -817,27 +931,27 @@ pub async fn replay_recording_smart(
                         amount,
                         display_w,
                         display_h,
-                        &cancel,
+                        cancel,
                     )
                     .await;
                     match outcome {
                         Ok(()) => {
                             emit(ComputerEvent::ActionResult {
-                                index: ui_index,
+                                index: *ui_index,
                                 success: true,
                                 message: None,
                             });
                         }
                         Err(err) => {
                             emit(ComputerEvent::ActionResult {
-                                index: ui_index,
+                                index: *ui_index,
                                 success: false,
                                 message: Some(err.to_string()),
                             });
                         }
                     }
-                    ui_index += 1;
-                    sleep_or_cancel(&cancel, SMART_RECOVERY_SETTLE_MS).await;
+                    *ui_index += 1;
+                    sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
                     continue;
                 }
                 _ => {
@@ -855,19 +969,14 @@ pub async fn replay_recording_smart(
                                 step.index + 1
                             ),
                         ));
-                        return;
+                        return Err(());
                     }
                     recoveries += 1;
-                    sleep_or_cancel(&cancel, SMART_RECOVERY_SETTLE_MS).await;
+                    sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
                     continue;
                 }
             }
         }
     }
-
-    emit(ComputerEvent::status_code(
-        RunStatus::Finished,
-        "smart_replay_completed",
-        "smart replay completed",
-    ));
+    Ok(())
 }

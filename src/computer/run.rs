@@ -19,6 +19,14 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 3;
 const DEFAULT_WAIT_MS: u64 = 800;
 const MAX_WAIT_MS: u64 = 15_000;
 const DEFAULT_SCROLL_AMOUNT: i32 = 3;
+const MAX_TOTAL_STEPS: u32 = 1_000;
+const MAX_DISPLAY_SWITCHES: u32 = 8;
+
+#[derive(Debug, Clone, Default)]
+pub struct UserMessage {
+    pub text: String,
+    pub image_data_uris: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +75,10 @@ pub enum ComputerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    UserUpdate {
+        index: u32,
+        text: String,
+    },
     Error {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +126,66 @@ pub struct RunParams {
     pub model: String,
     pub max_steps: u32,
     pub step_delay_ms: u64,
+    pub reference_images: Vec<String>,
+    pub initial_history: Vec<String>,
+}
+
+enum SleepOutcome {
+    Elapsed,
+    Cancelled,
+    User(UserMessage),
+}
+
+struct SteerState {
+    history: Vec<String>,
+    pending_images: Vec<String>,
+    goal_steps: u32,
+    consecutive_errors: u32,
+    consecutive_action_failures: u32,
+}
+
+impl SteerState {
+    fn apply_update(&mut self, msg: UserMessage, index: u32, emit: &impl Fn(ComputerEvent)) {
+        let text = msg.text.trim().to_string();
+        let has_images = !msg.image_data_uris.is_empty();
+        if !text.is_empty() {
+            self.history.push(format!("USER UPDATE (live instruction): {text}"));
+        } else if has_images {
+            self.history
+                .push("USER UPDATE (live instruction): the user attached reference image(s); \
+                       take them into account.".to_string());
+        }
+        emit(ComputerEvent::UserUpdate { index, text });
+        self.pending_images.extend(msg.image_data_uris);
+        self.goal_steps = 0;
+        self.consecutive_errors = 0;
+        self.consecutive_action_failures = 0;
+    }
+
+    fn drain_inbox(
+        &mut self,
+        user_rx: &mut UnboundedReceiver<UserMessage>,
+        index: u32,
+        emit: &impl Fn(ComputerEvent),
+    ) -> bool {
+        let mut any = false;
+        while let Ok(msg) = user_rx.try_recv() {
+            self.apply_update(msg, index, emit);
+            any = true;
+        }
+        any
+    }
+
+    fn take_reference_images(&mut self, limit: usize) -> Vec<String> {
+        if limit == 0 {
+            self.pending_images.clear();
+            return Vec::new();
+        }
+        let start = self.pending_images.len().saturating_sub(limit);
+        let recent = self.pending_images.split_off(start);
+        self.pending_images.clear();
+        recent
+    }
 }
 
 pub async fn run_loop(
@@ -121,7 +193,7 @@ pub async fn run_loop(
     config: Config,
     cancel: CancellationToken,
     event_tx: UnboundedSender<ComputerEvent>,
-    mut reply_rx: UnboundedReceiver<String>,
+    mut user_rx: UnboundedReceiver<UserMessage>,
 ) {
     let emit = |event: ComputerEvent| {
         let _ = event_tx.send(event);
@@ -151,26 +223,37 @@ pub async fn run_loop(
 
     emit(ComputerEvent::status(RunStatus::Running, None));
 
-    let mut history: Vec<String> = Vec::new();
-    let mut consecutive_errors = 0u32;
-    let mut consecutive_action_failures = 0u32;
-    let mut step: u32 = 0;
+    let monitors = capture::list_monitors().await;
+    let mut current_display = primary_display_index(&monitors);
+    let mut display_switches: u32 = 0;
 
-    while step < params.max_steps {
+    let mut steer = SteerState {
+        history: params.initial_history.clone(),
+        pending_images: params.reference_images.clone(),
+        goal_steps: 0,
+        consecutive_errors: 0,
+        consecutive_action_failures: 0,
+    };
+    let mut step: u32 = 0;
+    let reference_limit = client.max_reference_images();
+
+    while steer.goal_steps < params.max_steps && step < MAX_TOTAL_STEPS {
         if cancel.is_cancelled() {
             emit(ComputerEvent::status(RunStatus::Stopped, None));
             return;
         }
 
-        let screen = match capture::capture_primary().await {
+        steer.drain_inbox(&mut user_rx, step, &emit);
+
+        let screen = match capture_display(&monitors, current_display).await {
             Ok(screen) => screen,
             Err(err) => {
                 emit(ComputerEvent::error_code(
                     "capture_failed",
                     format!("screen capture failed: {err}"),
                 ));
-                consecutive_errors += 1;
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                steer.consecutive_errors += 1;
+                if steer.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                     emit(ComputerEvent::status_code(
                         RunStatus::Error,
                         "capture_failed_repeated",
@@ -178,7 +261,15 @@ pub async fn run_loop(
                     ));
                     return;
                 }
-                sleep_or_cancel(&cancel, 1000).await;
+                let backoff = (1000u64 * u64::from(steer.consecutive_errors)).min(4000);
+                match sleep_user_or_cancel(&cancel, &mut user_rx, backoff).await {
+                    SleepOutcome::Cancelled => {
+                        emit(ComputerEvent::status(RunStatus::Stopped, None));
+                        return;
+                    }
+                    SleepOutcome::User(msg) => steer.apply_update(msg, step, &emit),
+                    SleepOutcome::Elapsed => {}
+                }
                 continue;
             }
         };
@@ -186,12 +277,27 @@ pub async fn run_loop(
         emit(ComputerEvent::status(RunStatus::Thinking, None));
 
         let data_uri = screen.data_uri();
+        let reference_images = steer.take_reference_images(reference_limit);
+        let reference_refs: Vec<&str> = reference_images.iter().map(String::as_str).collect();
+        let display_hint = describe_displays(&monitors, current_display);
         let plan_result = tokio::select! {
             () = cancel.cancelled() => {
                 emit(ComputerEvent::status(RunStatus::Stopped, None));
                 return;
             }
-            result = planner::plan_next(&client, &data_uri, &params.task, &history) => result,
+            msg = recv_user(&mut user_rx) => {
+                steer.pending_images = reference_images;
+                steer.apply_update(msg, step, &emit);
+                continue;
+            }
+            result = planner::plan_next(
+                &client,
+                &data_uri,
+                &params.task,
+                &steer.history,
+                &reference_refs,
+                display_hint.as_deref(),
+            ) => result,
         };
         let planned = match plan_result {
             Ok(planned) => planned,
@@ -200,8 +306,8 @@ pub async fn run_loop(
                     "planning_failed",
                     format!("planning failed: {err}"),
                 ));
-                consecutive_errors += 1;
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                steer.consecutive_errors += 1;
+                if steer.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                     emit(ComputerEvent::status_code(
                         RunStatus::Error,
                         "planning_failed_repeated",
@@ -209,11 +315,33 @@ pub async fn run_loop(
                     ));
                     return;
                 }
-                sleep_or_cancel(&cancel, 800).await;
+                let backoff = (800u64 * u64::from(steer.consecutive_errors)).min(4000);
+                match sleep_user_or_cancel(&cancel, &mut user_rx, backoff).await {
+                    SleepOutcome::Cancelled => {
+                        emit(ComputerEvent::status(RunStatus::Stopped, None));
+                        return;
+                    }
+                    SleepOutcome::User(msg) => steer.apply_update(msg, step, &emit),
+                    SleepOutcome::Elapsed => {}
+                }
                 continue;
             }
         };
-        consecutive_errors = 0;
+        steer.consecutive_errors = 0;
+
+        if let Some(target_display) = planned.display {
+            if target_display < monitors.len()
+                && target_display != current_display
+                && display_switches < MAX_DISPLAY_SWITCHES
+            {
+                current_display = target_display;
+                display_switches += 1;
+                steer
+                    .history
+                    .push(format!("Switched to display {target_display}."));
+                continue;
+            }
+        }
 
         let monitor = screen.monitor;
 
@@ -263,10 +391,18 @@ pub async fn run_loop(
                     emit(ComputerEvent::status(RunStatus::Stopped, None));
                     return;
                 }
+                msg = recv_user(&mut user_rx) => {
+                    steer.apply_update(msg, step, &emit);
+                    continue;
+                }
                 resolved = resolve_all => resolved,
             };
             primary_target = resolved.0;
             secondary_target = resolved.1;
+        }
+
+        if steer.drain_inbox(&mut user_rx, step, &emit) {
+            continue;
         }
 
         emit(ComputerEvent::Step {
@@ -276,8 +412,8 @@ pub async fn run_loop(
                 action_type: planned.action.as_str().to_string(),
                 element_description: planned.element_description.clone(),
                 value: planned.value.clone(),
-                screenshot_base64: screen.png_base64.clone(),
-                screenshot_mime: "image/png",
+                screenshot_base64: screen.display_jpeg_base64.clone(),
+                screenshot_mime: "image/jpeg",
                 target_x_norm: primary_target.as_ref().map(|t| t.x_norm),
                 target_y_norm: primary_target.as_ref().map(|t| t.y_norm),
                 to_x_norm: secondary_target.as_ref().map(|t| t.x_norm),
@@ -304,10 +440,23 @@ pub async fn run_loop(
                         emit(ComputerEvent::status(RunStatus::Stopped, None));
                         return;
                     }
-                    reply = reply_rx.recv() => {
+                    reply = user_rx.recv() => {
                         match reply {
-                            Some(text) => {
-                                history.push(format!("Asked the user for help; they replied: {text}"));
+                            Some(msg) => {
+                                let text = msg.text.trim().to_string();
+                                if !text.is_empty() {
+                                    steer.history.push(format!(
+                                        "Asked the user for help; they replied: {text}"
+                                    ));
+                                    emit(ComputerEvent::UserUpdate {
+                                        index: step,
+                                        text,
+                                    });
+                                }
+                                steer.pending_images.extend(msg.image_data_uris);
+                                steer.goal_steps = 0;
+                                steer.consecutive_errors = 0;
+                                steer.consecutive_action_failures = 0;
                                 emit(ComputerEvent::status(RunStatus::Running, None));
                                 continue;
                             }
@@ -329,36 +478,54 @@ pub async fn run_loop(
 
         emit(ComputerEvent::status(RunStatus::Running, None));
 
-        let outcome = execute_action(
-            &planned,
-            monitor,
-            primary_target,
-            secondary_target,
-            &cancel,
-        )
-        .await;
+        let outcome = if matches!(planned.action, ActionType::Wait) {
+            let ms = planned
+                .amount
+                .map(|n| (n.max(0) as u64).min(MAX_WAIT_MS))
+                .unwrap_or(DEFAULT_WAIT_MS);
+            match sleep_user_or_cancel(&cancel, &mut user_rx, ms).await {
+                SleepOutcome::Cancelled => {
+                    emit(ComputerEvent::status(RunStatus::Stopped, None));
+                    return;
+                }
+                SleepOutcome::User(msg) => {
+                    steer.apply_update(msg, step, &emit);
+                    continue;
+                }
+                SleepOutcome::Elapsed => Ok(format!("Waited {ms}ms")),
+            }
+        } else {
+            execute_action(
+                &planned,
+                monitor,
+                primary_target,
+                secondary_target,
+                &cancel,
+            )
+            .await
+        };
         match outcome {
             Ok(summary) => {
-                consecutive_action_failures = 0;
+                steer.consecutive_action_failures = 0;
                 emit(ComputerEvent::ActionResult {
                     index: step,
                     success: true,
                     message: None,
                 });
-                history.push(summary);
+                steer.history.push(summary);
             }
             Err(err) => {
-                consecutive_action_failures += 1;
+                steer.consecutive_action_failures += 1;
                 emit(ComputerEvent::ActionResult {
                     index: step,
                     success: false,
                     message: Some(err.to_string()),
                 });
-                history.push(format!(
+                steer.history.push(format!(
                     "Attempted {} but it failed: {err}",
                     planned.action.as_str()
                 ));
-                if consecutive_action_failures >= MAX_CONSECUTIVE_ERRORS {
+                if steer.consecutive_action_failures >= MAX_CONSECUTIVE_ERRORS {
                     emit(ComputerEvent::status_code(
                         RunStatus::Error,
                         "action_failed_repeated",
@@ -370,7 +537,15 @@ pub async fn run_loop(
         }
 
         step += 1;
-        sleep_or_cancel(&cancel, params.step_delay_ms).await;
+        steer.goal_steps += 1;
+        match sleep_user_or_cancel(&cancel, &mut user_rx, params.step_delay_ms).await {
+            SleepOutcome::Cancelled => {
+                emit(ComputerEvent::status(RunStatus::Stopped, None));
+                return;
+            }
+            SleepOutcome::User(msg) => steer.apply_update(msg, step, &emit),
+            SleepOutcome::Elapsed => {}
+        }
     }
 
     emit(ComputerEvent::status_code(
@@ -378,6 +553,92 @@ pub async fn run_loop(
         "step_limit_reached",
         format!("reached the step limit ({})", params.max_steps),
     ));
+}
+
+fn primary_display_index(monitors: &[coordinates::MonitorRect]) -> usize {
+    monitors
+        .iter()
+        .position(|m| m.x == 0 && m.y == 0)
+        .unwrap_or(0)
+}
+
+fn describe_displays(monitors: &[coordinates::MonitorRect], current: usize) -> Option<String> {
+    if monitors.len() <= 1 {
+        return None;
+    }
+    let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
+    let max_x = monitors.iter().map(|m| m.x).max().unwrap_or(0);
+    let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
+    let max_y = monitors.iter().map(|m| m.y).max().unwrap_or(0);
+    let mut out = format!(
+        "This computer has {} displays and you are currently viewing display {current} (0-based). \
+         The screenshot shows ONLY that display. Displays are laid out on a shared desktop:\n",
+        monitors.len()
+    );
+    for (idx, m) in monitors.iter().enumerate() {
+        let mut position = String::new();
+        if m.x == min_x && max_x != min_x {
+            position.push_str("left");
+        } else if m.x == max_x && max_x != min_x {
+            position.push_str("right");
+        }
+        if m.y == min_y && max_y != min_y {
+            if !position.is_empty() {
+                position.push('-');
+            }
+            position.push_str("top");
+        } else if m.y == max_y && max_y != min_y {
+            if !position.is_empty() {
+                position.push('-');
+            }
+            position.push_str("bottom");
+        }
+        if position.is_empty() {
+            position.push_str("center");
+        }
+        let marker = if idx == current { " (current)" } else { "" };
+        out.push_str(&format!(
+            "- display {idx}: {}x{} at ({},{}), {position}{marker}\n",
+            m.width, m.height, m.x, m.y
+        ));
+    }
+    out.push_str(
+        "If the target is on a different display, respond with \"display\": <0-based index> to \
+         switch; a fresh screenshot of that display will be taken next.",
+    );
+    Some(out)
+}
+
+async fn capture_display(
+    monitors: &[coordinates::MonitorRect],
+    index: usize,
+) -> anyhow::Result<capture::CapturedScreen> {
+    match monitors.get(index) {
+        Some(monitor) => capture::capture_monitor(monitor.id).await,
+        None => capture::capture_primary().await,
+    }
+}
+
+async fn recv_user(user_rx: &mut UnboundedReceiver<UserMessage>) -> UserMessage {
+    match user_rx.recv().await {
+        Some(msg) => msg,
+        None => std::future::pending().await,
+    }
+}
+
+async fn sleep_user_or_cancel(
+    cancel: &CancellationToken,
+    user_rx: &mut UnboundedReceiver<UserMessage>,
+    ms: u64,
+) -> SleepOutcome {
+    if ms == 0 {
+        return SleepOutcome::Elapsed;
+    }
+    tokio::select! {
+        () = cancel.cancelled() => SleepOutcome::Cancelled,
+        msg = recv_user(user_rx) => SleepOutcome::User(msg),
+        () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => SleepOutcome::Elapsed,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

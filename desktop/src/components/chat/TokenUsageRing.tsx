@@ -28,8 +28,13 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
   const t = useTranslation()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const targetSessionId = sessionId === undefined ? activeTabId : sessionId
-  const cumulativeTokens = useChatStore((s) =>
-    targetSessionId ? s.sessions[targetSessionId]?.cumulativeTokens ?? 0 : 0,
+  // Current context occupancy is the tokens sent on the LAST turn (prompt +
+  // cache), not the running lifetime sum. Using the last input reflects real
+  // window usage and naturally drops after compaction — unlike the old
+  // `cumulativeTokens % limit`, which silently wrapped to ~0 once a long
+  // session exceeded the window.
+  const lastTurnUsage = useChatStore((s) =>
+    targetSessionId ? s.sessions[targetSessionId]?.tokenUsage : undefined,
   )
 
   const runtimeSelection = useSessionRuntimeStore((s) => {
@@ -63,19 +68,23 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
 
   const { used, total, pct } = useMemo(() => {
     const limit = resolveContextWindow(modelId, overrideTokens) || DEFAULT_CONTEXT_WINDOW
-    const safeCumulative = Math.max(0, cumulativeTokens)
+    const occupancy = Math.max(
+      0,
+      (lastTurnUsage?.input_tokens ?? 0) +
+        (lastTurnUsage?.cache_read_tokens ?? 0) +
+        (lastTurnUsage?.cache_creation_tokens ?? 0),
+    )
     if (limit <= 0) {
-      return { used: safeCumulative, total: limit, pct: 0 }
+      return { used: occupancy, total: limit, pct: 0 }
     }
-
-    const inCycle = safeCumulative % limit
-    const fraction = Math.max(0, Math.min(1, inCycle / limit))
+    // Clamp instead of wrapping: over-window shows a full (error) ring.
+    const fraction = Math.max(0, Math.min(1, occupancy / limit))
     return {
-      used: inCycle,
+      used: occupancy,
       total: limit,
       pct: fraction,
     }
-  }, [modelId, cumulativeTokens, overrideTokens])
+  }, [modelId, lastTurnUsage, overrideTokens])
 
   const stroke = 1.6
   const radius = (size - stroke) / 2

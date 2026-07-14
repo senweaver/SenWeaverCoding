@@ -91,6 +91,7 @@ pub async fn handle_approval_respond(
             .into_response();
     }
 
+    crate::approval::record_session_decision_delivery(&approval_id, &decision);
     gateway_approval_sink().emit_kind(crate::session::SessionEventKind::ApprovalResponded {
         id: approval_id,
         decision,

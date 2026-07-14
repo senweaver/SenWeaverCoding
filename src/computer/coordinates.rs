@@ -15,11 +15,23 @@ impl Box2d {
         if values.len() != 4 {
             return None;
         }
+        if values.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let scale = if values.iter().all(|v| v.abs() <= 1.0) {
+            1000.0
+        } else {
+            1.0
+        };
+        let y0 = values[0] * scale;
+        let x0 = values[1] * scale;
+        let y1 = values[2] * scale;
+        let x1 = values[3] * scale;
         Some(Self {
-            ymin: values[0],
-            xmin: values[1],
-            ymax: values[2],
-            xmax: values[3],
+            ymin: y0.min(y1),
+            xmin: x0.min(x1),
+            ymax: y0.max(y1),
+            xmax: x0.max(x1),
         })
     }
 

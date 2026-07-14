@@ -352,6 +352,16 @@ impl Tool for CronAddTool {
                     },
                 )
             }
+            JobType::Computer => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "computer control jobs are managed from the desktop computer mode"
+                            .to_string(),
+                    ),
+                });
+            }
         };
 
         match result {

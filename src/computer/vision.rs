@@ -73,6 +73,11 @@ impl VisionClient {
         })
     }
 
+    pub fn max_reference_images(&self) -> usize {
+        let (max_images, _) = self.multimodal.effective_limits();
+        max_images.saturating_sub(1)
+    }
+
     pub async fn complete_text(&self, system_prompt: &str, user_text: &str) -> Result<String> {
         let messages = vec![
             ChatMessage::system(system_prompt),
@@ -247,6 +252,8 @@ fn name_suggests_vision(model: &str) -> bool {
     lower.contains("vision")
         || lower.contains("-vl")
         || lower.contains("vl-")
+        || lower.contains("vl2")
+        || lower.contains("internvl")
         || lower.contains("multimodal")
         || lower.contains("omni")
         || lower.contains("4o")
@@ -255,4 +262,16 @@ fn name_suggests_vision(model: &str) -> bool {
         || lower.contains("claude-4")
         || lower.contains("sonnet")
         || lower.contains("opus")
+        || lower.contains("pixtral")
+        || lower.contains("llava")
+        || lower.contains("minicpm-v")
+        || lower.contains("minicpm-o")
+        || lower.contains("-4v")
+        || lower.contains("glm-4v")
+        || lower.contains("step-1v")
+        || lower.contains("step-1o")
+        || lower.contains("qvq")
+        || lower.contains("molmo")
+        || lower.contains("ui-tars")
+        || lower.contains("uitars")
 }

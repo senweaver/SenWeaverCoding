@@ -19,6 +19,53 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 
 const DEFAULT_LLM_OUTPUT_CAP: usize = 32_768;
 
+fn workspace_build_lock_enabled() -> bool {
+    crate::util::get_runtime_var("SEN_WORKSPACE_BUILD_LOCK")
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+// Heuristic: does this command mutate shared build/VCS state such that two
+// concurrent same-directory runs would conflict? Kept intentionally narrow so
+// read-only commands still run in parallel across sessions.
+fn command_is_build_like(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "cargo build",
+        "cargo test",
+        "cargo run",
+        "cargo check",
+        "cargo clippy",
+        "cargo fix",
+        "npm install",
+        "npm ci",
+        "npm run build",
+        "pnpm install",
+        "pnpm build",
+        "yarn install",
+        "yarn build",
+        "bun install",
+        "bun run build",
+        "go build",
+        "go test",
+        "make",
+        "cmake --build",
+        "gradle",
+        "mvn ",
+        "pip install",
+        "git checkout",
+        "git merge",
+        "git rebase",
+        "git pull",
+        "git reset",
+        "git stash",
+    ];
+    NEEDLES.iter().any(|n| lower.contains(n))
+}
+
 #[cfg(not(target_os = "windows"))]
 const SAFE_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
@@ -504,6 +551,27 @@ impl Tool for ShellTool {
                 });
             }
             None => None,
+        };
+
+        // Opt-in cross-session serialization for build/VCS commands so two
+        // parallel sessions sharing a directory cannot run conflicting builds
+        // simultaneously. Enabled via SEN_WORKSPACE_BUILD_LOCK=1.
+        let _workspace_guard = if workspace_build_lock_enabled()
+            && command_is_build_like(command)
+        {
+            match crate::session::acquire_workspace_exclusive_for_current_session().await {
+                Some(Ok(g)) => Some(g),
+                Some(Err(e)) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("{e}")),
+                    });
+                }
+                None => None,
+            }
+        } else {
+            None
         };
 
         let mut cmd = match self

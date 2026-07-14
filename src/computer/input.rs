@@ -166,6 +166,7 @@ fn new_enigo() -> Result<Enigo> {
 
 pub async fn main_display_size() -> Result<(i32, i32)> {
     tokio::task::spawn_blocking(|| {
+        super::dpi::ensure_dpi_awareness();
         let enigo = new_enigo()?;
         enigo
             .main_display()
@@ -311,9 +312,12 @@ async fn run_blocking<F>(f: F) -> Result<()>
 where
     F: FnOnce() -> Result<()> + Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| anyhow!("input task failed to join: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        super::dpi::ensure_dpi_awareness();
+        f()
+    })
+    .await
+    .map_err(|e| anyhow!("input task failed to join: {e}"))?
 }
 
 fn parse_combo(combo: &str) -> Result<(Vec<Key>, Key)> {

@@ -182,12 +182,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn is_request_from_localhost(headers: &HeaderMap) -> bool {
     if let Some(fwd) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         let first_ip = fwd.split(',').next().unwrap_or("").trim();
-        if first_ip == "127.0.0.1" || first_ip == "::1" {
-            return true;
-        }
-        return false;
+        return first_ip == "127.0.0.1" || first_ip == "::1";
     }
-    true
+    // No peer socket and no XFF header: we cannot prove the request is
+    // loopback, so do NOT grant the no-auth localhost shortcut. Genuine local
+    // callers reach auth through require_auth_with_peer, which sees the real
+    // ConnectInfo socket address.
+    false
 }
 
 pub async fn auth_middleware(

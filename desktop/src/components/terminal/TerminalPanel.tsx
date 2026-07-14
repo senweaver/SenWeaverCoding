@@ -80,11 +80,19 @@ export function TerminalPanel() {
     [tabs, activeTabId],
   )
 
-  if (!open) return null
+  // Never unmount when the panel is hidden: unmounting XtermView kills the
+  // underlying PTY (and its scrollback). Toggling the panel must not destroy
+  // running shells, so we keep everything mounted and hide with CSS. Until the
+  // user has ever opened the panel (no real tabs yet) we stay unmounted to
+  // avoid paying for terminal setup that was never requested.
+  const hasRealTabs = tabs.some((tab) => tab.kind !== 'agent-mirror')
+  if (!open && !hasRealTabs) return null
 
   return (
     <div
-      className="relative flex w-full flex-shrink-0 flex-col border-t border-[var(--color-border)] bg-[var(--color-surface-container-low)]"
+      className={`relative flex w-full flex-shrink-0 flex-col border-t border-[var(--color-border)] bg-[var(--color-surface-container-low)] ${
+        open ? '' : 'hidden'
+      }`}
       style={{ height: heightPx }}
     >
       <div

@@ -61,9 +61,10 @@ impl Tool for DiffApplyTool {
     }
 
     fn description(&self) -> &str {
-        "Atomically apply a set of unified-diff patches across multiple files as a single \
-         transaction. If any file fails to apply, every change in the set is rolled back. Use \
-         this for coordinated multi-file edits that must succeed or fail together."
+        "Atomically apply per-file unified-diff hunks given as explicit {path, diff} pairs \
+         (no `---`/`+++` headers needed): a single transaction where any failure rolls back \
+         every change. Use for coordinated multi-file edits expressed as diffs; for a complete \
+         patch document use patch_apply, for exact-string edits use file_edit/multi_edit."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

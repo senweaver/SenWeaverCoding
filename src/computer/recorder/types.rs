@@ -75,6 +75,14 @@ pub struct RecordedStep {
     pub monitor: Option<crate::computer::coordinates::MonitorRect>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RunConfig {
+    #[serde(default)]
+    pub loop_count: u32,
+    #[serde(default)]
+    pub interval_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordingManifest {
     pub rec_id: String,
@@ -85,6 +93,8 @@ pub struct RecordingManifest {
     pub steps: Vec<RecordedStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_config: Option<RunConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]

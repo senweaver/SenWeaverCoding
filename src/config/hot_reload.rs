@@ -60,16 +60,59 @@ impl LiveConfig {
 
     #[inline]
     pub fn store(&self, config: Config) {
-        self.inner.as_ref().store(config, vec!["runtime_hot_reload".into()]);
+        self.inner
+            .as_ref()
+            .store(config, vec!["runtime_hot_reload".into()]);
     }
 
     #[inline]
-    pub fn swap(&self, config: Config) -> Config {
+    pub fn store_validated(&self, config: Config) -> Result<(), String> {
+        let report = crate::config::validator::ConfigValidator::new(&config).run();
+        if !report.is_ok() {
+            let mut buf = String::new();
+            for section in &report.sections {
+                for error in &section.errors {
+                    if !buf.is_empty() {
+                        buf.push(';');
+                    }
+                    buf.push_str(section.section);
+                    buf.push(':');
+                    buf.push_str(error);
+                }
+            }
+            return Err(buf);
+        }
+        self.inner
+            .as_ref()
+            .store(config, vec!["runtime_hot_reload".into()]);
+        Ok(())
+    }
+
+    #[inline]
+    pub fn swap(&self, config: Config) -> Result<Config, String> {
+        let report = crate::config::validator::ConfigValidator::new(&config).run();
+        if !report.is_ok() {
+            let mut buf = String::new();
+            for section in &report.sections {
+                for error in &section.errors {
+                    if !buf.is_empty() {
+                        buf.push(';');
+                    }
+                    buf.push_str(section.section);
+                    buf.push(':');
+                    buf.push_str(error);
+                }
+            }
+            return Err(buf);
+        }
         let old = ArcSwap::swap(&self.inner.inner, Arc::new(config));
-        match Arc::try_unwrap(old) {
+        let _ = self.inner.notify.send(ConfigChangedEvent {
+            changed_fields: vec!["manual_swap".into()],
+        });
+        Ok(match Arc::try_unwrap(old) {
             Ok(config) => config,
             Err(shared) => (*shared).clone(),
-        }
+        })
     }
 
     pub fn provider_changed_since(
@@ -164,15 +207,30 @@ impl SharedConfig {
         self.store(new, changed_fields);
     }
 
-    pub fn swap(&self, new_config: Config) -> Config {
+    pub fn swap(&self, new_config: Config) -> Result<Config, String> {
+        let report = crate::config::validator::ConfigValidator::new(&new_config).run();
+        if !report.is_ok() {
+            let mut buf = String::new();
+            for section in &report.sections {
+                for error in &section.errors {
+                    if !buf.is_empty() {
+                        buf.push(';');
+                    }
+                    buf.push_str(section.section);
+                    buf.push(':');
+                    buf.push_str(error);
+                }
+            }
+            return Err(buf);
+        }
         let old = ArcSwap::swap(self.inner.as_ref(), Arc::new(new_config));
         let _ = self.notify.send(ConfigChangedEvent {
             changed_fields: vec!["manual_swap".into()],
         });
-        match Arc::try_unwrap(old) {
+        Ok(match Arc::try_unwrap(old) {
             Ok(config) => config,
             Err(shared) => (*shared).clone(),
-        }
+        })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ConfigChangedEvent> {

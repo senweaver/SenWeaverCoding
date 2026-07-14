@@ -9,13 +9,13 @@ pub mod skillgen;
 pub mod text_capture;
 pub mod types;
 
-pub use replay::{replay_recording, replay_recording_smart};
+pub use replay::{replay_recording, replay_recording_smart, ReplayRepeat};
 pub use session::{
     delete_recording, discard_recording, generate_skill, is_recording, last_saved_recording,
-    list_recordings, load_recording, load_skill_instructions, rename_recording, start_recording,
-    stop_recording,
+    list_recordings, load_recording, load_skill_instructions, rename_recording,
+    save_recording_manifest, start_recording, stop_recording,
 };
 pub use types::{
     RecordedStep, RecorderEvent, RecorderStatus, RecorderStepEvent, RecordingManifest,
-    RecordingSummary,
+    RecordingSummary, RunConfig,
 };

@@ -20,5 +20,5 @@ pub use outline::{OutlineEntry, OutlineError, extract_outline, locate_named_scop
 pub use search::{IncrementalIndex, SearchHit};
 pub use symbol_graph::{Edge, EdgeKind, SymbolEntry, SymbolGraph, SymbolId};
 pub use symbol_graph::incremental::{
-    Debouncer, DirtySet, FileEvent, FileWatcher, ManualWatcher, PersistLimiter, pump_events,
+    Debouncer, DirtySet, FileEvent, FileWatcher, PersistLimiter,
 };

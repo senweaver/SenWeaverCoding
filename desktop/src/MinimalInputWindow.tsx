@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useTranslation } from './i18n'
 import { useTabStore } from './stores/tabStore'
 import { useMinimalStore } from './stores/minimalStore'
@@ -13,6 +13,7 @@ import { isTauriRuntime } from './lib/desktopRuntime'
 import {
   MINIMAL_EVENT_INPUT_HIDDEN,
   MINIMAL_EVENT_INPUT_SHOW,
+  prewarmMinimalInputWindow,
   revealMinimalInputWindow,
 } from './lib/minimalMode'
 import type { MinimalVariant } from './lib/minimalMode'
@@ -33,20 +34,31 @@ function NoSessionHint() {
   )
 }
 
+function waitForPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
 export function MinimalInputWindow() {
   useMinimalWindowBridge()
 
   const variant = useMinimalStore((s) => s.variant)
   const opacityPct = useMinimalStore((s) => s.opacityPct)
   const activeTabId = useTabStore((s) => s.activeTabId)
+  const prewarmingRef = useRef(false)
+  const revealSeqRef = useRef(0)
 
-  const hideSelf = useCallback(async () => {
+  const hideSelf = useCallback(async (opts?: { silent?: boolean }) => {
     if (!isTauriRuntime()) return
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window')
       const win = getCurrentWindow()
       if (!(await win.isVisible())) return
       await win.hide()
+      if (opts?.silent) return
       const { emit } = await import('@tauri-apps/api/event')
       await emit(MINIMAL_EVENT_INPUT_HIDDEN)
     } catch (err) {
@@ -63,6 +75,7 @@ export function MinimalInputWindow() {
         const { getCurrentWindow } = await import('@tauri-apps/api/window')
         const off = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
           if (!focused) {
+            if (prewarmingRef.current) return
             void hideSelf()
             return
           }
@@ -96,6 +109,26 @@ export function MinimalInputWindow() {
 
   useEffect(() => {
     if (!isTauriRuntime()) return
+    let cancelled = false
+    void (async () => {
+      await waitForPaint()
+      if (cancelled) return
+      prewarmingRef.current = true
+      try {
+        await prewarmMinimalInputWindow()
+        await new Promise((r) => window.setTimeout(r, 160))
+      } finally {
+        if (!cancelled) prewarmingRef.current = false
+      }
+    })()
+    return () => {
+      cancelled = true
+      prewarmingRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
     let disposed = false
     let unlisten: (() => void) | null = null
     void (async () => {
@@ -107,9 +140,12 @@ export function MinimalInputWindow() {
             const target: MinimalVariant =
               event.payload?.variant === 'computer' ? 'computer' : 'code'
             useMinimalStore.getState().setVariant(target)
-            window.setTimeout(() => {
-              void revealMinimalInputWindow(target)
-            }, 0)
+            const seq = ++revealSeqRef.current
+            void (async () => {
+              await waitForPaint()
+              if (disposed || seq !== revealSeqRef.current) return
+              await revealMinimalInputWindow(target)
+            })()
           },
         )
         if (disposed) off()
@@ -130,22 +166,24 @@ export function MinimalInputWindow() {
 
   return (
     <div
-      className="flex h-screen w-screen flex-col justify-end overflow-hidden px-4 pt-4 pb-2"
+      className="relative flex h-screen w-screen flex-col justify-end overflow-hidden px-4 pt-4 pb-2"
       style={{ opacity: opacityPct / 100 }}
     >
       <div
+        aria-hidden={variant !== 'computer'}
         className={
           variant === 'computer'
             ? 'min-h-0 max-h-full overflow-y-auto -m-3 p-3'
-            : 'hidden'
+            : 'pointer-events-none absolute bottom-2 left-4 right-4 -z-10 opacity-0'
         }
       >
         <ComputerPanel onHeightChange={noopHeight} onSubmitted={handleSubmitted} />
       </div>
       <div
+        aria-hidden={variant === 'computer'}
         className={
           variant === 'computer'
-            ? 'hidden'
+            ? 'pointer-events-none absolute bottom-2 left-4 right-4 -z-10 opacity-0'
             : 'min-h-0 max-h-full overflow-y-auto -m-3 p-3'
         }
       >

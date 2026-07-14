@@ -7,7 +7,7 @@ use crate::agent::coding_mode::CodingMode;
 inventory::submit!(StaticSlashCommand {
     name: "mode",
     aliases: &["md"],
-    description: "Switch coding mode (vibe, agent, spec, plan, ask, tdd, debug, architect, pair, context, mvai, harness). Run /mode with no arguments to list all modes.",
+    description: "Switch coding mode (auto, vibe, agent, spec, plan, ask, tdd, debug, architect, pair, context, mvai, harness, curator, designer). Run /mode with no arguments to list all modes.",
     usage: "/mode [name]",
     category: CommandCategory::Session,
     hidden: false,
@@ -40,6 +40,9 @@ pub async fn handle_mode(ctx: CommandContext) -> CommandResult {
         Some(new_mode) => {
             let prev = get_current_mode();
             set_current_mode(new_mode);
+            if let Some(svc) = crate::services::try_get_services() {
+                svc.set_global_auto_coding_mode(false);
+            }
 
             if prev == CodingMode::Plan && new_mode != CodingMode::Plan {
                 if let Some(svc) = crate::services::try_get_services() {
@@ -53,10 +56,19 @@ pub async fn handle_mode(ctx: CommandContext) -> CommandResult {
                 new_mode.description(),
             ))
         }
+        None if arg.eq_ignore_ascii_case("auto") => {
+            if let Some(svc) = crate::services::try_get_services() {
+                svc.set_global_auto_coding_mode(true);
+            }
+            CommandResult::ok(
+                "Switched to **Auto** mode: each turn is intent-routed to the best coding mode."
+                    .to_string(),
+            )
+        }
         None => {
             let names: Vec<&str> = CodingMode::all().iter().map(|m| m.display_name()).collect();
             CommandResult::err(format!(
-                "Unknown mode '{}'. Available: {}",
+                "Unknown mode '{}'. Available: {}, auto",
                 arg,
                 names.join(", ")
             ))

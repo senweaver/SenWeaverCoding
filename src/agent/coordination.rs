@@ -482,6 +482,50 @@ impl LockManager {
         }
     }
 
+    pub async fn acquire_region_async(
+        self: &Arc<Self>,
+        path: PathBuf,
+        range: Range<usize>,
+        agent_id: String,
+        opts: AcquireOpts,
+    ) -> Result<RegionLockToken, LockError> {
+        let mgr = Arc::clone(self);
+        let path_for_err = path.clone();
+        let range_for_err = range.clone();
+        tokio::task::spawn_blocking(move || mgr.acquire_region(&path, range, &agent_id, opts))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "acquire_region_async join failed");
+                Err(LockError::Timeout {
+                    path: path_for_err,
+                    range: range_for_err,
+                })
+            })
+    }
+
+    pub async fn acquire_region_shared_async(
+        self: &Arc<Self>,
+        path: PathBuf,
+        range: Range<usize>,
+        agent_id: String,
+        opts: AcquireOpts,
+    ) -> Result<RegionLockToken, LockError> {
+        let mgr = Arc::clone(self);
+        let path_for_err = path.clone();
+        let range_for_err = range.clone();
+        tokio::task::spawn_blocking(move || {
+            mgr.acquire_region_shared(&path, range, &agent_id, opts)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "acquire_region_shared_async join failed");
+            Err(LockError::Timeout {
+                path: path_for_err,
+                range: range_for_err,
+            })
+        })
+    }
+
     pub fn acquire_region(
         self: &Arc<Self>,
         path: &Path,

@@ -152,6 +152,47 @@ pub fn add_agent_job(
     get_job(config, &id)
 }
 
+pub fn add_computer_job(
+    config: &Config,
+    name: Option<String>,
+    schedule: Schedule,
+    spec_json: &str,
+) -> Result<CronJob> {
+    let now = Utc::now();
+    validate_schedule(&schedule, now)?;
+    let next_run = next_run_for_schedule(&schedule, now)?;
+    let id = Uuid::new_v4().to_string();
+    let expression = schedule_cron_expression(&schedule).unwrap_or_default();
+    let schedule_json = serde_json::to_string(&schedule)?;
+    let delivery = crate::cron::DeliveryConfig::default();
+
+    let delete_after_run = matches!(schedule, Schedule::At { .. });
+
+    with_connection(config, |conn| {
+        conn.execute(
+            "INSERT INTO cron_jobs (
+                id, expression, command, schedule, job_type, prompt, name, session_target, model,
+                enabled, delivery, delete_after_run, created_at, next_run
+             ) VALUES (?1, ?2, ?3, ?4, 'computer', NULL, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                expression,
+                spec_json,
+                schedule_json,
+                name,
+                serde_json::to_string(&delivery)?,
+                i32::from(delete_after_run),
+                now.to_rfc3339(),
+                next_run.to_rfc3339(),
+            ],
+        )
+        .context("Failed to insert cron computer job")?;
+        Ok(())
+    })?;
+
+    get_job(config, &id)
+}
+
 pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
     with_connection(config, |conn| {
         let mut stmt = conn.prepare(

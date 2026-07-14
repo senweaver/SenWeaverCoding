@@ -99,50 +99,57 @@ impl HooksConfig {
 }
 
 fn strip_jsonc_comments(text: &str) -> String {
-
-    let bytes = text.as_bytes();
+    // Iterate by char, not byte: `out.push(b as char)` mangled every multi-byte
+    // UTF-8 sequence (e.g. Chinese paths in hook commands) into mojibake. All
+    // JSONC delimiters are ASCII, so char iteration handles them identically
+    // while preserving non-ASCII content verbatim.
     let mut out = String::with_capacity(text.len());
-    let mut i = 0;
+    let mut chars = text.chars().peekable();
     let mut in_string = false;
     let mut escape_next = false;
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some(c) = chars.next() {
         if in_string {
-            out.push(b as char);
+            out.push(c);
             if escape_next {
                 escape_next = false;
-            } else if b == b'\\' {
+            } else if c == '\\' {
                 escape_next = true;
-            } else if b == b'"' {
+            } else if c == '"' {
                 in_string = false;
             }
-            i += 1;
             continue;
         }
-        if b == b'"' {
+        if c == '"' {
             in_string = true;
             out.push('"');
-            i += 1;
             continue;
         }
-        if b == b'/' && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'/' {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if bytes[i + 1] == b'*' {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
+                Some('*') => {
+                    chars.next();
+                    let mut prev_star = false;
+                    for next in chars.by_ref() {
+                        if prev_star && next == '/' {
+                            break;
+                        }
+                        prev_star = next == '*';
+                    }
+                    continue;
                 }
-                i = (i + 2).min(bytes.len());
-                continue;
+                _ => {}
             }
         }
-        out.push(b as char);
-        i += 1;
+        out.push(c);
     }
     out
 }

@@ -67,15 +67,19 @@ impl Tool for SopApproveTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'run_id' parameter"))?;
 
-        let (result, run_snapshot) = {
+        let (result, run_snapshot, headless_driven) = {
             let mut engine = self.engine.lock();
+            let headless_driven = engine
+                .get_run(run_id)
+                .map(|r| r.headless_driven)
+                .unwrap_or(false);
 
             match engine.approve_step(run_id) {
                 Ok(action) => {
                     let snapshot = engine.get_run(run_id).cloned();
-                    (Ok(action), snapshot)
+                    (Ok(action), snapshot, headless_driven)
                 }
-                Err(e) => (Err(e), None),
+                Err(e) => (Err(e), None, headless_driven),
             }
         };
 
@@ -95,19 +99,48 @@ impl Tool for SopApproveTool {
 
         match result {
             Ok(action) => {
-                let output = match action {
-                    SopRunAction::ExecuteStep {
-                        run_id, context, ..
-                    } => {
-                        format!("Approved. Proceeding with run {run_id}.\n\n{context}")
-                    }
-                    other => format!("Approved. Action: {other:?}"),
-                };
-                Ok(ToolResult {
-                    success: true,
-                    output,
-                    error: None,
-                })
+                if headless_driven {
+                    let audit = self.audit.clone().unwrap_or_else(|| {
+                        Arc::new(SopAuditLogger::new(Arc::new(
+                            crate::memory::none::NoneMemory::new(),
+                        )))
+                    });
+                    crate::sop::runner::enqueue_action(
+                        Arc::clone(&self.engine),
+                        audit,
+                        action.clone(),
+                    );
+                    let output = match &action {
+                        SopRunAction::ExecuteStep { run_id, .. } => {
+                            format!(
+                                "Approved. Headless driver will continue run {run_id}; do not \
+                                 re-execute this step yourself."
+                            )
+                        }
+                        other => format!(
+                            "Approved. Headless driver will handle the next action ({other:?})."
+                        ),
+                    };
+                    Ok(ToolResult {
+                        success: true,
+                        output,
+                        error: None,
+                    })
+                } else {
+                    let output = match action {
+                        SopRunAction::ExecuteStep {
+                            run_id, context, ..
+                        } => {
+                            format!("Approved. Proceeding with run {run_id}.\n\n{context}")
+                        }
+                        other => format!("Approved. Action: {other:?}"),
+                    };
+                    Ok(ToolResult {
+                        success: true,
+                        output,
+                        error: None,
+                    })
+                }
             }
             Err(e) => Ok(ToolResult {
                 success: false,

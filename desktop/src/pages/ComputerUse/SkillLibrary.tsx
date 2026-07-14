@@ -7,6 +7,8 @@ import { useTranslation } from '../../i18n'
 import { enterMinimalMode } from '../../lib/minimalMode'
 import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
 import { useComputerUseStore } from '../../stores/computerUseStore'
+import { StepEditor } from './StepEditor'
+import { ScheduleDialog } from './ScheduleDialog'
 
 export function SkillLibrary({ onClose }: { onClose: () => void }) {
   const t = useTranslation()
@@ -30,6 +32,8 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [editingSteps, setEditingSteps] = useState<string | null>(null)
+  const [scheduling, setScheduling] = useState<string | null>(null)
 
   const submitRename = (name: string) => {
     const next = renameValue.trim()
@@ -242,6 +246,26 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                         <span className="material-symbols-outlined text-[14px]">replay</span>
                         {t('computerUse.skills.exactReplay')}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingSteps(rec.name)}
+                        disabled={rec.step_count === 0 || recorderBusy}
+                        title={t('computerUse.skills.editStepsHint')}
+                        className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-black/[0.06] disabled:opacity-50 dark:hover:bg-white/[0.08]"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">edit_note</span>
+                        {t('computerUse.skills.editSteps')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setScheduling(rec.name)}
+                        disabled={rec.step_count === 0 || recorderBusy}
+                        title={t('computerUse.skills.scheduleHint')}
+                        className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-black/[0.06] disabled:opacity-50 dark:hover:bg-white/[0.08]"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">schedule</span>
+                        {t('computerUse.skills.schedule')}
+                      </button>
                       {rec.has_skill ? (
                         <button
                           type="button"
@@ -307,6 +331,14 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </div>
+      {editingSteps && (
+        <StepEditor
+          name={editingSteps}
+          onClose={() => setEditingSteps(null)}
+          onSaved={() => void loadRecordings()}
+        />
+      )}
+      {scheduling && <ScheduleDialog name={scheduling} onClose={() => setScheduling(null)} />}
     </div>
   )
 }

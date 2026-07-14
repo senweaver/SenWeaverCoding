@@ -62,7 +62,6 @@ import { useDesignerCanvasStore } from '../../stores/designerCanvasStore'
 import { DesignerDockCoordinator } from './DesignerDockCoordinator'
 import { TerminalPanel } from '../terminal/TerminalPanel'
 import { startBackgroundShellMirror } from '../../api/backgroundShell'
-import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { dockHide, dockSetForegroundSession } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
@@ -76,6 +75,7 @@ import {
   MINIMAL_EVENT_COMPUTER_REPLAY,
   MINIMAL_EVENT_COMPUTER_REPLY,
   MINIMAL_EVENT_COMPUTER_START,
+  MINIMAL_EVENT_COMPUTER_STEER,
   MINIMAL_EVENT_COMPUTER_STOP,
   MINIMAL_EVENT_COMPUTER_SYNC,
   MINIMAL_EVENT_RECORDER_CONTROL,
@@ -90,6 +90,7 @@ import type {
   MinimalComputerReplay,
   MinimalComputerReply,
   MinimalComputerStart,
+  MinimalComputerSteer,
   MinimalRecorderControl,
   MinimalRecorderProgress,
   MinimalSubmitPayload,
@@ -116,7 +117,6 @@ export function AppShell() {
   const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
   const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
   const appMode = useUIStore((s) => s.appMode)
-  const terminalPanelOpen = useTerminalPanelStore((s) => s.open)
   const activeChatTabId = useTabStore((s) => s.activeTabId)
   const activeChatTitle = useTabStore((s) =>
     s.activeTabId ? s.tabs.find((tab) => tab.sessionId === s.activeTabId)?.title ?? null : null,
@@ -499,13 +499,22 @@ export function AppShell() {
       const emitComputerProgress = async (force = false) => {
         const s = useComputerUseStore.getState()
         const last = s.steps.length > 0 ? s.steps[s.steps.length - 1] : null
+        const lastUserUpdate = (() => {
+          for (let i = s.steps.length - 1; i >= 0; i--) {
+            const step = s.steps[i]
+            if (step && step.kind === 'user_update') return step.thought
+          }
+          return null
+        })()
         const payload: MinimalComputerProgress = {
           status: s.status,
           statusMessage: s.statusMessage,
           error: s.error,
           lastThought: last?.thought ? last.thought : null,
           lastAction: last ? last.elementDescription || last.actionType || null : null,
-          stepCount: s.steps.length,
+          stepCount: s.steps.filter((step) => step.kind === 'action').length,
+          pendingSteer: s.pendingSteer,
+          lastUserUpdate,
         }
         const key = JSON.stringify(payload)
         if (!force && key === lastProgressKey) return
@@ -525,7 +534,11 @@ export function AppShell() {
           const cu = useComputerUseStore.getState()
           if (p.provider && p.model) cu.setSelection(p.provider, p.model)
           cu.setTask(p.task)
-          cu.start()
+          cu.start(
+            p.attachments && p.attachments.length > 0
+              ? { attachments: p.attachments }
+              : undefined,
+          )
         }),
       )
       register(
@@ -538,6 +551,18 @@ export function AppShell() {
           const text = event.payload?.text
           if (!text?.trim()) return
           useComputerUseStore.getState().sendReply(text)
+        }),
+      )
+      register(
+        await listen<MinimalComputerSteer>(MINIMAL_EVENT_COMPUTER_STEER, (event) => {
+          const p = event.payload
+          const text = p?.text ?? ''
+          const attachments =
+            p?.attachments && p.attachments.length > 0 ? p.attachments : undefined
+          if (!text.trim() && !attachments) return
+          const rec = useComputerRecorderStore.getState()
+          if (rec.status === 'recording') return
+          useComputerUseStore.getState().send(text, attachments)
         }),
       )
       register(
@@ -937,7 +962,7 @@ export function AppShell() {
           </div>
         </div>
       </div>
-      {terminalPanelOpen && <TerminalPanel />}
+      <TerminalPanel />
       {appMode === 'computer' && (
         <div className="absolute inset-0 z-40 flex flex-col bg-[var(--color-background)]">
           <ComputerUsePage />

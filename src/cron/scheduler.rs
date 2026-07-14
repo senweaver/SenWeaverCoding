@@ -355,6 +355,7 @@ async fn execute_job_with_retry(
         let (success, output) = match job.job_type {
             JobType::Shell => run_job_command(config, security, job).await,
             JobType::Agent => Box::pin(run_agent_job(config, security, job)).await,
+            JobType::Computer => Box::pin(run_computer_job_dispatch(config, job)).await,
         };
         last_output = output;
 
@@ -375,6 +376,19 @@ async fn execute_job_with_retry(
     }
 
     (false, last_output)
+}
+
+#[cfg(feature = "computer-use")]
+async fn run_computer_job_dispatch(config: &Config, job: &CronJob) -> (bool, String) {
+    crate::cron::computer_job::run_computer_job(config, job).await
+}
+
+#[cfg(not(feature = "computer-use"))]
+async fn run_computer_job_dispatch(_config: &Config, _job: &CronJob) -> (bool, String) {
+    (
+        false,
+        "computer control jobs require the computer-use feature".to_string(),
+    )
 }
 
 fn dispatch_claimed_jobs(

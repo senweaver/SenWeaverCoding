@@ -98,6 +98,36 @@ pub fn claim_pending_gateway_approval(id: &str) -> bool {
     pending_gateway_approvals().lock().claim(id)
 }
 
+// Reliable decision mailbox: every emit site records the decision here before
+// broadcasting, so a waiter can never lose its verdict to a lagged broadcast
+// channel under load (the old failure mode blocked turns for the full 5-minute
+// approval timeout).
+static DELIVERED_DECISIONS: OnceLock<Mutex<HashMap<String, (ApprovalResponse, Instant)>>> =
+    OnceLock::new();
+
+fn delivered_decisions() -> &'static Mutex<HashMap<String, (ApprovalResponse, Instant)>> {
+    DELIVERED_DECISIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn record_session_decision_delivery(id: &str, decision: &str) {
+    let response = match decision.to_ascii_lowercase().as_str() {
+        "yes" | "y" => ApprovalResponse::Yes,
+        "always" | "a" => ApprovalResponse::Always,
+        _ => ApprovalResponse::No,
+    };
+    let mut guard = delivered_decisions().lock();
+    let now = Instant::now();
+    if guard.len() >= PENDING_APPROVAL_MAX_ENTRIES {
+        let ttl = Duration::from_secs(PENDING_APPROVAL_TTL_SECS);
+        guard.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+    }
+    guard.insert(id.to_string(), (response, now));
+}
+
+fn take_delivered_decision(id: &str) -> Option<ApprovalResponse> {
+    delivered_decisions().lock().remove(id).map(|(r, _)| r)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionApprovalVerdict {
     Decision(ApprovalResponse),
@@ -130,15 +160,24 @@ pub async fn wait_for_session_decision(
 ) -> SessionApprovalVerdict {
     let deadline = tokio::time::Instant::now()
         + Duration::from_millis(SESSION_APPROVAL_TIMEOUT_MS);
+    let mut mailbox_poll = tokio::time::interval(Duration::from_millis(250));
+    mailbox_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        if let Some(response) = take_delivered_decision(request_id) {
+            return SessionApprovalVerdict::Decision(response);
+        }
         let recv_with_deadline = tokio::time::timeout_at(deadline, rx.recv());
         let received = if let Some(token) = cancellation_token {
             tokio::select! {
                 () = token.cancelled() => return SessionApprovalVerdict::Cancelled,
+                _ = mailbox_poll.tick() => continue,
                 outcome = recv_with_deadline => outcome,
             }
         } else {
-            recv_with_deadline.await
+            tokio::select! {
+                _ = mailbox_poll.tick() => continue,
+                outcome = recv_with_deadline => outcome,
+            }
         };
         match received {
             Ok(Ok(event)) => {
@@ -156,7 +195,12 @@ pub async fn wait_for_session_decision(
                     }
                 }
             }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                if let Some(response) = take_delivered_decision(request_id) {
+                    return SessionApprovalVerdict::Decision(response);
+                }
+                continue;
+            }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
                 return SessionApprovalVerdict::TimedOut;
             }
@@ -202,13 +246,22 @@ pub struct ApprovalManager {
 
     allow_shell_in_non_interactive: bool,
 
-    session_allowlist: Mutex<HashSet<String>>,
+    // Keyed by session id so an "Always" grant in one desktop tab never
+    // silently auto-approves the same tool in every other parallel session.
+    // Contexts without a session (plain CLI) fall back to a shared bucket.
+    session_allowlist: Mutex<HashMap<String, HashSet<String>>>,
 
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
 
     audit_log_path: Mutex<Option<PathBuf>>,
 
     session_sink: Mutex<Option<crate::session::SessionEventSink>>,
+}
+
+fn allowlist_scope_key() -> String {
+    crate::session::current_session_context()
+        .map(|c| c.session_id)
+        .unwrap_or_else(|| "__no_session__".to_string())
 }
 
 impl ApprovalManager {
@@ -220,7 +273,7 @@ impl ApprovalManager {
             autonomy_level: config.level,
             non_interactive: false,
             allow_shell_in_non_interactive: config.allow_shell_in_non_interactive,
-            session_allowlist: Mutex::new(HashSet::new()),
+            session_allowlist: Mutex::new(HashMap::new()),
             audit_log: Mutex::new(Vec::new()),
             audit_log_path: Mutex::new(None),
             session_sink: Mutex::new(None),
@@ -249,7 +302,7 @@ impl ApprovalManager {
             autonomy_level: config.level,
             non_interactive: true,
             allow_shell_in_non_interactive: config.allow_shell_in_non_interactive,
-            session_allowlist: Mutex::new(HashSet::new()),
+            session_allowlist: Mutex::new(HashMap::new()),
             audit_log: Mutex::new(Vec::new()),
             audit_log_path: Mutex::new(None),
             session_sink: Mutex::new(None),
@@ -322,8 +375,13 @@ impl ApprovalManager {
             return false;
         }
 
+        let scope = allowlist_scope_key();
         let allowlist = self.session_allowlist.lock();
-        if allowlist.contains(tool_name) {
+        if allowlist
+            .get(&scope)
+            .map(|set| set.contains(tool_name))
+            .unwrap_or(false)
+        {
             return false;
         }
 
@@ -339,8 +397,12 @@ impl ApprovalManager {
     ) {
 
         if decision == ApprovalResponse::Always {
+            let scope = allowlist_scope_key();
             let mut allowlist = self.session_allowlist.lock();
-            allowlist.insert(tool_name.to_string());
+            allowlist
+                .entry(scope)
+                .or_default()
+                .insert(tool_name.to_string());
         }
 
         let summary = summarize_args(args);
@@ -380,7 +442,12 @@ impl ApprovalManager {
     }
 
     pub fn session_allowlist(&self) -> HashSet<String> {
-        self.session_allowlist.lock().clone()
+        let scope = allowlist_scope_key();
+        self.session_allowlist
+            .lock()
+            .get(&scope)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {

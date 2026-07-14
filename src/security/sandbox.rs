@@ -13,7 +13,13 @@ struct FsConfinement {
     enabled: bool,
     workspace: Option<PathBuf>,
     allowed_roots: Vec<PathBuf>,
+    // Session-scoped workspace roots: parallel sessions each register their
+    // own root here so confinement checks the caller's workspace instead of
+    // whichever session registered last (the old global last-writer-wins).
+    session_workspaces: std::collections::HashMap<String, PathBuf>,
 }
+
+const MAX_SESSION_WORKSPACES: usize = 256;
 
 static FS_CONFINEMENT: OnceLock<RwLock<FsConfinement>> = OnceLock::new();
 
@@ -23,6 +29,7 @@ fn confinement() -> &'static RwLock<FsConfinement> {
             enabled: false,
             workspace: None,
             allowed_roots: Vec::new(),
+            session_workspaces: std::collections::HashMap::new(),
         })
     })
 }
@@ -50,8 +57,53 @@ pub fn register_workspace_root(path: &Path) {
     if path.as_os_str().is_empty() {
         return;
     }
+    let normalized = normalize_abs(path);
+    let session_id = crate::session::current_session_context().map(|c| c.session_id);
     let mut guard = confinement().write();
-    guard.workspace = Some(normalize_abs(path));
+    match session_id {
+        Some(id) => {
+            insert_session_workspace(&mut guard, id, normalized.clone());
+            if guard.workspace.is_none() {
+                guard.workspace = Some(normalized);
+            }
+        }
+        None => {
+            // Only retarget the global root when no per-session roots exist
+            // (single-workspace CLI). With live sessions, a session-less call
+            // must not clobber every other session's confinement root.
+            if guard.session_workspaces.is_empty() || guard.workspace.is_none() {
+                guard.workspace = Some(normalized);
+            }
+        }
+    }
+}
+
+fn insert_session_workspace(guard: &mut FsConfinement, id: String, root: PathBuf) {
+    if guard.session_workspaces.len() >= MAX_SESSION_WORKSPACES
+        && !guard.session_workspaces.contains_key(&id)
+    {
+        if let Some(victim) = guard.session_workspaces.keys().next().cloned() {
+            guard.session_workspaces.remove(&victim);
+        }
+    }
+    guard.session_workspaces.insert(id, root);
+}
+
+pub fn register_workspace_root_for_session(session_id: &str, path: &Path) {
+    if path.as_os_str().is_empty() || session_id.is_empty() {
+        return;
+    }
+    let normalized = normalize_abs(path);
+    let mut guard = confinement().write();
+    insert_session_workspace(&mut guard, session_id.to_string(), normalized.clone());
+    if guard.workspace.is_none() {
+        guard.workspace = Some(normalized);
+    }
+}
+
+pub fn unregister_session_workspace_root(session_id: &str) {
+    let mut guard = confinement().write();
+    guard.session_workspaces.remove(session_id);
 }
 
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
@@ -198,7 +250,10 @@ pub fn sandbox_allows_path(path: &Path) -> bool {
     {
         let guard = confinement().read();
         if guard.enabled {
-            if let Some(ws) = guard.workspace.as_ref() {
+            let session_root = crate::session::current_session_context()
+                .and_then(|c| guard.session_workspaces.get(&c.session_id).cloned());
+            let effective_root = session_root.or_else(|| guard.workspace.clone());
+            if let Some(ws) = effective_root.as_ref() {
                 if path_within(path, ws) {
                     return true;
                 }

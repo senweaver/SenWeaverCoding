@@ -13,6 +13,8 @@ type MinimalComputerStore = {
   lastThought: string | null
   lastAction: string | null
   stepCount: number
+  pendingSteer: string | null
+  lastUserUpdate: string | null
   applyProgress: (progress: MinimalComputerProgress) => void
   reset: () => void
 }
@@ -24,6 +26,8 @@ const initial = {
   lastThought: null,
   lastAction: null,
   stepCount: 0,
+  pendingSteer: null,
+  lastUserUpdate: null,
 }
 
 export const useMinimalComputerStore = create<MinimalComputerStore>((set) => ({
@@ -36,6 +40,8 @@ export const useMinimalComputerStore = create<MinimalComputerStore>((set) => ({
       lastThought: progress.lastThought,
       lastAction: progress.lastAction,
       stepCount: progress.stepCount,
+      pendingSteer: progress.pendingSteer ?? null,
+      lastUserUpdate: progress.lastUserUpdate ?? null,
     }),
   reset: () => set({ ...initial }),
 }))

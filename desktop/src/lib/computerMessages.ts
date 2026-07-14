@@ -44,6 +44,12 @@ const CODE_TO_KEY: Record<string, TranslationKey> = {
   skill_generate_failed: 'computerUse.msg.skillGenerateFailed',
   skill_annotating: 'computerUse.msg.skillAnnotating',
   skill_drafting: 'computerUse.msg.skillDrafting',
+  steer_requires_model: 'computerUse.msg.steerRequiresModel',
+  steer_takeover: 'computerUse.msg.steerTakeover',
+  plan_draft_failed: 'computerUse.msg.planDraftFailed',
+  attachment_too_large: 'computerUse.msg.attachmentTooLarge',
+  attachment_unsupported: 'computerUse.msg.attachmentUnsupported',
+  replay_iteration: 'computerUse.msg.replayIteration',
 }
 
 const NUMBER_IN_TEXT = /(\d+)/

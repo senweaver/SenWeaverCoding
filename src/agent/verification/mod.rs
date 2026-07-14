@@ -5,6 +5,7 @@
 pub mod lsp;
 
 pub mod pipeline;
+pub mod post_edit;
 pub mod syntactic;
 pub mod test_runner;
 pub mod traits;

@@ -32,6 +32,7 @@ function createMemberSessionState() {
     pendingPermission: null,
     tokenUsage: { input_tokens: 0, output_tokens: 0 },
     cumulativeTokens: 0,
+    cumulativeCostUsd: 0,
     elapsedSeconds: 0,
     statusVerb: '',
     slashCommands: [],

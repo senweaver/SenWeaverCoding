@@ -1456,11 +1456,17 @@ async fn async_main() -> Result<()> {
             senweavercoding::bootstrap::init_state(std::env::current_dir().unwrap_or_default());
 
             if let Some(ref mode_str) = mode {
-                if let Some(coding_mode) =
+                if mode_str.eq_ignore_ascii_case("auto") {
+                    senweavercoding::util::set_runtime_var("SEN_CODING_MODE", "auto");
+                    if let Some(svc) = senweavercoding::services::try_get_services() {
+                        svc.set_global_auto_coding_mode(true);
+                    }
+                } else if let Some(coding_mode) =
                     senweavercoding::agent::coding_mode::CodingMode::from_str_loose(mode_str)
                 {
                     senweavercoding::util::set_runtime_var("SEN_CODING_MODE", mode_str);
                     if let Some(svc) = senweavercoding::services::try_get_services() {
+                        svc.set_global_auto_coding_mode(false);
                         *svc.coding_mode.write() = coding_mode;
                     }
                 } else {
@@ -1471,7 +1477,7 @@ async fn async_main() -> Result<()> {
                             .map(|m| m.display_name())
                             .collect();
                     eprintln!(
-                        "Warning: unknown mode '{}'. Available: {}",
+                        "Warning: unknown mode '{}'. Available: {}, auto",
                         mode_str,
                         available.join(", ")
                     );

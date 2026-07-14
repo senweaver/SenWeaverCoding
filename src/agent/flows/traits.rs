@@ -56,7 +56,7 @@ impl Artifact {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VerificationVerdict {
 
     Pass,
@@ -84,7 +84,7 @@ impl FlowContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TranscriptEntry {
     Plan {
         steps: Vec<Step>,

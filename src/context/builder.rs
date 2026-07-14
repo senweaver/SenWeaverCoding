@@ -15,7 +15,6 @@ use super::open_files::{NoOpenFilesSource, OpenFile, OpenFilesSource};
 use super::outline_ctx::OutlineNode;
 use super::rag_ctx::SearchHit;
 use super::symbols_ctx::SymbolSnapshot;
-use super::system_prompt::SystemPromptParts;
 
 pub trait SymbolGraphLookup: Send + Sync {
 
@@ -34,7 +33,6 @@ pub trait RagSource: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct QueryContext {
-    pub system_prompt: SystemPromptParts,
     pub git: Option<GitContext>,
     pub memory: MemoryFileContext,
     pub cwd: PathBuf,
@@ -59,10 +57,38 @@ impl QueryContext {
             && self.outline.is_empty()
             && self.lsp_info.is_empty()
             && self.rag_hits.is_empty()
+            && self.git.is_none()
         {
             return String::new();
         }
         let mut out = String::from("[Query context]\n");
+        if let Some(ref git) = self.git {
+            let branch_line = match git.default_branch.as_deref() {
+                Some(def) if !def.is_empty() && def != git.branch => {
+                    format!("git branch: {} (default: {def})\n", git.branch)
+                }
+                _ => format!("git branch: {}\n", git.branch),
+            };
+            out.push_str(&branch_line);
+            if git.is_dirty {
+                let changed: Vec<&str> = git.status_short.lines().take(10).collect();
+                let total = git.status_short.lines().count();
+                out.push_str(&format!("git status ({total} changed):\n"));
+                for line in &changed {
+                    out.push_str(&format!("  {line}\n"));
+                }
+                if total > changed.len() {
+                    out.push_str(&format!("  ... {} more\n", total - changed.len()));
+                }
+            }
+            if !git.recent_log.is_empty() {
+                let commits: Vec<&str> = git.recent_log.lines().take(5).collect();
+                out.push_str("recent commits:\n");
+                for line in &commits {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+        }
         if !self.focus_files.is_empty() {
             out.push_str("focus_files:\n");
             for p in &self.focus_files {
@@ -129,8 +155,6 @@ impl QueryContext {
 
 pub struct ContextBuilder {
     cwd: PathBuf,
-    additional_dirs: Vec<PathBuf>,
-    system_prompt_injection: Option<String>,
 
     open_files_source: Option<Arc<dyn OpenFilesSource>>,
     focus_files: Vec<PathBuf>,
@@ -147,8 +171,6 @@ impl ContextBuilder {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
-            additional_dirs: Vec::new(),
-            system_prompt_injection: None,
             open_files_source: None,
             focus_files: Vec::new(),
             symbol_graph: None,
@@ -158,16 +180,6 @@ impl ContextBuilder {
             rag_top_k: 5,
             lsp_timeout: Duration::from_secs(3),
         }
-    }
-
-    pub fn with_additional_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
-        self.additional_dirs = dirs;
-        self
-    }
-
-    pub fn with_system_prompt_injection(mut self, injection: Option<String>) -> Self {
-        self.system_prompt_injection = injection;
-        self
     }
 
     #[must_use]
@@ -218,9 +230,10 @@ impl ContextBuilder {
 
         let git_fut = GitContext::gather(&self.cwd);
 
-        let mut memory_search_dirs = vec![self.cwd.clone()];
-        memory_search_dirs.extend(self.additional_dirs.clone());
-        let memory_fut = MemoryFileContext::load(&memory_search_dirs);
+        // AGENTS.md/CLAUDE.md are already injected into the system prompt by
+        // the personality loader; re-reading them per turn here was pure IO
+        // waste because the injection block never rendered them.
+        let memory_fut = async { MemoryFileContext::default() };
 
         let focus_for_outline = self.focus_files.clone();
         let outline_fut = async move {
@@ -298,15 +311,9 @@ impl ContextBuilder {
         );
         let git = git_res.ok();
 
-        let mut system_prompt = SystemPromptParts::default();
-        if let Some(ref injection) = self.system_prompt_injection {
-            system_prompt.injections.push(injection.clone());
-        }
-
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         let ctx = QueryContext {
-            system_prompt,
             git,
             memory,
             cwd: self.cwd.clone(),
@@ -347,6 +354,9 @@ pub struct FocusPathRegistry;
 static FOCUS_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, Vec<PathBuf>>>> =
     Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
 
+const FOCUS_PATHS_PER_SESSION: usize = 8;
+const FOCUS_MAX_SESSIONS: usize = 64;
+
 impl FocusPathRegistry {
     fn session_key() -> String {
         crate::session::current_session_context()
@@ -357,6 +367,7 @@ impl FocusPathRegistry {
     pub fn set(paths: Vec<PathBuf>) {
         let key = Self::session_key();
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
+            Self::evict_if_needed(&mut guard, &key);
             guard.insert(key, paths);
         }
     }
@@ -367,11 +378,41 @@ impl FocusPathRegistry {
         }
         let key = Self::session_key();
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
+            Self::evict_if_needed(&mut guard, &key);
             let entry = guard.entry(key).or_default();
             for p in paths {
                 if !entry.contains(p) {
                     entry.push(p.clone());
                 }
+            }
+        }
+    }
+
+    // Most-recently-touched files float to the front and the per-session list
+    // stays capped, so injection reflects what the agent is working on now.
+    pub fn note(paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let key = Self::session_key();
+        if let Ok(mut guard) = FOCUS_REGISTRY.write() {
+            Self::evict_if_needed(&mut guard, &key);
+            let entry = guard.entry(key).or_default();
+            for p in paths {
+                entry.retain(|existing| existing != p);
+                entry.insert(0, p.clone());
+            }
+            entry.truncate(FOCUS_PATHS_PER_SESSION);
+        }
+    }
+
+    fn evict_if_needed(
+        guard: &mut std::collections::HashMap<String, Vec<PathBuf>>,
+        incoming_key: &str,
+    ) {
+        if guard.len() >= FOCUS_MAX_SESSIONS && !guard.contains_key(incoming_key) {
+            if let Some(victim) = guard.keys().next().cloned() {
+                guard.remove(&victim);
             }
         }
     }

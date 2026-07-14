@@ -146,15 +146,18 @@ pub fn parse_context_limit_from_error(msg: &str) -> Option<usize> {
     None
 }
 
+// Delegates to the shared ASCII/CJK-aware estimator so compaction, focus
+// windows and provider budgets all agree on one token model. A small envelope
+// factor still covers tool-call JSON overhead not visible in plain content.
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     let raw: usize = messages
         .iter()
-        .map(|m| m.content.len().div_ceil(4) + 4)
+        .map(crate::providers::traits::estimate_message_tokens)
         .sum();
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
-        (raw as f64 * 1.2) as usize
+        (raw as f64 * 1.05) as usize
     }
 }
 
@@ -469,6 +472,10 @@ impl ContextCompressor {
         );
 
         let timeout = Duration::from_secs(self.config.timeout_secs);
+        // Track whether we produced a real LLM summary or fell back to raw
+        // truncation, so the injected banner does not claim to be a faithful
+        // summary when middle content was actually dropped verbatim.
+        let mut degraded = false;
         let summary_raw = match tokio::time::timeout(
             timeout,
             provider.chat_with_system(Some(SUMMARIZER_SYSTEM), &user_prompt, summary_model, 0.1),
@@ -478,6 +485,7 @@ impl ContextCompressor {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "Summarization LLM call failed, using transcript truncation");
+                degraded = true;
                 truncate_chars(&transcript, self.config.summary_max_chars)
             }
             Err(_) => {
@@ -485,15 +493,24 @@ impl ContextCompressor {
                     "Summarization timed out after {}s, using transcript truncation",
                     self.config.timeout_secs
                 );
+                degraded = true;
                 truncate_chars(&transcript, self.config.summary_max_chars)
             }
         };
 
         let summary = truncate_chars(&summary_raw, self.config.summary_max_chars);
 
-        let summary_msg = format!(
-            "[CONTEXT SUMMARY \u{2014} {message_count} earlier messages compressed]\n\n{summary}"
-        );
+        let summary_msg = if degraded {
+            format!(
+                "[CONTEXT COMPACTION \u{2014} summarizer unavailable; {message_count} earlier \
+                 messages were TRUNCATED (not summarized), so middle content may be missing. \
+                 Re-read source files/tool outputs if you need details.]\n\n{summary}"
+            )
+        } else {
+            format!(
+                "[CONTEXT SUMMARY \u{2014} {message_count} earlier messages compressed]\n\n{summary}"
+            )
+        };
         replace_history_range_with_assistant(history, start, end, summary_msg);
 
         repair_tool_pairs(history);

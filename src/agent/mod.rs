@@ -36,7 +36,6 @@ pub mod mode;
 pub mod model_switch;
 pub mod multi_agent_runtime;
 pub mod observe;
-pub mod parallel_executor;
 pub mod pipeline;
 pub mod plan_mode;
 #[cfg(feature = "tool-curator")]
@@ -82,10 +81,6 @@ pub use multi_agent_runtime::{
     MultiAgentRuntimeManager, MultiAgentRuntimeManagerError, global_manager, global_runtime,
     init_global_runtime,
 };
-pub use parallel_executor::{
-    AggregationStrategy, ExecutorConfig, ExecutorStats, ParallelExecutor, Priority, TaskHandle,
-    TaskOutput,
-};
 pub use pipeline::{
     Pipeline, PipelineBuilder, PipelineConfig, PipelineResult, PipelineStage, PipelineTask,
     StageErrorStrategy, StageKind, StageResult, TaskResult,
@@ -93,9 +88,6 @@ pub use pipeline::{
 pub use registry::{AgentRegistry, AgentRegistryHandle};
 pub use supervisor::{Supervisor, SupervisorHandle};
 pub use task_orchestrator::queue::{TaskQueue, TaskQueueHandle};
-pub use task_orchestrator::router::{
-    RoutingDecision, RoutingStrategy, Task, TaskRouter, TaskRouterConfig,
-};
 pub use team_protocol::{
     ChannelType, Goal, GoalPriority, GoalStatus, MessagePayload, Role, Team, TeamConfig,
     TeamMessage,

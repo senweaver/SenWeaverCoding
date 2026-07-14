@@ -869,8 +869,14 @@ impl Agent {
         let multimodal = live_cfg.multimodal.clone();
         let pacing = live_cfg.pacing.clone();
         let dedup_exempt = live_cfg.agent.tool_call_dedup_exempt.clone();
+        let tool_filter_groups = live_cfg.agent.tool_filter_groups.clone();
         drop(live_cfg);
-        let excluded_tools: Vec<String> = Vec::new();
+        let excluded_tools: Vec<String> =
+            crate::agent::tool_handler::filter::compute_excluded_mcp_tools(
+                &self.tools,
+                &tool_filter_groups,
+                user_message,
+            );
 
         let hook_runner_arc = self.hook_runner.as_ref().and_then(|h| h.current());
         let hook_runner_ref = hook_runner_arc.as_deref();
@@ -901,7 +907,6 @@ impl Agent {
                 .with_model_switch_callback(Some(crate::agent::loop_::get_model_switch_state()))
                 .with_response_cache_hook(Some(gui_hooks.clone()))
                 .with_memory_session_hook(Some(gui_hooks.clone()))
-                .with_model_classifier_hook(Some(gui_hooks.clone()))
                 .with_turn_preamble_hook(Some(gui_hooks.clone()))
                 .with_gui_model_switch_hook(Some(gui_hooks.clone()))
                 .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
@@ -4095,7 +4100,18 @@ impl Agent {
             crate::agent::dangling_tool_repair::note_interrupted_turn(&mut self.history);
         }
 
-        let mut enriched = Self::build_user_envelope(user_message, &context);
+        // Resolve @file/@folder/@codebase tags into inline <context> blocks
+        // (Cursor-style attachments). Memory recall and intent analysis above
+        // keep the raw text; only the model-facing envelope is expanded.
+        let expanded_user = crate::agent::context::expansion::expand_input(
+            user_message,
+            &self.workspace_dir,
+            crate::context::builder::FocusPathRegistry::current(),
+            String::new(),
+        )
+        .await;
+
+        let mut enriched = Self::build_user_envelope(&expanded_user, &context);
 
         if let Ok(guard) = self.unfinished_task.lock() {
             if let Some(task) = guard.as_ref() {
@@ -4517,9 +4533,6 @@ pub(crate) struct GuiHooksFromAgent {
     memory_session_id: Option<String>,
     auto_save: bool,
     classification_config: crate::config::QueryClassificationConfig,
-    available_hints: Vec<String>,
-    route_model_by_hint: HashMap<String, String>,
-    auto_classify: Option<crate::agent::eval::AutoClassifyConfig>,
     default_model: String,
     temperature: f64,
     experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
@@ -4535,9 +4548,6 @@ impl GuiHooksFromAgent {
             memory_session_id: agent.memory_session_id.clone(),
             auto_save: agent.auto_save,
             classification_config: agent.classification_config.clone(),
-            available_hints: agent.available_hints.clone(),
-            route_model_by_hint: agent.route_model_by_hint.clone(),
-            auto_classify: agent.config.auto_classify.clone(),
             default_model: agent.model_name.clone(),
             temperature: agent.temperature,
             experience_replay: agent.experience_replay.clone(),
@@ -4656,48 +4666,6 @@ impl crate::agent::loop_::traits::MemorySessionHook for GuiHooksFromAgent {
                 self.memory_session_id.as_deref(),
             )
             .await;
-    }
-}
-
-impl crate::agent::loop_::traits::ModelClassifierHook for GuiHooksFromAgent {
-    fn classify(&self, user_message: &str) -> Option<String> {
-        if let Some(decision) = crate::agent::classifier::classify_with_decision(
-            &self.classification_config,
-            user_message,
-        ) {
-            if self.available_hints.contains(&decision.hint) {
-                let resolved_model = self
-                    .route_model_by_hint
-                    .get(&decision.hint)
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
-                tracing::info!(
-                    target: "query_classification",
-                    hint = decision.hint.as_str(),
-                    model = resolved_model,
-                    rule_priority = decision.priority,
-                    message_length = user_message.len(),
-                    "Classified message route via hook"
-                );
-                return Some(format!("route:{}", decision.hint));
-            }
-        }
-        if let Some(ref ac) = self.auto_classify {
-            let tier = crate::agent::eval::estimate_complexity(user_message);
-            if let Some(hint) = ac.hint_for(tier) {
-                if self.available_hints.contains(&hint.to_string()) {
-                    tracing::info!(
-                        target: "query_classification",
-                        hint = hint,
-                        complexity = ?tier,
-                        message_length = user_message.len(),
-                        "Auto-classified by complexity via hook"
-                    );
-                    return Some(format!("route:{hint}"));
-                }
-            }
-        }
-        None
     }
 }
 

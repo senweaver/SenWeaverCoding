@@ -31,9 +31,12 @@ export function ReviewCard() {
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const clearPendingEdits = useChatStore((s) => s.clearPendingEdits)
   const undoAllPendingEdits = useChatStore((s) => s.undoAllPendingEdits)
+  const undoPendingEditFile = useChatStore((s) => s.undoPendingEditFile)
+  const keepPendingEditFile = useChatStore((s) => s.keepPendingEditFile)
 
   const [expanded, setExpanded] = useState(false)
   const [undoing, setUndoing] = useState(false)
+  const [undoingPath, setUndoingPath] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const pendingEdits = sessionView.pendingEdits ?? EMPTY_PENDING_EDITS
@@ -72,6 +75,27 @@ export function ReviewCard() {
     } finally {
       setUndoing(false)
     }
+  }
+  const onUndoFile = async (e: React.MouseEvent, path: string) => {
+    e.stopPropagation()
+    if (!activeTabId || undoingPath) return
+    setUndoingPath(path)
+    setErrorMessage(null)
+    try {
+      await undoPendingEditFile(activeTabId, path)
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : t('review.undoFileFailed'),
+      )
+    } finally {
+      setUndoingPath(null)
+    }
+  }
+  const onKeepFile = (e: React.MouseEvent, path: string) => {
+    e.stopPropagation()
+    if (!activeTabId) return
+    keepPendingEditFile(activeTabId, path)
+    setErrorMessage(null)
   }
 
   return (
@@ -192,6 +216,27 @@ export function ReviewCard() {
                   <span className="shrink-0 rounded-full bg-[var(--color-error-container)]/50 px-1.5 py-0.5 font-[var(--font-mono)] text-[10px] text-[var(--color-error)]">
                     -{edit.deletions}
                   </span>
+                )}
+                {!isActive && (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={(e) => onUndoFile(e, edit.path)}
+                      disabled={undoingPath === edit.path}
+                      title={t('review.undoFile')}
+                      className="inline-flex h-5 w-5 items-center justify-center rounded text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)] disabled:opacity-40"
+                    >
+                      <span className="material-symbols-outlined text-[14px]">undo</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => onKeepFile(e, edit.path)}
+                      title={t('review.keepFile')}
+                      className="inline-flex h-5 w-5 items-center justify-center rounded text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
+                    >
+                      <span className="material-symbols-outlined text-[14px]">check</span>
+                    </button>
+                  </div>
                 )}
               </div>
             )

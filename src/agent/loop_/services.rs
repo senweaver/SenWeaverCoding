@@ -23,7 +23,10 @@ impl LspContextSource for StaticLspContextSource {
             None => return Vec::new(),
         };
         let all = services.lsp.get_all_diagnostics().await;
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = crate::session::current_session_context()
+            .map(|c| PathBuf::from(c.workspace_dir))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(focus.len());
         for path in focus {
             let abs = if path.is_absolute() {
@@ -31,8 +34,10 @@ impl LspContextSource for StaticLspContextSource {
             } else {
                 cwd.join(path)
             };
+            let key = crate::services::lsp::canonical_diag_key(&abs);
             let diagnostics = all
-                .get(&abs)
+                .get(&key)
+                .or_else(|| all.get(&abs))
                 .or_else(|| all.get(path))
                 .cloned()
                 .unwrap_or_default();
@@ -42,12 +47,11 @@ impl LspContextSource for StaticLspContextSource {
                 .map(|d| d.message.clone())
                 .collect::<Vec<_>>()
                 .join("; ");
-            let hover = services.lsp.hover(path, 0, 0).await;
             out.push(LspSnapshot {
                 path: path.clone(),
                 diagnostics: diagnostics.len(),
                 summary,
-                hover,
+                hover: None,
             });
         }
         out
@@ -55,7 +59,7 @@ impl LspContextSource for StaticLspContextSource {
 }
 
 struct SymbolGraphAdapter {
-    graph: Arc<SymbolGraph>,
+    writer: Arc<crate::code_intel::symbol_graph::incremental::SymbolGraphWriter>,
     workspace_root: PathBuf,
     per_file_cap: usize,
     dependents_cap: usize,
@@ -63,21 +67,26 @@ struct SymbolGraphAdapter {
 
 impl SymbolGraphLookup for SymbolGraphAdapter {
     fn snapshot_for_focus(&self, paths: &[PathBuf]) -> Vec<SymbolSnapshot> {
-        if paths.is_empty() || self.graph.symbols.is_empty() {
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let graph_lock = self.writer.graph();
+        let graph = graph_lock.read();
+        if graph.symbols.is_empty() {
             return Vec::new();
         }
         let mut out = Vec::new();
         for path in paths {
             let rel = relativize_to_workspace(path, &self.workspace_root);
             let mut for_file = 0usize;
-            for sym in self.graph.symbols.iter() {
+            for sym in graph.symbols.iter() {
                 if for_file >= self.per_file_cap {
                     break;
                 }
                 if !same_file(&sym.id.file, &rel) {
                     continue;
                 }
-                let dependents = collect_dependents(&self.graph, &sym.id, self.dependents_cap);
+                let dependents = collect_dependents(&graph, &sym.id, self.dependents_cap);
                 let signature =
                     read_signature_line(&self.workspace_root, &sym.id.file, sym.id.line);
                 out.push(SymbolSnapshot {
@@ -169,9 +178,6 @@ impl RagSource for CodeRagSource {
     }
 }
 
-static SYMBOL_GRAPH_CACHE: OnceLock<RwLock<std::collections::HashMap<PathBuf, Arc<SymbolGraph>>>> =
-    OnceLock::new();
-
 static CODE_RAG_CACHE: OnceLock<
     RwLock<std::collections::HashMap<PathBuf, Arc<dyn IncrementalIndex>>>,
 > = OnceLock::new();
@@ -179,19 +185,6 @@ static CODE_RAG_CACHE: OnceLock<
 static CODE_RAG_VECTOR_CACHE: OnceLock<
     RwLock<std::collections::HashMap<PathBuf, SharedVectorCodeIndex>>,
 > = OnceLock::new();
-
-fn symbol_graph_cache() -> &'static RwLock<std::collections::HashMap<PathBuf, Arc<SymbolGraph>>> {
-    SYMBOL_GRAPH_CACHE.get_or_init(|| {
-        tracing::debug!(
-            target: "agent.loop_services",
-            cache = "symbol_graph",
-            kind = "workspace-bucketed-global",
-            reason = "context-builder call-sites are not handed an AgentLoopServices instance",
-            "initialising workspace-bucketed global cache"
-        );
-        RwLock::new(std::collections::HashMap::new())
-    })
-}
 
 fn code_rag_cache(
 ) -> &'static RwLock<std::collections::HashMap<PathBuf, Arc<dyn IncrementalIndex>>> {
@@ -475,28 +468,10 @@ pub fn lsp_context_source() -> Option<Arc<dyn LspContextSource>> {
 #[must_use]
 pub fn symbol_graph_source(workspace_root: &Path) -> Option<Arc<dyn SymbolGraphLookup>> {
     let root = workspace_root.to_path_buf();
-    if let Ok(guard) = symbol_graph_cache().read() {
-        if let Some(graph) = guard.get(&root) {
-            return Some(Arc::new(SymbolGraphAdapter {
-                graph: graph.clone(),
-                workspace_root: root,
-                per_file_cap: 12,
-                dependents_cap: 5,
-            }));
-        }
-    }
-
-    let loaded = match SymbolGraph::load(&root) {
-        Ok(Some(g)) => Some(g),
-        Ok(None) => None,
-        Err(_) => None,
-    }?;
-    let arc = Arc::new(loaded);
-    if let Ok(mut guard) = symbol_graph_cache().write() {
-        guard.insert(root.clone(), arc.clone());
-    }
+    let writer =
+        crate::code_intel::symbol_graph::incremental::get_or_load_writer(&root)?;
     Some(Arc::new(SymbolGraphAdapter {
-        graph: arc,
+        writer,
         workspace_root: root,
         per_file_cap: 12,
         dependents_cap: 5,
@@ -539,9 +514,6 @@ pub fn rag_source(workspace_root: &Path) -> Option<Arc<dyn RagSource>> {
 }
 
 pub fn invalidate_caches() {
-    if let Ok(mut guard) = symbol_graph_cache().write() {
-        guard.clear();
-    }
     if let Ok(mut guard) = code_rag_cache().write() {
         guard.clear();
     }

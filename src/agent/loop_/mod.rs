@@ -37,6 +37,10 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+tokio::task_local! {
+    pub static TOOL_DENY_PREFIXES: Vec<String>;
+}
+
 pub use crate::agent::reward::cost_tracking::{
     TOOL_LOOP_COST_TRACKING_CONTEXT, ToolLoopCostTrackingContext, scope_tool_loop_cost_tracking,
 };
@@ -359,7 +363,9 @@ async fn build_context(
 async fn code_intel_injection_block(user_msg: &str) -> Option<String> {
     use crate::agent::loop_::services as loop_services;
 
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = crate::session::current_session_context()
+        .map(|c| std::path::PathBuf::from(c.workspace_dir))
+        .or_else(|| std::env::current_dir().ok())?;
     let registry_focus = crate::context::builder::FocusPathRegistry::current();
     let query = user_msg.trim();
     if registry_focus.is_empty() && query.is_empty() {
@@ -381,6 +387,9 @@ async fn code_intel_injection_block(user_msg: &str) -> Option<String> {
             .flatten()
     {
         builder = builder.with_symbol_graph(graph);
+        // Start the external-edit watcher from this async context (the graph
+        // was just loaded inside spawn_blocking, where it could not start).
+        crate::code_intel::symbol_graph::incremental::ensure_workspace_watcher(&cwd);
     }
     if !query.is_empty() {
         let rag_cwd = cwd.clone();
@@ -1733,6 +1742,32 @@ async fn execute_one_tool(
         });
     };
 
+    if let Some(feedback) = crate::agent::tool_handler::arg_validate::validate_args_against_schema(
+        call_name,
+        &tool.parameters_schema(),
+        &call_arguments,
+    ) {
+        let duration = start.elapsed();
+        observer.record_event(&ObserverEvent::ToolCall {
+            tool: call_name.to_string(),
+            duration,
+            success: false,
+        });
+        if let Some(svc) = crate::services::try_get_services() {
+            crate::observability::agent_metrics::inc_tool_call(
+                &svc.agent_metrics,
+                call_name,
+                "schema_rejected",
+            );
+        }
+        return Ok(ToolExecutionOutcome {
+            output: feedback.clone(),
+            success: false,
+            error_reason: Some(feedback),
+            duration,
+        });
+    }
+
     if let (Some(engine), Some(identity)) = (rbac_engine, rbac_identity) {
         let auth = engine.authorize_tool(identity, call_name);
         if !auth.allowed {
@@ -2642,7 +2677,6 @@ pub(crate) async fn run_unified_loop_impl(
         tool_registry,
         response_cache_hook,
         memory_session_hook,
-        model_classifier_hook,
         turn_preamble_hook,
         gui_model_switch_hook,
         iteration_context_budget_hook,
@@ -2650,7 +2684,6 @@ pub(crate) async fn run_unified_loop_impl(
         plan_mode_nudge_hook,
         tool_descriptions,
     } = policy;
-    let _ = &model_classifier_hook;
     let approval: Option<&ApprovalManager> = approval.or_else(|| {
         if channel_name == "gui" {
             crate::approval::session_surface_approval_manager()
@@ -2976,13 +3009,23 @@ pub(crate) async fn run_unified_loop_impl(
         if let Some(svc) = crate::services::try_get_services() {
             let mode = crate::agent::coding_mode::active_coding_mode();
             let max_ctx = svc.get_max_context_tokens();
-            if let Some(budget_msg) =
-                crate::agent::mode::effects::build_context_budget_message(mode, history, max_ctx)
+            match crate::agent::mode::effects::build_context_budget_message(mode, history, max_ctx)
             {
-                crate::agent::mode::effects::replace_or_push_system_reminder(
-                    history,
-                    budget_msg,
-                );
+                Some(budget_msg) => {
+                    crate::agent::mode::effects::replace_or_push_system_reminder(
+                        history,
+                        budget_msg,
+                    );
+                }
+                None => {
+                    // Occupancy fell back below the warning tier (e.g. after
+                    // compaction): retract the stale banner instead of leaving
+                    // a misleading high-usage reminder in the transcript.
+                    crate::agent::mode::effects::remove_system_reminder(
+                        history,
+                        crate::agent::mode::effects::CONTEXT_BUDGET_MARKER,
+                    );
+                }
             }
         }
 
@@ -4185,7 +4228,7 @@ pub(crate) async fn run_unified_loop_impl(
                         &user_msg_for_hooks,
                         model,
                         &display_text,
-                        0,
+                        _pacing_gov.total_generated_tokens() as u32,
                         &turn_tools_used,
                         &turn_tool_results,
                         true,
@@ -4284,7 +4327,7 @@ pub(crate) async fn run_unified_loop_impl(
                 &user_msg_for_hooks,
                 model,
                 &display_text,
-                0,
+                _pacing_gov.total_generated_tokens() as u32,
                 &turn_tools_used,
                 &turn_tool_results,
                 true,
@@ -4376,10 +4419,34 @@ pub(crate) async fn run_unified_loop_impl(
             if call.parse_error {
                 tracing::warn!(
                     tool = %call.name,
-                    "Tool '{}' received empty arguments because JSON parsing of its \
-                    original arguments failed. The model should retry with valid JSON arguments.",
-                    call.name
+                    "Tool call arguments failed JSON parsing; rejecting before execution \
+                     with a structured re-emit request instead of running with empty args"
                 );
+                let schema = find_tool(tools_registry, &call.name, tool_registry)
+                    .map(|handle| handle.as_tool().parameters_schema());
+                let feedback = crate::agent::tool_handler::arg_validate::parse_error_feedback(
+                    &call.name,
+                    schema.as_ref(),
+                );
+                if let Some(ref tx) = on_delta {
+                    let _ = tx
+                        .send(DraftEvent::Progress(format!(
+                            "\u{274c} {}: invalid JSON arguments; asked model to re-emit\n",
+                            call.name
+                        )))
+                        .await;
+                }
+                ordered_results[idx] = Some((
+                    call.name.clone(),
+                    call.tool_call_id.clone(),
+                    ToolExecutionOutcome {
+                        output: feedback.clone(),
+                        success: false,
+                        error_reason: Some(feedback),
+                        duration: Duration::ZERO,
+                    },
+                ));
+                continue;
             }
 
             let pre_hook_guardrail_cleared = {
@@ -5114,6 +5181,42 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             let mut outcome = outcome;
+
+            if outcome.success {
+                crate::agent::tool_handler::focus::note_tool_focus_paths(
+                    &call.name,
+                    &call.arguments,
+                );
+            }
+
+            if outcome.success
+                && crate::agent::verification::post_edit::is_checkable_mutation(
+                    call.name.as_str(),
+                )
+            {
+                match tokio::time::timeout(
+                    Duration::from_secs(3),
+                    crate::agent::verification::post_edit::post_edit_check(
+                        &call.name,
+                        &call.arguments,
+                    ),
+                )
+                .await
+                {
+                    Ok(Some(report)) => {
+                        outcome.output.push_str("\n\n");
+                        outcome.output.push_str(&report);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        tracing::debug!(
+                            tool = %call.name,
+                            "post-edit check timed out; skipping diagnostics append"
+                        );
+                    }
+                }
+            }
+
             if crate::agent::plan_mode::enforcement::is_ask_question_pause(
                 &call.name,
                 &outcome.output,
@@ -5345,7 +5448,7 @@ pub(crate) async fn run_unified_loop_impl(
                 &user_msg_for_hooks,
                 model,
                 &halt_text,
-                0,
+                _pacing_gov.total_generated_tokens() as u32,
                 &[],
                 &[],
                 false,
@@ -5387,7 +5490,7 @@ pub(crate) async fn run_unified_loop_impl(
                 &user_msg_for_hooks,
                 model,
                 &halt_text,
-                0,
+                _pacing_gov.total_generated_tokens() as u32,
                 &[],
                 &[],
                 false,
@@ -5431,7 +5534,7 @@ pub(crate) async fn run_unified_loop_impl(
                 &user_msg_for_hooks,
                 model,
                 &pause_text,
-                0,
+                _pacing_gov.total_generated_tokens() as u32,
                 &[],
                 &[],
                 false,
@@ -5541,7 +5644,7 @@ pub(crate) async fn run_unified_loop_impl(
                 &user_msg_for_hooks,
                 model,
                 &pair_text,
-                0,
+                _pacing_gov.total_generated_tokens() as u32,
                 &[],
                 &[],
                 false,
@@ -5875,6 +5978,23 @@ pub async fn run(
             retained = tools_registry.len(),
             "Applied capability-based tool access filter"
         );
+    }
+    if let Ok(prefixes) = TOOL_DENY_PREFIXES.try_with(|p| p.clone()) {
+        if !prefixes.is_empty() {
+            let before = tools_registry.len();
+            tools_registry.retain(|t| {
+                let name = t.name();
+                !prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix.as_str()))
+            });
+            tracing::info!(
+                denied_prefixes = prefixes.len(),
+                before,
+                retained = tools_registry.len(),
+                "Applied tool deny-prefix filter"
+            );
+        }
     }
 
     let mut deferred_section = String::new();
@@ -6474,11 +6594,22 @@ pub async fn run(
             String::new()
         };
         let context = format!("{mem_context}{hw_context}");
+        // Resolve @file/@folder/@codebase tags into inline <context> blocks so
+        // CLI users get Cursor-style attachment semantics. Recent focus files
+        // back the @recent tag. Raw text is still used for memory recall and
+        // intent, so only the envelope carries the expanded payload.
+        let expanded_msg = crate::agent::context::expansion::expand_input(
+            &effective_msg,
+            &config.workspace_dir,
+            crate::context::builder::FocusPathRegistry::current(),
+            String::new(),
+        )
+        .await;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
-            format!("[{now}] {effective_msg}")
+            format!("[{now}] {expanded_msg}")
         } else {
-            format!("{context}[{now}] {effective_msg}")
+            format!("{context}[{now}] {expanded_msg}")
         };
 
         let mut history = vec![
@@ -6788,11 +6919,18 @@ pub async fn run(
             };
             let extra_dir_context = String::new();
             let context = format!("{mem_context}{hw_context}{extra_dir_context}");
+            let expanded_input = crate::agent::context::expansion::expand_input(
+                &effective_input,
+                &config.workspace_dir,
+                crate::context::builder::FocusPathRegistry::current(),
+                String::new(),
+            )
+            .await;
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
             let enriched = if context.is_empty() {
-                format!("[{now}] {effective_input}")
+                format!("[{now}] {expanded_input}")
             } else {
-                format!("{context}[{now}] {effective_input}")
+                format!("{context}[{now}] {expanded_input}")
             };
 
             let history_len_before_turn = history.len();
@@ -7427,11 +7565,18 @@ pub async fn process_message(
         .map(|r| build_hardware_context(r, effective_msg_ref, &board_names, rag_limit))
         .unwrap_or_default();
     let context = format!("{mem_context}{hw_context}");
+    let expanded_message = crate::agent::context::expansion::expand_input(
+        &effective_message,
+        &config.workspace_dir,
+        crate::context::builder::FocusPathRegistry::current(),
+        String::new(),
+    )
+    .await;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
     let enriched = if context.is_empty() {
-        format!("[{now}] {effective_message}")
+        format!("[{now}] {expanded_message}")
     } else {
-        format!("{context}[{now}] {effective_message}")
+        format!("{context}[{now}] {expanded_message}")
     };
 
     let mut history = vec![

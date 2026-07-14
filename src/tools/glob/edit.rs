@@ -98,10 +98,10 @@ impl Tool for GlobEditTool {
     }
 
     fn description(&self) -> &str {
-        "Apply text replacements across multiple files matching a glob pattern. \
-         Finds all files matching the pattern, optionally filters by content, \
-         and replaces old_string with new_string in each file. Returns a summary \
-         of changes made."
+        "Bulk find-and-replace of the SAME old_string across MANY files selected by a glob \
+         pattern (e.g. src/**/*.rs), with optional content filter. Best for mechanical \
+         renames/sweeps. For a handful of distinct edits use multi_edit; for one file use \
+         file_edit."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

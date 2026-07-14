@@ -370,9 +370,17 @@ type MessageListProps = {
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160
 const USER_SCROLL_UP_CANCEL_PX = 24
-// Follow-mode only re-arms when the viewport is essentially pinned to the bottom,
-// so a small scroll-up to read back is no longer yanked back down.
-const AUTO_SCROLL_REARM_THRESHOLD_PX = 8
+
+// At idle, suppress follow-on-growth briefly after the user clicks inside the
+// list (e.g. expanding a tool card): the resulting height change is their own
+// interaction, and snapping to the bottom would yank the content they are
+// trying to read. Streaming growth is unaffected.
+const IDLE_INTERACTION_GRACE_MS = 1200
+// Follow-mode re-arms once the user manually returns close to the bottom.
+// Cancellation is gesture-driven (wheel/drag/keys), so a slightly generous
+// band here cannot fight the user; 48px is reachable by hand while staying
+// well inside atBottomThreshold (160px).
+const AUTO_SCROLL_REARM_THRESHOLD_PX = 48
 const FIRST_ITEM_INDEX_BASE = 1_000_000
 
 const EMPTY_MESSAGES: UIMessage[] = []
@@ -501,19 +509,24 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const addToast = useUIStore((s) => s.addToast)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const scrollerElRef = useRef<HTMLElement | null>(null)
-  const scrollListenerRef = useRef<(() => void) | null>(null)
+  const scrollerCleanupRef = useRef<(() => void) | null>(null)
   const followRef = useRef(true)
   const atBottomRef = useRef(true)
   const atTopRef = useRef(false)
   const lastScrollTopRef = useRef(0)
   const programmaticScrollRef = useRef(false)
+  // True while the user is physically holding a pointer/touch on the scroller
+  // (scrollbar drag, touch pan). Only then may upward scroll deltas cancel
+  // follow; every other scrollTop shift (Virtuoso re-measurement, streaming
+  // footer commits, programmatic pins) must never break stick-to-bottom.
+  const userInteractingRef = useRef(false)
   const scrollRafRef = useRef<number | null>(null)
   const followRafRef = useRef<number | null>(null)
   const followForceRef = useRef(false)
   const prevRenderKeysRef = useRef<string[]>([])
   const initialPinPendingRef = useRef(true)
   const initialPinDeadlineRef = useRef(0)
-  const followSettleDeadlineRef = useRef(0)
+  const lastScrollerPointerDownAtRef = useRef(0)
   const t = useTranslation()
   const [rewindTarget, setRewindTarget] = useState<{
     userMessageIndex: number
@@ -573,36 +586,105 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   }, [])
 
   const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
-    const prev = scrollerElRef.current
-    if (prev && scrollListenerRef.current) {
-      prev.removeEventListener('scroll', scrollListenerRef.current)
-      scrollListenerRef.current = null
+    if (scrollerCleanupRef.current) {
+      scrollerCleanupRef.current()
+      scrollerCleanupRef.current = null
     }
     scrollerElRef.current = el instanceof HTMLElement ? el : null
     const next = scrollerElRef.current
-    if (next) {
-      lastScrollTopRef.current = next.scrollTop
-      const onScroll = () => {
-        const st = next.scrollTop
-        const distanceFromBottom = next.scrollHeight - st - next.clientHeight
-        const scrolledUp =
-          !programmaticScrollRef.current &&
-          st < lastScrollTopRef.current - USER_SCROLL_UP_CANCEL_PX
-        if (scrolledUp && followRef.current) {
-          // User actively scrolled up (even while near the bottom): stop following
-          // so streaming content no longer drags the reading position back down.
-          followRef.current = false
-          setShowScrollToBottom(true)
-        } else if (distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
-          followRef.current = true
-          setShowScrollToBottom((prev) => (prev ? false : prev))
-        } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX && followRef.current) {
-          setShowScrollToBottom((prev) => (prev ? false : prev))
-        }
-        lastScrollTopRef.current = st
+    if (!next) return
+
+    lastScrollTopRef.current = next.scrollTop
+    userInteractingRef.current = false
+
+    const cancelFollow = () => {
+      if (!followRef.current) return
+      followRef.current = false
+      setShowScrollToBottom(true)
+    }
+
+    // The scroll listener never cancels follow on its own: Virtuoso item
+    // re-measurement, firstItemIndex compensation and streaming-footer commits
+    // all shift scrollTop without any user intent, and treating those as
+    // "the user scrolled up" was what kept killing stick-to-bottom. An upward
+    // delta only cancels while a pointer/touch gesture is physically active
+    // (scrollbar drag / touch pan); wheel and keyboard cancel via their own
+    // dedicated listeners below.
+    const onScroll = () => {
+      const st = next.scrollTop
+      const distanceFromBottom = next.scrollHeight - st - next.clientHeight
+      const movedUp = st < lastScrollTopRef.current
+      const draggedUp =
+        userInteractingRef.current &&
+        !programmaticScrollRef.current &&
+        st < lastScrollTopRef.current - USER_SCROLL_UP_CANCEL_PX
+      if (draggedUp && followRef.current) {
+        cancelFollow()
+      } else if (!movedUp && distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
+        // Re-arm only on non-upward motion into the bottom band, so a fresh
+        // wheel-up cancel right at the bottom is not immediately overridden
+        // by its own scroll event still being within the band.
+        followRef.current = true
+        setShowScrollToBottom((prev) => (prev ? false : prev))
+      } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX && followRef.current) {
+        setShowScrollToBottom((prev) => (prev ? false : prev))
       }
-      scrollListenerRef.current = onScroll
-      next.addEventListener('scroll', onScroll, { passive: true })
+      lastScrollTopRef.current = st
+    }
+
+    const onWheel = (e: WheelEvent) => {
+      // Ignore wheel-up when there is nothing to scroll back through; a pill
+      // with no scrollback would be a dead control.
+      if (e.deltaY < 0 && next.scrollHeight - next.clientHeight > 1) {
+        cancelFollow()
+      }
+    }
+    const onPointerDown = () => {
+      userInteractingRef.current = true
+      lastScrollerPointerDownAtRef.current = Date.now()
+    }
+    const endPointerInteraction = () => {
+      userInteractingRef.current = false
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'PageUp' || e.key === 'Home' || e.key === 'ArrowUp') {
+        cancelFollow()
+      }
+    }
+
+    next.addEventListener('scroll', onScroll, { passive: true })
+    next.addEventListener('wheel', onWheel, { passive: true })
+    next.addEventListener('pointerdown', onPointerDown, { passive: true })
+    next.addEventListener('touchstart', onPointerDown, { passive: true })
+    next.addEventListener('keydown', onKeyDown)
+    // Pointer/touch releases can land outside the scroller (drag ends off the
+    // scrollbar), so the end-of-gesture listeners live on the window.
+    window.addEventListener('pointerup', endPointerInteraction, { passive: true })
+    window.addEventListener('pointercancel', endPointerInteraction, { passive: true })
+    window.addEventListener('touchend', endPointerInteraction, { passive: true })
+    window.addEventListener('touchcancel', endPointerInteraction, { passive: true })
+
+    scrollerCleanupRef.current = () => {
+      next.removeEventListener('scroll', onScroll)
+      next.removeEventListener('wheel', onWheel)
+      next.removeEventListener('pointerdown', onPointerDown)
+      next.removeEventListener('touchstart', onPointerDown)
+      next.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('pointerup', endPointerInteraction)
+      window.removeEventListener('pointercancel', endPointerInteraction)
+      window.removeEventListener('touchend', endPointerInteraction)
+      window.removeEventListener('touchcancel', endPointerInteraction)
+    }
+  }, [])
+
+  // Virtuoso calls scrollerRef(null) on unmount, but keep an unmount sweep as
+  // insurance so the window-level gesture listeners can never outlive the list.
+  useEffect(() => {
+    return () => {
+      if (scrollerCleanupRef.current) {
+        scrollerCleanupRef.current()
+        scrollerCleanupRef.current = null
+      }
     }
   }, [])
 
@@ -610,7 +692,9 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     followRef.current = true
     atBottomRef.current = true
     setShowScrollToBottom(false)
-    followSettleDeadlineRef.current = Date.now() + 700
+    // Clear any in-list interaction grace: an explicit "scroll to latest"
+    // click overrides it, and follow now persists until a real upward gesture.
+    lastScrollerPointerDownAtRef.current = 0
     scrollFollowToBottom(true)
   }, [scrollFollowToBottom])
 
@@ -618,6 +702,8 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     followRef.current = true
     atBottomRef.current = true
     atTopRef.current = false
+    userInteractingRef.current = false
+    lastScrollerPointerDownAtRef.current = 0
     prevRenderKeysRef.current = []
     initialPinPendingRef.current = true
     initialPinDeadlineRef.current = 0
@@ -831,6 +917,18 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     prevRenderKeysRef.current = keys
   }, [listRenderItems])
 
+  // Jump-to-latest via Virtuoso, flagged as programmatic so the drag-up
+  // detector can never mistake the resulting scroll events for a user gesture.
+  const pinToLatestProgrammatically = useCallback(() => {
+    programmaticScrollRef.current = true
+    virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
+    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      programmaticScrollRef.current = false
+    })
+  }, [])
+
   useLayoutEffect(() => {
     if (!initialPinPendingRef.current) return
     if (listRenderItems.length === 0) return
@@ -840,9 +938,9 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     atBottomRef.current = true
     setShowScrollToBottom(false)
     requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
+      pinToLatestProgrammatically()
     })
-  }, [listRenderItems.length])
+  }, [listRenderItems.length, pinToLatestProgrammatically])
 
   const rewindIndexByMsgId = useMemo(() => {
     const map = new Map<string, number>()
@@ -1232,10 +1330,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           if (!followRef.current) return
           if (typeof document !== 'undefined' && document.hidden) return
           if (Date.now() < initialPinDeadlineRef.current) {
-            virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
+            pinToLatestProgrammatically()
             return
           }
-          if (chatState === 'idle' && Date.now() >= followSettleDeadlineRef.current) return
+          // At idle, height growth right after the user clicked inside the
+          // list (expanding a tool card, opening a diff) is their own doing:
+          // snapping to the bottom would yank away what they opened. During a
+          // live turn we always follow.
+          if (
+            chatState === 'idle' &&
+            Date.now() - lastScrollerPointerDownAtRef.current < IDLE_INTERACTION_GRACE_MS
+          ) {
+            return
+          }
           scrollFollowToBottom()
         }}
         atBottomStateChange={(atBottom) => {

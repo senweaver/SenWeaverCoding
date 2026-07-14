@@ -89,6 +89,8 @@ export type PerSessionState = {
   tokenUsage: TokenUsage
 
   cumulativeTokens: number
+
+  cumulativeCostUsd: number
   elapsedSeconds: number
   statusVerb: string
   slashCommands: Array<{ name: string; description: string }>
@@ -195,6 +197,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   pendingPermission: null,
   tokenUsage: { input_tokens: 0, output_tokens: 0 },
   cumulativeTokens: 0,
+  cumulativeCostUsd: 0,
   elapsedSeconds: 0,
   statusVerb: '',
   slashCommands: [],
@@ -217,6 +220,7 @@ function createDefaultSessionState(): PerSessionState {
     messages: [],
     tokenUsage: { input_tokens: 0, output_tokens: 0 },
     cumulativeTokens: 0,
+    cumulativeCostUsd: 0,
     pendingRewind: null,
     pendingSendAfterRewind: null,
     pendingEdits: [],
@@ -358,6 +362,10 @@ type ChatStore = {
   clearPendingEdits: (sessionId: string) => void
 
   undoAllPendingEdits: (sessionId: string) => Promise<void>
+
+  undoPendingEditFile: (sessionId: string, path: string) => Promise<void>
+
+  keepPendingEditFile: (sessionId: string, path: string) => void
 
   resumePlanExecution: (sessionId: string, planPath: string) => void
 
@@ -1614,6 +1622,20 @@ function clearSessionStreamBuffers(sessionId: string): void {
   lastStreamActivityAtBySession.delete(sessionId)
 }
 
+// Clears every module-level per-session map so closing a session leaves no
+// residue. Called on disconnect/suspend; individually tiny, but these leaked
+// unboundedly over a long desktop uptime with many opened/closed sessions.
+function purgeSessionEphemera(sessionId: string): void {
+  pendingTaskToolUseIdsBySession.delete(sessionId)
+  planModeBlockedToolUseIdsBySession.delete(sessionId)
+  updatePlanInlineToolUseIdsBySession.delete(sessionId)
+  lastDirectSendBySession.delete(sessionId)
+  runtimeSyncFailureToastSessions.delete(sessionId)
+  runtimeSyncRetrySessions.delete(sessionId)
+  elapsedLastTickAtBySession.delete(sessionId)
+  pendingDesignCanvasReveal.delete(sessionId)
+}
+
 function hasPendingThinking(sessionId: string): boolean {
   const buf = pendingThinkingBySession.get(sessionId)
   return buf !== undefined && buf.length > 0
@@ -2278,6 +2300,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       consumePendingThinking(sessionId)
     }
     clearSessionStreamBuffers(sessionId)
+    purgeSessionEphemera(sessionId)
     wsManager.disconnect(sessionId)
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
@@ -3355,6 +3378,38 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }))
   },
 
+  undoPendingEditFile: async (sessionId, path) => {
+    const sess = get().sessions[sessionId]
+    if (!sess) return
+    const target = sess.pendingEdits.find((e) => e.path === path)
+    if (!target) return
+    const revertedBatchIds = new Set(target.editBatchIds.filter(Boolean))
+    if (revertedBatchIds.size > 0) {
+      await sessionsApi.revertBatches(sessionId, Array.from(revertedBatchIds))
+    }
+    // A batch id can span several files (e.g. multi_edit). Reverting it undoes
+    // ALL of its files on disk, so every pending entry that shares a reverted
+    // batch must also leave the review list — otherwise those files would
+    // wrongly still appear pending while already reverted.
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (sc) => ({
+        pendingEdits: sc.pendingEdits.filter((e) => {
+          if (e.path === path) return false
+          if (revertedBatchIds.size === 0) return true
+          return !e.editBatchIds.some((id) => revertedBatchIds.has(id))
+        }),
+      })),
+    }))
+  },
+
+  keepPendingEditFile: (sessionId, path) => {
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (sc) => ({
+        pendingEdits: sc.pendingEdits.filter((e) => e.path !== path),
+      })),
+    }))
+  },
+
   resetDebugPiiStats: (sessionId) => {
     if (!sessionId) return
     set((s) => ({
@@ -3385,7 +3440,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           msg.type === 'task_update' ||
           msg.type === 'lsp_diagnostics' ||
           msg.type === 'permission_request' ||
-          msg.type === 'system_notification'
+          msg.type === 'system_notification' ||
+          // Worker/subagent terminal + resume events must still land after a
+          // stop is requested, otherwise the workers strip shows ghost
+          // "running" workers until the next manual refetch.
+          msg.type === 'worker_spawned' ||
+          msg.type === 'worker_status' ||
+          msg.type === 'worker_progress' ||
+          msg.type === 'worker_completed' ||
+          msg.type === 'worker_stopped' ||
+          msg.type === 'parent_resumed'
         if (!passThrough) {
           return
         }
@@ -3560,14 +3624,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break
 
       case 'content_reset': {
+        // Reset means "discard the partial assistant block and restart it"
+        // (typically provider failover). Committing the partial text into the
+        // message list caused visible duplicated fragments once the retried
+        // stream re-sent the same content, so drop the pending delta + live
+        // streaming text instead of flushing them into history.
+        consumePendingDelta(sessionId)
         update((s) => {
-          const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
-          const baseMessages = merged.trim()
-            ? appendAssistantTextMessage(s.messages, merged, Date.now())
-            : s.messages
           const patch = mergePendingThinkingIntoActive(s, sessionId)
           return {
-            messages: baseMessages,
             streamingText: '',
             activeThinkingId: patch.activeThinkingId,
             activeThinkingContent: patch.activeThinkingId
@@ -4396,6 +4461,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break
       }
       case 'usage_updated': {
+        const cost = typeof msg.costUsd === 'number' ? msg.costUsd : 0
+        // The gateway forwarder only delivers a usage event to this socket when
+        // its sessionId matches (or is empty/broadcast). Requiring a non-empty
+        // sessionId here excludes session-less broadcast records, which must
+        // not inflate every open tab's per-session cost figure, without
+        // assuming an exact id-format match with the frontend key.
+        const belongsToThisSession = !!msg.sessionId
+        if (cost > 0 && belongsToThisSession) {
+          update((s) => ({
+            cumulativeCostUsd: (s.cumulativeCostUsd ?? 0) + cost,
+          }))
+        }
         import('../stores/usageStore').then(({ useUsageStore }) => {
           void useUsageStore.getState().fetch().catch(() => {})
         }).catch(() => {})

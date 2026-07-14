@@ -39,7 +39,28 @@ export function useKeyboardShortcuts() {
     const handler = (e: KeyboardEvent) => {
       const bindings = useKeyboardShortcutsStore.getState().bindings
 
+      // Detect the typing context up front so configurable shortcuts that
+      // collide with normal typing (Ctrl+K, Ctrl+N, mode switch) don't steal
+      // focus while the user is composing a message or editing a file.
+      const targetElEarly = e.target as HTMLElement | null
+      const tagEarly = targetElEarly?.tagName?.toLowerCase()
+      const isContentEditableEarly = targetElEarly?.isContentEditable === true
+      const isMonacoEarly = !!targetElEarly?.closest?.(
+        '[data-workspace-editor], .monaco-editor',
+      )
+      const isChatInputEarly =
+        !!targetElEarly?.closest?.(
+          '[data-role="chat-composer"], [data-chat-input], [data-chat-textarea]',
+        ) || (tagEarly === 'textarea' && !isMonacoEarly)
+      const isTypingContext =
+        (tagEarly === 'input' ||
+          tagEarly === 'textarea' ||
+          isContentEditableEarly ||
+          isChatInputEarly) &&
+        !isMonacoEarly
+
       if (matchesBinding(e, bindings['new-session'])) {
+        if (isTypingContext) return
         e.preventDefault()
         setActiveSession(null)
         setActiveView('code')
@@ -47,6 +68,7 @@ export function useKeyboardShortcuts() {
       }
 
       if (matchesBinding(e, bindings['sidebar-search'])) {
+        if (isTypingContext) return
         e.preventDefault()
         setSidebarOpen(true)
         requestAnimationFrame(() => {
@@ -62,6 +84,24 @@ export function useKeyboardShortcuts() {
       if (matchesBinding(e, bindings['close-modal'])) {
         if (activeModalRef.current) {
           closeModal()
+          return
+        }
+        // Esc-to-interrupt (Claude Code muscle memory): only when the composer
+        // itself is focused and no in-composer popover (@ file search or /
+        // slash command) is open. Scoping this way avoids hijacking Esc from
+        // menus, the Monaco editor, dropdowns, and other native Esc consumers.
+        const composerFocused =
+          isChatInputEarly &&
+          !document.getElementById('file-search-menu') &&
+          !document.getElementById('slash-command-menu')
+        if (
+          e.key === 'Escape' &&
+          composerFocused &&
+          chatStateRef.current !== 'idle' &&
+          activeTabIdRef.current
+        ) {
+          e.preventDefault()
+          stopGeneration(activeTabIdRef.current)
         }
         return
       }
@@ -92,6 +132,7 @@ export function useKeyboardShortcuts() {
       }
 
       if (matchesBinding(e, bindings['quick-mode-switcher'])) {
+        if (isTypingContext) return
         e.preventDefault()
         e.stopPropagation()
         const ui = useUIStore.getState()
@@ -104,6 +145,7 @@ export function useKeyboardShortcuts() {
       }
 
       if (matchesBinding(e, bindings['mode-plan'])) {
+        if (isTypingContext) return
         e.preventDefault()
         e.stopPropagation()
         const settings = useSettingsStore.getState()
@@ -174,6 +216,23 @@ export function useKeyboardShortcuts() {
           const nextRel = tabs[nextIdx] ?? tabs[0]
           if (nextRel) {
             void workspaceState.selectFile(nextRel)
+          }
+          return
+        }
+        // No multi-file editor context: cycle chat/session tabs instead.
+        const tabState = useTabStore.getState()
+        if (tabState.tabs.length > 1) {
+          e.preventDefault()
+          e.stopPropagation()
+          const ids = tabState.tabs.map((tb) => tb.sessionId)
+          const curIdx = tabState.activeTabId
+            ? ids.indexOf(tabState.activeTabId)
+            : -1
+          const dir = e.shiftKey ? -1 : 1
+          const nextIdx = (curIdx + dir + ids.length) % ids.length
+          const nextId = ids[nextIdx] ?? ids[0]
+          if (nextId) {
+            tabState.setActiveTab(nextId)
           }
           return
         }

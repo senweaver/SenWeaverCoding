@@ -10,6 +10,7 @@ import { useProviderStore } from '../stores/providerStore'
 import { useMinimalStore } from '../stores/minimalStore'
 import { useMinimalComputerStore } from '../stores/minimalComputerStore'
 import { useMinimalRecorderStore } from '../stores/minimalRecorderStore'
+import { useComputerUseStore } from '../stores/computerUseStore'
 import { isTauriRuntime, subscribeServerStatus } from '../lib/desktopRuntime'
 import { getBaseUrl, setBaseUrl } from '../api/client'
 import { wsManager } from '../api/websocket'
@@ -51,6 +52,7 @@ export function useMinimalWindowBridge() {
         await useSettingsStore.getState().fetchAll().catch(() => {})
         useSessionRunStateStore.getState().start()
         void useProviderStore.getState().fetchProviders().catch(() => {})
+        void useComputerUseStore.getState().loadModels().catch(() => {})
       } catch (err) {
         console.warn('[minimal] bootstrap failed', err)
       }

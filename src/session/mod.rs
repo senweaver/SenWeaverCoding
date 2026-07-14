@@ -28,9 +28,11 @@ pub use resource_lock::{
     SessionContext, WaiterSnapshot, WorkspaceResourceManager, acquire_browser_for_current_session,
     acquire_file_write_for_current_session, acquire_file_write_locked,
     acquire_many_file_writes_for_current_session,
-    acquire_shell_for_current_session, current_connection_id, current_session_context,
+    acquire_shell_for_current_session, acquire_workspace_exclusive_for_current_session,
+    current_connection_id, current_session_context,
     global_workspace_resources,
-    install_global as install_global_workspace_resources, is_stale_for_current_session,
+    has_read_in_current_session, install_global as install_global_workspace_resources,
+    is_stale_for_current_session,
     record_read_for_current_session, record_write_for_current_session, scope_session_context,
     stale_file_error_message,
 };

@@ -22,6 +22,10 @@ pub enum ResourceKind {
     FileWrite { path: PathBuf },
     Browser,
     Shell,
+    // Coarse workspace-wide exclusive lock. Unlike Shell (per-session), this is
+    // keyed only by workspace so two parallel sessions in the same directory
+    // cannot run mutating build/VCS commands concurrently and clobber each other.
+    WorkspaceExclusive,
 }
 
 impl ResourceKind {
@@ -30,13 +34,16 @@ impl ResourceKind {
             ResourceKind::FileWrite { .. } => "file",
             ResourceKind::Browser => "browser",
             ResourceKind::Shell => "shell",
+            ResourceKind::WorkspaceExclusive => "workspace",
         }
     }
 
     pub fn target_str(&self) -> String {
         match self {
             ResourceKind::FileWrite { path } => path.to_string_lossy().to_string(),
-            ResourceKind::Browser | ResourceKind::Shell => String::new(),
+            ResourceKind::Browser
+            | ResourceKind::Shell
+            | ResourceKind::WorkspaceExclusive => String::new(),
         }
     }
 
@@ -45,6 +52,7 @@ impl ResourceKind {
             ResourceKind::FileWrite { path } => (0, path.to_string_lossy().to_string()),
             ResourceKind::Browser => (1, String::new()),
             ResourceKind::Shell => (2, String::new()),
+            ResourceKind::WorkspaceExclusive => (3, String::new()),
         }
     }
 }
@@ -315,6 +323,16 @@ impl WorkspaceResourceManager {
         out
     }
 
+    pub fn has_read(&self, workspace_key: &str, session_id: &str, path: &Path) -> bool {
+        let inner = self.inner.lock();
+        let snap_key = (
+            workspace_key.to_string(),
+            session_id.to_string(),
+            path.to_path_buf(),
+        );
+        inner.read_snapshots.contains_key(&snap_key)
+    }
+
     pub fn is_stale_for(&self, workspace_key: &str, session_id: &str, path: &Path) -> bool {
         let inner = self.inner.lock();
         let snap_key = (
@@ -547,6 +565,9 @@ fn scope_key_for(workspace_key: &str, kind: &ResourceKind, session_id: &str) -> 
         ResourceKind::Browser | ResourceKind::Shell => {
             format!("{}::session::{}", workspace_key, session_id)
         }
+        ResourceKind::WorkspaceExclusive => {
+            format!("{}::workspace", workspace_key)
+        }
     }
 }
 
@@ -694,6 +715,22 @@ pub async fn acquire_browser_for_current_session() -> Option<Result<ResourceGuar
     )
 }
 
+pub async fn acquire_workspace_exclusive_for_current_session(
+) -> Option<Result<ResourceGuard, AcquireError>> {
+    let ctx = current_session_context()?;
+    let manager = global_workspace_resources()?;
+    Some(
+        manager
+            .acquire(
+                &ctx.workspace_key,
+                ResourceKind::WorkspaceExclusive,
+                &ctx.session_id,
+                &ctx.title,
+            )
+            .await,
+    )
+}
+
 pub fn record_read_for_current_session(path: &Path) {
     let Some(ctx) = current_session_context() else {
         return;
@@ -723,6 +760,19 @@ pub fn is_stale_for_current_session(path: &Path) -> bool {
         return false;
     };
     manager.is_stale_for(&ctx.workspace_key, &ctx.session_id, path)
+}
+
+// Whether the current session has read this file at least once. Used to warn
+// (not block) when an edit is attempted against a file the agent has not
+// inspected in this session, encouraging read-before-edit like Cursor.
+pub fn has_read_in_current_session(path: &Path) -> bool {
+    let Some(ctx) = current_session_context() else {
+        return true;
+    };
+    let Some(manager) = global_workspace_resources() else {
+        return true;
+    };
+    manager.has_read(&ctx.workspace_key, &ctx.session_id, path)
 }
 
 pub fn stale_file_error_message(path: &Path) -> String {

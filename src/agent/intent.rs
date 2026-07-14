@@ -50,8 +50,11 @@ pub enum TaskIntent {
     Coding,
     Debug,
     Design,
+    UiDesign,
     Plan,
     Qa,
+    Curate,
+    Tdd,
     General,
 }
 
@@ -61,8 +64,11 @@ impl TaskIntent {
             Self::Coding => "coding",
             Self::Debug => "debug",
             Self::Design => "design",
+            Self::UiDesign => "ui_design",
             Self::Plan => "plan",
             Self::Qa => "qa",
+            Self::Curate => "curate",
+            Self::Tdd => "tdd",
             Self::General => "general",
         }
     }
@@ -71,9 +77,12 @@ impl TaskIntent {
         match s.trim().to_ascii_lowercase().as_str() {
             "coding" | "code" | "implement" => Self::Coding,
             "debug" | "bug" | "fix" | "troubleshoot" => Self::Debug,
-            "design" | "architecture" | "architect" => Self::Design,
+            "architecture" | "architect" | "arch" => Self::Design,
+            "ui_design" | "ui" | "designer" | "design" | "prototype" | "figma" => Self::UiDesign,
             "plan" | "planning" | "roadmap" => Self::Plan,
             "qa" | "question" | "ask" | "explain" => Self::Qa,
+            "curate" | "curator" | "research" | "report" | "thesis" => Self::Curate,
+            "tdd" | "test-driven" | "test_driven" => Self::Tdd,
             _ => Self::General,
         }
     }
@@ -93,6 +102,11 @@ impl TaskIntent {
                 "[Intent] The user wants design/architecture reasoning. Weigh the approach and key \
                  trade-offs, within the rules of the current coding mode.",
             ),
+            Self::UiDesign => Some(
+                "[Intent] The user wants UI/visual design work. Prefer Designer-mode surfaces \
+                 (prototype, dashboard, deck) and keep implementation secondary until the design \
+                 artifact is approved.",
+            ),
             Self::Plan => Some(
                 "[Intent] The user is describing a multi-step task. Keep the work organised into \
                  clear ordered steps, within the rules of the current coding mode.",
@@ -100,6 +114,14 @@ impl TaskIntent {
             Self::Qa => Some(
                 "[Intent] The user is asking a question and expects a clear, well-grounded \
                  explanation, within the rules of the current coding mode.",
+            ),
+            Self::Curate => Some(
+                "[Intent] The user wants deep research and a written report/blueprint rather than \
+                 immediate code changes. Prefer Curator-mode research → document delivery.",
+            ),
+            Self::Tdd => Some(
+                "[Intent] The user wants test-driven delivery. Write a failing test first, then \
+                 the minimum implementation to pass, then refactor.",
             ),
             Self::General => None,
         }
@@ -130,8 +152,11 @@ impl IntentAnalysis {
         match self.intent {
             TaskIntent::Debug => CodingMode::Debug,
             TaskIntent::Design => CodingMode::Architect,
+            TaskIntent::UiDesign => CodingMode::Designer,
             TaskIntent::Plan => CodingMode::Plan,
             TaskIntent::Qa => CodingMode::Ask,
+            TaskIntent::Curate => CodingMode::Curator,
+            TaskIntent::Tdd => CodingMode::Tdd,
             TaskIntent::Coding | TaskIntent::General => CodingMode::Agent,
         }
     }
@@ -267,8 +292,23 @@ const CODING_KEYWORDS: &[&str] = &[
 ];
 
 const DESIGN_KEYWORDS: &[&str] = &[
-    "design", "architecture", "approach", "trade-off", "tradeoff", "pattern", "structure",
-    "compare", "options", "strategy", "架构", "设计", "方案",
+    "architecture", "architect", "trade-off", "tradeoff", "system design", "架构", "系统设计",
+    "技术方案",
+];
+
+const UI_DESIGN_KEYWORDS: &[&str] = &[
+    "ui", "ux", "prototype", "figma", "dashboard", "mockup", "wireframe", "landing page",
+    "界面", "原型", "视觉", "设计稿", "设计师", "slideshow", "slide deck",
+];
+
+const CURATOR_KEYWORDS: &[&str] = &[
+    "curator", "research report", "technical report", "whitepaper", "thesis", "literature review",
+    "调研", "论文", "研究报告", "技术方案文档", "docx",
+];
+
+const TDD_KEYWORDS: &[&str] = &[
+    "tdd", "test-driven", "test driven", "red-green-refactor", "write a failing test",
+    "测试驱动", "先写测试",
 ];
 
 const PLAN_KEYWORDS: &[&str] = &[
@@ -293,16 +333,22 @@ pub fn analyze_intent(message: &str) -> IntentAnalysis {
     let debug_hits = count_hits(&lower, DEBUG_KEYWORDS);
     let coding_hits = count_hits(&lower, CODING_KEYWORDS);
     let design_hits = count_hits(&lower, DESIGN_KEYWORDS);
+    let ui_hits = count_hits(&lower, UI_DESIGN_KEYWORDS);
+    let curator_hits = count_hits(&lower, CURATOR_KEYWORDS);
+    let tdd_hits = count_hits(&lower, TDD_KEYWORDS);
     let plan_hits = count_hits(&lower, PLAN_KEYWORDS);
 
     let is_question = trimmed.ends_with('?')
         || trimmed.ends_with('？')
         || QA_PREFIXES.iter().any(|p| lower.starts_with(p));
 
-    let scored: [(TaskIntent, usize); 4] = [
+    let scored: [(TaskIntent, usize); 7] = [
         (TaskIntent::Debug, debug_hits),
         (TaskIntent::Coding, coding_hits),
         (TaskIntent::Design, design_hits),
+        (TaskIntent::UiDesign, ui_hits),
+        (TaskIntent::Curate, curator_hits),
+        (TaskIntent::Tdd, tdd_hits),
         (TaskIntent::Plan, plan_hits),
     ];
 
@@ -377,8 +423,11 @@ impl LlmIntentDecision {
         match self.task_intent {
             TaskIntent::Debug => CodingMode::Debug,
             TaskIntent::Design => CodingMode::Architect,
+            TaskIntent::UiDesign => CodingMode::Designer,
             TaskIntent::Plan => CodingMode::Plan,
             TaskIntent::Qa => CodingMode::Ask,
+            TaskIntent::Curate => CodingMode::Curator,
+            TaskIntent::Tdd => CodingMode::Tdd,
             TaskIntent::Coding | TaskIntent::General => CodingMode::Agent,
         }
     }
@@ -394,7 +443,7 @@ CANDIDATE UNFINISHED TASK (the single most-recent task that was interrupted befo
 Decide what the user wants RIGHT NOW and reply with ONLY one JSON object — no prose, no markdown, no code fences — \
 with exactly these fields: \
 {\"decision\":\"resume|new_task|greeting|clarify\",\"resume_task_seq\":<number or null>,\
-\"task_intent\":\"coding|debug|design|plan|qa|general\",\"confidence\":<0.0-1.0>,\"reason\":\"<short>\"}. \
+\"task_intent\":\"coding|debug|design|ui_design|plan|qa|curate|tdd|general\",\"confidence\":<0.0-1.0>,\"reason\":\"<short>\"}. \
 Rules: \
 (1) \"resume\" ONLY when a CANDIDATE UNFINISHED TASK exists AND the current message clearly means to continue or \
 finish THAT task (e.g. \"继续\"/\"continue\"/\"接着\"/\"go on\", or it explicitly refers to it); set resume_task_seq to that task's seq. \
@@ -403,7 +452,8 @@ finish THAT task (e.g. \"继续\"/\"continue\"/\"接着\"/\"go on\", or it expli
 (4) \"new_task\" for anything else — act on the current message as a fresh request. \
 The CANDIDATE UNFINISHED TASK is the ONLY resumable task; never treat any older or already-answered request as \
 something to resume. Judge strictly from the provided context. \
-task_intent describes the nature of the work for the chosen action.";
+task_intent describes the nature of the work: use ui_design for UI/visual/prototype work, design for software \
+architecture trade-offs, curate for research reports/blueprints, tdd for test-driven delivery.";
 
 const INTENT_MESSAGE_HEAD_CHARS: usize = 2_000;
 const INTENT_MESSAGE_TAIL_CHARS: usize = 1_000;

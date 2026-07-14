@@ -562,11 +562,116 @@ impl PromptSection for WorkspaceSection {
     }
 
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
-        Ok(format!(
-            "## Workspace\n\nWorking directory: `{}`",
-            ctx.workspace_dir.display()
-        ))
+        let map = render_repo_map(ctx.workspace_dir);
+        if map.is_empty() {
+            Ok(format!(
+                "## Workspace\n\nWorking directory: `{}`",
+                ctx.workspace_dir.display()
+            ))
+        } else {
+            Ok(format!(
+                "## Workspace\n\nWorking directory: `{}`\n\nRepo map (top 2 levels):\n{map}",
+                ctx.workspace_dir.display()
+            ))
+        }
     }
+}
+
+const REPO_MAP_SKIP: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    "vendor",
+    ".next",
+    "coverage",
+    ".idea",
+    ".vscode",
+];
+
+fn render_repo_map(root: &std::path::Path) -> String {
+    const MAX_TOP_ENTRIES: usize = 40;
+    const MAX_CHILD_NAMES: usize = 16;
+    const MAX_CHARS: usize = 2_000;
+
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return String::new();
+    };
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') && name != ".github" {
+            continue;
+        }
+        if REPO_MAP_SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => dirs.push(name),
+            Ok(ft) if ft.is_file() => files.push(name),
+            _ => {}
+        }
+    }
+    dirs.sort();
+    files.sort();
+
+    let mut out = String::new();
+    for dir in dirs.iter().take(MAX_TOP_ENTRIES) {
+        let child_path = root.join(dir);
+        let mut child_dirs: Vec<String> = Vec::new();
+        let mut child_file_count = 0usize;
+        if let Ok(children) = std::fs::read_dir(&child_path) {
+            for child in children.flatten() {
+                let cname = child.file_name().to_string_lossy().to_string();
+                if cname.starts_with('.') || REPO_MAP_SKIP.contains(&cname.as_str()) {
+                    continue;
+                }
+                match child.file_type() {
+                    Ok(ft) if ft.is_dir() => child_dirs.push(cname),
+                    Ok(ft) if ft.is_file() => child_file_count += 1,
+                    _ => {}
+                }
+            }
+        }
+        child_dirs.sort();
+        let shown: Vec<String> = child_dirs
+            .iter()
+            .take(MAX_CHILD_NAMES)
+            .map(|d| format!("{d}/"))
+            .collect();
+        let more = child_dirs.len().saturating_sub(MAX_CHILD_NAMES);
+        let mut line = format!("- {dir}/");
+        if !shown.is_empty() {
+            line.push_str(&format!(" [{}", shown.join(", ")));
+            if more > 0 {
+                line.push_str(&format!(", +{more} more"));
+            }
+            line.push(']');
+        }
+        if child_file_count > 0 {
+            line.push_str(&format!(" ({child_file_count} files)"));
+        }
+        line.push('\n');
+        out.push_str(&line);
+        if out.len() > MAX_CHARS {
+            out.push_str("- ...\n");
+            break;
+        }
+    }
+    if !files.is_empty() && out.len() < MAX_CHARS {
+        let shown: Vec<&str> = files.iter().take(20).map(String::as_str).collect();
+        out.push_str(&format!("- files: {}", shown.join(", ")));
+        if files.len() > 20 {
+            out.push_str(&format!(", +{} more", files.len() - 20));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 impl PromptSection for RuntimeSection {
@@ -607,16 +712,19 @@ impl PromptSection for DateTimeSection {
         let now = Local::now();
 
         let (year, month, day) = (now.year(), now.month(), now.day());
-        let (hour, minute, second) = (now.hour(), now.minute(), now.second());
+        let (hour, minute) = (now.hour(), now.minute());
         let tz = now.format("%Z");
 
+        // Minute precision (no seconds) so an otherwise-identical system prompt
+        // stays byte-stable for up to a minute, letting provider prompt caches
+        // hit across rapid turns without meaningfully hurting time accuracy.
         Ok(format!(
             "## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n\
              The following is the ABSOLUTE TRUTH regarding the current date and time. \
              Use this for all relative time calculations (e.g. \"last 7 days\").\n\n\
              Date: {year:04}-{month:02}-{day:02}\n\
-             Time: {hour:02}:{minute:02}:{second:02} ({tz})\n\
-             ISO 8601: {year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{}",
+             Time: {hour:02}:{minute:02} ({tz})\n\
+             ISO 8601: {year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}{}",
             now.format("%:z")
         ))
     }

@@ -26,7 +26,7 @@ export function ActiveSession() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessions = useSessionStore((s) => s.sessions)
   const connectToSession = useChatStore((s) => s.connectToSession)
-  const { chatState, totalTokens, hasMessages, hasStreamingText } =
+  const { chatState, totalTokens, cumulativeCostUsd, hasMessages, hasStreamingText } =
     useChatStore(
       useShallow((s) => {
         const st = activeTabId ? s.sessions[activeTabId] : undefined
@@ -34,6 +34,7 @@ export function ActiveSession() {
         return {
           chatState: st?.chatState ?? 'idle',
           totalTokens: usage.input_tokens + usage.output_tokens,
+          cumulativeCostUsd: st?.cumulativeCostUsd ?? 0,
           hasMessages: (st?.messages?.length ?? 0) > 0,
           hasStreamingText: !!st?.streamingText,
         }
@@ -210,7 +211,19 @@ export function ActiveSession() {
                   {totalTokens > 0 && (
                     <>
                       <span className="text-[var(--color-outline)]">·</span>
-                      <span>{totalTokens.toLocaleString()} t</span>
+                      <span title={t('session.lastTurnTokens')}>
+                        {totalTokens.toLocaleString()} t
+                      </span>
+                    </>
+                  )}
+                  {cumulativeCostUsd > 0 && (
+                    <>
+                      <span className="text-[var(--color-outline)]">·</span>
+                      <span title={t('session.sessionCost')}>
+                        ${cumulativeCostUsd < 0.01
+                          ? cumulativeCostUsd.toFixed(4)
+                          : cumulativeCostUsd.toFixed(2)}
+                      </span>
                     </>
                   )}
                   {lastUpdated && (

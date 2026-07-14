@@ -705,7 +705,7 @@ impl LspService {
         match result {
             Ok(response) => {
                 let diags = parse_lsp_diagnostics(&response);
-                let path = file.to_path_buf();
+                let path = canonical_diag_key(file);
                 let mut inner = self.inner.lock().await;
                 inner.diagnostics.insert(path, diags.clone());
                 Ok(diags)
@@ -715,7 +715,7 @@ impl LspService {
                 let inner = self.inner.lock().await;
                 Ok(inner
                     .diagnostics
-                    .get(&file.to_path_buf())
+                    .get(&canonical_diag_key(file))
                     .cloned()
                     .unwrap_or_default())
             }
@@ -1384,19 +1384,97 @@ pub fn path_to_uri(path: &Path) -> String {
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
     };
-    let s = abs.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') {
-        format!("file://{s}")
+    let s = normalize_drive_case(&abs.to_string_lossy().replace('\\', "/"));
+    let encoded = percent_encode_uri_path(&s);
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
     } else {
-        format!("file:///{s}")
+        format!("file:///{encoded}")
     }
 }
 
+fn percent_encode_uri_path(path: &str) -> String {
+    // RFC 3986 unreserved plus the path chars LSP servers universally accept
+    // unescaped. Everything else (spaces, CJK, etc.) is percent-encoded so
+    // Windows paths with spaces or non-ASCII segments form valid URIs.
+    const KEEP: &[u8] = b"/:-._~!$&'()*+,;=@";
+    let mut out = String::with_capacity(path.len());
+    for byte in path.as_bytes() {
+        let b = *byte;
+        if b.is_ascii_alphanumeric() || KEEP.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &input[i + 1..i + 3];
+            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn normalize_drive_case(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1] == b':'
+    {
+        let mut s = String::with_capacity(path.len());
+        s.push(bytes[0].to_ascii_uppercase() as char);
+        s.push_str(&path[1..]);
+        return s;
+    }
+    if bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_lowercase()
+        && bytes[2] == b':'
+    {
+        let mut s = String::with_capacity(path.len());
+        s.push('/');
+        s.push(bytes[1].to_ascii_uppercase() as char);
+        s.push_str(&path[2..]);
+        return s;
+    }
+    path.to_string()
+}
+
 fn uri_to_path_string(uri: &str) -> String {
-    uri.strip_prefix("file:///")
-        .or_else(|| uri.strip_prefix("file://"))
-        .unwrap_or(uri)
-        .to_string()
+    let stripped = uri.strip_prefix("file://").unwrap_or(uri);
+    let decoded = percent_decode(stripped);
+    // `file:///d:/x` decodes to `/d:/x`: drop the leading slash for Windows
+    // drive paths while keeping it for POSIX absolute paths.
+    let bytes = decoded.as_bytes();
+    let trimmed = if bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+    {
+        decoded[1..].to_string()
+    } else {
+        decoded
+    };
+    normalize_drive_case(&trimmed)
+}
+
+pub fn canonical_diag_key(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy().replace('\\', "/");
+    PathBuf::from(normalize_drive_case(&s))
 }
 
 fn symbol_kind_name(kind: u64) -> &'static str {

@@ -5,6 +5,8 @@ use crate::config::Config;
 use crate::security::SecurityPolicy;
 use anyhow::{Result, anyhow, bail};
 
+#[cfg(feature = "computer-use")]
+pub mod computer_job;
 mod legacy_import;
 mod schedule;
 mod store;
@@ -16,13 +18,14 @@ pub use schedule::{
     next_run_for_schedule, normalize_expression, schedule_cron_expression, validate_schedule,
 };
 pub use store::{
-    activity_jobs, add_agent_job, all_overdue_jobs, claim_job, due_jobs, finalize_run, get_job,
-    list_jobs, list_runs, record_last_run, record_run, remove_job, reschedule_after_run,
-    reset_running_runs, reset_stale_running, start_run, sync_declarative_jobs, update_job,
+    activity_jobs, add_agent_job, add_computer_job, all_overdue_jobs, claim_job, due_jobs,
+    finalize_run, get_job, list_jobs, list_runs, record_last_run, record_run, remove_job,
+    reschedule_after_run, reset_running_runs, reset_stale_running, start_run,
+    sync_declarative_jobs, update_job,
 };
 pub use types::{
-    AgentJobOptions, CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
-    deserialize_maybe_stringified,
+    AgentJobOptions, ComputerJobMode, ComputerJobSpec, CronJob, CronJobPatch, CronRun,
+    DeliveryConfig, JobType, Schedule, SessionTarget, deserialize_maybe_stringified,
 };
 
 pub fn validate_shell_command(config: &Config, command: &str, approved: bool) -> Result<()> {

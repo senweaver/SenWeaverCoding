@@ -20,6 +20,7 @@ pub mod router;
 pub mod sanitize;
 pub mod telnyx;
 pub mod traits;
+pub mod unconfigured;
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, Provider, ProviderCapabilityError,
     TokenUsage, ToolCall, ToolResultMessage,

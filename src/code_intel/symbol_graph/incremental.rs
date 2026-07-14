@@ -24,23 +24,6 @@ pub trait FileWatcher: Send + Sync {
     fn poll(&self) -> Vec<FileEvent>;
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct ManualWatcher {
-    queue: Arc<Mutex<Vec<FileEvent>>>,
-}
-
-impl ManualWatcher {
-    pub fn push(&self, ev: FileEvent) {
-        self.queue.lock().push(ev);
-    }
-}
-
-impl FileWatcher for ManualWatcher {
-    fn poll(&self) -> Vec<FileEvent> {
-        std::mem::take(&mut *self.queue.lock())
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct DirtySet {
     changed: HashSet<PathBuf>,
@@ -158,23 +141,6 @@ impl PersistLimiter {
     }
 }
 
-pub fn pump_events(
-    watcher: &dyn FileWatcher,
-    dirty: &mut DirtySet,
-    debouncer: &Debouncer,
-) -> usize {
-    let events = watcher.poll();
-    let n = events.len();
-    if n == 0 {
-        return 0;
-    }
-    for ev in events {
-        dirty.apply(ev);
-    }
-    debouncer.notify();
-    n
-}
-
 pub fn filter_by_root<'a>(
     paths: impl IntoIterator<Item = &'a PathBuf>,
     root: &Path,
@@ -193,6 +159,248 @@ pub struct SymbolGraphWriter {
     debouncer: Arc<Debouncer>,
     persist_limiter: Arc<PersistLimiter>,
     sync_signal: Arc<(Mutex<()>, Condvar)>,
+}
+
+struct GlobalWriterEntry {
+    writer: Arc<SymbolGraphWriter>,
+    drain_scheduled: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "fs-watch")]
+    watcher_started: std::sync::atomic::AtomicBool,
+}
+
+static GLOBAL_WRITERS: std::sync::OnceLock<
+    RwLock<std::collections::HashMap<PathBuf, Arc<GlobalWriterEntry>>>,
+> = std::sync::OnceLock::new();
+
+fn global_writers()
+-> &'static RwLock<std::collections::HashMap<PathBuf, Arc<GlobalWriterEntry>>> {
+    GLOBAL_WRITERS.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+fn persisted_graph_path(root: &Path) -> PathBuf {
+    root.join(".sen").join("symbol_graph.json")
+}
+
+fn find_graph_root(path: &Path) -> Option<PathBuf> {
+    let mut cursor = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    loop {
+        if persisted_graph_path(&cursor).is_file() {
+            return Some(cursor);
+        }
+        if !cursor.pop() {
+            return None;
+        }
+    }
+}
+
+fn entry_for_root(root: &Path, build_if_missing: bool) -> Option<Arc<GlobalWriterEntry>> {
+    if let Some(entry) = global_writers().read().get(root) {
+        return Some(Arc::clone(entry));
+    }
+    let graph = match SymbolGraph::load(root) {
+        Ok(Some(g)) => g,
+        Ok(None) if build_if_missing => match SymbolGraph::build(root) {
+            Ok(g) => {
+                let _ = g.persist(root);
+                g
+            }
+            Err(_) => return None,
+        },
+        _ => return None,
+    };
+    let writer = Arc::new(SymbolGraphWriter::new(
+        Arc::new(RwLock::new(graph)),
+        root.to_path_buf(),
+    ));
+    let entry = Arc::new(GlobalWriterEntry {
+        writer,
+        drain_scheduled: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "fs-watch")]
+        watcher_started: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut guard = global_writers().write();
+    let stored = match guard.entry(root.to_path_buf()) {
+        std::collections::hash_map::Entry::Occupied(slot) => Arc::clone(slot.get()),
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(Arc::clone(&entry));
+            entry
+        }
+    };
+    Some(stored)
+}
+
+// Starts the workspace fs watcher exactly once per graph root, and only when a
+// tokio runtime is actually available on the current thread. This is called
+// from async contexts (edit-apply path); it is deliberately NOT invoked from
+// `entry_for_root`, because the writer is frequently first created inside a
+// `spawn_blocking` thread where `Handle::try_current()` fails and the watcher
+// would silently never start.
+#[cfg(feature = "fs-watch")]
+pub fn ensure_workspace_watcher(root: &Path) {
+    use std::sync::atomic::Ordering;
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let Some(entry) = entry_for_root(root, false) else {
+        return;
+    };
+    if entry
+        .watcher_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    spawn_fs_watcher_for_root(root.to_path_buf(), entry);
+}
+
+#[cfg(not(feature = "fs-watch"))]
+pub fn ensure_workspace_watcher(_root: &Path) {}
+
+// Watches the workspace so files changed OUTSIDE the agent's own edit tools
+// (user edits, git checkout, formatters) also flow into the incremental
+// symbol-graph rebuild. Agent-driven edits arrive via note_files_changed_global.
+#[cfg(feature = "fs-watch")]
+fn spawn_fs_watcher_for_root(root: PathBuf, entry: Arc<GlobalWriterEntry>) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        // Caller (ensure_workspace_watcher) already flipped watcher_started;
+        // undo it so a later async caller can retry.
+        entry
+            .watcher_started
+            .store(false, std::sync::atomic::Ordering::Release);
+        return;
+    };
+    let watcher = match crate::code_intel::file_watcher_notify::NotifyWatcher::open(&root) {
+        Ok(w) => w,
+        Err(err) => {
+            entry
+                .watcher_started
+                .store(false, std::sync::atomic::Ordering::Release);
+            tracing::debug!(
+                target: "code_intel.fs_watch",
+                root = %root.display(),
+                error = %err,
+                "symbol-graph fs watcher unavailable; incremental updates limited to agent edits"
+            );
+            return;
+        }
+    };
+    handle.spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let poll_watcher = std::sync::Arc::clone(&watcher);
+            let events = tokio::task::spawn_blocking(move || poll_watcher.poll())
+                .await
+                .unwrap_or_default();
+            if events.is_empty() {
+                continue;
+            }
+            let mut changed: Vec<PathBuf> = Vec::new();
+            let mut removed: Vec<PathBuf> = Vec::new();
+            for ev in events {
+                match ev {
+                    FileEvent::Changed(p) if watch_relevant(&p) => changed.push(p),
+                    FileEvent::Removed(p) if watch_relevant(&p) => removed.push(p),
+                    _ => {}
+                }
+            }
+            if changed.is_empty() && removed.is_empty() {
+                continue;
+            }
+            if !changed.is_empty() {
+                entry.writer.on_files_changed(&changed);
+            }
+            if !removed.is_empty() {
+                entry.writer.on_files_removed(&removed);
+            }
+            schedule_global_drain(Arc::clone(&entry));
+        }
+    });
+}
+
+#[cfg(feature = "fs-watch")]
+fn watch_relevant(path: &Path) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/");
+    const SKIP_SEGMENTS: &[&str] = &[
+        "/.sen/",
+        "/.git/",
+        "/target/",
+        "/node_modules/",
+        "/dist/",
+        "/build/",
+        "/__pycache__/",
+        "/.venv/",
+    ];
+    if SKIP_SEGMENTS.iter().any(|seg| s.contains(seg)) {
+        return false;
+    }
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some(
+            "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "java" | "c" | "h" | "cpp"
+                | "hpp" | "cc"
+        )
+    )
+}
+
+#[must_use]
+pub fn get_or_load_writer(root: &Path) -> Option<Arc<SymbolGraphWriter>> {
+    entry_for_root(root, false).map(|e| Arc::clone(&e.writer))
+}
+
+pub fn get_or_build_writer(root: &Path) -> Option<Arc<SymbolGraphWriter>> {
+    entry_for_root(root, true).map(|e| Arc::clone(&e.writer))
+}
+
+// Called from the edit-apply layer after files change on disk. Marks the
+// owning workspace's graph dirty and schedules a debounced partial rebuild so
+// context injection sees fresh symbols without a manual re-index.
+pub fn note_files_changed_global(paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let mut grouped: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+    for p in paths {
+        if let Some(root) = find_graph_root(p) {
+            grouped.entry(root).or_default().push(p.clone());
+        }
+    }
+    for (root, group) in grouped {
+        let Some(entry) = entry_for_root(&root, false) else {
+            continue;
+        };
+        entry.writer.on_files_changed(&group);
+        schedule_global_drain(entry);
+        // Lazily start the external-edit watcher from this async context; the
+        // read-side (context injection) path runs in spawn_blocking and cannot.
+        #[cfg(feature = "fs-watch")]
+        ensure_workspace_watcher(&root);
+    }
+}
+
+fn schedule_global_drain(entry: Arc<GlobalWriterEntry>) {
+    use std::sync::atomic::Ordering;
+    if entry.drain_scheduled.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        entry.drain_scheduled.store(false, Ordering::SeqCst);
+        return;
+    };
+    handle.spawn(async move {
+        tokio::time::sleep(DEFAULT_DEBOUNCE.saturating_add(Duration::from_millis(150))).await;
+        entry.drain_scheduled.store(false, Ordering::SeqCst);
+        let writer = Arc::clone(&entry.writer);
+        let _ = tokio::task::spawn_blocking(move || {
+            writer.flush_pending_blocking(Duration::from_secs(2))
+        })
+        .await;
+    });
 }
 
 impl SymbolGraphWriter {

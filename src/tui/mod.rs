@@ -940,8 +940,75 @@ impl App {
                 });
                 true
             }
-            KeyAction::TabComplete | KeyAction::VoiceToggle | KeyAction::Custom(_) => false,
+            KeyAction::VoiceToggle => {
+                self.chat_messages.push(ChatMessage::with_role_now(
+                    "system",
+                    "Voice input is not available in this build unless compiled with voice-wake and configured under channels_config.voice_wake. Use /voice for status.",
+                ));
+                self.dirty = true;
+                true
+            }
+            KeyAction::TabComplete => {
+                self.apply_tab_complete();
+                true
+            }
+            KeyAction::Custom(_) => false,
         }
+    }
+
+    fn apply_tab_complete(&mut self) {
+        let text = self.chat_input.as_string();
+        let cursor = self.chat_cursor.min(text.chars().count());
+        let before: String = text.chars().take(cursor).collect();
+        let token_start = before
+            .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let partial = &before[token_start..];
+        if partial.is_empty() {
+            return;
+        }
+        let path = std::path::Path::new(partial);
+        let (dir, prefix) = if partial.ends_with('/') || partial.ends_with('\\') {
+            (path.to_path_buf(), String::new())
+        } else {
+            (
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                path.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let mut matches: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        matches.sort();
+        let Some(chosen) = matches.first() else {
+            return;
+        };
+        let completed = if dir.as_os_str() == "." {
+            chosen.clone()
+        } else {
+            dir.join(chosen).to_string_lossy().into_owned()
+        };
+        let after: String = text.chars().skip(cursor).collect();
+        let mut next = String::new();
+        next.push_str(&before[..token_start]);
+        next.push_str(&completed);
+        next.push_str(&after);
+        let prefix_chars = before[..token_start].chars().count();
+        let new_cursor = prefix_chars + completed.chars().count();
+        self.chat_input = crate::editor_core::TextBuffer::from_text(&next);
+        self.set_chat_cursor(new_cursor);
+        self.dirty = true;
     }
 
     fn handle_key(&mut self, key: event::KeyEvent) {

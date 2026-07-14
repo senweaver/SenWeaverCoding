@@ -16,7 +16,7 @@ const MAX_SESSION_HISTORY_BYTES: u64 = 256 * 1024 * 1024;
 pub fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
     history
         .iter()
-        .map(|m| m.content.len().div_ceil(4) + 4)
+        .map(crate::providers::traits::estimate_message_tokens)
         .sum()
 }
 
@@ -24,7 +24,7 @@ pub(crate) fn estimate_tokens_filtered(history: &[ChatMessage], is_system: bool)
     history
         .iter()
         .filter(|m| (m.role == "system") == is_system)
-        .map(|m| m.content.len().div_ceil(4) + 4)
+        .map(crate::providers::traits::estimate_message_tokens)
         .sum()
 }
 

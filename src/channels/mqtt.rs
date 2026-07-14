@@ -72,7 +72,7 @@ pub async fn run_mqtt_sop_listener(
                 };
 
                 let results = dispatch_sop_event(&engine, &audit, event).await;
-                process_headless_results(&results);
+                process_headless_results(&engine, &audit, &results);
             }
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 error_backoff = ERROR_BACKOFF_MIN;

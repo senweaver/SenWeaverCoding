@@ -301,6 +301,9 @@ pub struct SopRun {
 
     #[serde(default)]
     pub llm_calls_saved: u64,
+
+    #[serde(default)]
+    pub headless_driven: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

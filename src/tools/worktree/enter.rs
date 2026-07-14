@@ -115,16 +115,32 @@ impl Tool for WorktreeEnterTool {
         };
 
         match output {
-            Ok(out) if out.status.success() => Ok(ToolResult {
-                success: true,
-                output: json!({
-                    "worktree_path": worktree_dir.to_string_lossy(),
-                    "branch": branch_name,
-                    "message": format!("Entered worktree at {}", worktree_dir.display())
+            Ok(out) if out.status.success() => {
+                // Register the worktree as this session's confinement root so
+                // subsequent file edits inside it pass the sandbox allow-list.
+                if let Some(ctx) = crate::session::current_session_context() {
+                    crate::security::sandbox::register_workspace_root_for_session(
+                        &ctx.session_id,
+                        &worktree_dir,
+                    );
+                }
+                Ok(ToolResult {
+                    success: true,
+                    output: json!({
+                        "worktree_path": worktree_dir.to_string_lossy(),
+                        "branch": branch_name,
+                        "message": format!(
+                            "Entered worktree at {}. Pass this path as the base for \
+                             subsequent file_read/file_edit/shell calls to keep this \
+                             session's work isolated on branch '{}'.",
+                            worktree_dir.display(),
+                            branch_name
+                        )
+                    })
+                    .to_string(),
+                    error: None,
                 })
-                .to_string(),
-                error: None,
-            }),
+            }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 Ok(ToolResult {

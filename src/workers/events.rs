@@ -49,6 +49,11 @@ pub struct WorkerSpec {
     pub context: Option<String>,
 
     pub model: Option<String>,
+
+    // Per-worker working directory override (e.g. an isolated git worktree).
+    // Falls back to the parent session's workspace when absent.
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

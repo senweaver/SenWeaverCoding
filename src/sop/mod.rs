@@ -6,6 +6,7 @@ pub mod condition;
 pub mod dispatch;
 pub mod engine;
 pub mod metrics;
+pub mod runner;
 pub mod types;
 
 pub use audit::SopAuditLogger;

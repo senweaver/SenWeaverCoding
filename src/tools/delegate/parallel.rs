@@ -697,19 +697,31 @@ impl Tool for DelegateParallelTool {
             merge_results_structured(&results, args.merge_strategy)
         };
 
-        let merged_text = if crate::token_saver::is_enabled() {
-            crate::token_saver::compact_tool_output(
-                "delegate_parallel",
-                &merged.merged,
-                &crate::token_saver::global(),
-            )
-        } else {
-            merged.merged.clone()
+        let any_degraded = results.iter().any(|r| r.degraded) || merged.degraded;
+        let merged_text = {
+            let body = if crate::token_saver::is_enabled() {
+                crate::token_saver::compact_tool_output(
+                    "delegate_parallel",
+                    &merged.merged,
+                    &crate::token_saver::global(),
+                )
+            } else {
+                merged.merged.clone()
+            };
+            if any_degraded {
+                format!(
+                    "DEGRADED PARALLELISM: one or more tasks used single-agent fallback \
+                     (missing multi-agent runtime, capability match, or services). \
+                     Treat results as sequential/best-effort, not true isolated parallel work.\n\n{body}"
+                )
+            } else {
+                body
+            }
         };
         let payload = serde_json::json!({
             "merged": merged_text,
             "metadata": {
-                "degraded": merged.degraded,
+                "degraded": any_degraded,
                 "reasons": merged.reasons,
                 "failures": merged.failures,
                 "tasks": results.iter().map(|r| serde_json::json!({
@@ -721,7 +733,21 @@ impl Tool for DelegateParallelTool {
             }
         });
         match serde_json::to_string(&payload) {
-            Ok(s) => Ok(ok_result(s)),
+            Ok(s) => {
+                if any_degraded {
+                    Ok(ToolResult {
+                        success: results.iter().all(|r| r.success),
+                        output: s,
+                        error: Some(
+                            "delegate_parallel completed with degraded single-agent fallback(s); \
+                             see metadata.degraded and DEGRADED PARALLELISM banner"
+                                .into(),
+                        ),
+                    })
+                } else {
+                    Ok(ok_result(s))
+                }
+            }
             Err(e) => Ok(err_result(format!("delegate_parallel: serialize merged output failed: {e}"))),
         }
     }

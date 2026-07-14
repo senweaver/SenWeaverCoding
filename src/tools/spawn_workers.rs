@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,12 +17,16 @@ use crate::session::current_session_context;
 use crate::workers::events::{WorkerResult, WorkerSpec, WorkerStatus};
 use crate::workers::runner::WorkerRunContext;
 use crate::workers::supervisor::ensure_supervisor;
+use crate::workers::worker::WorkerHandle;
 
 const TOOL_NAME: &str = "spawn_workers";
 
 const DEFAULT_WORKERS_TIMEOUT_SECS: u64 = 1800;
 
 const MAX_WORKERS_PER_CALL: usize = crate::constants::system::MAX_CONCURRENT_SUBAGENTS as usize;
+
+const SUMMARY_INPUT_CAP_CHARS: usize = 6_000;
+const JUDGE_INPUT_CAP_CHARS: usize = 8_000;
 
 #[derive(Debug, Deserialize)]
 struct SpawnArgs {
@@ -33,6 +38,12 @@ struct SpawnArgs {
 
     #[serde(default)]
     workers_timeout_secs: Option<u64>,
+
+    #[serde(default = "default_isolation")]
+    isolation: Isolation,
+
+    #[serde(default = "default_auto_merge")]
+    auto_merge: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,15 +57,81 @@ struct TaskArgs {
     context: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum MergeStrategy {
     Concat,
     Summary,
+    BestOfN,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Isolation {
+    Shared,
+    Worktree,
+}
+
+#[derive(Clone, Copy)]
+enum MergePrompt {
+    Summary,
+    Judge,
 }
 
 fn default_merge_strategy() -> MergeStrategy {
     MergeStrategy::Concat
+}
+
+fn default_isolation() -> Isolation {
+    Isolation::Worktree
+}
+
+fn default_auto_merge() -> bool {
+    true
+}
+
+const WORKER_PORT_BASE: u16 = 4100;
+
+struct WorktreeInfo {
+    path: PathBuf,
+    branch: String,
+    base: PathBuf,
+}
+
+// Cancels every still-running worker if the parent tool future is dropped
+// (turn cancelled, tool timeout, channel closed). Without this the workers
+// keep running as orphans until their own 1800s wall clock expires.
+struct WorkerBatchCancelGuard {
+    handles: Vec<Arc<WorkerHandle>>,
+    disarmed: bool,
+}
+
+impl WorkerBatchCancelGuard {
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for WorkerBatchCancelGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let mut cancelled = 0usize;
+        for h in &self.handles {
+            if h.result_snapshot().is_none() {
+                h.cancel();
+                cancelled += 1;
+            }
+        }
+        if cancelled > 0 {
+            tracing::warn!(
+                cancelled,
+                "spawn_workers tool future dropped before completion; \
+                 propagated cancellation to still-running workers"
+            );
+        }
+    }
 }
 
 pub struct SpawnWorkersTool {
@@ -78,8 +155,14 @@ impl Tool for SpawnWorkersTool {
         "Run multiple long-running subtasks as parallel worker sub-agents. Each worker has its own \
          session and detail tab in the UI. Use when you need to decompose a complex request into \
          independent tasks that can run concurrently (e.g. analysing multiple codebases, fanning \
-         out research, executing several long jobs). The tool blocks until every worker reaches a \
-         terminal state and returns an aggregated result. Workers cannot spawn additional workers."
+         out research, executing several long jobs). Default isolation is \"worktree\" so each \
+         worker gets its own git worktree + branch and unique DEV port (4100+N); set \
+         isolation=\"shared\" only for read-only/research fan-out. When isolation is worktree, \
+         successful workers are merged sequentially into the parent workspace (auto_merge=true \
+         by default) with conflict abort + report. Set merge_strategy=\"best_of_n\" to run \
+         competing attempts and have a judge pick the best result before merge. The tool blocks \
+         until every worker reaches a terminal state and returns an aggregated result. Workers \
+         cannot spawn additional workers."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -118,9 +201,20 @@ impl Tool for SpawnWorkersTool {
                 },
                 "merge_strategy": {
                     "type": "string",
-                    "enum": ["concat", "summary"],
+                    "enum": ["concat", "summary", "best_of_n"],
                     "default": "concat",
-                    "description": "How to aggregate worker outputs back to the parent: 'concat' joins outputs with separators; 'summary' produces a short per-worker summary."
+                    "description": "How to aggregate worker outputs back to the parent: 'concat' joins full outputs; 'summary' produces an LLM-written synthesis of all workers; 'best_of_n' has an LLM judge compare competing results and return the winner with a rationale."
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["shared", "worktree"],
+                    "default": "worktree",
+                    "description": "'worktree' (default) creates an isolated git worktree + branch and unique DEV port per worker so concurrent file edits and local servers cannot conflict; successful branches are merged sequentially into the parent workspace when auto_merge is true. 'shared' runs workers in the parent workspace (prefer for read-only/research fan-out)."
+                },
+                "auto_merge": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "When isolation is worktree, commit each successful worker's changes and merge its branch into the parent workspace one-at-a-time. On conflict the merge is aborted, the branch is preserved, and the conflict paths are reported. Ignored for shared isolation."
                 },
                 "workers_timeout_secs": {
                     "type": "integer",
@@ -188,25 +282,66 @@ impl Tool for SpawnWorkersTool {
         let run_ctx = WorkerRunContext {
             config: Arc::clone(&self.config),
             live_config: self.live_config.clone(),
-            parent_workspace_dir,
+            parent_workspace_dir: parent_workspace_dir.clone(),
             parent_permission_mode: crate::gateway::ws::desktop::scoped_permission_mode_opt(),
         };
+
+        let base_workspace = parent_workspace_dir
+            .as_deref()
+            .filter(|d| !d.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok());
+
+        let mut worktrees: Vec<Option<WorktreeInfo>> =
+            (0..parsed.tasks.len()).map(|_| None).collect();
+        let mut isolation_notes: Vec<String> = Vec::new();
+        if parsed.isolation == Isolation::Worktree {
+            match base_workspace.as_ref() {
+                Some(base) => {
+                    for idx in 0..parsed.tasks.len() {
+                        match create_worker_worktree(base, idx).await {
+                            Ok(info) => worktrees[idx] = Some(info),
+                            Err(err) => {
+                                isolation_notes.push(format!(
+                                    "worker #{idx}: worktree isolation unavailable ({err}); \
+                                     running in the shared workspace instead"
+                                ));
+                            }
+                        }
+                    }
+                }
+                None => {
+                    isolation_notes.push(
+                        "worktree isolation requested but no parent workspace directory is \
+                         known; all workers run in the shared workspace"
+                            .to_string(),
+                    );
+                }
+            }
+        }
 
         let specs: Vec<WorkerSpec> = parsed
             .tasks
             .iter()
-            .map(|task| {
+            .enumerate()
+            .map(|(idx, task)| {
                 let title = task
                     .title
                     .clone()
                     .unwrap_or_else(|| derive_title(&task.prompt));
+                let workspace_dir = worktrees[idx]
+                    .as_ref()
+                    .map(|w| w.path.to_string_lossy().into_owned());
+                let context =
+                    compose_worker_context(task.context.as_deref(), worktrees[idx].as_ref(), idx);
                 WorkerSpec {
                     parent_session_id: parent_session_id.clone(),
                     parent_tool_use_id: parent_tool_use_id.clone(),
                     title,
                     prompt: task.prompt.clone(),
-                    context: task.context.clone(),
+                    context,
                     model: task.model.clone(),
+                    workspace_dir,
                 }
             })
             .collect();
@@ -220,6 +355,11 @@ impl Tool for SpawnWorkersTool {
                     error: Some(err),
                 });
             }
+        };
+
+        let mut cancel_guard = WorkerBatchCancelGuard {
+            handles: handles.clone(),
+            disarmed: false,
         };
 
         let mut waits = Vec::with_capacity(handles.len());
@@ -279,6 +419,16 @@ impl Tool for SpawnWorkersTool {
             }
         }
 
+        cancel_guard.disarm();
+
+        let mut change_reports: Vec<Option<String>> = Vec::with_capacity(results.len());
+        for wt in &worktrees {
+            match wt {
+                Some(info) => change_reports.push(Some(worktree_change_report(info).await)),
+                None => change_reports.push(None),
+            }
+        }
+
         if let Some(tx) = parent_draft.as_ref() {
             let _ = tx
                 .send(DraftEvent::ParentResumed {
@@ -287,10 +437,35 @@ impl Tool for SpawnWorkersTool {
                 .await;
         }
 
-        let aggregated = aggregate_results(&results, parsed.merge_strategy);
-        let any_failed = results
-            .iter()
-            .any(|r| matches!(r.status, WorkerStatus::Failed | WorkerStatus::Stopped));
+        let mut aggregated = self
+            .aggregate_results(&results, &change_reports, parsed.merge_strategy)
+            .await;
+        if !isolation_notes.is_empty() {
+            aggregated.push_str("\n\nIsolation notes:\n");
+            for note in &isolation_notes {
+                aggregated.push_str(&format!("- {note}\n"));
+            }
+        }
+
+        let mut merge_failed = false;
+        if parsed.isolation == Isolation::Worktree && parsed.auto_merge {
+            let merge_report =
+                sequential_merge_worktrees(&worktrees, &results, &change_reports).await;
+            if merge_report.has_failure {
+                merge_failed = true;
+            }
+            aggregated.push_str("\n\n## Auto-merge (sequential)\n");
+            aggregated.push_str(&merge_report.body);
+        } else if parsed.isolation == Isolation::Worktree && !parsed.auto_merge {
+            aggregated.push_str(
+                "\n\n## Auto-merge\nSkipped (auto_merge=false). Review each worker branch and merge manually.\n",
+            );
+        }
+
+        let any_failed = merge_failed
+            || results
+                .iter()
+                .any(|r| matches!(r.status, WorkerStatus::Failed | WorkerStatus::Stopped));
 
         Ok(ToolResult {
             success: !any_failed,
@@ -298,6 +473,375 @@ impl Tool for SpawnWorkersTool {
             error: None,
         })
     }
+}
+
+impl SpawnWorkersTool {
+    async fn aggregate_results(
+        &self,
+        results: &[WorkerResult],
+        change_reports: &[Option<String>],
+        strategy: MergeStrategy,
+    ) -> String {
+        match strategy {
+            MergeStrategy::Concat => concat_results(results, change_reports),
+            MergeStrategy::Summary => {
+                match self.llm_merge(results, change_reports, MergePrompt::Summary).await {
+                    Some(text) => format!(
+                        "{text}\n\n---\nFull worker outputs follow:\n\n{}",
+                        concat_results(results, change_reports)
+                    ),
+                    None => concat_results(results, change_reports),
+                }
+            }
+            MergeStrategy::BestOfN => {
+                match self.llm_merge(results, change_reports, MergePrompt::Judge).await {
+                    Some(text) => format!(
+                        "{text}\n\n---\nAll candidate outputs follow for reference:\n\n{}",
+                        concat_results(results, change_reports)
+                    ),
+                    None => concat_results(results, change_reports),
+                }
+            }
+        }
+    }
+
+    async fn llm_merge(
+        &self,
+        results: &[WorkerResult],
+        change_reports: &[Option<String>],
+        prompt_kind: MergePrompt,
+    ) -> Option<String> {
+        let model = crate::providers::resolve_default_model(&self.config).ok()?;
+        let provider_raw = self
+            .config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "openrouter".to_string());
+        let provider_name =
+            crate::providers::resolve_runtime_provider_name(&provider_raw, &self.config);
+        let runtime_options = crate::providers::ProviderRuntimeOptions {
+            auth_profile_override: None,
+            provider_api_url: self.config.api_url.clone(),
+            sen_dir: self
+                .config
+                .config_path
+                .parent()
+                .map(std::path::PathBuf::from),
+            secrets_encrypt: self.config.secrets.encrypt,
+            reasoning_enabled: self.config.runtime.reasoning_enabled,
+            reasoning_effort: self.config.runtime.reasoning_effort.clone(),
+            provider_timeout_secs: Some(self.config.provider_timeout_secs),
+            extra_headers: crate::providers::merged_extra_headers_for_config(&self.config),
+            api_path: self.config.api_path.clone(),
+            provider_max_tokens: self.config.provider_max_tokens,
+            model_context_windows: self.config.model_context_windows.clone(),
+        };
+        let provider = crate::providers::create_provider_with_options_async(
+            provider_name,
+            self.config.api_key.clone(),
+            runtime_options,
+        )
+        .await
+        .ok()?;
+
+        let cap = match prompt_kind {
+            MergePrompt::Summary => SUMMARY_INPUT_CAP_CHARS,
+            MergePrompt::Judge => JUDGE_INPUT_CAP_CHARS,
+        };
+        let per_worker_cap = (cap / results.len().max(1)).max(400);
+        let mut body = String::new();
+        for (idx, r) in results.iter().enumerate() {
+            let payload = if r.output.trim().is_empty() {
+                r.error.clone().unwrap_or_else(|| "<no output>".to_string())
+            } else {
+                truncate(&r.output, per_worker_cap)
+            };
+            body.push_str(&format!(
+                "### Worker {} — {} [{}]\n{}\n",
+                idx + 1,
+                r.title,
+                r.status.as_str(),
+                payload
+            ));
+            if let Some(Some(report)) = change_reports.get(idx) {
+                body.push_str(&format!("Changed files:\n{report}\n"));
+            }
+            body.push('\n');
+        }
+
+        let prompt = match prompt_kind {
+            MergePrompt::Summary => format!(
+                "You are aggregating the outputs of parallel worker sub-agents. Write a single \
+                 coherent synthesis that preserves every concrete finding, file path, command, \
+                 and decision. Note agreements and disagreements between workers. Do not invent \
+                 information not present below.\n\n{body}"
+            ),
+            MergePrompt::Judge => format!(
+                "You are judging competing attempts at the SAME task from parallel worker \
+                 sub-agents. Pick the single best result and explain in 2-3 sentences why it \
+                 wins (correctness, completeness, verification evidence). Then restate the \
+                 winning result in full so it can be used directly. If none succeeded, say so \
+                 and summarize the blockers.\n\n{body}"
+            ),
+        };
+
+        let temperature = self.config.default_temperature;
+        match provider.simple_chat(&prompt, &model, temperature).await {
+            Ok(text) if !text.trim().is_empty() => Some(text),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "spawn_workers llm merge failed; falling back to concat"
+                );
+                None
+            }
+        }
+    }
+}
+
+fn compose_worker_context(
+    task_context: Option<&str>,
+    worktree: Option<&WorktreeInfo>,
+    idx: usize,
+) -> Option<String> {
+    let port = WORKER_PORT_BASE.saturating_add(idx as u16);
+    let runtime = format!(
+        "Runtime isolation: use DEV/server port {port} (env SEN_WORKER_PORT / PORT / \
+         DEV_SERVER_PORT preferred). Do not bind the parent workspace's default ports."
+    );
+    match (task_context, worktree) {
+        (Some(ctx), Some(wt)) => Some(format!(
+            "{ctx}\n\nYou are working in an isolated git worktree at `{}` on branch `{}`. \
+             Make your changes here. The parent runtime will commit and sequentially merge \
+             successful worker branches into the main workspace after all workers finish.\n{runtime}",
+            wt.path.display(),
+            wt.branch
+        )),
+        (None, Some(wt)) => Some(format!(
+            "You are working in an isolated git worktree at `{}` on branch `{}`. Make your \
+             changes here. The parent runtime will commit and sequentially merge successful \
+             worker branches into the main workspace after all workers finish.\n{runtime}",
+            wt.path.display(),
+            wt.branch
+        )),
+        (Some(ctx), None) => Some(format!("{ctx}\n\n{runtime}")),
+        (None, None) => Some(runtime),
+    }
+}
+
+struct MergeReport {
+    body: String,
+    has_failure: bool,
+}
+
+async fn sequential_merge_worktrees(
+    worktrees: &[Option<WorktreeInfo>],
+    results: &[WorkerResult],
+    change_reports: &[Option<String>],
+) -> MergeReport {
+    let mut lines: Vec<String> = Vec::new();
+    let mut has_failure = false;
+    for (idx, wt_opt) in worktrees.iter().enumerate() {
+        let Some(info) = wt_opt else {
+            lines.push(format!(
+                "- worker #{idx}: skipped merge (no worktree; ran shared or worktree create failed)"
+            ));
+            continue;
+        };
+        let status = results.get(idx).map(|r| r.status).unwrap_or(WorkerStatus::Failed);
+        if !matches!(status, WorkerStatus::Completed) {
+            lines.push(format!(
+                "- `{}`: skipped merge (worker status={})",
+                info.branch,
+                status.as_str()
+            ));
+            continue;
+        }
+        let changes = change_reports
+            .get(idx)
+            .and_then(|c| c.as_deref())
+            .unwrap_or("");
+        if changes.contains("(no file changes)") {
+            lines.push(format!(
+                "- `{}`: skipped merge (no file changes)",
+                info.branch
+            ));
+            continue;
+        }
+        match commit_and_merge_worker(info).await {
+            Ok(msg) => lines.push(format!("- `{}`: {msg}", info.branch)),
+            Err(err) => {
+                has_failure = true;
+                lines.push(format!("- `{}`: MERGE FAILED — {err}", info.branch));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push("- (no worktree merges attempted)".to_string());
+    }
+    MergeReport {
+        body: lines.join("\n"),
+        has_failure,
+    }
+}
+
+async fn commit_and_merge_worker(info: &WorktreeInfo) -> Result<String, String> {
+    let path = info.path.to_string_lossy().to_string();
+    let base = info.base.to_string_lossy().to_string();
+
+    let add = crate::util::hidden_async_command("git")
+        .args(["-C", &path, "add", "-A"])
+        .output()
+        .await
+        .map_err(|e| format!("git add failed: {e}"))?;
+    if !add.status.success() {
+        return Err(String::from_utf8_lossy(&add.stderr).trim().to_string());
+    }
+
+    let staged = crate::util::hidden_async_command("git")
+        .args(["-C", &path, "diff", "--cached", "--quiet"])
+        .output()
+        .await
+        .map_err(|e| format!("git diff --cached failed: {e}"))?;
+    if staged.status.success() {
+        return Ok("no staged changes after add; merge skipped".to_string());
+    }
+
+    let msg = format!("sen-worker: {}", info.branch);
+    let commit = crate::util::hidden_async_command("git")
+        .args(["-C", &path, "commit", "-m", &msg, "--no-verify"])
+        .output()
+        .await
+        .map_err(|e| format!("git commit failed: {e}"))?;
+    if !commit.status.success() {
+        return Err(String::from_utf8_lossy(&commit.stderr).trim().to_string());
+    }
+
+    let merge = crate::util::hidden_async_command("git")
+        .args(["-C", &base, "merge", "--no-edit", "--no-ff", &info.branch])
+        .output()
+        .await
+        .map_err(|e| format!("git merge failed to spawn: {e}"))?;
+    if merge.status.success() {
+        return Ok("committed and merged into parent workspace".to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&merge.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&merge.stdout).trim().to_string();
+    let conflicts = crate::util::hidden_async_command("git")
+        .args(["-C", &base, "diff", "--name-only", "--diff-filter=U"])
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let _ = crate::util::hidden_async_command("git")
+        .args(["-C", &base, "merge", "--abort"])
+        .output()
+        .await;
+
+    let mut detail = String::new();
+    if !conflicts.is_empty() {
+        detail.push_str("conflict paths: ");
+        detail.push_str(&conflicts.replace('\n', ", "));
+        detail.push_str("; ");
+    }
+    if !stderr.is_empty() {
+        detail.push_str(&stderr);
+    } else if !stdout.is_empty() {
+        detail.push_str(&stdout);
+    } else {
+        detail.push_str("merge conflict; aborted and left worker branch intact");
+    }
+    detail.push_str(&format!(
+        " (branch `{}` preserved at {})",
+        info.branch,
+        info.path.display()
+    ));
+    Err(detail)
+}
+
+async fn create_worker_worktree(base: &Path, idx: usize) -> Result<WorktreeInfo, String> {
+    let inside = crate::util::hidden_async_command("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(base)
+        .output()
+        .await
+        .map_err(|e| format!("git not available: {e}"))?;
+    if !inside.status.success() {
+        return Err("not a git repository".to_string());
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let branch = format!("sen-worker/{stamp}-{idx}");
+    let worktrees_dir = base.join(".sen").join("worktrees");
+    if let Err(e) = tokio::fs::create_dir_all(&worktrees_dir).await {
+        return Err(format!("failed to create worktrees dir: {e}"));
+    }
+    let path = worktrees_dir.join(format!("{stamp}-{idx}"));
+    let path_str = path.to_string_lossy().to_string();
+
+    let output = crate::util::hidden_async_command("git")
+        .args(["worktree", "add", "-b", &branch, &path_str, "HEAD"])
+        .current_dir(base)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("git worktree add failed to spawn: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    Ok(WorktreeInfo {
+        path,
+        branch,
+        base: base.to_path_buf(),
+    })
+}
+
+async fn worktree_change_report(info: &WorktreeInfo) -> String {
+    let output = crate::util::hidden_async_command("git")
+        .args(["-C", &info.path.to_string_lossy(), "status", "--short"])
+        .current_dir(&info.base)
+        .output()
+        .await;
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                "(no file changes)".to_string()
+            } else {
+                truncate(trimmed, 1_500)
+            }
+        }
+        _ => "(unable to read worktree status)".to_string(),
+    }
+}
+
+fn concat_results(results: &[WorkerResult], change_reports: &[Option<String>]) -> String {
+    results
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| {
+            let header = format!("## {} ({}) [{}]", r.title, r.worker_id, r.status.as_str());
+            let body = if r.output.trim().is_empty() {
+                r.error.clone().unwrap_or_else(|| "<no output>".to_string())
+            } else {
+                r.output.clone()
+            };
+            let changes = match change_reports.get(idx).and_then(|c| c.clone()) {
+                Some(report) => format!("\n\nChanged files:\n{report}"),
+                None => String::new(),
+            };
+            format!("{header}\n{body}{changes}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
 }
 
 fn derive_title(prompt: &str) -> String {
@@ -325,56 +869,11 @@ fn derive_title(prompt: &str) -> String {
     }
 }
 
-fn aggregate_results(results: &[WorkerResult], strategy: MergeStrategy) -> String {
-    match strategy {
-        MergeStrategy::Concat => results
-            .iter()
-            .map(|r| {
-                let header = format!(
-                    "## {} ({}) [{}]",
-                    r.title,
-                    r.worker_id,
-                    r.status.as_str()
-                );
-                let body = if r.output.trim().is_empty() {
-                    r.error
-                        .clone()
-                        .unwrap_or_else(|| "<no output>".to_string())
-                } else {
-                    r.output.clone()
-                };
-                format!("{header}\n{body}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n"),
-        MergeStrategy::Summary => {
-            let mut out = String::from("Worker results summary:\n");
-            for r in results {
-                let snippet = if r.output.trim().is_empty() {
-                    r.error
-                        .clone()
-                        .unwrap_or_else(|| "<no output>".to_string())
-                } else {
-                    truncate(&r.output, 240)
-                };
-                out.push_str(&format!(
-                    "- {} ({}): {}  -  {}\n",
-                    r.title,
-                    r.worker_id,
-                    r.status.as_str(),
-                    snippet
-                ));
-            }
-            out
-        }
-    }
-}
-
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
-        return s.replace('\n', " ");
+        return s.to_string();
     }
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
-    out.replace('\n', " ")
+    out
 }

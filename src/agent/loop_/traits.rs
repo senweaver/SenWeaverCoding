@@ -39,10 +39,6 @@ pub trait MemorySessionHook: Send + Sync {
     async fn on_turn_end(&self, assistant_message: &str, tools_used: &[String]);
 }
 
-pub trait ModelClassifierHook: Send + Sync {
-    fn classify(&self, user_message: &str) -> Option<String>;
-}
-
 #[async_trait]
 pub trait TurnPreambleHook: Send + Sync {
     async fn apply(

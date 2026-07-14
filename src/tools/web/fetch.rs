@@ -113,51 +113,56 @@ impl WebFetchTool {
         }
     }
 
-    fn http_client(&self) -> reqwest::Client {
-        self.client
-            .get_or_init(|| {
-                let timeout_secs = if self.timeout_secs == 0 {
-                    60
-                } else {
-                    self.timeout_secs
-                };
-                let allowed_domains = self.allowed_domains.clone();
-                let blocked_domains = self.blocked_domains.clone();
-                let allowed_private_hosts = self.allowed_private_hosts.clone();
-                let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-                    if attempt.previous().len() >= 10 {
-                        return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
-                    }
-                    if let Err(err) = validate_target_url(
-                        attempt.url().as_str(),
-                        &allowed_domains,
-                        &blocked_domains,
-                        &allowed_private_hosts,
-                        "web_fetch",
-                    ) {
-                        return attempt.error(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Blocked redirect target: {err}"),
-                        ));
-                    }
-                    attempt.follow()
-                });
-                let builder = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(timeout_secs))
-                    .connect_timeout(Duration::from_secs(10))
-                    .redirect(redirect_policy)
-                    .cookie_store(true)
-                    .user_agent(BROWSER_USER_AGENT);
-                match crate::services::try_get_services() {
-                    Some(services) => services
-                        .proxy_runtime()
-                        .apply_to_builder(builder, "tool.web_fetch")
-                        .build()
-                        .unwrap_or_else(|_| reqwest::Client::new()),
-                    None => builder.build().unwrap_or_else(|_| reqwest::Client::new()),
-                }
-            })
-            .clone()
+    fn http_client(&self) -> anyhow::Result<reqwest::Client> {
+        if let Some(existing) = self.client.get() {
+            return Ok(existing.clone());
+        }
+        let timeout_secs = if self.timeout_secs == 0 {
+            60
+        } else {
+            self.timeout_secs
+        };
+        let allowed_domains = self.allowed_domains.clone();
+        let blocked_domains = self.blocked_domains.clone();
+        let allowed_private_hosts = self.allowed_private_hosts.clone();
+        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
+            }
+            if let Err(err) = validate_target_url(
+                attempt.url().as_str(),
+                &allowed_domains,
+                &blocked_domains,
+                &allowed_private_hosts,
+                "web_fetch",
+            ) {
+                return attempt.error(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Blocked redirect target: {err}"),
+                ));
+            }
+            attempt.follow()
+        });
+        let builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(redirect_policy)
+            .cookie_store(true)
+            .user_agent(BROWSER_USER_AGENT);
+        let built = match crate::services::try_get_services() {
+            Some(services) => services
+                .proxy_runtime()
+                .apply_to_builder(builder, "tool.web_fetch")
+                .build()
+                .map_err(|e| anyhow::anyhow!("web_fetch client build failed: {e}"))?,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "web_fetch blocked: service container unavailable (fail-closed)"
+                ));
+            }
+        };
+        let _ = self.client.set(built.clone());
+        Ok(self.client.get().cloned().unwrap_or(built))
     }
 
     fn validate_url(&self, raw_url: &str) -> anyhow::Result<String> {
@@ -638,7 +643,7 @@ impl WebFetchTool {
             }
         }
 
-        let client = self.http_client();
+        let client = self.http_client()?;
 
         let standard_result = self.standard_fetch(&client, &url).await;
 

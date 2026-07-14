@@ -80,6 +80,167 @@ pub async fn handle_rename_recording(
     }
 }
 
+const MAX_EDITED_STEPS: usize = 500;
+const MAX_EDITED_DELAY_MS: u64 = 600_000;
+const MAX_EDITED_VALUE_CHARS: usize = 10_000;
+const MAX_LOOP_COUNT: u32 = 100;
+const MAX_LOOP_INTERVAL_MS: u64 = 3_600_000;
+
+const EDITABLE_ACTIONS: [&str; 9] = [
+    "click",
+    "double_click",
+    "right_click",
+    "type",
+    "key_press",
+    "scroll",
+    "drag",
+    "move_mouse",
+    "wait",
+];
+
+pub async fn handle_get_recording_steps(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = super::super::api::require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let workspace = state.live_config.load_ref().workspace_dir.clone();
+    match recorder::load_recording(&workspace, &name).await {
+        Ok(manifest) => Json(serde_json::json!({
+            "name": name,
+            "task": manifest.task,
+            "display_w": manifest.display_w,
+            "display_h": manifest.display_h,
+            "run_config": manifest.run_config,
+            "steps": manifest.steps,
+        }))
+        .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_put_recording_steps(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = super::super::api::require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let workspace = state.live_config.load_ref().workspace_dir.clone();
+    let mut manifest = match recorder::load_recording(&workspace, &name).await {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(raw_steps) = body.get("steps") {
+        let steps: Vec<crate::computer::recorder::RecordedStep> =
+            match serde_json::from_value(raw_steps.clone()) {
+                Ok(steps) => steps,
+                Err(e) => {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": format!("invalid steps: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+        if steps.is_empty() || steps.len() > MAX_EDITED_STEPS {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("steps must contain 1..={MAX_EDITED_STEPS} entries")
+                })),
+            )
+                .into_response();
+        }
+        for step in &steps {
+            if !EDITABLE_ACTIONS.contains(&step.action_type.as_str()) {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("unsupported action type '{}'", step.action_type)
+                    })),
+                )
+                    .into_response();
+            }
+            if step.delay_ms > MAX_EDITED_DELAY_MS {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("delay_ms must be <= {MAX_EDITED_DELAY_MS}")
+                    })),
+                )
+                    .into_response();
+            }
+            if step
+                .value
+                .as_ref()
+                .is_some_and(|v| v.chars().count() > MAX_EDITED_VALUE_CHARS)
+            {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("value must be <= {MAX_EDITED_VALUE_CHARS} characters")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        let mut reindexed = steps;
+        for (idx, step) in reindexed.iter_mut().enumerate() {
+            step.index = idx as u32;
+        }
+        manifest.steps = reindexed;
+    }
+
+    if let Some(raw_config) = body.get("runConfig") {
+        if raw_config.is_null() {
+            manifest.run_config = None;
+        } else {
+            let loop_count = raw_config
+                .get("loopCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1) as u32;
+            let interval_ms = raw_config
+                .get("intervalMs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            manifest.run_config = Some(crate::computer::recorder::RunConfig {
+                loop_count: loop_count.clamp(1, MAX_LOOP_COUNT),
+                interval_ms: interval_ms.min(MAX_LOOP_INTERVAL_MS),
+            });
+        }
+    }
+
+    match recorder::save_recording_manifest(&workspace, &name, &manifest).await {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "step_count": manifest.steps.len(),
+            "run_config": manifest.run_config,
+        }))
+        .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn handle_generate_recording_skill(
     State(state): State<AppState>,
     Path(name): Path<String>,

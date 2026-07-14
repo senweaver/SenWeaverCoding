@@ -132,8 +132,13 @@ async fn annotate_step(
         .as_ref()
         .ok_or_else(|| anyhow!("step has no screenshot"))?;
     let bytes = tokio::fs::read(recording_dir.join(file)).await?;
+    let mime = if file.to_ascii_lowercase().ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
     let data_uri = format!(
-        "data:image/png;base64,{}",
+        "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(&bytes)
     );
 

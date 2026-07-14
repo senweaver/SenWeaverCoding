@@ -11,13 +11,19 @@ use serde::{Deserialize, Serialize};
 use super::backend::{CheckpointBackend, CheckpointMeta};
 use super::super::traits::{Artifact, TranscriptEntry};
 
+// Cap persisted transcript entries so a long flow can't bloat the checkpoint
+// JSON; the most recent entries are the ones a post-restart rewind needs.
+const MAX_PERSISTED_TRANSCRIPT_ENTRIES: usize = 200;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: String,
     pub label: String,
     pub artifacts: Vec<Artifact>,
 
-    #[serde(skip)]
+    // Persisted (bounded) so restoring a checkpoint after a restart recovers
+    // the flow transcript, not just the artifacts.
+    #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
 
     #[serde(default)]
@@ -100,7 +106,11 @@ impl CheckpointStore {
                 );
                 return;
             };
-            let cp_owned = cp;
+            let mut cp_owned = cp;
+            if cp_owned.transcript.len() > MAX_PERSISTED_TRANSCRIPT_ENTRIES {
+                let overflow = cp_owned.transcript.len() - MAX_PERSISTED_TRANSCRIPT_ENTRIES;
+                cp_owned.transcript.drain(0..overflow);
+            }
             crate::runtime::spawn_supervised("checkpoint.persist", async move {
                 match backend.save(&session_id, &cp_owned).await {
                     Ok(()) => crate::observability::session_write_mode_metrics::incr_checkpoint_persisted(),

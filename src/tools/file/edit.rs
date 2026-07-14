@@ -79,7 +79,10 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file using various modes: replace (default), append, insert_after, insert_before"
+        "PREFERRED tool for a single targeted change in ONE file: exact-string replace \
+         (default), append, insert_after, or insert_before. old_string must match the file \
+         exactly (copy it from a fresh file_read, including whitespace). For several related \
+         changes use multi_edit; if you already hold a unified diff use diff_apply/patch_apply."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -461,17 +464,29 @@ impl FileEditTool {
         }
 
         if hits.is_empty() {
+            let error = if let Some(name) = scope_name.as_deref() {
+                // Scoped search failed inside the named scope; still analyze the
+                // whole file so the model sees where the text actually lives.
+                let mut msg = format!("old_string not found in scope '{name}'.");
+                if let Some(diag) = super::match_diagnostics::diagnose(&content, old_string) {
+                    msg.push('\n');
+                    msg.push_str(&diag.message);
+                }
+                msg
+            } else {
+                let had_read =
+                    crate::session::has_read_in_current_session(resolved_target);
+                super::match_diagnostics::failure_message(
+                    &content,
+                    old_string,
+                    display_path,
+                    had_read,
+                )
+            };
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(if scope_name.is_some() {
-                    format!(
-                        "old_string not found in scope '{}'",
-                        scope_name.as_deref().unwrap_or("")
-                    )
-                } else {
-                    "old_string not found in file".into()
-                }),
+                error: Some(error),
             });
         }
 
@@ -625,10 +640,17 @@ impl FileEditTool {
         }
 
         if hits.is_empty() {
+            let had_read = crate::session::has_read_in_current_session(resolved_target);
+            let error = super::match_diagnostics::failure_message(
+                &content,
+                pattern,
+                display_path,
+                had_read,
+            );
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("Pattern not found in file".into()),
+                error: Some(error),
             });
         }
 
@@ -696,10 +718,17 @@ impl FileEditTool {
         }
 
         if hits.is_empty() {
+            let had_read = crate::session::has_read_in_current_session(resolved_target);
+            let error = super::match_diagnostics::failure_message(
+                &content,
+                pattern,
+                display_path,
+                had_read,
+            );
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("Pattern not found in file".into()),
+                error: Some(error),
             });
         }
 

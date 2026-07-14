@@ -153,6 +153,7 @@ pub async fn start_recording(
         display_h: dh,
         steps: Vec::new(),
         skill_name: None,
+        run_config: None,
     };
 
     let consumer = Consumer::new(dir.clone(), event_tx, dw, dh, monitors, manifest);
@@ -432,6 +433,24 @@ pub async fn load_recording(workspace_dir: &Path, name: &str) -> Result<Recordin
         .await
         .map_err(|e| anyhow!("recording '{name}' not found: {e}"))?;
     serde_json::from_str(&data).map_err(|e| anyhow!("invalid recording '{name}': {e}"))
+}
+
+pub async fn save_recording_manifest(
+    workspace_dir: &Path,
+    name: &str,
+    manifest: &RecordingManifest,
+) -> Result<()> {
+    let safe = sanitize_name(name)?;
+    let path = workspace_dir
+        .join("skills")
+        .join(&safe)
+        .join("recording.json");
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        bail!("recording '{name}' not found");
+    }
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    tokio::fs::write(&path, bytes).await?;
+    Ok(())
 }
 
 pub fn load_skill_instructions(workspace_dir: &Path, name: &str) -> Option<String> {
@@ -977,9 +996,9 @@ impl Consumer {
         let mut frame_monitor = None;
         if let Some(frame) = frame {
             screenshot_base64 = frame.preview_jpeg_base64.to_string();
-            let file = format!("shots/{index}.png");
+            let file = format!("shots/{index}.jpg");
             let path = self.dir.join(&file);
-            let bytes = frame.png_bytes.clone();
+            let bytes = frame.shot_jpeg_bytes.clone();
             self.shot_writes.spawn(async move {
                 let _ = tokio::fs::write(path, bytes.as_slice()).await;
             });

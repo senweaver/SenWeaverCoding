@@ -119,55 +119,28 @@ pub async fn dispatch_sop_event(
     results
 }
 
-pub fn process_headless_results(results: &[DispatchResult]) {
+pub fn process_headless_results(
+    engine: &Arc<Mutex<SopEngine>>,
+    audit: &Arc<SopAuditLogger>,
+    results: &[DispatchResult],
+) {
     for result in results {
         match result {
             DispatchResult::Started {
-                run_id,
+                run_id: _,
                 sop_name,
                 action,
-            } => match action.as_ref() {
-                SopRunAction::ExecuteStep { step, .. } => {
-                    warn!(
-                        "SOP headless dispatch: run {run_id} ('{sop_name}') ready for step {} \
-                         '{}' but no agent loop available to execute",
-                        step.number, step.title,
-                    );
-                }
-                SopRunAction::WaitApproval { step, .. } => {
-                    info!(
-                        "SOP headless dispatch: run {run_id} ('{sop_name}') waiting for approval \
-                         on step {} '{}'. Timeout polling will handle progression",
-                        step.number, step.title,
-                    );
-                }
-                SopRunAction::DeterministicStep { step, .. } => {
-                    info!(
-                        "SOP headless dispatch: run {run_id} ('{sop_name}') deterministic step {} \
-                         '{}'",
-                        step.number, step.title,
-                    );
-                }
-                SopRunAction::CheckpointWait {
-                    step, state_file, ..
-                } => {
-                    info!(
-                        "SOP headless dispatch: run {run_id} ('{sop_name}') checkpoint at step {} \
-                         '{}', state persisted to {}",
-                        step.number,
-                        step.title,
-                        state_file.display(),
-                    );
-                }
-                SopRunAction::Completed { .. } => {
-                    info!(
-                        "SOP headless dispatch: run {run_id} ('{sop_name}') completed immediately"
-                    );
-                }
-                SopRunAction::Failed { reason, .. } => {
-                    warn!("SOP headless dispatch: run {run_id} ('{sop_name}') failed: {reason}");
-                }
-            },
+            } => {
+                info!(
+                    "SOP headless dispatch: '{sop_name}' -> {}",
+                    action_label(action.as_ref())
+                );
+                super::runner::enqueue_action(
+                    Arc::clone(engine),
+                    Arc::clone(audit),
+                    action.as_ref().clone(),
+                );
+            }
             DispatchResult::Skipped { sop_name, reason } => {
                 info!("SOP headless dispatch: skipped '{sop_name}': {reason}");
             }
@@ -244,19 +217,34 @@ const SOP_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 static SOP_MAINTENANCE_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+fn maintenance_audit_slot() -> &'static parking_lot::Mutex<Option<Arc<SopAuditLogger>>> {
+    static SLOT: std::sync::OnceLock<parking_lot::Mutex<Option<Arc<SopAuditLogger>>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+fn resolve_maintenance_audit() -> Arc<SopAuditLogger> {
+    maintenance_audit_slot()
+        .lock()
+        .clone()
+        .unwrap_or_else(|| {
+            Arc::new(SopAuditLogger::new(Arc::new(
+                crate::memory::none::NoneMemory::new(),
+            )))
+        })
+}
+
 pub fn ensure_sop_maintenance(
     engine: Arc<Mutex<SopEngine>>,
     audit: Option<Arc<SopAuditLogger>>,
     workspace_dir: std::path::PathBuf,
 ) {
+    if let Some(a) = audit {
+        *maintenance_audit_slot().lock() = Some(a);
+    }
     if SOP_MAINTENANCE_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let audit = audit.unwrap_or_else(|| {
-        Arc::new(SopAuditLogger::new(Arc::new(
-            crate::memory::none::NoneMemory::new(),
-        )))
-    });
     crate::runtime::spawn_supervised("sop.maintenance", async move {
         {
             let mut eng = engine.lock();
@@ -271,25 +259,28 @@ pub fn ensure_sop_maintenance(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            let audit = resolve_maintenance_audit();
 
             let timeout_actions = engine.lock().check_approval_timeouts();
-            for action in &timeout_actions {
+            for action in timeout_actions {
                 info!(
                     "SOP maintenance: approval timeout advanced run {} ({})",
-                    extract_run_id_from_action(action),
-                    action_label(action),
+                    extract_run_id_from_action(&action),
+                    action_label(&action),
                 );
+                super::runner::enqueue_action(Arc::clone(&engine), Arc::clone(&audit), action);
             }
 
             let reaped = engine
                 .lock()
                 .reap_stale_runs(super::engine::SopEngine::MAX_RUN_LIFETIME_SECS);
-            for action in &reaped {
+            for action in reaped {
                 warn!(
                     "SOP maintenance: reaped stale run {} ({})",
-                    extract_run_id_from_action(action),
-                    action_label(action),
+                    extract_run_id_from_action(&action),
+                    action_label(&action),
                 );
+                super::runner::enqueue_action(Arc::clone(&engine), Arc::clone(&audit), action);
             }
 
             let cache = SopCronCache::from_engine(&engine);
@@ -298,7 +289,7 @@ pub fn ensure_sop_maintenance(
             }
             let results =
                 check_sop_cron_triggers(&engine, &audit, &cache, &mut last_cron_check).await;
-            process_headless_results(&results);
+            process_headless_results(&engine, &audit, &results);
         }
     });
 }
@@ -311,13 +302,15 @@ pub async fn check_sop_cron_triggers(
 ) -> Vec<DispatchResult> {
     let now = chrono::Utc::now();
     let mut all_results = Vec::new();
+    let mut fired_expressions = std::collections::HashSet::new();
 
     for (_sop_name, expression, schedule) in &cache.schedules {
-
         let mut upcoming = schedule.after(last_check);
         if let Some(next) = upcoming.next() {
             if next <= now {
-
+                if !fired_expressions.insert(expression.clone()) {
+                    continue;
+                }
                 let event = SopEvent {
                     source: SopTriggerSource::Cron,
                     topic: Some(expression.clone()),

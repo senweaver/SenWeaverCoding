@@ -12,12 +12,14 @@ use super::coordinates::MonitorRect;
 const MAX_TRANSPORT_DIM: u32 = 1536;
 const PREVIEW_MAX_DIM: u32 = 640;
 const PREVIEW_JPEG_QUALITY: u8 = 60;
+const DISPLAY_JPEG_QUALITY: u8 = 72;
 
 #[derive(Debug, Clone)]
 pub struct CapturedScreen {
     pub width: u32,
     pub height: u32,
     pub png_base64: String,
+    pub display_jpeg_base64: String,
     pub monitor: MonitorRect,
 }
 
@@ -31,7 +33,7 @@ impl CapturedScreen {
 pub struct RecorderFrame {
     pub width: u32,
     pub height: u32,
-    pub png_bytes: Arc<Vec<u8>>,
+    pub shot_jpeg_bytes: Arc<Vec<u8>>,
     pub preview_jpeg_base64: Arc<str>,
     pub monitor: MonitorRect,
 }
@@ -47,28 +49,38 @@ fn monitor_rect(monitor: &xcap::Monitor) -> MonitorRect {
 }
 
 pub async fn list_monitors() -> Vec<MonitorRect> {
-    tokio::task::spawn_blocking(|| match xcap::Monitor::all() {
-        Ok(monitors) => monitors.iter().map(monitor_rect).collect(),
-        Err(_) => Vec::new(),
+    tokio::task::spawn_blocking(|| {
+        super::dpi::ensure_dpi_awareness();
+        match xcap::Monitor::all() {
+            Ok(monitors) => monitors.iter().map(monitor_rect).collect(),
+            Err(_) => Vec::new(),
+        }
     })
     .await
     .unwrap_or_default()
 }
 
 pub async fn capture_primary() -> Result<CapturedScreen> {
-    tokio::task::spawn_blocking(|| capture_screen_blocking(MonitorSelector::Primary))
-        .await
-        .map_err(|e| anyhow!("screen capture task failed to join: {e}"))?
+    tokio::task::spawn_blocking(|| {
+        super::dpi::ensure_dpi_awareness();
+        capture_screen_blocking(MonitorSelector::Primary)
+    })
+    .await
+    .map_err(|e| anyhow!("screen capture task failed to join: {e}"))?
 }
 
 pub async fn capture_monitor(id: u32) -> Result<CapturedScreen> {
-    tokio::task::spawn_blocking(move || capture_screen_blocking(MonitorSelector::Id(id)))
-        .await
-        .map_err(|e| anyhow!("screen capture task failed to join: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        super::dpi::ensure_dpi_awareness();
+        capture_screen_blocking(MonitorSelector::Id(id))
+    })
+    .await
+    .map_err(|e| anyhow!("screen capture task failed to join: {e}"))?
 }
 
 pub async fn capture_recorder_frame() -> Result<RecorderFrame> {
     tokio::task::spawn_blocking(|| {
+        super::dpi::ensure_dpi_awareness();
         let selector = match cursor_point() {
             Some((x, y)) => MonitorSelector::Point { x, y },
             None => MonitorSelector::Primary,
@@ -98,6 +110,7 @@ fn cursor_point() -> Option<(i32, i32)> {
 
 pub async fn capture_preview_jpeg() -> Result<String> {
     tokio::task::spawn_blocking(|| {
+        super::dpi::ensure_dpi_awareness();
         let (transport, _, _, _) = grab_frame(MonitorSelector::Primary)?;
         encode_preview_jpeg_base64(&transport)
     })
@@ -183,6 +196,24 @@ fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>> {
     Ok(png_bytes)
 }
 
+fn encode_display_jpeg_bytes(image: &image::RgbaImage) -> Result<Vec<u8>> {
+    let rgb = image::DynamicImage::ImageRgba8(image.clone()).to_rgb8();
+    let mut jpeg_bytes: Vec<u8> = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+        &mut jpeg_bytes,
+        DISPLAY_JPEG_QUALITY,
+    );
+    encoder
+        .encode_image(&rgb)
+        .context("encode screenshot to display JPEG")?;
+    Ok(jpeg_bytes)
+}
+
+fn encode_display_jpeg_base64(image: &image::RgbaImage) -> Result<String> {
+    let jpeg_bytes = encode_display_jpeg_bytes(image)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes))
+}
+
 pub(crate) fn encode_preview_jpeg_base64(image: &image::RgbaImage) -> Result<String> {
     let longest = image.width().max(image.height());
     let preview = if longest > PREVIEW_MAX_DIM {
@@ -214,24 +245,26 @@ fn capture_screen_blocking(selector: MonitorSelector) -> Result<CapturedScreen> 
     let (transport, width, height, monitor) = grab_frame(selector)?;
     let png_bytes = encode_png(&transport)?;
     let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    let display_jpeg_base64 = encode_display_jpeg_base64(&transport)?;
 
     Ok(CapturedScreen {
         width,
         height,
         png_base64,
+        display_jpeg_base64,
         monitor,
     })
 }
 
 fn capture_recorder_frame_blocking(selector: MonitorSelector) -> Result<RecorderFrame> {
     let (transport, width, height, monitor) = grab_frame(selector)?;
-    let png_bytes = encode_png(&transport)?;
+    let shot_jpeg_bytes = encode_display_jpeg_bytes(&transport)?;
     let preview = encode_preview_jpeg_base64(&transport)?;
 
     Ok(RecorderFrame {
         width,
         height,
-        png_bytes: Arc::new(png_bytes),
+        shot_jpeg_bytes: Arc::new(shot_jpeg_bytes),
         preview_jpeg_base64: Arc::from(preview),
         monitor,
     })

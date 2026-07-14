@@ -59,6 +59,8 @@ export function ComputerBar() {
   const error = useMinimalComputerStore((s) => s.error)
   const lastThought = useMinimalComputerStore((s) => s.lastThought)
   const stepCount = useMinimalComputerStore((s) => s.stepCount)
+  const pendingSteer = useMinimalComputerStore((s) => s.pendingSteer)
+  const lastUserUpdate = useMinimalComputerStore((s) => s.lastUserUpdate)
 
   const recStatus = useMinimalRecorderStore((s) => s.status)
   const recStepCount = useMinimalRecorderStore((s) => s.stepCount)
@@ -224,8 +226,14 @@ export function ComputerBar() {
     : generating
       ? t('computerUse.record.generating')
       : null
+  const steerText =
+    busy && pendingSteer
+      ? `${t('minimal.computer.steerPending')} · ${pendingSteer}`
+      : busy && lastUserUpdate
+        ? `${t('minimal.computer.steerApplied')} · ${lastUserUpdate}`
+        : null
   const marqueeText =
-    recorderText || error || lastThought || statusMessage || t(statusKey(status))
+    recorderText || error || steerText || lastThought || statusMessage || t(statusKey(status))
   const scrolling = busy || attention || recording || generating
 
   return (

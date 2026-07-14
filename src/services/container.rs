@@ -262,19 +262,29 @@ impl ServiceContainer {
             tool_use_summary: Arc::new(parking_lot::Mutex::new(ToolUseSummaryService::new())),
 
             command_registry,
-            coding_mode: crate::agent::coding_mode::coding_mode_handle_with(
-                crate::util::get_runtime_var("SEN_CODING_MODE")
+            coding_mode: {
+                let raw = crate::util::get_runtime_var("SEN_CODING_MODE");
+                let is_auto = raw
                     .as_deref()
-                    .and_then(CodingMode::from_str_loose)
-                    .unwrap_or_default(),
-            ),
+                    .is_some_and(|s| s.eq_ignore_ascii_case("auto"));
+                crate::agent::coding_mode::coding_mode_handle_with(
+                    raw.as_deref()
+                        .filter(|_| !is_auto)
+                        .and_then(CodingMode::from_str_loose)
+                        .unwrap_or_default(),
+                )
+            },
             session_coding_modes: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             session_auto_coding_modes: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
-            global_auto_coding_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            global_auto_coding_mode: Arc::new(std::sync::atomic::AtomicBool::new(
+                crate::util::get_runtime_var("SEN_CODING_MODE")
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("auto")),
+            )),
             session_pending_plans: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),

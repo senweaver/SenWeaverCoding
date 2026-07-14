@@ -85,14 +85,14 @@ impl CodingMode {
             "ask" | "a" | "q" => Some(Self::Ask),
             "tdd" | "t" | "test" => Some(Self::Tdd),
             "debug" | "d" | "dbg" => Some(Self::Debug),
-            "agent" | "ag" | "auto" | "agentic" | "ae" => Some(Self::Agent),
-            "architect" | "arch" | "design" => Some(Self::Architect),
+            "agent" | "ag" | "agentic" | "ae" => Some(Self::Agent),
+            "architect" | "arch" => Some(Self::Architect),
             "pair" | "pp" | "collab" => Some(Self::Pair),
             "context" | "ce" | "context-eng" => Some(Self::ContextEng),
             "mvai" => Some(Self::Mvai),
             "harness" | "hn" | "hs" => Some(Self::Harness),
             "curator" | "cu" | "curate" | "curation" => Some(Self::Curator),
-            "designer" | "des" | "ui" => Some(Self::Designer),
+            "designer" | "des" | "ui" | "design" => Some(Self::Designer),
             _ => None,
         }
     }
@@ -1711,13 +1711,11 @@ pub fn active_coding_mode() -> CodingMode {
             return mode;
         }
     }
-    let fallback = *svc.coding_mode.read();
     tracing::warn!(
         target: "isolation",
-        fallback = %fallback.display_name(),
-        "active_coding_mode() called without session scope; falling back to global default",
+        "active_coding_mode() called without session scope; using Agent default instead of shared global mode"
     );
-    fallback
+    CodingMode::default()
 }
 
 pub fn new_coding_mode_handle() -> CodingModeHandle {

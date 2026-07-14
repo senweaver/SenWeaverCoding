@@ -11,6 +11,7 @@ import {
 } from '../../../utils/toolCategory'
 import { Popover } from '../../shared/Popover'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { useChatStore } from '../../../stores/chatStore'
 import type { ToolViewProps } from './ToolViewProps'
 import { ReadHeader, ReadDetail } from './ReadToolView'
 import { SearchHeader, SearchDetail, getSearchHoverContent } from './SearchToolView'
@@ -137,6 +138,14 @@ export function ToolCard({
   childResults,
 }: Props) {
   const t = useTranslation()
+  // Read the card's own session mode reactively (not the global mode via
+  // getState()), so a Plan-mode tab shows the correct badge and one tab's mode
+  // never bleeds onto another's cards.
+  const globalCodingMode = useSettingsStore((s) => s.codingMode)
+  const sessionCodingMode = useChatStore((s) =>
+    parentSessionId ? s.sessionCodingMode[parentSessionId] : undefined,
+  )
+  const effectiveMode = sessionCodingMode ?? globalCodingMode
   const category = getToolCategory(toolName)
   const isSpawnWorkers = toolName === 'spawn_workers'
   const isDocumentConvert = toolName === 'document_convert'
@@ -163,7 +172,7 @@ export function ToolCard({
     : isDocumentConvert
       ? t('tool.verb.converted')
       : t(VERB_KEYS[category])
-  const modeBadge = compact ? null : getModeBadge(useSettingsStore.getState().codingMode)
+  const modeBadge = compact ? null : getModeBadge(effectiveMode, t)
   const expandable =
     renderer.alwaysExpandable === true ||
     Boolean(result && hasMeaningfulOutput(result.content))
@@ -294,23 +303,23 @@ function hasMeaningfulOutput(content: unknown): boolean {
 
 type ModeBadge = { label: string; className: string } | null
 
-function getModeBadge(mode: string): ModeBadge {
+function getModeBadge(mode: string, t: ReturnType<typeof useTranslation>): ModeBadge {
   switch (mode) {
     case 'agent':
     case 'harness':
       return {
-        label: 'auto',
+        label: t('chat.toolBadge.auto'),
         className: 'bg-[var(--color-success)]/12 text-[var(--color-success)]',
       }
     case 'plan':
     case 'ask':
       return {
-        label: 'read-only',
+        label: t('chat.toolBadge.readOnly'),
         className: 'bg-[var(--color-secondary)]/12 text-[var(--color-secondary)]',
       }
     case 'pair':
       return {
-        label: 'checkpoint',
+        label: t('chat.toolBadge.checkpoint'),
         className: 'bg-[var(--color-warning)]/12 text-[var(--color-warning)]',
       }
     default:

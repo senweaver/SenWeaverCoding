@@ -60,9 +60,10 @@ impl Tool for MultiEditTool {
     }
 
     fn description(&self) -> &str {
-        "Apply edits to multiple files atomically. All edits succeed or none are applied. \
-         Each edit specifies a file path and either old_string/new_string replacement \
-         or full content to write."
+        "Apply SEVERAL exact-string edits atomically in one call (same file or across files): \
+         all succeed or none are applied. Each edit gives a path plus old_string/new_string \
+         (omit old_string to write full content). Use this instead of chained file_edit calls \
+         when changes belong together; for diff-formatted changes use diff_apply."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -333,13 +334,17 @@ impl Tool for MultiEditTool {
                 };
                 let count = content.matches(old).count();
                 if count == 0 {
+                    let had_read = crate::session::has_read_in_current_session(&path);
+                    let detail = super::super::file::match_diagnostics::failure_message(
+                        &content,
+                        old,
+                        &path.display().to_string(),
+                        had_read,
+                    );
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),
-                        error: Some(format!(
-                            "Edit {i}: old_string not found in '{}'",
-                            path.display()
-                        )),
+                        error: Some(format!("Edit {i}: {detail}")),
                     });
                 }
                 if count > 1 {
@@ -347,7 +352,9 @@ impl Tool for MultiEditTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!(
-                            "Edit {i}: old_string matches {count} times in '{}' (use exact string to disambiguate)",
+                            "Edit {i}: old_string matches {count} times in '{}'. Include more \
+                             surrounding lines (a longer, unique old_string) so exactly one \
+                             location is targeted.",
                             path.display()
                         )),
                     });

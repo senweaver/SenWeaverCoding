@@ -165,6 +165,7 @@ impl SopEngine {
             step_results: Vec::new(),
             waiting_since: None,
             llm_calls_saved: 0,
+            headless_driven: false,
         };
 
         self.active_runs.insert(run_id.clone(), run);
@@ -242,6 +243,52 @@ impl SopEngine {
         self.finish_run(run_id, SopRunStatus::Cancelled, None);
         info!("SOP run {run_id} cancelled");
         Ok(())
+    }
+
+    pub fn fail_run(&mut self, run_id: &str, reason: impl Into<String>) -> Result<SopRunAction> {
+        if !self.active_runs.contains_key(run_id) {
+            bail!("Active run not found: {run_id}");
+        }
+        let reason = reason.into();
+        warn!("SOP run {run_id} failed: {reason}");
+        Ok(self.finish_run(run_id, SopRunStatus::Failed, Some(reason)))
+    }
+
+    pub fn headless_resume_action(&self, run_id: &str) -> Option<SopRunAction> {
+        let run = self.active_runs.get(run_id)?;
+        let sop = self.get_sop(&run.sop_name)?;
+        let step_idx = (run.current_step.saturating_sub(1)) as usize;
+        let step = sop.steps.get(step_idx)?.clone();
+        let context = format_step_context(sop, run, &step);
+        match run.status {
+            SopRunStatus::WaitingApproval => Some(SopRunAction::WaitApproval {
+                run_id: run_id.to_string(),
+                step,
+                context,
+            }),
+            SopRunStatus::Running | SopRunStatus::PausedCheckpoint => {
+                if run
+                    .step_results
+                    .iter()
+                    .any(|s| s.step_number == run.current_step)
+                {
+                    return None;
+                }
+                Some(resolve_step_action(
+                    sop,
+                    &step,
+                    run_id.to_string(),
+                    context,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn mark_headless_driven(&mut self, run_id: &str) {
+        if let Some(run) = self.active_runs.get_mut(run_id) {
+            run.headless_driven = true;
+        }
     }
 
     pub fn approve_step(&mut self, run_id: &str) -> Result<SopRunAction> {
@@ -339,6 +386,7 @@ impl SopEngine {
             step_results: Vec::new(),
             waiting_since: None,
             llm_calls_saved: 0,
+            headless_driven: false,
         };
 
         self.active_runs.insert(run_id.clone(), run);
@@ -669,10 +717,13 @@ impl SopEngine {
         }
 
         match status {
-            SopRunStatus::Failed => SopRunAction::Failed {
+            SopRunStatus::Failed | SopRunStatus::Cancelled => SopRunAction::Failed {
                 run_id: run_id_owned,
                 sop_name,
-                reason: reason.unwrap_or_default(),
+                reason: reason.unwrap_or_else(|| match status {
+                    SopRunStatus::Cancelled => "cancelled".to_string(),
+                    _ => String::new(),
+                }),
             },
             _ => SopRunAction::Completed {
                 run_id: run_id_owned,

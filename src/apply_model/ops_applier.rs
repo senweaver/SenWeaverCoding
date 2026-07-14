@@ -291,6 +291,20 @@ pub trait LspNotifier: Send + Sync {
     async fn notify_changed(&self, path: &Path, contents: &str) -> anyhow::Result<()>;
 }
 
+// Resolves the LSP service at call time so every OpsApplier constructed before
+// the service registry is up still forwards didChange once services exist.
+struct LazyServiceLspNotifier;
+
+#[async_trait::async_trait]
+impl LspNotifier for LazyServiceLspNotifier {
+    async fn notify_changed(&self, path: &Path, contents: &str) -> anyhow::Result<()> {
+        let Some(svc) = crate::services::try_get_services() else {
+            return Ok(());
+        };
+        svc.lsp.notify_file_changed(path, contents).await
+    }
+}
+
 impl OpsApplier {
     #[inline]
     fn workspace_snapshot(&self) -> PathBuf {
@@ -324,7 +338,7 @@ impl OpsApplier {
             apply_opts: ApplyOptions::default(),
             journal_retention: 64,
             symbol_graph_writer: None,
-            lsp_notify: None,
+            lsp_notify: Some(Arc::new(LazyServiceLspNotifier)),
             edit_history: None,
         }
     }
@@ -578,6 +592,10 @@ impl OpsApplier {
         if let Some(writer) = self.symbol_graph_writer.as_ref() {
             let changed: Vec<PathBuf> = unique_paths.to_vec();
             writer.on_files_changed(&changed);
+        } else {
+            crate::code_intel::symbol_graph::incremental::note_files_changed_global(
+                &unique_paths,
+            );
         }
 
         if let Some(notifier) = self.lsp_notify.as_ref() {

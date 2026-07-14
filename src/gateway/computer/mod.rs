@@ -12,12 +12,17 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 pub mod record;
 
-use crate::computer::run::{run_loop, ComputerEvent, RunParams};
+use crate::computer::briefing;
+use crate::computer::recorder::ReplayRepeat;
+use crate::computer::run::{run_loop, ComputerEvent, RunParams, UserMessage};
 use crate::computer::session::run_registry;
+use crate::computer::vision::VisionClient;
 use crate::config::Config;
 
 const DEFAULT_MAX_STEPS: u32 = 40;
@@ -61,6 +66,77 @@ pub async fn handle_stop(
     Json(serde_json::json!({ "ok": true, "cancelled": cancelled })).into_response()
 }
 
+pub async fn handle_plan_draft(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = super::api::require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config: Config = state.live_config.load_ref().as_ref().clone();
+    let task = body
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let attachments = match briefing::parse_attachments(body.get("attachments"), &config) {
+        Ok(attachments) => attachments,
+        Err((code, message)) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message, "code": code })),
+            )
+                .into_response();
+        }
+    };
+    if task.is_empty() && attachments.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "task or attachments required",
+                "code": "plan_draft_failed"
+            })),
+        )
+            .into_response();
+    }
+    let Some((provider, model)) = resolve_vision_route(&body, &config) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "no vision provider/model configured",
+                "code": "no_vision_model"
+            })),
+        )
+            .into_response();
+    };
+    let client = match VisionClient::from_config(&config, &provider, &model) {
+        Ok(client) => client,
+        Err(err) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("failed to initialize model '{model}': {err}"),
+                    "code": "model_init_failed"
+                })),
+            )
+                .into_response();
+        }
+    };
+    match briefing::draft_execution_steps(&client, &task, &attachments).await {
+        Ok(steps) => Json(serde_json::json!({ "steps": steps })).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": format!("plan draft failed: {err}"),
+                "code": "plan_draft_failed"
+            })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn handle_ws_computer(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -92,12 +168,115 @@ pub async fn handle_ws_computer(
         .into_response()
 }
 
+enum RunKind {
+    Agent,
+    Replay { recording: String, task: String },
+}
+
+struct ActiveRun {
+    handle: tokio::task::JoinHandle<()>,
+    kind: RunKind,
+    mute: Arc<AtomicBool>,
+    user_tx: Option<UnboundedSender<UserMessage>>,
+}
+
+impl ActiveRun {
+    fn is_alive(&self) -> bool {
+        !self.handle.is_finished()
+    }
+}
+
+fn spawn_event_forwarder(
+    event_tx: &UnboundedSender<ComputerEvent>,
+    mute: Arc<AtomicBool>,
+) -> UnboundedSender<ComputerEvent> {
+    let (run_tx, mut run_rx) = mpsc::unbounded_channel::<ComputerEvent>();
+    let downstream = event_tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = run_rx.recv().await {
+            if mute.load(Ordering::Acquire) {
+                continue;
+            }
+            if downstream.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    run_tx
+}
+
+fn resolve_vision_route(
+    value: &serde_json::Value,
+    config: &Config,
+) -> Option<(String, String)> {
+    let provider = value
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| config.multimodal.vision_provider.clone())
+        .or_else(|| config.default_provider.clone());
+    let model = value
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| config.multimodal.vision_model.clone())
+        .or_else(|| config.default_model.clone());
+    match (provider, model) {
+        (Some(provider), Some(model)) => Some((provider, model)),
+        _ => None,
+    }
+}
+
+fn parse_repeat(value: &serde_json::Value) -> Option<ReplayRepeat> {
+    let repeat = value.get("repeat")?;
+    let count = repeat
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1) as u32;
+    let interval_ms = repeat
+        .get("intervalMs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some(
+        ReplayRepeat {
+            count,
+            interval_ms,
+        }
+        .clamped(),
+    )
+}
+
+fn parse_user_message(
+    parsed: &serde_json::Value,
+    config: &Config,
+) -> Result<Option<UserMessage>, (&'static str, String)> {
+    let attachments = briefing::parse_attachments(parsed.get("attachments"), config)?;
+    let mut text = parsed
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !attachments.document_block.is_empty() {
+        text.push_str(&attachments.document_block);
+    }
+    if text.is_empty() && attachments.image_data_uris.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(UserMessage {
+        text,
+        image_data_uris: attachments.image_data_uris,
+    }))
+}
+
 async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
     let (mut sink, mut receiver) = socket.split();
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ComputerEvent>();
-    let (reply_tx, reply_rx) = mpsc::unbounded_channel::<String>();
-    let mut reply_rx = Some(reply_rx);
 
     let writer = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
@@ -112,8 +291,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
     });
 
     let registry = run_registry();
-    let mut loop_handle: Option<tokio::task::JoinHandle<()>> = None;
-    let mut started = false;
+    let mut active: Option<ActiveRun> = None;
 
     while let Some(Ok(message)) = receiver.next().await {
         match message {
@@ -125,7 +303,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
                 let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match msg_type {
                     "start" => {
-                        if started {
+                        if active.as_ref().is_some_and(ActiveRun::is_alive) {
                             continue;
                         }
                         let config: Config = state.live_config.load_ref().as_ref().clone();
@@ -159,28 +337,29 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
                                     continue;
                                 }
                             };
+                            let repeat = parse_repeat(&parsed)
+                                .or_else(|| {
+                                    manifest.run_config.map(|rc| {
+                                        ReplayRepeat {
+                                            count: rc.loop_count.max(1),
+                                            interval_ms: rc.interval_ms,
+                                        }
+                                        .clamped()
+                                    })
+                                })
+                                .unwrap_or_default();
                             let smart = parsed
                                 .get("smart")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(false);
+                            let replay_kind = RunKind::Replay {
+                                recording: name.to_string(),
+                                task: manifest.task.clone(),
+                            };
                             if smart {
-                                let provider = parsed
-                                    .get("provider")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .map(str::to_string)
-                                    .or_else(|| config.multimodal.vision_provider.clone())
-                                    .or_else(|| config.default_provider.clone());
-                                let model = parsed
-                                    .get("model")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .map(str::to_string)
-                                    .or_else(|| config.multimodal.vision_model.clone())
-                                    .or_else(|| config.default_model.clone());
-                                let (Some(provider), Some(model)) = (provider, model) else {
+                                let Some((provider, model)) =
+                                    resolve_vision_route(&parsed, &config)
+                                else {
                                     let _ = event_tx.send(ComputerEvent::error_code(
                                         "no_vision_model",
                                         "no vision provider/model configured for smart replay",
@@ -189,30 +368,43 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
                                 };
                                 let recording_dir =
                                     config.workspace_dir.join("skills").join(name);
-                                started = true;
                                 let cancel = registry.register(&run_id);
-                                let event_tx = event_tx.clone();
-                                loop_handle = Some(tokio::spawn(
+                                let mute = Arc::new(AtomicBool::new(false));
+                                let run_tx = spawn_event_forwarder(&event_tx, mute.clone());
+                                let handle = tokio::spawn(
                                     crate::computer::recorder::replay_recording_smart(
                                         manifest,
                                         recording_dir,
                                         config,
                                         provider,
                                         model,
+                                        repeat,
                                         cancel,
-                                        event_tx,
+                                        run_tx,
                                     ),
-                                ));
+                                );
+                                active = Some(ActiveRun {
+                                    handle,
+                                    kind: replay_kind,
+                                    mute,
+                                    user_tx: None,
+                                });
                                 continue;
                             }
-                            started = true;
                             let cancel = registry.register(&run_id);
-                            let event_tx = event_tx.clone();
-                            loop_handle = Some(tokio::spawn(
+                            let mute = Arc::new(AtomicBool::new(false));
+                            let run_tx = spawn_event_forwarder(&event_tx, mute.clone());
+                            let handle = tokio::spawn(
                                 crate::computer::recorder::replay_recording(
-                                    manifest, cancel, event_tx,
+                                    manifest, repeat, cancel, run_tx,
                                 ),
-                            ));
+                            );
+                            active = Some(ActiveRun {
+                                handle,
+                                kind: replay_kind,
+                                mute,
+                                user_tx: None,
+                            });
                             continue;
                         }
 
@@ -223,6 +415,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
                             ));
                             continue;
                         };
+                        match briefing::parse_attachments(parsed.get("attachments"), &config) {
+                            Ok(attachments) => {
+                                params.reference_images = attachments.image_data_uris;
+                                if !attachments.document_block.is_empty() {
+                                    params.task.push_str(&attachments.document_block);
+                                }
+                            }
+                            Err((code, message)) => {
+                                let _ = event_tx.send(ComputerEvent::error_code(code, message));
+                                let _ = event_tx.send(ComputerEvent::status_code(
+                                    crate::computer::run::RunStatus::Error,
+                                    code,
+                                    "run aborted due to invalid attachments",
+                                ));
+                                continue;
+                            }
+                        }
                         if let Some(skill) = parsed
                             .get("skill")
                             .and_then(|v| v.as_str())
@@ -251,22 +460,56 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
                                 params.task
                             );
                         }
-                        let Some(reply_rx) = reply_rx.take() else {
-                            continue;
-                        };
-                        started = true;
+                        let (user_tx, user_rx) = mpsc::unbounded_channel::<UserMessage>();
                         let cancel = registry.register(&run_id);
-                        let event_tx = event_tx.clone();
-                        loop_handle = Some(tokio::spawn(run_loop(
-                            params, config, cancel, event_tx, reply_rx,
-                        )));
+                        let mute = Arc::new(AtomicBool::new(false));
+                        let run_tx = spawn_event_forwarder(&event_tx, mute.clone());
+                        let handle =
+                            tokio::spawn(run_loop(params, config, cancel, run_tx, user_rx));
+                        active = Some(ActiveRun {
+                            handle,
+                            kind: RunKind::Agent,
+                            mute,
+                            user_tx: Some(user_tx),
+                        });
                     }
                     "stop" => {
                         registry.cancel(&run_id);
                     }
-                    "user_reply" => {
-                        if let Some(reply) = parsed.get("text").and_then(|v| v.as_str()) {
-                            let _ = reply_tx.send(reply.to_string());
+                    "user_reply" | "steer" => {
+                        let config: Config = state.live_config.load_ref().as_ref().clone();
+                        let msg = match parse_user_message(&parsed, &config) {
+                            Ok(Some(msg)) => msg,
+                            Ok(None) => continue,
+                            Err((code, message)) => {
+                                let _ = event_tx.send(ComputerEvent::error_code(code, message));
+                                continue;
+                            }
+                        };
+                        let Some(run) = active.as_ref() else {
+                            continue;
+                        };
+                        if !run.is_alive() {
+                            continue;
+                        }
+                        match &run.kind {
+                            RunKind::Agent => {
+                                if let Some(user_tx) = &run.user_tx {
+                                    let _ = user_tx.send(msg);
+                                }
+                            }
+                            RunKind::Replay { .. } => {
+                                takeover_replay(
+                                    &mut active,
+                                    &registry,
+                                    &run_id,
+                                    &event_tx,
+                                    config,
+                                    &parsed,
+                                    msg,
+                                )
+                                .await;
+                            }
                         }
                     }
                     _ => {}
@@ -279,11 +522,75 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: String) {
 
     registry.cancel(&run_id);
     registry.unregister(&run_id);
-    if let Some(handle) = loop_handle {
-        let _ = handle.await;
+    if let Some(run) = active.take() {
+        let _ = run.handle.await;
     }
     drop(event_tx);
     let _ = writer.await;
+}
+
+async fn takeover_replay(
+    active: &mut Option<ActiveRun>,
+    registry: &Arc<crate::computer::session::ComputerRunRegistry>,
+    run_id: &str,
+    event_tx: &UnboundedSender<ComputerEvent>,
+    config: Config,
+    parsed: &serde_json::Value,
+    msg: UserMessage,
+) {
+    let Some((provider, model)) = resolve_vision_route(parsed, &config) else {
+        let _ = event_tx.send(ComputerEvent::error_code(
+            "steer_requires_model",
+            "steering a replay requires a vision provider/model; the replay continues",
+        ));
+        return;
+    };
+    let Some(run) = active.take() else {
+        return;
+    };
+    run.mute.store(true, Ordering::Release);
+    registry.cancel(run_id);
+    let _ = run.handle.await;
+    let (recording, task) = match run.kind {
+        RunKind::Replay { recording, task } => (recording, task),
+        RunKind::Agent => (String::new(), String::new()),
+    };
+
+    let goal = if task.trim().is_empty() {
+        "Follow the user's live instructions.".to_string()
+    } else {
+        task
+    };
+    let params = RunParams {
+        run_id: run_id.to_string(),
+        task: goal,
+        provider,
+        model,
+        max_steps: DEFAULT_MAX_STEPS,
+        step_delay_ms: DEFAULT_STEP_DELAY_MS,
+        reference_images: Vec::new(),
+        initial_history: vec![format!(
+            "Was replaying the recording '{recording}' when the user interrupted with a live \
+             instruction; continue from the current screen state."
+        )],
+    };
+    let (user_tx, user_rx) = mpsc::unbounded_channel::<UserMessage>();
+    let _ = user_tx.send(msg);
+    let cancel = registry.register(run_id);
+    let mute = Arc::new(AtomicBool::new(false));
+    let run_tx = spawn_event_forwarder(event_tx, mute.clone());
+    let _ = event_tx.send(ComputerEvent::status_code(
+        crate::computer::run::RunStatus::Running,
+        "steer_takeover",
+        format!("replay '{recording}' interrupted; continuing with the live agent"),
+    ));
+    let handle = tokio::spawn(run_loop(params, config, cancel, run_tx, user_rx));
+    *active = Some(ActiveRun {
+        handle,
+        kind: RunKind::Agent,
+        mute,
+        user_tx: Some(user_tx),
+    });
 }
 
 fn parse_start(value: &serde_json::Value, run_id: &str) -> Option<RunParams> {
@@ -324,5 +631,7 @@ fn parse_start(value: &serde_json::Value, run_id: &str) -> Option<RunParams> {
         model,
         max_steps,
         step_delay_ms,
+        reference_images: Vec::new(),
+        initial_history: Vec::new(),
     })
 }

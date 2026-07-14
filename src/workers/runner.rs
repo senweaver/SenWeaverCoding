@@ -126,10 +126,19 @@ pub async fn run_worker(
 
     agent.set_memory_session_id(Some(handle.worker_id.clone()));
 
-    if let Some(ref dir) = ctx.parent_workspace_dir {
-        if !dir.trim().is_empty() {
-            agent.set_session_workspace_dir(std::path::PathBuf::from(dir));
-        }
+    let effective_workspace = spec
+        .workspace_dir
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+        .or(ctx.parent_workspace_dir.as_deref())
+        .filter(|d| !d.trim().is_empty())
+        .map(str::to_string);
+    if let Some(ref dir) = effective_workspace {
+        agent.set_session_workspace_dir(std::path::PathBuf::from(dir));
+        crate::security::sandbox::register_workspace_root_for_session(
+            &handle.worker_id,
+            std::path::Path::new(dir),
+        );
     }
 
     handle.set_status(WorkerStatus::Running);
@@ -329,6 +338,7 @@ async fn finalize_worker(
     handle.complete(result);
 
     supervisor.unregister(&handle.worker_id);
+    crate::security::sandbox::unregister_session_workspace_root(&handle.worker_id);
 }
 
 enum WorkerLifecycle {

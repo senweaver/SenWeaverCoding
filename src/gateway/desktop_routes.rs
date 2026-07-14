@@ -5385,6 +5385,22 @@ pub async fn handle_scheduled_tasks_list(
 fn cron_job_to_payload(j: crate::cron::CronJob) -> serde_json::Value {
     use crate::cron::Schedule;
     let is_activity = matches!(j.schedule, Schedule::Idle { .. } | Schedule::OnSessionEnd);
+    let job_type = match j.job_type {
+        crate::cron::JobType::Computer => "computer",
+        crate::cron::JobType::Agent => "agent",
+        crate::cron::JobType::Shell => {
+            if j.prompt.is_some() {
+                "agent"
+            } else {
+                "shell"
+            }
+        }
+    };
+    let computer_spec = if matches!(j.job_type, crate::cron::JobType::Computer) {
+        serde_json::from_str::<serde_json::Value>(&j.command).ok()
+    } else {
+        None
+    };
     serde_json::json!({
         "id": j.id,
         "name": j.name.clone().unwrap_or_else(|| j.id.clone()),
@@ -5404,7 +5420,8 @@ fn cron_job_to_payload(j: crate::cron::CronJob) -> serde_json::Value {
             Schedule::Idle { after_idle_ms } => Some(*after_idle_ms),
             _ => None,
         },
-        "type": if j.prompt.is_some() { "agent" } else { "shell" },
+        "type": job_type,
+        "computer": computer_spec,
         "command": j.command,
         "prompt": j.prompt.clone().unwrap_or_default(),
         "enabled": j.enabled,
@@ -5615,7 +5632,56 @@ pub async fn handle_scheduled_tasks_create(
         .map(|s| s.to_string());
     let allowed_tools = parse_allowed_tools(&body);
 
-    let job = if let Some(prompt) = prompt {
+    let task_type = body.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let computer_spec = body.get("computer").cloned();
+
+    let job = if task_type == "computer" || computer_spec.is_some() {
+        let Some(raw_spec) = computer_spec else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing computer spec"})),
+            )
+                .into_response();
+        };
+        let spec = match serde_json::from_value::<crate::cron::ComputerJobSpec>(raw_spec) {
+            Ok(spec) => spec,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("invalid computer spec: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        let valid = match spec.mode {
+            crate::cron::ComputerJobMode::Replay => spec
+                .recording
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty()),
+            crate::cron::ComputerJobMode::Agent => {
+                spec.task.as_deref().is_some_and(|s| !s.trim().is_empty())
+            }
+        };
+        if !valid {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "computer spec requires a recording (replay) or a task (agent)"
+                })),
+            )
+                .into_response();
+        }
+        match spec.encode() {
+            Ok(spec_json) => crate::cron::add_computer_job(&config, name, schedule, &spec_json),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        }
+    } else if let Some(prompt) = prompt {
         crate::cron::add_agent_job(
             &config,
             name,
@@ -5750,6 +5816,27 @@ pub async fn handle_scheduled_tasks_update(
     }
     if let Some(tools) = parse_allowed_tools(&body) {
         patch.allowed_tools = Some(tools);
+    }
+    if let Some(raw_spec) = body.get("computer").filter(|v| !v.is_null()) {
+        match serde_json::from_value::<crate::cron::ComputerJobSpec>(raw_spec.clone()) {
+            Ok(spec) => match spec.encode() {
+                Ok(spec_json) => patch.command = Some(spec_json),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": e})),
+                    )
+                        .into_response();
+                }
+            },
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("invalid computer spec: {e}")})),
+                )
+                    .into_response();
+            }
+        }
     }
 
     match crate::cron::update_job(&config, &id, patch) {

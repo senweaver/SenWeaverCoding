@@ -1327,6 +1327,7 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
 
           {!isMemberSession && slashMenuOpen && filteredCommands.length > 0 && (
             <div
+              id="slash-command-menu"
               ref={slashMenuRef}
               className="absolute bottom-full left-0 right-0 z-50 mb-2 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
             >

@@ -11,7 +11,7 @@ use crate::agent::event_sink::EventSink;
 use crate::agent::loop_::{DraftEvent, ModelSwitchCallback};
 use crate::agent::loop_::traits::{
     ExperienceRecorderHook, GuiModelSwitchHook, IterationContextBudgetHook, MemorySessionHook,
-    ModelClassifierHook, PlanModeNudgeHook, ResponseCacheHook, TurnPreambleHook,
+    PlanModeNudgeHook, ResponseCacheHook, TurnPreambleHook,
 };
 use crate::approval::ApprovalManager;
 use crate::config::PacingConfig;
@@ -72,7 +72,6 @@ pub struct PolicyBundle<'a> {
 
     pub response_cache_hook: Option<Arc<dyn ResponseCacheHook>>,
     pub memory_session_hook: Option<Arc<dyn MemorySessionHook>>,
-    pub model_classifier_hook: Option<Arc<dyn ModelClassifierHook>>,
     pub turn_preamble_hook: Option<Arc<dyn TurnPreambleHook>>,
     pub gui_model_switch_hook: Option<Arc<dyn GuiModelSwitchHook>>,
     pub iteration_context_budget_hook: Option<Arc<dyn IterationContextBudgetHook>>,
@@ -131,7 +130,6 @@ impl<'a> PolicyBundle<'a> {
             tool_registry: None,
             response_cache_hook: None,
             memory_session_hook: None,
-            model_classifier_hook: None,
             turn_preamble_hook: None,
             gui_model_switch_hook: None,
             iteration_context_budget_hook: None,
@@ -505,14 +503,6 @@ impl<'a> PolicyBundle<'a> {
 
     pub fn with_memory_session_hook(mut self, hook: Option<Arc<dyn MemorySessionHook>>) -> Self {
         self.memory_session_hook = hook;
-        self
-    }
-
-    pub fn with_model_classifier_hook(
-        mut self,
-        hook: Option<Arc<dyn ModelClassifierHook>>,
-    ) -> Self {
-        self.model_classifier_hook = hook;
         self
     }
 

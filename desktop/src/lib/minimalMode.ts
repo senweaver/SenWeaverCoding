@@ -7,7 +7,7 @@ import { useUIStore, type AppMode } from '../stores/uiStore'
 import { useTabStore, SCHEDULED_TAB_ID } from '../stores/tabStore'
 import type { AttachmentRef } from '../types/chat'
 import type { useChatStore } from '../stores/chatStore'
-import type { ComputerStatus } from '../stores/computerUseStore'
+import type { ComputerAttachment, ComputerStatus } from '../stores/computerUseStore'
 import type { RecorderStatus } from '../stores/computerRecorderStore'
 
 type ChatSendOptions = Parameters<
@@ -46,6 +46,7 @@ export const MINIMAL_EVENT_COMPUTER_PROGRESS = 'minimal://computer-progress'
 export const MINIMAL_EVENT_COMPUTER_START = 'minimal://computer-start'
 export const MINIMAL_EVENT_COMPUTER_STOP = 'minimal://computer-stop'
 export const MINIMAL_EVENT_COMPUTER_REPLY = 'minimal://computer-reply'
+export const MINIMAL_EVENT_COMPUTER_STEER = 'minimal://computer-steer'
 export const MINIMAL_EVENT_COMPUTER_EXIT = 'minimal://computer-exit'
 export const MINIMAL_EVENT_COMPUTER_SYNC = 'minimal://computer-sync'
 
@@ -80,16 +81,24 @@ export interface MinimalComputerProgress {
   lastThought: string | null
   lastAction: string | null
   stepCount: number
+  pendingSteer?: string | null
+  lastUserUpdate?: string | null
 }
 
 export interface MinimalComputerStart {
   task: string
   provider: string
   model: string
+  attachments?: ComputerAttachment[]
 }
 
 export interface MinimalComputerReply {
   text: string
+}
+
+export interface MinimalComputerSteer {
+  text: string
+  attachments?: ComputerAttachment[]
 }
 
 export interface MinimalRecorderProgress {
@@ -194,6 +203,7 @@ export async function enterMinimalMode(variant?: MinimalVariant): Promise<void> 
       await minimal.show()
       await minimal.setFocus()
       await hideMainWindow()
+      void prewarmMinimalInputWindow()
     } catch (err) {
       console.warn('[minimalMode] reveal minimal window failed', err)
       notifyMinimal('error', `进入极简模式失败：${err instanceof Error ? err.message : String(err)}`)
@@ -248,6 +258,16 @@ export async function revealMinimalInputWindow(variant: MinimalVariant): Promise
     })
   } catch (err) {
     console.warn('[minimalMode] revealMinimalInputWindow failed', err)
+  }
+}
+
+export async function prewarmMinimalInputWindow(): Promise<void> {
+  if (!isTauriRuntime()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('minimal_input_prewarm')
+  } catch (err) {
+    console.warn('[minimalMode] prewarmMinimalInputWindow failed', err)
   }
 }
 
